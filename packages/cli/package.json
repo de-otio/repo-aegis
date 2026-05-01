@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@de-otio/repo-aegis-core": "^0.0.1",
+    "@de-otio/repo-aegis-scan": "^0.0.1",
     "commander": "^12.1.0"
   }
 }

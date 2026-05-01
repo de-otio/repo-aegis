@@ -1,14 +1,18 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import {
   computeDenySet,
+  loadRegistry,
   readRepoConfig,
   scanFile,
+  isActive,
   type RepoConfig,
   type DenySet,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, shouldRevealMatches, type OutputOptions } from "../format.js";
+import { runScan, makeOctokitClient } from "@de-otio/repo-aegis-scan";
 
 interface AuditOptions extends OutputOptions {
   cwd?: string;
@@ -17,6 +21,9 @@ interface AuditOptions extends OutputOptions {
   lockfileCheck?: boolean;
   fixtureCheck?: boolean;
   remoteCheck?: boolean;
+  org?: string;
+  published?: string;
+  token?: string;
   verbose?: boolean;
 }
 
@@ -248,6 +255,192 @@ function checkFixtures(
   return { name: "fixtures", ok: findings.length === 0, findings };
 }
 
+// Extract literal "seeds" from a regex pattern that GitHub code-search
+// can use as substring matches. Splits on regex metacharacters and
+// keeps continuous runs of length >= 4. Best-effort; patterns that
+// produce no usable seed are silently skipped.
+function literalSeeds(pattern: string): string[] {
+  const runs = pattern.split(/[\\^$()\[\]{}?+*|.]+/);
+  return runs.filter(r => r.length >= 4);
+}
+
+async function checkOrg(
+  org: string,
+  reg: { engagements: import("@de-otio/repo-aegis-core").Engagement[]; alwaysBlock: string[] },
+  token: string,
+): Promise<CheckResult> {
+  const seedSet = new Set<string>();
+  for (const e of reg.engagements) {
+    if (!isActive(e)) continue;
+    for (const p of e.markers) for (const s of literalSeeds(p)) seedSet.add(s);
+  }
+  for (const p of reg.alwaysBlock) for (const s of literalSeeds(p)) seedSet.add(s);
+
+  const seeds = Array.from(seedSet);
+  if (seeds.length === 0) {
+    return {
+      name: "org-scan",
+      ok: true,
+      findings: [],
+      skipped: true,
+      skipReason: "no usable literal seeds extracted from registry patterns",
+    };
+  }
+
+  const queries = seeds.map((s, i) => ({
+    name: `audit-seed-${i}`,
+    query: `"${s}" org:${org}`,
+  }));
+
+  const client = makeOctokitClient({ token });
+  const result = await runScan({
+    queries,
+    state: { seen: {} },
+    client,
+    interRequestSleepMs: 1500,
+    maxPagesPerQuery: 2,
+    capResultsPerQuery: 50,
+  });
+
+  const findings: Finding[] = [];
+  for (const h of result.hits) {
+    findings.push({
+      message: `${h.repo}:${h.path}${h.line !== null ? `:${h.line}` : ""}`,
+      detail: { repo: h.repo, path: h.path, line: h.line, url: h.url, query: h.query },
+    });
+  }
+
+  const allFailed = result.summary.queries.length > 0 && result.summary.queries.every(q => !q.ok);
+  if (allFailed) {
+    return {
+      name: "org-scan",
+      ok: false,
+      findings: [{ message: "all org-scan queries failed", detail: { queries: result.summary.queries } }],
+    };
+  }
+
+  return { name: "org-scan", ok: findings.length === 0, findings };
+}
+
+function checkPublished(
+  input: string,
+  cwd: string,
+  denySet: DenySet,
+  reveal: boolean,
+): CheckResult {
+  const findings: Finding[] = [];
+  const tmp = mkdtempSync(join(tmpdir(), "repo-aegis-published-"));
+  let extractDir = tmp;
+
+  try {
+    if (input.endsWith(".tgz") || input.endsWith(".tar.gz")) {
+      if (!existsSync(input)) {
+        return {
+          name: "published",
+          ok: false,
+          findings: [{ message: `tarball not found: ${input}` }],
+        };
+      }
+      const r = spawnSync("tar", ["-xzf", input, "-C", tmp], { encoding: "utf8" });
+      if (r.status !== 0) {
+        return {
+          name: "published",
+          ok: false,
+          findings: [{ message: `tar extract failed: ${r.stderr}` }],
+        };
+      }
+    } else if (input.endsWith(".vsix")) {
+      if (!existsSync(input)) {
+        return {
+          name: "published",
+          ok: false,
+          findings: [{ message: `vsix not found: ${input}` }],
+        };
+      }
+      const r = spawnSync("unzip", ["-q", input, "-d", tmp], { encoding: "utf8" });
+      if (r.status !== 0) {
+        return {
+          name: "published",
+          ok: false,
+          findings: [{ message: `unzip failed: ${r.stderr}` }],
+        };
+      }
+    } else {
+      // Treat as npm package name; pack first.
+      const packResult = spawnSync("npm", ["pack", "--silent", input], {
+        cwd: tmp,
+        encoding: "utf8",
+      });
+      if (packResult.status !== 0) {
+        return {
+          name: "published",
+          ok: false,
+          findings: [{ message: `npm pack failed for ${input}: ${packResult.stderr}` }],
+        };
+      }
+      const tgzs = readdirSync(tmp).filter(f => f.endsWith(".tgz"));
+      if (tgzs.length === 0) {
+        return {
+          name: "published",
+          ok: false,
+          findings: [{ message: `npm pack produced no .tgz for ${input}` }],
+        };
+      }
+      const tgz = tgzs[0]!;
+      const xr = spawnSync("tar", ["-xzf", join(tmp, tgz), "-C", tmp], { encoding: "utf8" });
+      if (xr.status !== 0) {
+        return {
+          name: "published",
+          ok: false,
+          findings: [{ message: `tar extract failed: ${xr.stderr}` }],
+        };
+      }
+    }
+
+    function recurse(dir: string): void {
+      let entries: string[];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const name of entries) {
+        const full = join(dir, name);
+        let st;
+        try {
+          st = statSync(full);
+        } catch {
+          continue;
+        }
+        if (st.isDirectory()) {
+          recurse(full);
+          continue;
+        }
+        if (!st.isFile()) continue;
+        const r = scanFile(full, denySet, { revealMatches: reveal });
+        for (const h of r.hits) {
+          const rel = relative(extractDir, full);
+          findings.push({
+            message: `${rel}:${h.line}:${h.column}`,
+            detail: { path: rel, line: h.line, column: h.column, matchPreview: h.matchPreview },
+          });
+        }
+      }
+    }
+
+    recurse(extractDir);
+    void cwd;
+  } finally {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+
+  return { name: "published", ok: findings.length === 0, findings };
+}
+
 function checkRemote(cwd: string, repo: RepoConfig): CheckResult {
   if (!repo.isGitRepo) {
     return { name: "remote", ok: true, findings: [], skipped: true, skipReason: "not a git repo" };
@@ -293,7 +486,7 @@ function checkRemote(cwd: string, repo: RepoConfig): CheckResult {
   return { name: "remote", ok: true, findings: [] };
 }
 
-export function audit(opts: AuditOptions): void {
+export async function audit(opts: AuditOptions): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
   const repo = readRepoConfig(cwd);
   const denySet = computeDenySet(repo);
@@ -311,6 +504,33 @@ export function audit(opts: AuditOptions): void {
   if (runLockfile) results.push(checkLockfile(cwd));
   if (runFixture) results.push(checkFixtures(cwd, repo, denySet, reveal));
   if (runRemote) results.push(checkRemote(cwd, repo));
+
+  if (opts.org) {
+    const tokenVar = opts.token ?? "GH_TOKEN";
+    const token = process.env[tokenVar];
+    if (!token) {
+      results.push({
+        name: "org-scan",
+        ok: false,
+        findings: [{ message: `${tokenVar} env var is not set; cannot run --org sweep` }],
+      });
+    } else {
+      try {
+        const reg = loadRegistry();
+        results.push(await checkOrg(opts.org, reg, token));
+      } catch (err) {
+        results.push({
+          name: "org-scan",
+          ok: false,
+          findings: [{ message: `org-scan setup failed: ${(err as Error).message}` }],
+        });
+      }
+    }
+  }
+
+  if (opts.published) {
+    results.push(checkPublished(opts.published, cwd, denySet, reveal));
+  }
 
   const failedChecks = results.filter(c => !c.ok);
   const totalFindings = results.reduce((sum, c) => sum + c.findings.length, 0);

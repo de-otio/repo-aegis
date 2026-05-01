@@ -202,12 +202,15 @@ markers
 
 program
   .command("audit")
-  .description("composite repo audit: marker scan, lockfile, fixtures, remote consistency")
+  .description("composite repo audit: marker scan, lockfile, fixtures, remote consistency, optional org/published sweep")
   .option("--history", "also sweep full git history with `git log -G` per pattern (slow)")
   .option("--no-marker-scan", "skip the marker scan over tracked files")
   .option("--no-lockfile-check", "skip package-lock.json non-public-registry check")
   .option("--no-fixture-check", "skip scan of fixture/__fixtures__/testdata directories")
   .option("--no-remote-check", "skip the remote-vs-class consistency check")
+  .option("--org <org>", "also run a one-shot GitHub code-search sweep against this org (needs GH_TOKEN)")
+  .option("--published <pkg-or-tarball>", "also scan a packed npm tarball, VSIX bundle, or npm package name")
+  .option("--token <env-var>", "env var holding the GitHub token for --org (default GH_TOKEN)")
   .option("--cwd <dir>", "audit a different repo directory")
   .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
   .option("--json")
