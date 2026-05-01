@@ -58,3 +58,47 @@ describe("validatePatterns", () => {
     assert.equal(r.invalid.length, 0);
   });
 });
+
+describe("validatePatterns({ strict: true })", () => {
+  it("accepts ordinary patterns", () => {
+    const r = validatePatterns(["acme-corp", "\\d{12}"], { strict: true });
+    assert.equal(r.valid.length, 2);
+    assert.equal(r.invalid.length, 0);
+  });
+
+  it("rejects syntactically invalid regex without spawning", () => {
+    const r = validatePatterns(["(unclosed"], { strict: true });
+    assert.equal(r.invalid.length, 1);
+    assert.match(r.invalid[0]!.reason, /invalid regex/);
+  });
+
+  it("rejects patterns over the length cap without spawning", () => {
+    const r = validatePatterns(["a".repeat(3000)], { strict: true });
+    assert.equal(r.invalid.length, 1);
+    assert.match(r.invalid[0]!.reason, /exceeds/);
+  });
+
+  it("flags catastrophic-backtracking patterns via subprocess", () => {
+    // Classic ReDoS shape: nested unbounded quantifier with a literal
+    // that the all-'a' stress input cannot satisfy, forcing the regex
+    // engine to try every possible split.
+    const r = validatePatterns(["^(a+)+b$"], { strict: true });
+    assert.equal(r.invalid.length, 1, `expected the pattern to be rejected; got valid=${JSON.stringify(r.valid)}`);
+    assert.match(r.invalid[0]!.reason, /catastrophic|timed out|>/i);
+  });
+
+  it("returns empty for empty input without spawning", () => {
+    const r = validatePatterns([], { strict: true });
+    assert.equal(r.valid.length, 0);
+    assert.equal(r.invalid.length, 0);
+  });
+
+  it("preserves order across mixed valid/invalid input", () => {
+    const r = validatePatterns(
+      ["acme-corp", "(bad", "\\d+", ""],
+      { strict: true },
+    );
+    assert.deepEqual(r.valid, ["acme-corp", "\\d+"]);
+    assert.equal(r.invalid.length, 2);
+  });
+});

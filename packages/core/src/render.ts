@@ -61,13 +61,16 @@ export function renderMarkers(reg: Registry, opts: RenderOptions = {}): RenderRe
 
   const invalidPatterns: { engagementId: string; pattern: string; reason: string }[] = [];
   if (doValidate) {
+    // Strict mode: subprocess-backed validation that can be preemptively
+    // killed on catastrophic-backtracking patterns. Render is a manual,
+    // infrequent operation; the ~50-200ms spawn overhead is acceptable.
     for (const e of reg.engagements) {
-      const r = validatePatterns(e.markers);
+      const r = validatePatterns(e.markers, { strict: true });
       for (const inv of r.invalid) {
         invalidPatterns.push({ engagementId: e.id, pattern: inv.pattern, reason: inv.reason });
       }
     }
-    const alwaysR = validatePatterns(reg.alwaysBlock);
+    const alwaysR = validatePatterns(reg.alwaysBlock, { strict: true });
     for (const inv of alwaysR.invalid) {
       invalidPatterns.push({
         engagementId: ALWAYS_FILE_STEM,
