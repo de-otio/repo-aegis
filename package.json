@@ -1,0 +1,28 @@
+{
+  "name": "repo-aegis-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Engagement-scoped leak prevention for multi-customer git repos",
+  "license": "GPL-3.0-or-later",
+  "author": "Richard Myers",
+  "homepage": "https://github.com/de-otio/repo-aegis",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/de-otio/repo-aegis.git"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b packages/core packages/cli",
+    "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo coverage",
+    "test": "node --test --test-reporter=spec packages/core/dist/**/*.test.js packages/cli/dist/**/*.test.js",
+    "test:cov": "c8 --reporter=text --reporter=html --check-coverage --lines 80 --branches 75 --include 'packages/*/dist/**/*.js' --exclude 'packages/*/dist/**/*.test.js' --exclude 'packages/*/dist/**/*.d.ts' --exclude 'packages/*/dist/**/types.js' --exclude 'packages/*/dist/**/index.js' npm test",
+    "repo-aegis": "node packages/cli/dist/index.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "c8": "^10.1.2",
+    "typescript": "^5.4.0"
+  }
+}
