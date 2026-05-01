@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsc -b packages/core packages/cli packages/scan",
     "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo coverage",
-    "test": "node --test --test-reporter=spec packages/core/dist/**/*.test.js packages/cli/dist/**/*.test.js packages/scan/dist/**/*.test.js",
+    "test": "find packages -path '*/dist/*' -name '*.test.js' -print0 | xargs -0 node --test --test-reporter=spec",
     "test:cov": "c8 --reporter=text --reporter=html --check-coverage --lines 80 --branches 75 --include 'packages/*/dist/**/*.js' --exclude 'packages/*/dist/**/*.test.js' --exclude 'packages/*/dist/**/*.d.ts' --exclude 'packages/*/dist/**/types.js' --exclude 'packages/*/dist/**/index.js' npm test",
     "repo-aegis": "node packages/cli/dist/index.js",
     "repo-aegis-scan": "node packages/scan/dist/index.js"
