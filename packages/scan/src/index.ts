@@ -7,6 +7,8 @@ import { parseQueryFile, validateQueryFile } from "./queries.js";
 import { loadState, saveStateAtomic } from "./state.js";
 import { runScan } from "./run.js";
 import { makeOctokitClient } from "./octokit-client.js";
+import { renderMarkdown } from "./output.js";
+import { fileIssue } from "./issue-filer.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as { version: string };
@@ -72,11 +74,17 @@ program
   .option("--no-update-state", "dry-run; do not write state")
   .option("--reveal-matches", "include literal snippet text in output (default OFF)")
   .action(async (opts: RunCliOptions) => {
-    if (opts.outputFormat && opts.outputFormat !== "json") {
+    const format = opts.outputFormat ?? "json";
+    if (!["json", "markdown", "issue"].includes(format)) {
       emitError({
-        code: "NOT_IMPLEMENTED",
-        error: `output-format=${opts.outputFormat} is planned for v0.3`,
-        details: "only --output-format=json is supported in v0.2",
+        code: "USAGE",
+        error: `--output-format must be one of: json, markdown, issue (got ${format})`,
+      });
+    }
+    if (format === "issue" && !opts.reportIssueRepo) {
+      emitError({
+        code: "USAGE",
+        error: "--report-issue-repo is required when --output-format=issue",
       });
     }
     const tokenVarName = opts.token ?? "GH_TOKEN";
@@ -132,13 +140,39 @@ program
       saveStateAtomic(opts.state, result.updatedState);
     }
 
-    process.stdout.write(JSON.stringify({ summary: result.summary, hits: result.hits }, null, 2) + "\n");
+    if (format === "json") {
+      process.stdout.write(
+        JSON.stringify({ summary: result.summary, hits: result.hits }, null, 2) + "\n",
+      );
+    } else if (format === "markdown") {
+      process.stdout.write(renderMarkdown(result.summary, result.hits));
+    } else if (format === "issue") {
+      const filed = await fileIssue(result.summary, result.hits, {
+        reportRepo: opts.reportIssueRepo!,
+        client,
+      });
+      process.stdout.write(
+        JSON.stringify(
+          {
+            action: filed.action,
+            issueNumber: filed.issueNumber ?? null,
+            url: filed.url ?? null,
+            title: filed.title,
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+    }
 
     const allFailed = result.summary.queries.every(q => !q.ok);
     if (allFailed && result.summary.queries.length > 0) {
       process.exit(2);
     }
-    if (result.summary.totalNew > 0) {
+    if (format === "json" && result.summary.totalNew > 0) {
+      // Per the design contract: json caller must react; issue/markdown
+      // outputs already deliver the report, so they exit 0 even with
+      // new hits.
       process.exit(1);
     }
     process.exit(0);

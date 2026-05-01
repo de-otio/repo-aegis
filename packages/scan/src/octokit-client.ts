@@ -1,12 +1,15 @@
 import { Octokit } from "@octokit/rest";
 import type { SearchClient, SearchClientResult } from "./run.js";
+import type { IssueClient } from "./issue-filer.js";
 
 export interface OctokitClientOptions {
   token: string;
   userAgent?: string;
 }
 
-export function makeOctokitClient(opts: OctokitClientOptions): SearchClient {
+export function makeOctokitClient(
+  opts: OctokitClientOptions,
+): SearchClient & IssueClient {
   const octokit = new Octokit({
     auth: opts.token,
     userAgent: opts.userAgent ?? "repo-aegis-scan",
@@ -32,6 +35,35 @@ export function makeOctokitClient(opts: OctokitClientOptions): SearchClient {
         total_count: data.total_count,
         incomplete_results: data.incomplete_results,
       };
+    },
+
+    async findOpenIssueByTitle(owner, repo, title): Promise<number | null> {
+      const res = await octokit.rest.issues.listForRepo({
+        owner,
+        repo,
+        state: "open",
+        per_page: 100,
+      });
+      const issues = res.data as { number: number; title: string }[];
+      const match = issues.find(i => i.title === title);
+      return match ? match.number : null;
+    },
+
+    async createIssue(owner, repo, title, body): Promise<{ number: number; html_url: string }> {
+      const res = await octokit.rest.issues.create({ owner, repo, title, body });
+      const d = res.data as { number: number; html_url: string };
+      return { number: d.number, html_url: d.html_url };
+    },
+
+    async addComment(owner, repo, issueNumber, body): Promise<{ html_url: string }> {
+      const res = await octokit.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        body,
+      });
+      const d = res.data as { html_url: string };
+      return { html_url: d.html_url };
     },
   };
 }
