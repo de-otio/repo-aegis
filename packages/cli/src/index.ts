@@ -69,6 +69,28 @@ engagements
   .option("--all", "include ended engagements past the retention window")
   .action((opts: { json?: boolean; all?: boolean }) => engagementsList(opts));
 
+engagements
+  .command("add <id>")
+  .description("add a new engagement (validates patterns, triggers render)")
+  .option("--name <name>", "human-readable name (defaults to id)")
+  .option("--started <date>", "started date in YYYY-MM-DD (defaults to today)")
+  .option("--marker <pattern...>", "marker pattern; pass multiple times for multiple markers")
+  .option("--json")
+  .action((id: string, opts) => engagementsAdd(id, opts));
+
+engagements
+  .command("end <id>")
+  .description("mark engagement ended; markers retain for 12 months by default")
+  .option("--purge", "back-date so markers are removed at next render")
+  .option("--json")
+  .action((id: string, opts) => engagementsEnd(id, opts));
+
+engagements
+  .command("show <id>")
+  .description("show one engagement's registered details")
+  .option("--json")
+  .action((id: string, opts) => engagementsShow(id, opts));
+
 // v0.2 commands: stubbed so the CLI surface is complete-feeling and the
 // handoff to parallel agents has clear entry points.
 const stubbed = (name: string) =>
@@ -87,7 +109,7 @@ const stubbed = (name: string) =>
       );
     });
 
-for (const name of ["audit", "markers"]) {
+for (const name of ["audit"]) {
   stubbed(name);
 }
 
@@ -99,6 +121,8 @@ const { installHooks } = await import("./commands/install-hooks.js");
 const { installGitignore } = await import("./commands/install-gitignore.js");
 const { installCi } = await import("./commands/install-ci.js");
 const { installClaudeMd } = await import("./commands/install-claude-md.js");
+const { markersList, markersTest } = await import("./commands/markers.js");
+const { engagementsAdd, engagementsEnd, engagementsShow } = await import("./commands/engagements-mutate.js");
 
 program
   .command("init")
@@ -155,5 +179,22 @@ install
   .option("--claude-home <dir>", "override default ~/.claude location")
   .option("--json")
   .action(opts => installClaudeMd(opts));
+
+const markers = program.command("markers").description("inspect and probe the marker deny set");
+
+markers
+  .command("list")
+  .description("list patterns grouped by source file (redacted by default)")
+  .option("--verbose", "reveal literal patterns (NEVER pass from hooks)")
+  .option("--json")
+  .action(opts => markersList(opts));
+
+markers
+  .command("test <string>")
+  .description("report which patterns would match <string> in this repo's deny set")
+  .option("--verbose", "reveal literal matches (NEVER pass from hooks)")
+  .option("--cwd <dir>", "evaluate from a different repo directory")
+  .option("--json")
+  .action((input: string, opts) => markersTest(input, opts));
 
 await program.parseAsync(process.argv);
