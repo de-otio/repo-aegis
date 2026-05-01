@@ -4,21 +4,31 @@
 # installed copy.
 #
 # Reads stdin lines of `<local-ref> <local-sha> <remote-ref> <remote-sha>`
-# from git. For each updated branch, scans the staged-equivalent content
-# (currently: the local working tree). v0.2 will add commit-range scanning.
+# from git. For each updated branch, scans the commit-range diff via
+# `repo-aegis check --range`. New branches (remote sha = zero) scan
+# the full local sha. Branch deletions (local sha = zero) skip.
 set -euo pipefail
 
 if ! command -v repo-aegis >/dev/null 2>&1; then
   exit 0
 fi
 
-# Reading stdin to honour the pre-push protocol; for now we ignore the
-# specific refs and run a working-tree scan. v0.2: scan the commit range
-# via `repo-aegis check --range <remote-sha>..<local-sha>`.
+zero="0000000000000000000000000000000000000000"
+exit_rc=0
 while read -r local_ref local_sha remote_ref remote_sha; do
-  : "$local_ref" "$local_sha" "$remote_ref" "$remote_sha"
-  # Placeholder: in v0.1 we re-run the staged check; v0.2 implements range scan.
-  break
+  : "$local_ref" "$remote_ref"
+  if [ "$local_sha" = "$zero" ]; then
+    continue
+  fi
+  if [ "$remote_sha" = "$zero" ]; then
+    range="$local_sha"
+  else
+    range="${remote_sha}..${local_sha}"
+  fi
+  # Never pass --verbose: hook output flows into the agent's tool result.
+  if ! repo-aegis check --range "$range"; then
+    exit_rc=1
+  fi
 done
 
-exec repo-aegis check --staged
+exit "$exit_rc"

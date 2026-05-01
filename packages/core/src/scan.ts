@@ -139,6 +139,89 @@ export function scanStagedDiff(
   return { hits: scanText(addedLines, denySet, undefined, opts), skipped: [] };
 }
 
+/**
+ * Scan the diff over an arbitrary git range (e.g. `main..HEAD`,
+ * `<remote-sha>..<local-sha>`). Pre-push hook entry point.
+ *
+ * Only `+`-line content is scanned. The caller is responsible for
+ * passing a syntactically valid range; if `git diff` exits non-zero,
+ * the throw propagates.
+ */
+export function scanRange(
+  repo: RepoConfig,
+  denySet: DenySet,
+  range: string,
+  opts: ScanOptions = {},
+): { hits: ScanHit[]; skipped: SkippedFile[] } {
+  if (!repo.isGitRepo) return { hits: [], skipped: [] };
+  if (!denySet.combinedRegex) return { hits: [], skipped: [] };
+
+  const diff = execFileSync(
+    "git",
+    ["diff", range, "--diff-filter=ACM", "-U0", "--no-color"],
+    { cwd: repo.cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  const addedLines = diff
+    .split("\n")
+    .filter(l => l.startsWith("+") && !l.startsWith("+++"))
+    .map(l => l.slice(1))
+    .join("\n");
+  return { hits: scanText(addedLines, denySet, undefined, opts), skipped: [] };
+}
+
+export interface HistoryHit {
+  pattern: string;
+  commitSha: string;
+  commitSummary: string;
+}
+
+/**
+ * Scan the full git history with `git log -G <pattern>` per pattern.
+ * Returns one HistoryHit per (pattern, commit) match. Cost scales as
+ * O(patterns × history-size); use sparingly.
+ *
+ * The pattern field is redacted by default (preview mode) — same
+ * policy as scan hits. Pass `revealMatches: true` to opt into
+ * literals (NEVER from a hook).
+ */
+export function scanHistory(
+  repo: RepoConfig,
+  denySet: DenySet,
+  opts: ScanOptions = {},
+): HistoryHit[] {
+  if (!repo.isGitRepo) return [];
+  const hits: HistoryHit[] = [];
+  for (const pattern of denySet.patterns) {
+    let stdout = "";
+    try {
+      stdout = execFileSync(
+        "git",
+        ["log", "-G", pattern, "--oneline", "--no-decorate"],
+        {
+          cwd: repo.cwd,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          maxBuffer: 64 * 1024 * 1024,
+        },
+      );
+    } catch {
+      continue;
+    }
+    for (const line of stdout.split("\n")) {
+      if (!line.trim()) continue;
+      const sp = line.indexOf(" ");
+      const sha = sp >= 0 ? line.slice(0, sp) : line;
+      const summary = sp >= 0 ? line.slice(sp + 1) : "";
+      hits.push({
+        pattern: formatMatch(pattern, opts),
+        commitSha: sha,
+        commitSummary: summary,
+      });
+    }
+  }
+  return hits;
+}
+
 function looksBinary(buf: Buffer): boolean {
   // Heuristic: any NUL byte in the first 8KB is a strong binary signal.
   const sample = buf.subarray(0, Math.min(buf.length, 8192));

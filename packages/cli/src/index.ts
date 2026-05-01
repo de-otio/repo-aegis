@@ -46,6 +46,8 @@ program
   .description("scan content against this repo's scoped deny set")
   .option("--staged", "scan the staged diff (used by pre-commit hook)")
   .option("--path <path>", "scan a single file")
+  .option("--range <revspec>", "scan additions in a git range, e.g. <remote>..<local> (used by pre-push hook)")
+  .option("--history", "scan full git history with `git log -G` per pattern (slow)")
   .option("--max-file-bytes <n>", "skip files larger than this (default 1 MiB)", v => parseInt(v, 10))
   .option("--verbose", "reveal literal matched markers (NEVER pass from hooks)")
   .option("--json", "output JSON")
