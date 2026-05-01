@@ -9,6 +9,7 @@ import { runScan } from "./run.js";
 import { makeOctokitClient } from "./octokit-client.js";
 import { renderMarkdown } from "./output.js";
 import { fileIssue } from "./issue-filer.js";
+import { encryptFile, decryptFile, writeBufferTo, AgeNotFoundError, AgeError } from "./age.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as { version: string };
@@ -176,6 +177,59 @@ program
       process.exit(1);
     }
     process.exit(0);
+  });
+
+program
+  .command("encrypt-query <file>")
+  .description("encrypt a queries YAML file with age")
+  .option("--recipient <pubkey...>", "age recipient(s); pass multiple times for multiple recipients")
+  .option("--recipient-file <path>", "file with one recipient per line")
+  .option("--output <path>", "write ciphertext here (default: <file>.age)")
+  .action((file: string, opts: { recipient?: string[]; recipientFile?: string; output?: string }) => {
+    try {
+      const buf = encryptFile(file, {
+        recipients: opts.recipient,
+        recipientFile: opts.recipientFile,
+      });
+      const target = opts.output ?? `${file}.age`;
+      writeBufferTo(target, buf);
+      process.stdout.write(JSON.stringify({ action: "encrypt-query", input: file, output: target }, null, 2) + "\n");
+    } catch (err) {
+      if (err instanceof AgeNotFoundError) {
+        emitError({ code: err.code, error: err.message });
+      }
+      if (err instanceof AgeError) {
+        emitError({ code: err.code, error: err.message });
+      }
+      emitError({ code: "ENCRYPT_ERROR", error: (err as Error).message });
+    }
+  });
+
+program
+  .command("decrypt-query <file>")
+  .description("decrypt an age-encrypted queries YAML file")
+  .requiredOption("--identity <path>", "age identity file (private key)")
+  .option("--output <path>", "write cleartext here (default: stdout)")
+  .action((file: string, opts: { identity: string; output?: string }) => {
+    try {
+      const buf = decryptFile(file, { identityFile: opts.identity });
+      if (opts.output) {
+        writeBufferTo(opts.output, buf);
+        process.stdout.write(
+          JSON.stringify({ action: "decrypt-query", input: file, output: opts.output }, null, 2) + "\n",
+        );
+      } else {
+        process.stdout.write(buf);
+      }
+    } catch (err) {
+      if (err instanceof AgeNotFoundError) {
+        emitError({ code: err.code, error: err.message });
+      }
+      if (err instanceof AgeError) {
+        emitError({ code: err.code, error: err.message });
+      }
+      emitError({ code: "DECRYPT_ERROR", error: (err as Error).message });
+    }
   });
 
 await program.parseAsync(process.argv);
