@@ -109,9 +109,8 @@ const stubbed = (name: string) =>
       );
     });
 
-for (const name of ["audit"]) {
-  stubbed(name);
-}
+// All v0.2 leaf commands implemented; nothing left to stub.
+void stubbed;
 
 // v0.2 commands (Phase B parallel work) — implemented and wired:
 const { init } = await import("./commands/init.js");
@@ -123,6 +122,7 @@ const { installCi } = await import("./commands/install-ci.js");
 const { installClaudeMd } = await import("./commands/install-claude-md.js");
 const { markersList, markersTest } = await import("./commands/markers.js");
 const { engagementsAdd, engagementsEnd, engagementsShow } = await import("./commands/engagements-mutate.js");
+const { audit } = await import("./commands/audit.js");
 
 program
   .command("init")
@@ -196,5 +196,18 @@ markers
   .option("--cwd <dir>", "evaluate from a different repo directory")
   .option("--json")
   .action((input: string, opts) => markersTest(input, opts));
+
+program
+  .command("audit")
+  .description("composite repo audit: marker scan, lockfile, fixtures, remote consistency")
+  .option("--history", "also sweep full git history with `git log -G` per pattern (slow)")
+  .option("--no-marker-scan", "skip the marker scan over tracked files")
+  .option("--no-lockfile-check", "skip package-lock.json non-public-registry check")
+  .option("--no-fixture-check", "skip scan of fixture/__fixtures__/testdata directories")
+  .option("--no-remote-check", "skip the remote-vs-class consistency check")
+  .option("--cwd <dir>", "audit a different repo directory")
+  .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
+  .option("--json")
+  .action(opts => audit(opts));
 
 await program.parseAsync(process.argv);
