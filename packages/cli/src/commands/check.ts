@@ -20,6 +20,7 @@ interface CheckOptions {
   range?: string;
   history?: boolean;
   maxFileBytes?: number;
+  ignoreAllowlistComments?: boolean;
   json?: boolean;
   verbose?: boolean;
 }
@@ -47,7 +48,11 @@ export function check(opts: CheckOptions): void {
 
   const denySet = computeDenySet(repo);
   const reveal = shouldRevealMatches(opts);
-  const scanOpts = { revealMatches: reveal, maxFileBytes: opts.maxFileBytes ?? undefined };
+  const scanOpts = {
+    revealMatches: reveal,
+    maxFileBytes: opts.maxFileBytes ?? undefined,
+    respectAllowComments: !opts.ignoreAllowlistComments,
+  };
 
   if (denySet.combinedRegex === "") {
     if (opts.json) emitJson({ hits: [], skipped: [], status: "no-deny-set", warnings: denySet.warnings });

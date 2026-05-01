@@ -26,7 +26,18 @@ export interface ScanOptions {
   revealMatches?: boolean;
   redactionMode?: RedactionMode;
   maxFileBytes?: number;
+  /** When true, treat lines containing `repo-aegis: allow` as suppressed. Default: true. */
+  respectAllowComments?: boolean;
 }
+
+/**
+ * A line is allowed-by-comment if it contains the literal token
+ * `repo-aegis: allow` (case-insensitive). Optional reason can follow,
+ * e.g. `// repo-aegis: allow — synthetic test fixture`. The token is
+ * intentionally explicit (not just `allow`) to avoid accidental
+ * suppression by unrelated comments.
+ */
+export const ALLOW_COMMENT = /repo-aegis:\s*allow\b/i;
 
 function formatMatch(literal: string, opts: ScanOptions): string {
   if (opts.revealMatches) return revealMatch(literal);
@@ -46,12 +57,14 @@ export function scanText(
 ): ScanHit[] {
   if (!denySet.combinedRegex) return [];
   const re = new RegExp(denySet.combinedRegex, "i");
+  const respectAllow = opts.respectAllowComments !== false;
   const hits: ScanHit[] = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
     const m = line.match(re);
     if (m && m[0]) {
+      if (respectAllow && ALLOW_COMMENT.test(line)) continue;
       hits.push({
         ...(path !== undefined && { path }),
         line: i + 1,

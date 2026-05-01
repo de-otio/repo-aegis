@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -138,5 +138,92 @@ describe("setClass / unsetClass", () => {
 
   it("setClass throws NotAGitRepoError outside a git repo", () => {
     assert.throws(() => setClass("public-eligible", nonGitDir), NotAGitRepoError);
+  });
+});
+
+describe(".repo-aegis.yml overrides", () => {
+  let overrideRepo: string;
+  const yamlPath = (dir: string): string => join(dir, ".repo-aegis.yml");
+  const writeOverride = (dir: string, body: string): void => {
+    writeFileSync(yamlPath(dir), body);
+  };
+
+  before(() => {
+    overrideRepo = join(tmp, "override-repo");
+    execFileSync("mkdir", ["-p", overrideRepo]);
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: overrideRepo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: overrideRepo });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: overrideRepo });
+  });
+
+  it("yml provides class when git config does not", () => {
+    writeOverride(overrideRepo, "class: customer-coupled\nengagements: [from-yml]\n");
+    const cfg = readRepoConfig(overrideRepo);
+    assert.equal(cfg.class, "customer-coupled");
+    assert.equal(cfg.classExplicit, true);
+    assert.equal(cfg.classFromOverride, true);
+    assert.deepEqual(cfg.engagements, ["from-yml"]);
+    assert.equal(cfg.engagementsFromOverride, true);
+    rmSync(yamlPath(overrideRepo));
+    unsetClass(overrideRepo);
+  });
+
+  it("git config wins over yml when both set", () => {
+    execFileSync("git", ["config", "repo-aegis.class", "private-strict"], {
+      cwd: overrideRepo,
+    });
+    execFileSync("git", ["config", "--add", "repo-aegis.engagement", "from-config"], {
+      cwd: overrideRepo,
+    });
+    writeOverride(overrideRepo, "class: customer-coupled\nengagements: [from-yml]\n");
+    const cfg = readRepoConfig(overrideRepo);
+    assert.equal(cfg.class, "private-strict", "git config class wins");
+    assert.equal(cfg.classFromOverride, undefined);
+    assert.deepEqual(cfg.engagements, ["from-config"]);
+    assert.equal(cfg.engagementsFromOverride, undefined);
+    execFileSync("git", ["config", "--unset-all", "repo-aegis.class"], { cwd: overrideRepo });
+    execFileSync("git", ["config", "--unset-all", "repo-aegis.engagement"], { cwd: overrideRepo });
+    rmSync(yamlPath(overrideRepo));
+  });
+
+  it("invalid class in yml throws RepoOverrideError", async () => {
+    const { RepoOverrideError } = await import("./repo.js");
+    writeOverride(overrideRepo, "class: not-a-real-class\n");
+    assert.throws(() => readRepoConfig(overrideRepo), RepoOverrideError);
+    rmSync(yamlPath(overrideRepo));
+  });
+
+  it("non-array engagements throws RepoOverrideError", async () => {
+    const { RepoOverrideError } = await import("./repo.js");
+    writeOverride(overrideRepo, "engagements: customer-a\n");
+    assert.throws(() => readRepoConfig(overrideRepo), RepoOverrideError);
+    rmSync(yamlPath(overrideRepo));
+  });
+
+  it("malformed YAML throws RepoOverrideError", async () => {
+    const { RepoOverrideError } = await import("./repo.js");
+    writeOverride(overrideRepo, "class: customer-coupled\n  unindented: bad\n");
+    assert.throws(() => readRepoConfig(overrideRepo), RepoOverrideError);
+    rmSync(yamlPath(overrideRepo));
+  });
+
+  it("yml is found via git toplevel even from a subdirectory", () => {
+    const sub = join(overrideRepo, "src", "deep");
+    execFileSync("mkdir", ["-p", sub]);
+    writeOverride(overrideRepo, "class: scratch\n");
+    const cfg = readRepoConfig(sub);
+    assert.equal(cfg.class, "scratch");
+    assert.equal(cfg.classFromOverride, true);
+    rmSync(yamlPath(overrideRepo));
+  });
+
+  it("works in non-git dirs (yml at cwd)", () => {
+    const dir = join(tmp, "non-git-with-yml");
+    execFileSync("mkdir", ["-p", dir]);
+    writeOverride(dir, "class: scratch\n");
+    const cfg = readRepoConfig(dir);
+    assert.equal(cfg.isGitRepo, false);
+    assert.equal(cfg.class, "scratch");
+    assert.equal(cfg.classFromOverride, true);
   });
 });

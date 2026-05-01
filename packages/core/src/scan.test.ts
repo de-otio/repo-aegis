@@ -82,6 +82,45 @@ describe("scanText", () => {
     const hits = scanText("see ACME-Corp", ds);
     assert.equal(hits.length, 1);
   });
+
+  it("respects per-line allow comments by default", () => {
+    const ds = denySetWithPatterns(["acme-corp"]);
+    const text = [
+      "this acme-corp has hit",
+      "this acme-corp is fine // repo-aegis: allow synthetic fixture",
+      "this acme-corp is also a hit",
+    ].join("\n");
+    const hits = scanText(text, ds);
+    assert.equal(hits.length, 2);
+    assert.equal(hits[0]!.line, 1);
+    assert.equal(hits[1]!.line, 3);
+  });
+
+  it("recognises the allow comment in any comment style", () => {
+    const ds = denySetWithPatterns(["acme-corp"]);
+    const cases = [
+      "acme-corp # repo-aegis: allow",
+      "acme-corp /* repo-aegis: allow */",
+      "acme-corp <!-- repo-aegis: allow -->",
+      "acme-corp ;; repo-aegis: allow",
+    ];
+    for (const text of cases) {
+      assert.equal(scanText(text, ds).length, 0, `should suppress: ${text}`);
+    }
+  });
+
+  it("does NOT suppress when allow token is malformed", () => {
+    const ds = denySetWithPatterns(["acme-corp"]);
+    const text = "acme-corp # repo-aegis allow"; // missing colon
+    assert.equal(scanText(text, ds).length, 1);
+  });
+
+  it("respectAllowComments=false bypasses suppression", () => {
+    const ds = denySetWithPatterns(["acme-corp"]);
+    const text = "acme-corp // repo-aegis: allow";
+    const hits = scanText(text, ds, undefined, { respectAllowComments: false });
+    assert.equal(hits.length, 1);
+  });
 });
 
 describe("scanFile", () => {

@@ -49,6 +49,7 @@ program
   .option("--range <revspec>", "scan additions in a git range, e.g. <remote>..<local> (used by pre-push hook)")
   .option("--history", "scan full git history with `git log -G` per pattern (slow)")
   .option("--max-file-bytes <n>", "skip files larger than this (default 1 MiB)", v => parseInt(v, 10))
+  .option("--ignore-allowlist-comments", "do not respect `repo-aegis: allow` comments (audit-grade strict)")
   .option("--verbose", "reveal literal matched markers (NEVER pass from hooks)")
   .option("--json", "output JSON")
   .action((opts) => check(opts));
