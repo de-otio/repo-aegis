@@ -10,9 +10,8 @@ marker list when working on customer-A's own code.
 
 ## Status
 
-**Pre-release. v0.2. CLI feature-complete; scanner package
-implemented (JSON output only — issue and markdown formats deferred
-to v0.3). Not yet published to npm.**
+**Pre-release. v0.2. CLI and scanner are feature-complete: all
+commands and output formats implemented. Not yet published to npm.**
 
 ## What it does
 
@@ -62,11 +61,44 @@ to v0.3). Not yet published to npm.**
 - `repo-aegis-scan validate-queries <file>` — schema-check a queries
   YAML file.
 - `repo-aegis-scan run --queries <file> --state <file>` — run the
-  configured GitHub code-search queries; new hits returned as JSON;
-  state file tracks seen hits across runs (atomic writes).
+  configured GitHub code-search queries; output as `--output-format
+  json|markdown|issue` (with `--report-issue-repo owner/repo` for
+  issue mode); state file tracks seen hits across runs (atomic
+  writes).
+- `repo-aegis-scan encrypt-query <file> --recipient <pubkey>` —
+  encrypt a queries YAML file with `age`. Used for committing
+  encrypted query lists in a public deployment repo.
+- `repo-aegis-scan decrypt-query <file> --identity <key>` — inverse.
 
 Redacted by default everywhere; `--verbose` / `--reveal-matches` opt-in.
 Hooks must never pass these flags.
+
+### Per-line allowlist comments
+
+Add `repo-aegis: allow` to a line (in any comment style) to suppress
+hits on that line. The token is intentionally explicit so unrelated
+comments don't accidentally suppress.
+
+```ts
+const fixture = "acme-corp.example"; // repo-aegis: allow synthetic test data
+```
+
+Run `check --ignore-allowlist-comments` for an audit-grade strict
+mode that doesn't honour them.
+
+### Per-repo `.repo-aegis.yml` overrides
+
+A `.repo-aegis.yml` at the repo root declares class and engagements
+when the maintainer wants the config checked in:
+
+```yaml
+class: customer-coupled
+engagements:
+  - customer-a
+```
+
+Per-clone `git config repo-aegis.class` / `repo-aegis.engagement`
+still wins; the YAML is the project default.
 
 ## Why this matters for AI-assisted coding
 
@@ -168,16 +200,21 @@ The monorepo has three workspace packages:
 All three share the same marker list and engagement registry, so a
 string is identified as a leak by the same logic at every layer.
 
-### Deferred to v0.3
+### Beyond v0.2
 
-- `repo-aegis-scan run --output-format=issue|markdown` (currently
-  only `json` is implemented).
-- `repo-aegis-scan encrypt-query` / `decrypt-query` (age wrappers).
-- `repo-aegis audit --org <org>` and `audit --published <pkg>`.
-- `repo-aegis check --range` / `check --history` (range-based scans).
-- Per-repo `.repo-aegis.yml` overrides.
-- Per-line allowlist comments.
-- Worker-thread upgrade for the regex-safety check.
+Designed but not yet implemented:
+
+- `audit --published` for VSIX bundles is wired; for npm tarballs it
+  uses `npm pack` to fetch by name. A network-isolated mode (mirror
+  registry) is a future polish.
+- Pattern-attribution in `ScanHit` (which engagement's marker matched
+  this hit) — currently inferable from the deny set's per-file
+  layout but not surfaced per-hit.
+- `re2` regex backend for hard ReDoS resistance (current strict
+  validation uses a subprocess timer; `re2` would obviate it).
+- Age-encrypted registry (the deployment-side query file is
+  encryptable; the engagement registry itself is not).
+- MCP server / VSCode extension / GitHub Action wrapper.
 
 ## Background
 
