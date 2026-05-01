@@ -87,7 +87,7 @@ const stubbed = (name: string) =>
       );
     });
 
-for (const name of ["install", "audit", "markers"]) {
+for (const name of ["audit", "markers"]) {
   stubbed(name);
 }
 
@@ -95,6 +95,10 @@ for (const name of ["install", "audit", "markers"]) {
 const { init } = await import("./commands/init.js");
 const { classify } = await import("./commands/classify.js");
 const { contextOn, contextOff, contextStatus } = await import("./commands/context.js");
+const { installHooks } = await import("./commands/install-hooks.js");
+const { installGitignore } = await import("./commands/install-gitignore.js");
+const { installCi } = await import("./commands/install-ci.js");
+const { installClaudeMd } = await import("./commands/install-claude-md.js");
 
 program
   .command("init")
@@ -118,5 +122,38 @@ const ctx = program.command("context").description("toggle leak-context strict m
 ctx.command("on").description("enable strict mode").option("--json").action(opts => contextOn(opts));
 ctx.command("off").description("disable strict mode").option("--json").action(opts => contextOff(opts));
 ctx.command("status").description("show whether strict mode is on").option("--json").action(opts => contextStatus(opts));
+
+const install = program.command("install").description("install hooks, gitignore, claude-md, or ci workflow");
+
+install
+  .command("hooks")
+  .description("write pre-commit/pre-push to ~/.config/repo-aegis/hooks and set core.hooksPath")
+  .option("--force", "overwrite a conflicting core.hooksPath")
+  .option("--cwd <dir>", "target a different repo directory")
+  .option("--json")
+  .action(opts => installHooks(opts));
+
+install
+  .command("gitignore")
+  .description("append recommended secret-file patterns to ~/.config/git/ignore")
+  .option("--gitignore-path <path>", "override default global gitignore path")
+  .option("--json")
+  .action(opts => installGitignore(opts));
+
+install
+  .command("ci")
+  .description("emit (or --write) .github/workflows/leak-scan.yml")
+  .option("--write", "write to disk instead of printing to stdout")
+  .option("--force", "overwrite an existing workflow file")
+  .option("--cwd <dir>", "target a different repo directory")
+  .option("--json")
+  .action(opts => installCi(opts));
+
+install
+  .command("claude-md")
+  .description("install Claude Code PostToolUse hook + CLAUDE.md snippet")
+  .option("--claude-home <dir>", "override default ~/.claude location")
+  .option("--json")
+  .action(opts => installClaudeMd(opts));
 
 await program.parseAsync(process.argv);
