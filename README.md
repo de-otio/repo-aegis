@@ -10,23 +10,63 @@ marker list when working on customer-A's own code.
 
 ## Status
 
-**Pre-release. v0.x. Interface may change. Not yet published to npm.**
+**Pre-release. v0.2. CLI feature-complete; scanner package
+implemented (JSON output only — issue and markdown formats deferred
+to v0.3). Not yet published to npm.**
 
 ## What it does
 
+### Per-repo flow
+
 - `repo-aegis allow <name>` — declare that the current repo legitimately
-  references a given engagement; the hook stops firing on that
-  engagement's strings inside this repo.
+  references a given engagement; the deny set is then computed
+  excluding that engagement's markers inside this repo.
 - `repo-aegis deny <name>` — inverse.
 - `repo-aegis status` — show this repo's class, allowed engagements,
   the deny set in effect, and the active pattern count.
 - `repo-aegis check --staged` — scan the staged diff against the
   scoped deny set; used by pre-commit / pre-push hooks.
-- `repo-aegis check --path <file>` — scan a single file.
-- `repo-aegis render` — regenerate the per-engagement marker files
-  from the engagement registry.
-- `repo-aegis engagements list` — show what's known about each
-  engagement.
+- `repo-aegis check --path <file>` — scan a single file (used by the
+  Claude Code PostToolUse hook).
+- `repo-aegis classify --apply` — auto-detect repo class + engagement
+  from the git remote URL using a rules YAML; sets `git config`.
+- `repo-aegis audit` — composite repo health check: marker scan over
+  tracked files, optional history sweep, lockfile non-public-registry
+  check, fixture-directory scan, remote-vs-class consistency.
+
+### Setup and registry
+
+- `repo-aegis init` — bootstrap the home directory and registry stub.
+- `repo-aegis install hooks` — write pre-commit and pre-push to
+  `~/.config/repo-aegis/hooks` and set `core.hooksPath` for the
+  current repo.
+- `repo-aegis install gitignore` — append a managed block of secret-file
+  patterns to `~/.config/git/ignore`.
+- `repo-aegis install ci` — emit (or `--write`) `.github/workflows/leak-scan.yml`.
+- `repo-aegis install claude-md` — wire a Claude Code PostToolUse
+  hook + a CLAUDE.md snippet into `~/.claude`.
+- `repo-aegis engagements list|add|end|show` — manage the registry.
+- `repo-aegis render` — regenerate per-engagement marker files from
+  the registry.
+- `repo-aegis context on|off|status` — toggle leak-context strict mode.
+
+### Inspection
+
+- `repo-aegis markers list` — list registered patterns by source file
+  (redacted by default; `--verbose` to reveal literals).
+- `repo-aegis markers test <string>` — report which patterns would
+  match the input in this repo's scoped deny set.
+
+### Scanner (separate package)
+
+- `repo-aegis-scan validate-queries <file>` — schema-check a queries
+  YAML file.
+- `repo-aegis-scan run --queries <file> --state <file>` — run the
+  configured GitHub code-search queries; new hits returned as JSON;
+  state file tracks seen hits across runs (atomic writes).
+
+Redacted by default everywhere; `--verbose` / `--reveal-matches` opt-in.
+Hooks must never pass these flags.
 
 ## Why this matters for AI-assisted coding
 
@@ -111,20 +151,33 @@ audits), see the data-leak prevention guide referenced under
 
 ## Roadmap
 
-The monorepo is structured for three workspace packages:
+The monorepo has three workspace packages:
 
 - `@de-otio/repo-aegis-core` — the registry/deny-set/scanner library.
-- `@de-otio/repo-aegis` — this CLI for engineers (prevention layer:
-  blocks leaks at commit time on the developer machine).
-- `@de-otio/repo-aegis-scan` — *planned*: a centralised Layer-2 sweep
-  tool, runnable as `npx @de-otio/repo-aegis-scan`, that scans public
-  GitHub via `gh search code` queries on a schedule and reports new
-  hits. The implementation lives here as the third workspace package;
-  deployment (the scheduled GitHub Action, encrypted query list, and
-  state file) lives in a private repo of the operator's choosing.
+- `@de-otio/repo-aegis` — the developer CLI: blocks leaks at commit
+  time on the developer machine. Feature-complete for v0.2.
+- `@de-otio/repo-aegis-scan` — the centralised Layer-2 sweep:
+  reads queries from a YAML file, runs them against GitHub
+  code-search, filters out previously-seen hits via an atomic state
+  file. Returns new hits as JSON. Issue-filing and markdown output
+  are planned for v0.3. Deployment (the scheduled GitHub Action,
+  encrypted query list, and state file) lives in a private repo of
+  the operator's choosing — see
+  [data-leaks-on-github/code-search-solution.md](https://github.com/de-otio/dot-notes/blob/main/doc/topics/data-leaks-on-github/code-search-solution.md).
 
 All three share the same marker list and engagement registry, so a
 string is identified as a leak by the same logic at every layer.
+
+### Deferred to v0.3
+
+- `repo-aegis-scan run --output-format=issue|markdown` (currently
+  only `json` is implemented).
+- `repo-aegis-scan encrypt-query` / `decrypt-query` (age wrappers).
+- `repo-aegis audit --org <org>` and `audit --published <pkg>`.
+- `repo-aegis check --range` / `check --history` (range-based scans).
+- Per-repo `.repo-aegis.yml` overrides.
+- Per-line allowlist comments.
+- Worker-thread upgrade for the regex-safety check.
 
 ## Background
 
