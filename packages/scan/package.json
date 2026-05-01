@@ -1,0 +1,29 @@
+{
+  "name": "@de-otio/repo-aegis-scan",
+  "version": "0.0.1",
+  "description": "Org-wide GitHub code-search sweep for leaked engagement markers",
+  "license": "GPL-3.0-or-later",
+  "author": "Richard Myers",
+  "homepage": "https://github.com/de-otio/repo-aegis",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/de-otio/repo-aegis.git",
+    "directory": "packages/scan"
+  },
+  "type": "module",
+  "bin": {
+    "repo-aegis-scan": "./dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js"
+  },
+  "dependencies": {
+    "@octokit/rest": "^20.1.1",
+    "commander": "^12.1.0",
+    "yaml": "^2.4.0"
+  }
+}
