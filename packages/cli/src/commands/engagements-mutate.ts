@@ -6,8 +6,10 @@ import {
   validatePatterns,
   isActive,
   renderMarkers,
+  withLockSync,
   PatternValidationError,
   RegistryNotFoundError,
+  LockTimeoutError,
   ALWAYS_BLOCK_RESERVED_ID,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
@@ -127,15 +129,19 @@ export function engagementsAdd(id: string, opts: EngagementsAddOptions): void {
     started: opts.started ?? todayIso(),
     markers,
   };
-  seq.add(newEntry);
-
-  saveDoc(doc!, path);
 
   let renderResult;
   try {
-    const reg = loadRegistry(path);
-    renderResult = renderMarkers(reg);
+    renderResult = withLockSync(() => {
+      seq.add(newEntry);
+      saveDoc(doc!, path);
+      const reg = loadRegistry(path);
+      return renderMarkers(reg);
+    });
   } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      emitError({ code: err.code, error: err.message }, opts);
+    }
     if (err instanceof PatternValidationError) {
       emitError(
         { code: "PATTERN_VALIDATION", error: err.message, details: err.invalid },
@@ -181,15 +187,19 @@ export function engagementsEnd(id: string, opts: EngagementsEndOptions): void {
   }
 
   const endedDate = opts.purge ? backdated13MonthsIso() : todayIso();
-  node!.set("ended", endedDate);
-
-  saveDoc(doc!, path);
 
   let renderResult;
   try {
-    const reg = loadRegistry(path);
-    renderResult = renderMarkers(reg);
+    renderResult = withLockSync(() => {
+      node!.set("ended", endedDate);
+      saveDoc(doc!, path);
+      const reg = loadRegistry(path);
+      return renderMarkers(reg);
+    });
   } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      emitError({ code: err.code, error: err.message }, opts);
+    }
     if (err instanceof PatternValidationError) {
       emitError(
         { code: "PATTERN_VALIDATION", error: err.message, details: err.invalid },

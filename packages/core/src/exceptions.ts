@@ -56,6 +56,14 @@ export class OutsideWorkingTreeError extends Error {
   }
 }
 
+export class LockTimeoutError extends Error {
+  readonly code = "LOCK_TIMEOUT" as const;
+  constructor(public lockPath: string) {
+    super(`could not acquire registry lock at ${lockPath} (another repo-aegis process is running?)`);
+    this.name = "LockTimeoutError";
+  }
+}
+
 export class CustomerCoupledNoEngagementError extends Error {
   readonly code = "CUSTOMER_COUPLED_NO_ENGAGEMENT" as const;
   constructor() {

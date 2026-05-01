@@ -8,4 +8,5 @@ export * from "./redaction.js";
 export * from "./regex-safety.js";
 export * from "./exceptions.js";
 export * from "./exit-codes.js";
+export * from "./lock.js";
 export type { RepoJson, EngagementJson } from "./types.js";

@@ -1,8 +1,10 @@
 import {
   loadRegistry,
   renderMarkers,
+  withLockSync,
   PatternValidationError,
   RegistryNotFoundError,
+  LockTimeoutError,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
@@ -30,8 +32,15 @@ export function render(opts: RenderOptions): void {
 
   let result;
   try {
-    result = renderMarkers(reg, { dryRun: !!opts.dryRun });
+    if (opts.dryRun) {
+      result = renderMarkers(reg, { dryRun: true });
+    } else {
+      result = withLockSync(() => renderMarkers(reg, { dryRun: false }));
+    }
   } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      emitError({ code: err.code, error: err.message }, opts);
+    }
     if (err instanceof PatternValidationError) {
       if (opts.json) {
         emitJson({
