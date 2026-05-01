@@ -9,3 +9,5 @@ coverage/
 .npm/
 # doc-search index
 .doc-search-index
+# review artefacts
+tmp/
