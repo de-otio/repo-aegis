@@ -71,6 +71,11 @@ fi
 
 interface InstallClaudeMdOptions extends OutputOptions {
   claudeHome?: string;
+  /**
+   * When true, do the work but suppress all stdout/stderr emission.
+   * emitError still fires on hard failure. Used by `init`.
+   */
+  silent?: boolean;
 }
 
 interface SettingsJson {
@@ -207,6 +212,8 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   // 4. Warn if leak-context strict mode is off
   const flagPath = leakContextFlagPath();
   const strictModeOn = existsSync(flagPath);
+
+  if (opts.silent) return;
 
   if (opts.json) {
     emitJson({

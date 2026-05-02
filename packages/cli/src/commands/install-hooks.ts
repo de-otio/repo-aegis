@@ -69,6 +69,13 @@ exit "$exit_rc"
 interface InstallHooksOptions extends OutputOptions {
   force?: boolean;
   cwd?: string;
+  /**
+   * When true, do the work but suppress all stdout/stderr emission
+   * (no emitJson / emitText). emitError still fires on hard failure
+   * (which calls process.exit). Used by `init` to call this command
+   * inline without polluting init's own output stream.
+   */
+  silent?: boolean;
 }
 
 function git(cwd: string, args: string[]): { ok: boolean; stdout: string } {
@@ -142,6 +149,8 @@ export function installHooks(opts: InstallHooksOptions): void {
       opts,
     );
   }
+
+  if (opts.silent) return;
 
   if (opts.json) {
     emitJson({

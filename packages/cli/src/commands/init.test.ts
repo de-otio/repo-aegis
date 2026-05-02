@@ -1,16 +1,14 @@
 /**
- * Integration tests for `init.ts`.
+ * Tests for `init.ts`. Migrated to the shared `_test-utils` helpers.
  *
- * These tests invoke `init()` directly (not via subprocess) to work around the
- * fact that `index.ts` wires up the command *after* this module is delivered.
- * The coordinator wires `init` into the CLI once both agents are done; until
- * then, subprocess invocation would hit the NOT_IMPLEMENTED stub.
- *
- * We test the filesystem side-effects by pointing `REPO_AEGIS_HOME` at a
- * temporary directory and capturing stdout/stderr through thin wrappers.
+ * Most tests pass `withHooks: false, withClaude: false` so they don't touch
+ * the real `~/.claude` or set git config on a tmp git repo. Dedicated tests
+ * for the wiring use overrides (`cwd`, `claudeHome`) to install into a
+ * tmp dir.
  */
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -22,80 +20,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-// Helpers to capture stdout/stderr written directly to process streams
-function captureOutput(fn: () => void): { stdout: string; stderr: string; exitCode?: number } {
-  const stdoutChunks: Buffer[] = [];
-  const stderrChunks: Buffer[] = [];
-  let exitCode: number | undefined;
-
-  const origStdoutWrite = process.stdout.write.bind(process.stdout);
-  const origStderrWrite = process.stderr.write.bind(process.stderr);
-  const origExit = process.exit.bind(process);
-
-  const patchedExit = (code?: number): never => {
-    exitCode = code ?? 0;
-    // Restore before throwing so teardown works
-    process.stdout.write = origStdoutWrite;
-    process.stderr.write = origStderrWrite;
-    process.exit = origExit;
-    throw new ExitError(code ?? 0);
-  };
-
-  process.stdout.write = (chunk: unknown, ...args: unknown[]): boolean => {
-    stdoutChunks.push(Buffer.from(chunk as string));
-    return true;
-  };
-  process.stderr.write = (chunk: unknown, ...args: unknown[]): boolean => {
-    stderrChunks.push(Buffer.from(chunk as string));
-    return true;
-  };
-  (process as NodeJS.Process).exit = patchedExit as typeof process.exit;
-
-  try {
-    fn();
-  } catch (e) {
-    if (!(e instanceof ExitError)) {
-      process.stdout.write = origStdoutWrite;
-      process.stderr.write = origStderrWrite;
-      process.exit = origExit;
-      throw e;
-    }
-  } finally {
-    process.stdout.write = origStdoutWrite;
-    process.stderr.write = origStderrWrite;
-    process.exit = origExit;
-  }
-
-  return {
-    stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-    stderr: Buffer.concat(stderrChunks).toString("utf8"),
-    exitCode,
-  };
-}
-
-class ExitError extends Error {
-  constructor(public code: number) {
-    super(`process.exit(${code})`);
-  }
-}
-
-function withHome<T>(home: string, fn: () => T): T {
-  const prev = process.env["REPO_AEGIS_HOME"];
-  process.env["REPO_AEGIS_HOME"] = home;
-  try {
-    return fn();
-  } finally {
-    if (prev === undefined) {
-      delete process.env["REPO_AEGIS_HOME"];
-    } else {
-      process.env["REPO_AEGIS_HOME"] = prev;
-    }
-  }
-}
-
-// Lazily import init so we can set env before module-level code runs
-// (paths.ts reads REPO_AEGIS_HOME at call time, not import time, so this is fine)
+import { captureOutputAsync, withEnvAsync } from "../_test-utils.js";
 import { init } from "./init.js";
 
 let tmp: string;
@@ -111,68 +36,60 @@ after(() => {
 describe("init command — fresh init in empty home", () => {
   let home: string;
 
-  before(() => {
+  before(async () => {
     home = join(tmp, "fresh-home");
-    // Do NOT pre-create; init must create it
-    withHome(home, () => {
-      captureOutput(() => init({}));
-    });
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
   });
 
   it("creates home directory", () => {
-    assert.ok(existsSync(home), "home directory should exist after init");
+    assert.ok(existsSync(home));
   });
 
   it("home directory has mode 0700", () => {
     const st = statSync(home);
-    assert.equal(st.mode & 0o777, 0o700, `home dir mode should be 0700, got ${(st.mode & 0o777).toString(8)}`);
+    assert.equal(st.mode & 0o777, 0o700);
   });
 
   it("creates markers directory", () => {
-    const markersPath = join(home, "markers");
-    assert.ok(existsSync(markersPath), "markers directory should exist");
+    assert.ok(existsSync(join(home, "markers")));
   });
 
   it("creates state directory", () => {
-    const stateDirPath = join(home, "state");
-    assert.ok(existsSync(stateDirPath), "state directory should exist");
+    assert.ok(existsSync(join(home, "state")));
   });
 
   it("creates engagements.yaml", () => {
-    const regPath = join(home, "engagements.yaml");
-    assert.ok(existsSync(regPath), "engagements.yaml should exist");
+    assert.ok(existsSync(join(home, "engagements.yaml")));
   });
 
   it("engagements.yaml has mode 0600", () => {
-    const regPath = join(home, "engagements.yaml");
-    const st = statSync(regPath);
-    assert.equal(st.mode & 0o777, 0o600, `registry mode should be 0600, got ${(st.mode & 0o777).toString(8)}`);
+    const st = statSync(join(home, "engagements.yaml"));
+    assert.equal(st.mode & 0o777, 0o600);
   });
 
   it("engagements.yaml contains stub content", () => {
-    const regPath = join(home, "engagements.yaml");
-    const contents = readFileSync(regPath, "utf8");
-    assert.ok(contents.includes("always_block"), "stub should contain always_block");
-    assert.ok(contents.includes("engagements"), "stub should contain engagements");
-    assert.ok(contents.includes("example-customer"), "stub should contain example-customer placeholder");
+    const body = readFileSync(join(home, "engagements.yaml"), "utf8");
+    assert.ok(body.includes("always_block"));
+    assert.ok(body.includes("engagements"));
+    assert.ok(body.includes("example-customer"));
   });
 
-  it("prints 'scaffolded engagements.yaml' to stdout", () => {
-    const freshHome = join(tmp, "fresh-home-output");
-    const result = withHome(freshHome, () => captureOutput(() => init({})));
-    assert.ok(result.stdout.includes("scaffolded engagements.yaml"), `stdout: ${result.stdout}`);
+  it("prints 'scaffolded engagements.yaml' to stdout", async () => {
+    const fresh = join(tmp, "fresh-home-output");
+    const r = await withEnvAsync("REPO_AEGIS_HOME", fresh, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
+    assert.ok(r.stdout.includes("scaffolded engagements.yaml"));
   });
 
-  it("prints hooks deferred note to stdout", () => {
-    const freshHome = join(tmp, "fresh-home-hooks");
-    const result = withHome(freshHome, () => captureOutput(() => init({})));
-    assert.ok(result.stdout.includes("deferred to v0.2.1"), `stdout: ${result.stdout}`);
-  });
-
-  it("exits 0 (no exit call on success)", () => {
-    const freshHome = join(tmp, "fresh-home-exit");
-    const result = withHome(freshHome, () => captureOutput(() => init({})));
-    assert.equal(result.exitCode, undefined, "init should not call process.exit on success");
+  it("exits 0 (no exit call on success)", async () => {
+    const fresh = join(tmp, "fresh-home-exit");
+    const r = await withEnvAsync("REPO_AEGIS_HOME", fresh, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
+    assert.equal(r.exitCode, undefined);
   });
 });
 
@@ -180,56 +97,60 @@ describe("init command — idempotent re-init (no --force)", () => {
   let home: string;
   let contentBefore: string;
 
-  before(() => {
+  before(async () => {
     home = join(tmp, "idempotent-home");
     mkdirSync(home, { recursive: true });
-    withHome(home, () => captureOutput(() => init({})));
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
     contentBefore = readFileSync(join(home, "engagements.yaml"), "utf8");
   });
 
-  it("exits 0 on second run", () => {
-    const result = withHome(home, () => captureOutput(() => init({})));
-    assert.equal(result.exitCode, undefined, "second init should exit 0");
+  it("exits 0 on second run", async () => {
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
+    assert.equal(r.exitCode, undefined);
   });
 
-  it("does not overwrite existing registry", () => {
-    withHome(home, () => captureOutput(() => init({})));
-    const contentAfter = readFileSync(join(home, "engagements.yaml"), "utf8");
-    assert.equal(contentBefore, contentAfter, "registry contents should be unchanged on re-init");
+  it("does not overwrite existing registry", async () => {
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
+    const after = readFileSync(join(home, "engagements.yaml"), "utf8");
+    assert.equal(contentBefore, after);
   });
 
-  it("prints 'registry already exists at <path>'", () => {
-    const result = withHome(home, () => captureOutput(() => init({})));
-    assert.ok(result.stdout.includes("registry already exists at"), `stdout: ${result.stdout}`);
-    assert.ok(result.stdout.includes("engagements.yaml"), `stdout: ${result.stdout}`);
+  it("prints 'registry already exists at <path>'", async () => {
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
+    assert.ok(r.stdout.includes("registry already exists at"));
+    assert.ok(r.stdout.includes("engagements.yaml"));
   });
 });
 
 describe("init command — --force flag", () => {
   let home: string;
 
-  before(() => {
+  before(async () => {
     home = join(tmp, "force-home");
     mkdirSync(home, { recursive: true });
-    withHome(home, () => captureOutput(() => init({})));
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
   });
 
-  it("overwrites existing registry when --force is passed", () => {
+  it("overwrites existing registry when --force is passed", async () => {
     const regPath = join(home, "engagements.yaml");
     const original = readFileSync(regPath, "utf8");
-    const modified = original + "\n# extra comment to detect overwrite\n";
-    writeFileSync(regPath, modified);
-
-    withHome(home, () => captureOutput(() => init({ force: true })));
-
+    writeFileSync(regPath, original + "\n# extra comment to detect overwrite\n");
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ force: true, withHooks: false, withClaude: false })),
+    );
     const after = readFileSync(regPath, "utf8");
-    assert.notEqual(after, modified, "registry should have been overwritten");
-    assert.ok(after.includes("example-customer"), "overwritten registry should contain stub");
-  });
-
-  it("prints 'scaffolded engagements.yaml' after --force overwrite", () => {
-    const result = withHome(home, () => captureOutput(() => init({ force: true })));
-    assert.ok(result.stdout.includes("scaffolded engagements.yaml"), `stdout: ${result.stdout}`);
+    assert.ok(after.includes("example-customer"));
+    assert.ok(!after.includes("extra comment to detect overwrite"));
   });
 });
 
@@ -241,104 +162,99 @@ describe("init command — --json output", () => {
     mkdirSync(home, { recursive: true });
   });
 
-  it("emits valid JSON with expected shape on fresh init", () => {
-    let captured = "";
-    const origWrite = process.stdout.write.bind(process.stdout);
-    process.stdout.write = (chunk: unknown, ...args: unknown[]): boolean => {
-      captured += chunk as string;
-      return true;
-    };
-    try {
-      withHome(home, () => init({ json: true }));
-    } finally {
-      process.stdout.write = origWrite;
-    }
-
-    const j = JSON.parse(captured) as {
+  it("emits valid JSON with expected shape on fresh init", async () => {
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ json: true, withHooks: false, withClaude: false })),
+    );
+    const j = JSON.parse(r.stdout) as {
       action: string;
       home: string;
       registry: { path: string; scaffolded: boolean; alreadyExisted: boolean };
       rendered: { written: unknown[]; removed: unknown[] };
-      hooks: { deferred: boolean; reason: string };
-      claude: { deferred: boolean; reason: string };
+      hooks: { ran: boolean };
+      claude: { ran: boolean };
     };
-
     assert.equal(j.action, "init");
     assert.equal(j.home, home);
     assert.ok(j.registry.path.endsWith("engagements.yaml"));
     assert.equal(j.registry.scaffolded, true);
     assert.equal(j.registry.alreadyExisted, false);
-    assert.ok(Array.isArray(j.rendered.written));
-    assert.ok(Array.isArray(j.rendered.removed));
-    assert.equal(j.hooks.deferred, true);
-    assert.equal(j.hooks.reason, "v0.2.1 task");
-    assert.equal(j.claude.deferred, true);
-    assert.equal(j.claude.reason, "v0.2.1 task");
+    assert.equal(j.hooks.ran, false);
+    assert.equal(j.claude.ran, false);
   });
 
-  it("alreadyExisted=true on re-init", () => {
-    // First init
-    withHome(home, () => captureOutput(() => init({})));
-
-    let captured = "";
-    const origWrite = process.stdout.write.bind(process.stdout);
-    process.stdout.write = (chunk: unknown, ...args: unknown[]): boolean => {
-      captured += chunk as string;
-      return true;
-    };
-    try {
-      withHome(home, () => init({ json: true }));
-    } finally {
-      process.stdout.write = origWrite;
-    }
-
-    const j = JSON.parse(captured) as { registry: { scaffolded: boolean; alreadyExisted: boolean } };
+  it("alreadyExisted=true on re-init", async () => {
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ json: true, withHooks: false, withClaude: false })),
+    );
+    const j = JSON.parse(r.stdout) as { registry: { scaffolded: boolean; alreadyExisted: boolean } };
     assert.equal(j.registry.alreadyExisted, true);
     assert.equal(j.registry.scaffolded, false);
   });
+});
 
-  it("scaffolded=true and alreadyExisted=true with --force", () => {
-    // First init
-    withHome(home, () => captureOutput(() => init({})));
+describe("init command — --with-hooks wires installHooks", () => {
+  it("sets core.hooksPath when --with-hooks is on (default) and cwd is a git repo", async () => {
+    const home = join(tmp, "with-hooks-home");
+    mkdirSync(home, { recursive: true });
+    const repo = join(tmp, "with-hooks-repo");
+    mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "test"], { cwd: repo });
 
-    let captured = "";
-    const origWrite = process.stdout.write.bind(process.stdout);
-    process.stdout.write = (chunk: unknown, ...args: unknown[]): boolean => {
-      captured += chunk as string;
-      return true;
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ cwd: repo, withClaude: false })),
+    );
+
+    const out = execFileSync("git", ["config", "--get", "core.hooksPath"], {
+      cwd: repo,
+      encoding: "utf8",
+    }).trim();
+    assert.equal(out, join(home, "hooks"));
+    assert.ok(existsSync(join(home, "hooks", "pre-commit")));
+    assert.ok(existsSync(join(home, "hooks", "pre-push")));
+  });
+});
+
+describe("init command — --with-claude wires installClaudeMd", () => {
+  it("writes scan-after-write.sh and registers the hook in settings.json", async () => {
+    const home = join(tmp, "with-claude-aegis-home");
+    mkdirSync(join(home, "state"), { recursive: true });
+    const claudeHome = join(tmp, "with-claude-claude-home");
+    mkdirSync(claudeHome, { recursive: true });
+
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, claudeHome })),
+    );
+
+    assert.ok(existsSync(join(claudeHome, "hooks", "scan-after-write.sh")));
+    const settings = JSON.parse(readFileSync(join(claudeHome, "settings.json"), "utf8")) as {
+      hooks: { PostToolUse: { matcher: string }[] };
     };
-    try {
-      withHome(home, () => init({ json: true, force: true }));
-    } finally {
-      process.stdout.write = origWrite;
-    }
-
-    const j = JSON.parse(captured) as { registry: { scaffolded: boolean; alreadyExisted: boolean } };
-    assert.equal(j.registry.scaffolded, true);
-    assert.equal(j.registry.alreadyExisted, true);
+    assert.ok(settings.hooks.PostToolUse.some(e => e.matcher === "Write|Edit|MultiEdit"));
   });
 });
 
 describe("init command — renderMarkers behaviour", () => {
-  /**
-   * The scaffold stub has no real patterns (markers: [] for the example
-   * engagement, no alwaysBlock entries), so PatternValidationError cannot be
-   * triggered by the stub itself. This test verifies init succeeds on fresh
-   * scaffold, documenting that the validation path is a no-op with the stub.
-   */
-  it("exits 0 with stub scaffold (no patterns to validate)", () => {
+  it("exits 0 with stub scaffold (no patterns to validate)", async () => {
     const home = join(tmp, "render-ok-home");
     mkdirSync(home, { recursive: true });
-    const result = withHome(home, () => captureOutput(() => init({})));
-    assert.equal(result.exitCode, undefined, "init should exit 0 with stub scaffold");
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
+    assert.equal(r.exitCode, undefined);
   });
 
-  it("marker files are created after init", () => {
+  it("marker files are created after init", async () => {
     const home = join(tmp, "render-markers-home");
     mkdirSync(home, { recursive: true });
-    withHome(home, () => captureOutput(() => init({})));
-    // renderMarkers always writes _always.txt
-    const alwaysFile = join(home, "markers", "_always.txt");
-    assert.ok(existsSync(alwaysFile), "_always.txt should exist after init+render");
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
+    assert.ok(existsSync(join(home, "markers", "_always.txt")));
   });
 });

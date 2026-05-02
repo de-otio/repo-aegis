@@ -39,9 +39,13 @@ interface InitOptions extends OutputOptions {
   force?: boolean;
   withHooks?: boolean;
   withClaude?: boolean;
+  /** When --with-hooks runs installHooks, this is the cwd it targets. */
+  cwd?: string;
+  /** Override ~/.claude path used by --with-claude. */
+  claudeHome?: string;
 }
 
-export function init(opts: InitOptions): void {
+export async function init(opts: InitOptions): Promise<void> {
   const home = repoAegisHome();
   const markers = markersDir(home);
   const state = statePath(home);
@@ -141,12 +145,54 @@ export function init(opts: InitOptions): void {
     emitError({ code: "RENDER_ERROR", error: (err as Error).message }, opts);
   }
 
-  // Step 4: hooks/claude are deferred to v0.2.1
-  const hooksDeferred = { deferred: true as const, reason: "v0.2.1 task" };
-  const claudeDeferred = { deferred: true as const, reason: "v0.2.1 task" };
+  // Step 4: install hooks (per-repo) when --with-hooks. Default on.
+  // Side-loaded via dynamic import to avoid a cycle (install-hooks.ts
+  // doesn't import init, but init keeps the import out of the module
+  // top-level so test suites that don't exercise this path stay fast).
+  type HooksResult =
+    | { ran: true; hooksDir: string }
+    | { ran: false; reason: string };
+  let hooksResult: HooksResult = { ran: false, reason: "--no-with-hooks" };
+  if (opts.withHooks !== false) {
+    try {
+      const { installHooks } = await import("./install-hooks.js");
+      installHooks({
+        ...(opts.cwd !== undefined && { cwd: opts.cwd }),
+        force: opts.force,
+        silent: true,
+      });
+      hooksResult = { ran: true, hooksDir: `${home}/hooks` };
+    } catch (err) {
+      // installHooks calls process.exit via emitError on hard failures
+      // (NOT_GIT_REPO, FS_ERROR, HOOKS_PATH_CONFLICT). Catching here is
+      // best-effort: in practice the throw aborts the process, so we
+      // only see this branch on truly unexpected exceptions.
+      hooksResult = { ran: false, reason: `install-hooks failed: ${(err as Error).message}` };
+    }
+  }
+
+  type ClaudeResult =
+    | { ran: true; claudeHome: string }
+    | { ran: false; reason: string };
+  let claudeResult: ClaudeResult = { ran: false, reason: "--no-with-claude" };
+  if (opts.withClaude !== false) {
+    try {
+      const { installClaudeMd } = await import("./install-claude-md.js");
+      installClaudeMd({
+        ...(opts.claudeHome !== undefined && { claudeHome: opts.claudeHome }),
+        silent: true,
+      });
+      claudeResult = { ran: true, claudeHome: opts.claudeHome ?? "~/.claude" };
+    } catch (err) {
+      claudeResult = { ran: false, reason: `install-claude-md failed: ${(err as Error).message}` };
+    }
+  }
 
   if (!opts.json) {
-    emitText("install hooks: deferred to v0.2.1 (separate task)");
+    if (hooksResult.ran) emitText(`hooks: installed at ${hooksResult.hooksDir}`);
+    else emitText(`hooks: skipped (${hooksResult.reason})`);
+    if (claudeResult.ran) emitText(`claude-md: installed at ${claudeResult.claudeHome}`);
+    else emitText(`claude-md: skipped (${claudeResult.reason})`);
   }
 
   if (opts.json) {
@@ -162,8 +208,8 @@ export function init(opts: InitOptions): void {
         written: rendered.written,
         removed: rendered.removed,
       },
-      hooks: hooksDeferred,
-      claude: claudeDeferred,
+      hooks: hooksResult,
+      claude: claudeResult,
     });
     return;
   }
