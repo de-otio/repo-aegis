@@ -11,8 +11,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node: [20, 22]
+        node: [20, 22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,4 +28,4 @@ jobs:
           git config --global user.name "ci"
       - run: npm test
       - run: npm run test:cov
-        if: matrix.node == '22'
+        if: matrix.node == '24'
