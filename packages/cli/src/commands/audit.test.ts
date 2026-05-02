@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutputAsync, withEnvAsync } from "../_test-utils.js";
-import { audit } from "./audit.js";
+import { audit, __testCreateFileCache } from "./audit.js";
 
 let tmp: string;
 
@@ -635,6 +635,55 @@ describe("audit --published — pre-flight binary checks", () => {
       if (prevPath !== undefined) process.env["PATH"] = prevPath;
       else delete process.env["PATH"];
     }
+  });
+});
+
+describe("audit — file-read deduplication", () => {
+  it("FileCache reads each unique file at most once across repeated load() calls", () => {
+    // Direct unit test of the cache primitive used by audit() to share
+    // file content across marker-scan, lockfile, and fixture-check.
+    const dir = mkdtempSync(join(tmp, "dedupe-cache-"));
+    const f = join(dir, "shared.txt");
+    writeFileSync(f, "hello world\n");
+    const cache = __testCreateFileCache(dir);
+    const a = cache.load(f, { mustBeUnderTree: true });
+    const b = cache.load(f, { mustBeUnderTree: true });
+    assert.equal(a.kind, "ok");
+    assert.equal(b.kind, "ok");
+    assert.equal(a.text, b.text);
+    assert.equal(
+      cache.readCount,
+      1,
+      "second load() of the same path must not re-read from disk",
+    );
+    // Path-aliasing via realpath: the cache should also dedupe when
+    // the same realpath is reached from a symlink. (We cover this only
+    // in the trivial "same string" case here; symlink coverage lives
+    // in the broader scan tests.)
+  });
+
+  it("FileCache scans the same path under multiple checks reusing one buffer", () => {
+    // Simulate the "tracked + in-fixture-dir + lockfile" overlap
+    // scenario. Three load() calls against the same path must trigger
+    // exactly one disk read; the kind/text returned must be stable
+    // across calls so each check sees the same content.
+    const dir = mkdtempSync(join(tmp, "dedupe-multi-"));
+    const fpath = join(dir, "package-lock.json");
+    writeFileSync(fpath, '{"packages":{}}\n');
+    const cache = __testCreateFileCache(dir);
+    const v1 = cache.load(fpath); // simulating lockfile check
+    const v2 = cache.load(fpath); // simulating marker-scan
+    const v3 = cache.load(fpath, { mustBeUnderTree: true }); // simulating fixture
+    assert.equal(v1.kind, "ok");
+    assert.equal(v2.kind, "ok");
+    assert.equal(v3.kind, "ok");
+    assert.equal(v1.text, v2.text);
+    assert.equal(v2.text, v3.text);
+    assert.equal(
+      cache.readCount,
+      1,
+      "three checks against the same path must share one read",
+    );
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scanText, scanFile, scanStagedDiff, scanRange, scanHistory } from "./scan.js";
@@ -451,5 +451,128 @@ describe("scanHistory", () => {
       { revealMatches: true },
     );
     assert.equal(hits[0]!.pattern, "secret-pattern-y");
+  });
+
+  it("multi-pattern scan: all patterns attributed in a single git invocation", () => {
+    // Two distinct patterns, each leaked in a different commit. The
+    // refactor combines patterns into one `git log -G '<a>|<b>'`
+    // invocation; we verify that with a counting `git` shim on PATH
+    // and assert exactly ONE git invocation drove the whole scan.
+    const dir = join(tmp, "hist-multi");
+    gitInit(dir);
+    commit(dir, { "f.txt": "init\n" }, "init");
+    const shaA = commit(
+      dir,
+      { "f.txt": "init\nalpha-leak-marker-here\n" },
+      "leak alpha",
+    );
+    const shaB = commit(
+      dir,
+      { "f.txt": "init\nalpha-leak-marker-here\nbravo-leak-marker-here\n" },
+      "leak bravo",
+    );
+
+    // Build a fake `git` on PATH that records each invocation to a
+    // log file and then exec()s the real git so behaviour is
+    // unchanged. Sufficient for invocation counting.
+    const shimDir = mkdtempSync(join(tmp, "shim-"));
+    const logPath = join(shimDir, "git-calls.log");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    const shim = `#!/usr/bin/env bash\necho "$@" >> "${logPath}"\nexec ${realGit} "$@"\n`;
+    writeFileSync(join(shimDir, "git"), shim);
+    execFileSync("chmod", ["+x", join(shimDir, "git")]);
+
+    const prevPath = process.env["PATH"];
+    process.env["PATH"] = `${shimDir}:${prevPath ?? ""}`;
+    let hits;
+    try {
+      hits = scanHistory(
+        makeRepoConfig(dir),
+        denySetWithPatterns(["alpha-leak-marker", "bravo-leak-marker"]),
+        { revealMatches: true },
+      );
+    } finally {
+      if (prevPath !== undefined) process.env["PATH"] = prevPath;
+      else delete process.env["PATH"];
+    }
+
+    // Only one git invocation should have been made by scanHistory.
+    const calls = readFileSync(logPath, "utf8")
+      .split("\n")
+      .filter(Boolean);
+    // Some calls may include `git log -G` and others come from the
+    // shim itself only when scanHistory invoked git. The test gitInit
+    // / commit helpers call `execFileSync("git", ...)` *directly* with
+    // an absolute path resolved at import time, so they bypass the
+    // shim and don't pollute the count. (We installed the shim AFTER
+    // those commits.) Therefore exactly one entry is expected.
+    assert.equal(
+      calls.length,
+      1,
+      `expected exactly 1 git invocation, got ${calls.length}: ${calls.join(" | ")}`,
+    );
+    assert.ok(calls[0]!.includes("log"), `expected log subcommand, got: ${calls[0]}`);
+
+    // Each pattern must attribute to the commit that *introduced* it.
+    // (`git log -G` filters to commits where the diff content
+    // matched. Once a line is present, subsequent commits that don't
+    // touch it won't appear for that pattern.)
+    const alphaHits = hits.filter(h => h.pattern === "alpha-leak-marker");
+    const bravoHits = hits.filter(h => h.pattern === "bravo-leak-marker");
+    assert.ok(
+      alphaHits.some(h => shaA.startsWith(h.commitSha)),
+      `alpha pattern should attribute to commit ${shaA.slice(0, 7)}`,
+    );
+    assert.ok(
+      bravoHits.some(h => shaB.startsWith(h.commitSha)),
+      `bravo pattern should attribute to commit ${shaB.slice(0, 7)}`,
+    );
+    assert.ok(
+      !bravoHits.some(h => shaA.startsWith(h.commitSha)),
+      `bravo pattern must NOT attribute to commit ${shaA.slice(0, 7)} (not introduced there)`,
+    );
+  });
+});
+
+describe("scanRange streaming", () => {
+  it("handles a multi-MB diff without OOM (streaming, not buffered whole)", () => {
+    // Build a synthetic diff several MB in size by committing many
+    // benign lines and one marker line. The streaming implementation
+    // walks the diff in 64 KiB chunks; the prior buffer-the-whole-
+    // diff implementation would still complete here, but the test is
+    // worthwhile as a smoke test for the new code path on realistic
+    // large inputs.
+    const dir = join(tmp, "range-large");
+    gitInit(dir);
+    commit(dir, { "f.txt": "seed\n" }, "init");
+    // ~3 MB of benign added content: 60_000 lines × ~50 bytes each.
+    const benignLines: string[] = ["seed"];
+    for (let i = 0; i < 60_000; i++) {
+      benignLines.push(
+        `benign-line-${i}-padding-padding-padding-padding-padding`,
+      );
+    }
+    benignLines.push("hidden-streaming-marker-line");
+    for (let i = 0; i < 100; i++) {
+      benignLines.push(`tail-${i}`);
+    }
+    const a = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).trim();
+    writeFileSync(join(dir, "f.txt"), benignLines.join("\n") + "\n");
+    execFileSync("git", ["add", "f.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "huge"], { cwd: dir });
+    const b = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).trim();
+
+    const r = scanRange(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["hidden-streaming-marker"]),
+      `${a}..${b}`,
+    );
+    assert.equal(r.hits.length, 1, "marker buried in MB of additions must still be found");
   });
 });

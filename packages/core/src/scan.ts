@@ -1,7 +1,17 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
-import { isAbsolute, relative } from "node:path";
-import parseDiff from "parse-diff";
+import {
+  closeSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  existsSync,
+  statSync,
+  realpathSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative } from "node:path";
 import type { DenySet } from "./deny-set.js";
 import type { RepoConfig } from "./repo.js";
 import { redactMatch, revealMatch, type RedactionMode } from "./redaction.js";
@@ -9,11 +19,10 @@ import { OutsideWorkingTreeError } from "./exceptions.js";
 
 const DEFAULT_MAX_FILE_BYTES = 1024 * 1024; // 1 MiB
 
-// Cap for `git diff` capture in scanStagedDiff / scanRange. 256 MiB is a
-// generous upper bound for "200 commits of large refactors"; larger pushes
-// will be truncated (see runGitDiff). Streaming would avoid this entirely
-// but is more invasive than this batch warrants.
-const DIFF_MAX_BUFFER = 256 * 1024 * 1024;
+// Per-read chunk size when streaming `git diff` output through a temp
+// file. 64 KiB keeps allocations small without making syscalls dominate
+// throughput. Lines are reassembled across chunk boundaries.
+const DIFF_STREAM_CHUNK_BYTES = 64 * 1024;
 
 export interface ScanHit {
   path?: string;
@@ -169,68 +178,181 @@ export function scanFile(
 }
 
 /**
- * Run `git diff <args>` and return its stdout. Uses `spawnSync` with a
- * 256 MiB cap (vs. the previous `execFileSync` 64 MiB) so multi-commit
- * pushes are less likely to throw on overflow. If `spawnSync` reports
- * `ENOBUFS` (cap exceeded) we emit a one-line warning to stderr and
- * scan whatever stdout we did get — partial scanning is better than a
- * hard hook failure that strands the user.
+ * Stream `git diff <args>` and scan its added-line content. Works by
+ * spawning `git diff` with stdout redirected directly to a temp file
+ * (so the parent process never needs a giant in-memory buffer), then
+ * walking the file in fixed-size chunks, splitting into lines, and
+ * applying the deny-set regex per added line.
+ *
+ * Unified-diff parsing is hand-rolled here (replacing the previous
+ * `parse-diff`-based `extractAdditions`) so we can stream rather than
+ * load the entire diff. The rules implemented mirror parse-diff's
+ * handling of:
+ *   - `diff --git`, `--- a/<x>`, `+++ b/<x>` headers (skipped, not content)
+ *   - `@@ ... @@` chunk headers (toggle "in-chunk" state)
+ *   - `+`-prefixed lines inside a chunk (added content; strip leading `+`)
+ *   - `-` and ` ` lines (removed/context; ignored)
+ *   - `\ No newline at end of file` markers (ignored)
+ *   - Binary-diff stanzas (no `@@`, so we never enter chunk state)
+ *
+ * Hit line numbers are 1-indexed across the synthetic stream of added
+ * lines (matching the prior behaviour where `extractAdditions` joined
+ * additions with `\n` and `scanText` numbered them by split-index).
  */
-function runGitDiff(cwd: string, args: readonly string[]): string {
-  const r = spawnSync("git", ["diff", ...args], {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: DIFF_MAX_BUFFER,
-  });
-  if (r.error) {
-    const err = r.error as NodeJS.ErrnoException;
-    if (err.code === "ENOBUFS") {
-      process.stderr.write(
-        `repo-aegis: git diff output exceeded ${DIFF_MAX_BUFFER} bytes; scanning truncated output. Consider scanning a smaller range.\n`,
-      );
-      return typeof r.stdout === "string" ? r.stdout : "";
+function streamScanDiff(
+  cwd: string,
+  args: readonly string[],
+  denySet: DenySet,
+  opts: ScanOptions,
+): ScanHit[] {
+  if (!denySet.combinedRegex) return [];
+
+  // Spawn git diff with stdout going straight to a temp file. Using a
+  // file descriptor (vs. a pipe captured into a Buffer) means even a
+  // multi-GB diff doesn't allocate a single proportionally-sized
+  // buffer in our address space; the kernel writes the bytes to disk
+  // and we read them back in fixed-size chunks below.
+  const tmp = mkdtempSync(join(tmpdir(), "repo-aegis-diff-"));
+  const diffPath = join(tmp, "diff.patch");
+  let outFd: number | null = null;
+  try {
+    outFd = openSync(diffPath, "w");
+    const r = spawnSync("git", ["diff", ...args], {
+      cwd,
+      stdio: ["ignore", outFd, "pipe"],
+    });
+    closeSync(outFd);
+    outFd = null;
+    if (r.error) throw r.error;
+    if (r.status !== 0) {
+      const stderr =
+        r.stderr instanceof Buffer
+          ? r.stderr.toString("utf8")
+          : typeof r.stderr === "string"
+            ? r.stderr
+            : "";
+      throw new Error(`git diff exited ${r.status ?? "?"}: ${stderr.trim()}`);
     }
-    throw err;
+    return scanDiffFile(diffPath, denySet, opts);
+  } finally {
+    if (outFd !== null) {
+      try {
+        closeSync(outFd);
+      } catch {
+        /* best-effort */
+      }
+    }
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
   }
-  if (r.status !== 0) {
-    const stderr = typeof r.stderr === "string" ? r.stderr : "";
-    throw new Error(`git diff exited ${r.status ?? "?"}: ${stderr.trim()}`);
-  }
-  return typeof r.stdout === "string" ? r.stdout : "";
 }
 
 /**
- * Extract added-line content from a unified diff. Uses `parse-diff` so
- * we correctly handle:
- *   - rename diffs (`+++ b/new-name` is a header, not content)
- *   - in-context lines whose content begins with `+`
- *   - `\ No newline at end of file` markers
- *   - binary-diff stanzas (no `add` changes emitted)
- * Returns the additions joined by `\n` so the existing line/column
- * machinery in scanText keeps working.
+ * Walk a unified-diff file chunk-by-chunk, applying the deny-set regex
+ * per added line. The streaming counterpart to the prior
+ * extractAdditions + scanText pair. Memory usage is bounded by the
+ * read-chunk size (~64 KiB) plus any partial-line carry-over.
  */
-function extractAdditions(diff: string): string {
-  const files = parseDiff(diff);
-  const lines: string[] = [];
-  for (const file of files) {
-    for (const chunk of file.chunks) {
-      for (const change of chunk.changes) {
-        if (change.type === "add") {
-          // `change.content` includes the leading `+`; strip it to
-          // match the prior behaviour and avoid double-counting.
-          const content = change.content.startsWith("+")
-            ? change.content.slice(1)
-            : change.content;
-          lines.push(content);
-        }
+function scanDiffFile(
+  path: string,
+  denySet: DenySet,
+  opts: ScanOptions,
+): ScanHit[] {
+  const re = new RegExp(denySet.combinedRegex, "i");
+  const respectAllow = opts.respectAllowComments !== false;
+  const hits: ScanHit[] = [];
+  let inChunk = false;
+  let virtualLine = 0; // 1-indexed counter of added-content lines emitted
+
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(DIFF_STREAM_CHUNK_BYTES);
+    let carry = ""; // partial line spanning the previous chunk boundary
+    while (true) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) break;
+      const text = carry + buf.subarray(0, n).toString("utf8");
+      // Split on \n; the last element is either a complete line (if
+      // the chunk ended on a newline) or a partial line carried into
+      // the next iteration.
+      const parts = text.split("\n");
+      carry = parts.pop() ?? "";
+      for (const line of parts) {
+        ({ inChunk, virtualLine } = processDiffLine(
+          line,
+          inChunk,
+          virtualLine,
+          re,
+          denySet,
+          respectAllow,
+          opts,
+          hits,
+        ));
       }
     }
+    if (carry.length > 0) {
+      processDiffLine(carry, inChunk, virtualLine, re, denySet, respectAllow, opts, hits);
+    }
+  } finally {
+    closeSync(fd);
   }
-  return lines.join("\n");
+  return hits;
+}
+
+/**
+ * Examine a single diff line. Updates `inChunk` state on `@@` headers,
+ * and when the line is an added-content line, runs the regex and
+ * appends a hit (with a virtual line number based on the count of
+ * added lines seen so far). Returns the new (inChunk, virtualLine)
+ * state for the caller.
+ */
+function processDiffLine(
+  line: string,
+  inChunk: boolean,
+  virtualLine: number,
+  re: RegExp,
+  denySet: DenySet,
+  respectAllow: boolean,
+  opts: ScanOptions,
+  hits: ScanHit[],
+): { inChunk: boolean; virtualLine: number } {
+  // File-level headers reset chunk state; they are never content.
+  if (line.startsWith("diff --git ")) return { inChunk: false, virtualLine };
+  if (line.startsWith("--- ") || line.startsWith("+++ ")) return { inChunk, virtualLine };
+  if (line.startsWith("@@")) return { inChunk: true, virtualLine };
+  // The "no newline at end of file" marker is content-adjacent but
+  // never an added line.
+  if (line.startsWith("\\ No newline")) return { inChunk, virtualLine };
+  if (!inChunk) return { inChunk, virtualLine };
+  // Inside a chunk: only `+`-prefixed lines (excluding `+++`, already
+  // filtered above) are added content. Strip the leading `+` to match
+  // the prior `extractAdditions` behaviour.
+  if (!line.startsWith("+")) return { inChunk, virtualLine };
+  const content = line.slice(1);
+  const next = virtualLine + 1;
+  const m = content.match(re);
+  if (!m || !m[0]) return { inChunk, virtualLine: next };
+  if (respectAllow && ALLOW_COMMENT.test(content)) {
+    return { inChunk, virtualLine: next };
+  }
+  const engagement = attributeMatch(m[0], denySet);
+  hits.push({
+    line: next,
+    column: (m.index ?? 0) + 1,
+    matchPreview: formatMatch(m[0], opts),
+    ...(engagement !== undefined && { engagement }),
+  });
+  return { inChunk, virtualLine: next };
 }
 
 /**
  * Scan the staged diff in a git repo. Pre-commit hook entry point.
+ * Streams the diff through a temp file rather than buffering it whole
+ * — multi-GB pushes that previously OOM'd are now bounded by disk
+ * temp space and a small read buffer.
  */
 export function scanStagedDiff(
   repo: RepoConfig,
@@ -239,15 +361,13 @@ export function scanStagedDiff(
 ): { hits: ScanHit[]; skipped: SkippedFile[] } {
   if (!repo.isGitRepo) return { hits: [], skipped: [] };
   if (!denySet.combinedRegex) return { hits: [], skipped: [] };
-
-  const diff = runGitDiff(repo.cwd, [
-    "--cached",
-    "--diff-filter=ACM",
-    "-U0",
-    "--no-color",
-  ]);
-  const addedLines = extractAdditions(diff);
-  return { hits: scanText(addedLines, denySet, undefined, opts), skipped: [] };
+  const hits = streamScanDiff(
+    repo.cwd,
+    ["--cached", "--diff-filter=ACM", "-U0", "--no-color"],
+    denySet,
+    opts,
+  );
+  return { hits, skipped: [] };
 }
 
 /**
@@ -256,7 +376,7 @@ export function scanStagedDiff(
  *
  * Only added-line content is scanned. The caller is responsible for
  * passing a syntactically valid range; if `git diff` exits non-zero,
- * the throw propagates.
+ * the throw propagates. Streams the diff (see scanStagedDiff).
  */
 export function scanRange(
   repo: RepoConfig,
@@ -266,15 +386,13 @@ export function scanRange(
 ): { hits: ScanHit[]; skipped: SkippedFile[] } {
   if (!repo.isGitRepo) return { hits: [], skipped: [] };
   if (!denySet.combinedRegex) return { hits: [], skipped: [] };
-
-  const diff = runGitDiff(repo.cwd, [
-    range,
-    "--diff-filter=ACM",
-    "-U0",
-    "--no-color",
-  ]);
-  const addedLines = extractAdditions(diff);
-  return { hits: scanText(addedLines, denySet, undefined, opts), skipped: [] };
+  const hits = streamScanDiff(
+    repo.cwd,
+    [range, "--diff-filter=ACM", "-U0", "--no-color"],
+    denySet,
+    opts,
+  );
+  return { hits, skipped: [] };
 }
 
 export interface HistoryHit {
@@ -291,10 +409,17 @@ export interface ScanHistoryOptions extends ScanOptions {
 }
 
 /**
- * Scan the full git history with `git log -G <pattern>` per pattern.
- * Returns one HistoryHit per (pattern, commit) match. Cost scales as
- * O(patterns × history-size); use sparingly. Pass `--since` to bound
- * the lower edge.
+ * Scan the full git history with a single `git log -G <combined> -p`
+ * invocation, then attribute matches per-pattern by walking each
+ * commit's diff text. Returns one HistoryHit per (pattern, commit)
+ * match. Pass `--since` to bound the lower edge.
+ *
+ * Cost scales as O(history-size + patterns × hits). Patterns are
+ * combined via `|` into a single regex passed to `git log -G`, so we
+ * pay one git invocation regardless of pattern count. Per-pattern
+ * attribution happens in-process by re-testing each diff line against
+ * the individual patterns — cheap because git already filtered to
+ * commits where at least one pattern matched.
  *
  * The pattern field is redacted by default (preview mode) — same
  * policy as scan hits. Pass `revealMatches: true` to opt into
@@ -306,38 +431,88 @@ export function scanHistory(
   opts: ScanHistoryOptions = {},
 ): HistoryHit[] {
   if (!repo.isGitRepo) return [];
-  const hits: HistoryHit[] = [];
-  for (const pattern of denySet.patterns) {
-    let stdout = "";
-    const args = ["log", "-G", pattern, "--oneline", "--no-decorate"];
-    if (opts.since) {
-      // git log <revspec>.. shows commits reachable from HEAD but not
-      // from <revspec>; effectively "since this point forward".
-      args.push(`${opts.since}..`);
-    }
+  if (denySet.patterns.length === 0) return [];
+
+  // Combine all patterns into a single -G regex. This matches any
+  // commit whose diff (added or removed line content) contains at
+  // least one pattern; we attribute the specific pattern(s) below.
+  const combined = denySet.patterns.join("|");
+  // `--format=__COMMIT__:%H %s` gives us a stable, parseable boundary
+  // that can't be confused with diff content (the diff body uses
+  // `diff --git`, `@@`, `+`, `-`, ` ` line prefixes). The summary
+  // can contain anything but is bounded by the next `__COMMIT__:`.
+  const commitMarker = "__COMMIT__:";
+  const args = [
+    "log",
+    "-G",
+    combined,
+    "-p",
+    "--no-color",
+    `--format=${commitMarker}%H %s`,
+  ];
+  if (opts.since) {
+    args.push(`${opts.since}..`);
+  }
+  let stdout = "";
+  try {
+    stdout = execFileSync("git", args, {
+      cwd: repo.cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 256 * 1024 * 1024,
+    });
+  } catch {
+    return [];
+  }
+
+  // Pre-compile per-pattern regexes once for attribution.
+  const perPatternRegexes: (RegExp | null)[] = denySet.patterns.map(p => {
     try {
-      stdout = execFileSync(
-        "git",
-        args,
-        {
-          cwd: repo.cwd,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-          maxBuffer: 64 * 1024 * 1024,
-        },
-      );
+      return new RegExp(p, "i");
     } catch {
+      return null;
+    }
+  });
+
+  const hits: HistoryHit[] = [];
+  // Walk the output. Each commit's section starts with the marker
+  // line, followed by `diff --git` blocks. `git log -G` filters
+  // commits whose diff content matched the regex; `-p` includes the
+  // unified-diff body so we can attribute per pattern.
+  const lines = stdout.split("\n");
+  let curSha = "";
+  let curSummary = "";
+  // Tracks which (pattern-index, commit) pairs we've already emitted,
+  // since multiple lines in one commit can hit the same pattern.
+  const emitted = new Set<string>();
+  for (const line of lines) {
+    if (line.startsWith(commitMarker)) {
+      const rest = line.slice(commitMarker.length);
+      const sp = rest.indexOf(" ");
+      curSha = sp >= 0 ? rest.slice(0, sp) : rest;
+      curSummary = sp >= 0 ? rest.slice(sp + 1) : "";
       continue;
     }
-    for (const line of stdout.split("\n")) {
-      if (!line.trim()) continue;
-      const sp = line.indexOf(" ");
-      const sha = sp >= 0 ? line.slice(0, sp) : line;
-      const summary = sp >= 0 ? line.slice(sp + 1) : "";
+    if (!curSha) continue;
+    // -G matches both added and removed line content; attribute
+    // either kind. `+++` / `---` are headers, not content.
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.length === 0) continue;
+    const c0 = line.charCodeAt(0);
+    // 43 = '+', 45 = '-'
+    if (c0 !== 43 && c0 !== 45) continue;
+    const content = line.slice(1);
+    for (let i = 0; i < denySet.patterns.length; i++) {
+      const re = perPatternRegexes[i];
+      if (!re) continue;
+      if (!re.test(content)) continue;
+      const key = `${i}:${curSha}`;
+      if (emitted.has(key)) continue;
+      emitted.add(key);
       hits.push({
-        pattern: formatMatch(pattern, opts),
-        commitSha: sha,
-        commitSummary: summary,
+        pattern: formatMatch(denySet.patterns[i]!, opts),
+        commitSha: curSha,
+        commitSummary: curSummary,
       });
     }
   }

@@ -7,9 +7,11 @@ import {
   loadRegistry,
   readRepoConfig,
   scanFile,
+  scanText,
   isActive,
   type RepoConfig,
   type DenySet,
+  type ScanHit,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, shouldRevealMatches, type OutputOptions } from "../format.js";
 import { runScan, makeOctokitClient } from "@de-otio/repo-aegis-scan";
@@ -46,6 +48,159 @@ interface CheckResult {
   skipReason?: string;
 }
 
+const DEFAULT_AUDIT_MAX_FILE_BYTES = 1024 * 1024; // mirror scanFile's default
+
+type LoadedKind = "ok" | "binary" | "too-large" | "unreadable" | "outside";
+
+interface LoadedFile {
+  /** Original path as queried; possibly relative to cwd. */
+  queryPath: string;
+  /** Realpath when resolvable; otherwise the original path. */
+  realPath: string;
+  kind: LoadedKind;
+  /** Populated when kind === "ok"; otherwise undefined. */
+  text?: string;
+  /** True when file lives inside a fixture directory (per FIXTURE_DIR_NAMES). */
+  inFixtureDir: boolean;
+}
+
+/**
+ * Loads files at most once per realpath and shares the result across
+ * checks. Each check that needs file content (marker-scan,
+ * fixture-check, lockfile-check) reuses the same buffer rather than
+ * issuing its own read syscall. Binary / oversize / outside-tree
+ * decisions are made at load time, not per-check.
+ *
+ * `readCount` is exposed for tests asserting that overlapping paths
+ * across checks don't trigger duplicate reads.
+ */
+class FileCache {
+  private byReal = new Map<string, LoadedFile>();
+  private byQuery = new Map<string, LoadedFile>();
+  /** Test instrumentation: incremented once per actual readFileSync issued by load(). */
+  public readCount = 0;
+  constructor(
+    private workingTree: string,
+    private maxBytes = DEFAULT_AUDIT_MAX_FILE_BYTES,
+  ) {}
+
+  load(queryPath: string, opts: { mustBeUnderTree?: boolean } = {}): LoadedFile {
+    const cachedByQuery = this.byQuery.get(queryPath);
+    if (cachedByQuery) return cachedByQuery;
+
+    if (!existsSync(queryPath)) {
+      return this.recordResult(queryPath, queryPath, {
+        kind: "unreadable",
+        inFixtureDir: false,
+      });
+    }
+    let real: string;
+    try {
+      real = realpathSync(queryPath);
+    } catch {
+      return this.recordResult(queryPath, queryPath, {
+        kind: "unreadable",
+        inFixtureDir: false,
+      });
+    }
+
+    const cachedByReal = this.byReal.get(real);
+    if (cachedByReal) {
+      this.byQuery.set(queryPath, cachedByReal);
+      return cachedByReal;
+    }
+
+    if (opts.mustBeUnderTree && this.workingTree) {
+      let wtReal: string;
+      try {
+        wtReal = realpathSync(this.workingTree);
+      } catch {
+        wtReal = this.workingTree;
+      }
+      const rel = relative(wtReal, real);
+      if (rel.startsWith("..") || isAbsolute(rel)) {
+        return this.recordResult(queryPath, real, {
+          kind: "outside",
+          inFixtureDir: false,
+        });
+      }
+    }
+
+    let st;
+    try {
+      st = statSync(real);
+    } catch {
+      return this.recordResult(queryPath, real, {
+        kind: "unreadable",
+        inFixtureDir: false,
+      });
+    }
+    if (!st.isFile()) {
+      return this.recordResult(queryPath, real, {
+        kind: "unreadable",
+        inFixtureDir: false,
+      });
+    }
+    if (st.size > this.maxBytes) {
+      return this.recordResult(queryPath, real, {
+        kind: "too-large",
+        inFixtureDir: false,
+      });
+    }
+    let buf: Buffer;
+    try {
+      buf = readFileSync(real);
+      this.readCount += 1;
+    } catch {
+      return this.recordResult(queryPath, real, {
+        kind: "unreadable",
+        inFixtureDir: false,
+      });
+    }
+    if (looksBinary(buf)) {
+      return this.recordResult(queryPath, real, {
+        kind: "binary",
+        inFixtureDir: false,
+      });
+    }
+    return this.recordResult(queryPath, real, {
+      kind: "ok",
+      text: buf.toString("utf8"),
+      inFixtureDir: false,
+    });
+  }
+
+  private recordResult(
+    queryPath: string,
+    realPath: string,
+    body: Omit<LoadedFile, "queryPath" | "realPath">,
+  ): LoadedFile {
+    const entry: LoadedFile = { queryPath, realPath, ...body };
+    this.byQuery.set(queryPath, entry);
+    this.byReal.set(realPath, entry);
+    return entry;
+  }
+}
+
+function looksBinary(buf: Buffer): boolean {
+  const sample = buf.subarray(0, Math.min(buf.length, 8192));
+  for (let i = 0; i < sample.length; i++) {
+    if (sample[i] === 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Test-only: build a FileCache and run an arbitrary closure with it.
+ * Lets the audit test assert that overlapping reads across checks
+ * don't trigger duplicate readFileSync calls.
+ *
+ * @internal
+ */
+export function __testCreateFileCache(workingTree: string): FileCache {
+  return new FileCache(workingTree);
+}
+
 function git(cwd: string, args: string[]): { ok: boolean; stdout: string } {
   try {
     const stdout = execFileSync("git", args, {
@@ -65,11 +220,21 @@ function listTrackedFiles(cwd: string): string[] {
   return r.stdout.split("\n").filter(Boolean);
 }
 
+function scanLoadedFile(
+  loaded: LoadedFile,
+  denySet: DenySet,
+  reveal: boolean,
+): ScanHit[] {
+  if (loaded.kind !== "ok" || loaded.text === undefined) return [];
+  return scanText(loaded.text, denySet, loaded.realPath, { revealMatches: reveal });
+}
+
 function checkMarkerScan(
   cwd: string,
   repo: RepoConfig,
   denySet: DenySet,
   reveal: boolean,
+  cache: FileCache,
 ): CheckResult {
   if (!repo.isGitRepo) {
     return { name: "marker-scan", ok: true, findings: [], skipped: true, skipReason: "not a git repo" };
@@ -81,9 +246,10 @@ function checkMarkerScan(
   const files = listTrackedFiles(cwd);
   for (const f of files) {
     const abs = join(cwd, f);
-    if (!existsSync(abs)) continue;
-    const r = scanFile(abs, denySet, { revealMatches: reveal }, cwd);
-    for (const h of r.hits) {
+    const loaded = cache.load(abs, { mustBeUnderTree: true });
+    if (loaded.kind !== "ok") continue;
+    const hits = scanLoadedFile(loaded, denySet, reveal);
+    for (const h of hits) {
       findings.push({
         message: `${f}:${h.line}:${h.column}`,
         detail: { path: f, line: h.line, column: h.column, matchPreview: h.matchPreview },
@@ -124,15 +290,33 @@ function checkHistory(cwd: string, repo: RepoConfig, denySet: DenySet): CheckRes
   return { name: "history", ok: findings.length === 0, findings };
 }
 
-function checkLockfile(cwd: string): CheckResult {
+function checkLockfile(cwd: string, cache: FileCache): CheckResult {
   const lockPath = join(cwd, "package-lock.json");
   if (!existsSync(lockPath)) {
     return { name: "lockfile", ok: true, findings: [], skipped: true, skipReason: "no package-lock.json" };
   }
-
+  const loaded = cache.load(lockPath, { mustBeUnderTree: false });
+  if (loaded.kind === "unreadable") {
+    return {
+      name: "lockfile",
+      ok: false,
+      findings: [{ message: "package-lock.json is not readable" }],
+    };
+  }
+  // A lockfile that's somehow binary or oversized is unusual but not a
+  // policy violation; surface as a skip rather than failure.
+  if (loaded.kind !== "ok" || loaded.text === undefined) {
+    return {
+      name: "lockfile",
+      ok: true,
+      findings: [],
+      skipped: true,
+      skipReason: `package-lock.json ${loaded.kind}`,
+    };
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(lockPath, "utf8"));
+    parsed = JSON.parse(loaded.text);
   } catch {
     return {
       name: "lockfile",
@@ -212,6 +396,7 @@ function checkFixtures(
   repo: RepoConfig,
   denySet: DenySet,
   reveal: boolean,
+  cache: FileCache,
 ): CheckResult {
   if (denySet.combinedRegex === "") {
     return {
@@ -247,8 +432,10 @@ function checkFixtures(
         continue;
       }
       if (!st.isFile()) continue;
-      const r = scanFile(full, denySet, { revealMatches: reveal }, repo.isGitRepo ? cwd : undefined);
-      for (const h of r.hits) {
+      const loaded = cache.load(full, { mustBeUnderTree: repo.isGitRepo });
+      if (loaded.kind !== "ok") continue;
+      const hits = scanLoadedFile(loaded, denySet, reveal);
+      for (const h of hits) {
         const rel = relative(cwd, full);
         findings.push({
           message: `${rel}:${h.line}:${h.column}`,
@@ -663,11 +850,18 @@ export async function audit(opts: AuditOptions): Promise<void> {
   const runRemote = opts.remoteCheck !== false;
   const runHistory = !!opts.history;
 
+  // Single shared cache: if marker-scan, lockfile, and fixture-check
+  // each touch the same path (a tracked package-lock.json, or a tracked
+  // file inside __fixtures__/), we read it once and re-scan from the
+  // cached buffer. The cache also short-circuits binary / oversize
+  // decisions across checks.
+  const cache = new FileCache(cwd);
+
   const results: CheckResult[] = [];
-  if (runMarker) results.push(checkMarkerScan(cwd, repo, denySet, reveal));
+  if (runMarker) results.push(checkMarkerScan(cwd, repo, denySet, reveal, cache));
   if (runHistory) results.push(checkHistory(cwd, repo, denySet));
-  if (runLockfile) results.push(checkLockfile(cwd));
-  if (runFixture) results.push(checkFixtures(cwd, repo, denySet, reveal));
+  if (runLockfile) results.push(checkLockfile(cwd, cache));
+  if (runFixture) results.push(checkFixtures(cwd, repo, denySet, reveal, cache));
   if (runRemote) results.push(checkRemote(cwd, repo));
 
   if (opts.org) {
