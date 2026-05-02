@@ -16,6 +16,30 @@ export class RegistryParseError extends Error {
   }
 }
 
+/**
+ * Raised by `loadRegistry` when the plaintext registry path is absent
+ * but a sibling `<path>.age` ciphertext exists. The user (or the agent
+ * on their behalf) must run `repo-aegis registry decrypt --identity
+ * <path>` before any registry-reading command will work.
+ *
+ * Why this is its own error: encrypted-at-rest is the *intended* state
+ * during periods of non-use. Auto-decrypt would defeat the purpose
+ * (any process could read the registry). Surfacing a distinct code
+ * lets the agent guide the user to the right command without trying
+ * to recover blindly.
+ */
+export class RegistryEncryptedError extends Error {
+  readonly code = "REGISTRY_ENCRYPTED" as const;
+  constructor(public path: string, public ciphertextPath: string) {
+    super(
+      `engagement registry at ${path} is encrypted at rest ` +
+        `(ciphertext present at ${ciphertextPath}); ` +
+        `run \`repo-aegis registry decrypt --identity <path>\` first`,
+    );
+    this.name = "RegistryEncryptedError";
+  }
+}
+
 export class NotAGitRepoError extends Error {
   readonly code = "NOT_GIT_REPO" as const;
   constructor() {

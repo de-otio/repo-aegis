@@ -272,7 +272,7 @@ Stable, contract-bearing surface:
   `validateCombinedSize`, types `PatternValidationResult`/
   `ValidatePatternsOptions`.
 - Exceptions: `RegistryNotFoundError`, `RegistryParseError`,
-  `NotAGitRepoError`, `AmbiguousQueryError`,
+  `RegistryEncryptedError`, `NotAGitRepoError`, `AmbiguousQueryError`,
   `EngagementNotFoundError`, `PatternValidationError`,
   `OutsideWorkingTreeError`, `LockTimeoutError`,
   `CustomerCoupledNoEngagementError`.
@@ -316,7 +316,7 @@ Stable across all subcommands. Never reused.
 | Hook output recency-pressure amplifier              | `ScanHit.matchPreview` redacted by default; literal markers never flow into agent tool-result. Hooks never pass `--verbose`.                                                                                                            |
 | Supply chain via `@latest`                          | Workflow YAML pins exact version. `npm ci` from lockfile. Trusted publishing (OIDC).                                                                                                                                                    |
 | ReDoS via marker patterns                           | `validatePatterns` runs at `render` with a subprocess timeout (100ms). Bad patterns block `render`. `re2` swap is documented as a future hardening.                                                                                     |
-| Registry at-rest exposure                           | `chmod 600` registry, `chmod 700` directory. Cloud-sync warning documented. Future: optional age-encrypted registry.                                                                                                                    |
+| Registry at-rest exposure                           | `chmod 600` registry, `chmod 700` directory. Cloud-sync warning documented. Optional age-encryption: `repo-aegis registry encrypt --recipient <pubkey>` writes `engagements.yaml.age` and removes the plaintext; `repo-aegis registry decrypt --identity <path>` reverses. `loadRegistry` throws `RegistryEncryptedError` (code `REGISTRY_ENCRYPTED`) when the ciphertext is present — no auto-decrypt. |
 | `REPO_AEGIS_HOME` silent override                   | Stderr warning on every TTY invocation. Hook context (stderr-is-pipe) suppressed because the warning would itself be a recency-pressure signal.                                                                                          |
 | Scanner issue body leaks                            | Default redacted; `--reveal-matches` is explicit opt-in. Documented "use only in private restricted repo."                                                                                                                              |
 | TOCTOU races on registry / markers                  | `withLock`/`withLockSync` (proper-lockfile) on `~/.config/repo-aegis/state/.lock` for any write under `REPO_AEGIS_HOME`. Git config writes use git's own `.git/config.lock`.                                                              |
@@ -352,8 +352,13 @@ command, hand-rolled scripts) against silent breakage.
 
 - **`re2` regex backend** — linear-time evaluation makes ReDoS
   structurally impossible. Tradeoff: native dependency, harder install.
-- **Age-encrypted registry** — the deployment-side query file is
-  already age-encryptable; the engagement registry itself is not.
+- **Auto-decrypt-on-demand for the encrypted registry** — currently
+  `loadRegistry` throws `RegistryEncryptedError` when the ciphertext
+  is present and the user must run `registry decrypt` explicitly. A
+  future option would be a per-process opt-in (env var or flag) to
+  prompt for the identity file inline. Deliberately not the default,
+  since at-rest encryption only protects against scenarios where the
+  agent itself can be silently coerced into reading the registry.
 - **MCP server / VSCode extension / GitHub Action wrapper** — surface
   the same machinery to other coding agents.
 - **Network-isolated `audit --published`** — mirror-registry mode

@@ -2,7 +2,11 @@ import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
 import { registryPath } from "./paths.js";
-import { RegistryNotFoundError, RegistryParseError } from "./exceptions.js";
+import {
+  RegistryNotFoundError,
+  RegistryParseError,
+  RegistryEncryptedError,
+} from "./exceptions.js";
 import { registryFileSchema, formatZodError } from "./schemas.js";
 
 export interface Engagement {
@@ -43,7 +47,17 @@ export const ALWAYS_BLOCK_RESERVED_ID = "_always";
 export const MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION = 1;
 
 export function loadRegistry(path: string = registryPath()): Registry {
+  // If the plaintext registry is absent but a sibling `<path>.age`
+  // ciphertext exists, the registry is in its encrypted-at-rest state.
+  // We deliberately do NOT auto-decrypt: the whole point of the
+  // encryption is that the registry only goes plaintext when the user
+  // explicitly opts in with `repo-aegis registry decrypt --identity
+  // <path>`. Auto-decrypt would defeat the purpose.
   if (!existsSync(path)) {
+    const ciphertextPath = `${path}.age`;
+    if (existsSync(ciphertextPath)) {
+      throw new RegistryEncryptedError(path, ciphertextPath);
+    }
     throw new RegistryNotFoundError(path);
   }
   let parsed: unknown;

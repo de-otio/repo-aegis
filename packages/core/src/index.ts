@@ -93,6 +93,7 @@ export type {
 export {
   RegistryNotFoundError,
   RegistryParseError,
+  RegistryEncryptedError,
   NotAGitRepoError,
   AmbiguousQueryError,
   EngagementNotFoundError,
@@ -104,6 +105,20 @@ export {
 
 // ---- exit codes ----------------------------------------------------------
 export { EXIT_OK, EXIT_HIT, EXIT_USAGE } from "./exit-codes.js";
+
+// ---- age (file-encryption helpers) --------------------------------------
+// Wrapper around the `age` CLI. Used by the scan package's
+// `encrypt-query` / `decrypt-query` commands and by the cli's
+// `registry encrypt` / `registry decrypt` commands. The `age` binary
+// is a runtime requirement; absence surfaces as `AgeNotFoundError`.
+export {
+  encryptFile,
+  decryptFile,
+  writeBufferTo,
+  AgeNotFoundError,
+  AgeError,
+} from "./age.js";
+export type { EncryptOptions, DecryptOptions } from "./age.js";
 
 // ---- locking -------------------------------------------------------------
 export { withLock, withLockSync } from "./lock.js";

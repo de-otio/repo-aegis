@@ -235,6 +235,29 @@ export async function buildProgram(): Promise<Command> {
     .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
     .action((opts, cmd) => audit(withGlobals(opts, cmd)));
 
+  // `registry` subcommand group — at-rest encryption of the engagement
+  // registry. Lives here so the user can shut a machine down with a
+  // ciphertext-only registry between work sessions, then re-decrypt
+  // before resuming. `loadRegistry` deliberately does NOT auto-decrypt
+  // (it throws `RegistryEncryptedError`); the user must explicitly
+  // run `repo-aegis registry decrypt --identity <path>` first.
+  const registry = program.command("registry").description("manage the engagement registry's at-rest encryption");
+
+  const { registryEncrypt } = await import("./commands/registry-encrypt.js");
+  const { registryDecrypt } = await import("./commands/registry-decrypt.js");
+
+  registry
+    .command("encrypt")
+    .description("encrypt the engagement registry to engagements.yaml.age and remove the plaintext")
+    .requiredOption("--recipient <pubkey>", "age recipient public key (age1... or ssh-ed25519 ...)")
+    .action((opts, cmd) => registryEncrypt(withGlobals(opts, cmd)));
+
+  registry
+    .command("decrypt")
+    .description("decrypt engagements.yaml.age back to engagements.yaml and remove the ciphertext")
+    .requiredOption("--identity <path>", "age identity file (private key)")
+    .action((opts, cmd) => registryDecrypt(withGlobals(opts, cmd)));
+
   // `hook` subcommand group — entry points wired into Claude Code (or
   // other coding agents') hook frameworks. Kept separate from the human-
   // facing commands so the surface stays uncluttered. The settings.json

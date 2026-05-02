@@ -9,7 +9,11 @@ import {
   resolveEngagement,
   MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION,
 } from "./registry.js";
-import { RegistryNotFoundError, RegistryParseError } from "./exceptions.js";
+import {
+  RegistryNotFoundError,
+  RegistryParseError,
+  RegistryEncryptedError,
+} from "./exceptions.js";
 
 let tmp: string;
 
@@ -63,6 +67,49 @@ engagements:
 
   it("throws RegistryNotFoundError when file missing", () => {
     assert.throws(() => loadRegistry(join(tmp, "nonexistent.yaml")), RegistryNotFoundError);
+  });
+
+  it("throws RegistryEncryptedError when only <path>.age exists", () => {
+    const plain = join(tmp, "encrypted-only.yaml");
+    const cipher = `${plain}.age`;
+    writeFileSync(cipher, "age-encrypted-payload");
+    assert.throws(
+      () => loadRegistry(plain),
+      (err: unknown) =>
+        err instanceof RegistryEncryptedError &&
+        err.code === "REGISTRY_ENCRYPTED" &&
+        err.path === plain &&
+        err.ciphertextPath === cipher &&
+        /registry decrypt/.test(err.message),
+    );
+    rmSync(cipher);
+  });
+
+  it("prefers RegistryEncryptedError over RegistryNotFoundError when both states would apply", () => {
+    // i.e. plaintext absent + ciphertext present => encrypted error,
+    // not "not found". The agent gets a recoverable signal.
+    const plain = join(tmp, "encrypted-vs-missing.yaml");
+    writeFileSync(`${plain}.age`, "ciphertext");
+    assert.throws(() => loadRegistry(plain), RegistryEncryptedError);
+    rmSync(`${plain}.age`);
+  });
+
+  it("does not throw RegistryEncryptedError when plaintext exists alongside .age", () => {
+    // Defensive: if for any reason both files coexist, the plaintext
+    // wins (loadRegistry's whole job is to read the plaintext). The
+    // CLI's encrypt/decrypt flow ensures this doesn't happen, but the
+    // load path must not surprise callers.
+    const plain = writeYaml(
+      "both-exist.yaml",
+      `engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+    );
+    writeFileSync(`${plain}.age`, "ciphertext");
+    const reg = loadRegistry(plain);
+    assert.equal(reg.engagements.length, 1);
+    rmSync(`${plain}.age`);
   });
 
   it("throws RegistryParseError for invalid YAML", () => {

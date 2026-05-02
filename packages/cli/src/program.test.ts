@@ -98,6 +98,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "init",
       "install",
       "markers",
+      "registry",
       "render",
       "status",
     ],
@@ -222,6 +223,15 @@ const EXPECTED_SHAPE: CommandShape[] = [
   },
   { path: "markers list", flags: ["--verbose"], subcommands: [] },
   { path: "markers test", flags: ["--verbose"], subcommands: [] },
+
+  // ---- registry ----
+  {
+    path: "registry",
+    flags: [],
+    subcommands: ["decrypt", "encrypt"],
+  },
+  { path: "registry encrypt", flags: ["--recipient"], subcommands: [] },
+  { path: "registry decrypt", flags: ["--identity"], subcommands: [] },
 
   // ---- hook (Claude Code et al) ----
   {

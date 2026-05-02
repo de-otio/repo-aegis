@@ -233,6 +233,62 @@ window, next `render` removes the marker file.
 `--purge` back-dates so markers are removed at next render
 immediately.
 
+### Encrypting the registry
+
+The engagement registry can be encrypted at rest with age:
+
+```sh
+repo-aegis registry encrypt --recipient age1...
+```
+
+This writes `engagements.yaml.age` next to the plaintext, removes the
+plaintext, and writes a marker file at
+`~/.config/repo-aegis/state/registry.encrypted` recording the
+recipient and the timestamp. To resume work the user runs:
+
+```sh
+repo-aegis registry decrypt --identity /path/to/identity-file
+```
+
+This restores `engagements.yaml` (chmod 600), removes the ciphertext,
+and removes the marker.
+
+**When the user does this:** between work sessions, when the machine
+will be away from a trusted environment, or when storing the home dir
+on cloud-synced storage. Encryption-at-rest is the *intended* state
+for those periods.
+
+**When you (the agent) hit a `REGISTRY_ENCRYPTED` error:**
+
+If you call any registry-reading command (`status`, `check`,
+`engagements list`, `audit`, `render`, etc.) and you get back JSON
+like:
+
+```json
+{
+  "code": "REGISTRY_ENCRYPTED",
+  "error": "engagement registry at … is encrypted at rest …",
+  "details": "…"
+}
+```
+
+…then the registry is in its encrypted-at-rest state. **Do NOT
+run `registry decrypt` on your own initiative.** Decryption requires
+the user's identity file path, which is sensitive material — they
+must give it to you explicitly. Surface the situation:
+
+> The engagement registry is encrypted at rest. To proceed, run:
+> `repo-aegis registry decrypt --identity <path-to-your-age-identity>`.
+> Tell me the identity-file path if you'd like me to run it.
+
+Wait for an explicit identity-file path before invoking `registry
+decrypt`. Do not guess (e.g. "tried `~/.ssh/id_ed25519`"); a wrong
+guess at best fails noisily, at worst silently uses the wrong key.
+
+After successful decryption you can re-run the command that failed.
+At end of session, ask the user whether they want to re-encrypt with
+`registry encrypt` before stopping.
+
 ### "Permanently delete an engagement record (data-subject erasure)"
 
 ```sh
@@ -385,6 +441,8 @@ Codes you should recognise and act on:
 | `NOT_GIT_REPO` | command needs a git repo, this dir isn't one | confirm with `git rev-parse --is-inside-work-tree`; if user wants to scan ad-hoc, use `check --path` (which works outside a git repo) |
 | `REGISTRY_NOT_FOUND` | `engagements.yaml` missing | run `repo-aegis init`; user-confirmed if the home is non-default |
 | `REGISTRY_PARSE` | YAML invalid / shape wrong | open the registry, fix YAML; `details` carries the underlying parse error |
+| `REGISTRY_ENCRYPTED` | the registry is encrypted at rest (`engagements.yaml.age` present, plaintext absent) | surface to user; ask for the age identity-file path; run `repo-aegis registry decrypt --identity <path>`. Do NOT decrypt without an explicit user-supplied path |
+| `REGISTRY_ALREADY_ENCRYPTED` / `REGISTRY_NOT_ENCRYPTED` | `registry encrypt`/`decrypt` would clobber existing state | a stale marker or leftover ciphertext; surface to the user, do not auto-resolve |
 | `PATTERN_VALIDATION` | a marker pattern failed validation (regex syntax / ReDoS / oversize) | open registry; `details` carries the engagement id and reason but **redacts the literal pattern**. The user runs `repo-aegis render` at a terminal to see the literal |
 | `ENGAGEMENT_EXISTS` | `engagements add` with an id already in use | use `engagements show <id>` to inspect, `engagements end <id>` if outdated |
 | `ENGAGEMENT_NOT_FOUND` | `allow`/`deny`/`engagements end`/`show`/`remove` query didn't match | run `engagements list --json` to see options |
@@ -490,6 +548,8 @@ shape we don't model.
 | `engagements end <id>` | mark ended | `action`, `id`, `ended`, `purged`, `rendered` |
 | `engagements show <id>` | show one engagement | `action`, `id`, `name`, `started`, `ended`, `active`, `markerCount`, `notes` |
 | `engagements remove <id> --hard` | hard-delete | `action`, `id`, `removed`, `rendered` |
+| `registry encrypt --recipient <pubkey>` | encrypt registry at rest | `action`, `registry`, `recipient`, `marker` |
+| `registry decrypt --identity <path>` | decrypt registry | `action`, `registry`, `identity`, `markerRemoved` |
 | `init` | bootstrap | `action`, `home`, `registry`, `rendered`, `hooks`, `claude` |
 | `classify [--apply]` | auto-detect class | `action`, `remote`, `matched`, `applied`, `before`/`after` |
 | `audit` | composite repo audit | `repo`, `denySet`, `checks` |
