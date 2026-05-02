@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { captureOutput } from "../_test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -98,55 +99,6 @@ function removeRemote(cwd: string): void {
 import { classify } from "./classify.js";
 
 // ---------------------------------------------------------------------------
-// Capture stdout/stderr for testing
-// ---------------------------------------------------------------------------
-
-function captureOutput(fn: () => void): { stdout: string; stderr: string; exitCode: number | null } {
-  const stdoutChunks: string[] = [];
-  const stderrChunks: string[] = [];
-  let exitCode: number | null = null;
-
-  const origStdoutWrite = process.stdout.write.bind(process.stdout);
-  const origStderrWrite = process.stderr.write.bind(process.stderr);
-  const origExit = process.exit.bind(process);
-
-  process.stdout.write = (chunk: unknown): boolean => {
-    stdoutChunks.push(String(chunk));
-    return true;
-  };
-  process.stderr.write = (chunk: unknown): boolean => {
-    stderrChunks.push(String(chunk));
-    return true;
-  };
-  (process as NodeJS.Process & { exit: (code?: number) => never }).exit = (code?: number): never => {
-    exitCode = code ?? 0;
-    throw new Error(`__process_exit__${code ?? 0}`);
-  };
-
-  try {
-    fn();
-  } catch (err) {
-    const msg = (err as Error).message ?? "";
-    if (!msg.startsWith("__process_exit__")) {
-      process.stdout.write = origStdoutWrite;
-      process.stderr.write = origStderrWrite;
-      (process as NodeJS.Process & { exit: (code?: number) => never }).exit = origExit;
-      throw err;
-    }
-  } finally {
-    process.stdout.write = origStdoutWrite;
-    process.stderr.write = origStderrWrite;
-    (process as NodeJS.Process & { exit: (code?: number) => never }).exit = origExit;
-  }
-
-  return {
-    stdout: stdoutChunks.join(""),
-    stderr: stderrChunks.join(""),
-    exitCode,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Tests: 1. No remote
 // ---------------------------------------------------------------------------
 
@@ -159,7 +111,7 @@ describe("classify — no remote", () => {
       classify({ cwd: gitDir, rules: join(rulesDir, "nonexistent.yml") }),
     );
 
-    assert.equal(exitCode, null, "should not call process.exit");
+    assert.equal(exitCode, undefined, "should not call process.exit");
     assert.ok(stdout.includes("no remote"), `stdout: ${stdout}`);
   });
 
@@ -171,7 +123,7 @@ describe("classify — no remote", () => {
       classify({ cwd: gitDir, json: true, rules: join(rulesDir, "nonexistent.yml") }),
     );
 
-    assert.equal(exitCode, null);
+    assert.equal(exitCode, undefined);
     const out = JSON.parse(stdout) as { action: string; remote: null };
     assert.equal(out.action, "classify");
     assert.equal(out.remote, null);
@@ -191,7 +143,7 @@ describe("classify — no rules file", () => {
       classify({ cwd: gitDir, rules: join(rulesDir, "does-not-exist.yml") }),
     );
 
-    assert.equal(exitCode, null);
+    assert.equal(exitCode, undefined);
     assert.ok(stdout.includes("no rules file") || stdout.includes("suggestion"), `stdout: ${stdout}`);
   });
 
@@ -207,7 +159,7 @@ describe("classify — no rules file", () => {
       }),
     );
 
-    assert.equal(exitCode, null);
+    assert.equal(exitCode, undefined);
     const out = JSON.parse(stdout) as { action: string; remote: string; matched: null; suggestion: string };
     assert.equal(out.action, "classify");
     assert.ok(typeof out.remote === "string");
@@ -240,7 +192,7 @@ describe("classify — first-rule match", () => {
       classify({ cwd: gitDir, rules: rulesFile }),
     );
 
-    assert.equal(exitCode, null);
+    assert.equal(exitCode, undefined);
     assert.ok(stdout.includes("public-eligible"), `stdout: ${stdout}`);
   });
 
@@ -263,7 +215,7 @@ describe("classify — first-rule match", () => {
       classify({ cwd: gitDir, json: true, rules: rulesFile }),
     );
 
-    assert.equal(exitCode, null);
+    assert.equal(exitCode, undefined);
     const out = JSON.parse(stdout) as {
       action: string;
       matched: { rule: number; class: string; engagement: null };
@@ -326,7 +278,7 @@ describe("classify — customer-coupled rule", () => {
       classify({ cwd: gitDir, json: true, rules: rulesFile }),
     );
 
-    assert.equal(exitCode, null);
+    assert.equal(exitCode, undefined);
     const out = JSON.parse(stdout) as {
       matched: { class: string; engagement: string | null };
     };
@@ -359,7 +311,7 @@ describe("classify — --apply", () => {
       classify({ cwd: gitDir, rules: rulesFile, apply: true }),
     );
 
-    assert.equal(exitCode, null);
+    assert.equal(exitCode, undefined);
     const classVal = gitCmd(gitDir, ["config", "--get", "repo-aegis.class"]);
     assert.equal(classVal, "public-eligible");
 
@@ -383,7 +335,7 @@ describe("classify — --apply", () => {
       classify({ cwd: gitDir, json: true, rules: rulesFile, apply: true }),
     );
 
-    assert.equal(exitCode, null);
+    assert.equal(exitCode, undefined);
     const out = JSON.parse(stdout) as {
       applied: boolean;
       before: { class: string };

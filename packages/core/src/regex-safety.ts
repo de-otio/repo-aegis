@@ -22,6 +22,12 @@ const STRICT_BATCH_TIMEOUT_MS = 5000;
  *    rejected as ReDoS-suspected.
  *
  * Run at `render` time; bad patterns must not reach the hot path of `check`.
+ *
+ * @internal Prefer {@link validatePatterns} (which can run strict,
+ * subprocess-backed validation that is preemptable on catastrophic
+ * backtracking). This single-pattern, in-process helper is exposed for
+ * intra-repo callers that already pre-validate adversary-trust boundaries
+ * but is not part of the supported public API.
  */
 export function validatePattern(pattern: string): PatternValidationResult {
   if (typeof pattern !== "string" || pattern.length === 0) {

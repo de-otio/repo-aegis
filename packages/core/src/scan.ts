@@ -1,12 +1,19 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, existsSync, statSync, realpathSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
+import parseDiff from "parse-diff";
 import type { DenySet } from "./deny-set.js";
 import type { RepoConfig } from "./repo.js";
 import { redactMatch, revealMatch, type RedactionMode } from "./redaction.js";
 import { OutsideWorkingTreeError } from "./exceptions.js";
 
 const DEFAULT_MAX_FILE_BYTES = 1024 * 1024; // 1 MiB
+
+// Cap for `git diff` capture in scanStagedDiff / scanRange. 256 MiB is a
+// generous upper bound for "200 commits of large refactors"; larger pushes
+// will be truncated (see runGitDiff). Streaming would avoid this entirely
+// but is more invasive than this batch warrants.
+const DIFF_MAX_BUFFER = 256 * 1024 * 1024;
 
 export interface ScanHit {
   path?: string;
@@ -128,6 +135,67 @@ export function scanFile(
 }
 
 /**
+ * Run `git diff <args>` and return its stdout. Uses `spawnSync` with a
+ * 256 MiB cap (vs. the previous `execFileSync` 64 MiB) so multi-commit
+ * pushes are less likely to throw on overflow. If `spawnSync` reports
+ * `ENOBUFS` (cap exceeded) we emit a one-line warning to stderr and
+ * scan whatever stdout we did get — partial scanning is better than a
+ * hard hook failure that strands the user.
+ */
+function runGitDiff(cwd: string, args: readonly string[]): string {
+  const r = spawnSync("git", ["diff", ...args], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: DIFF_MAX_BUFFER,
+  });
+  if (r.error) {
+    const err = r.error as NodeJS.ErrnoException;
+    if (err.code === "ENOBUFS") {
+      process.stderr.write(
+        `repo-aegis: git diff output exceeded ${DIFF_MAX_BUFFER} bytes; scanning truncated output. Consider scanning a smaller range.\n`,
+      );
+      return typeof r.stdout === "string" ? r.stdout : "";
+    }
+    throw err;
+  }
+  if (r.status !== 0) {
+    const stderr = typeof r.stderr === "string" ? r.stderr : "";
+    throw new Error(`git diff exited ${r.status ?? "?"}: ${stderr.trim()}`);
+  }
+  return typeof r.stdout === "string" ? r.stdout : "";
+}
+
+/**
+ * Extract added-line content from a unified diff. Uses `parse-diff` so
+ * we correctly handle:
+ *   - rename diffs (`+++ b/new-name` is a header, not content)
+ *   - in-context lines whose content begins with `+`
+ *   - `\ No newline at end of file` markers
+ *   - binary-diff stanzas (no `add` changes emitted)
+ * Returns the additions joined by `\n` so the existing line/column
+ * machinery in scanText keeps working.
+ */
+function extractAdditions(diff: string): string {
+  const files = parseDiff(diff);
+  const lines: string[] = [];
+  for (const file of files) {
+    for (const chunk of file.chunks) {
+      for (const change of chunk.changes) {
+        if (change.type === "add") {
+          // `change.content` includes the leading `+`; strip it to
+          // match the prior behaviour and avoid double-counting.
+          const content = change.content.startsWith("+")
+            ? change.content.slice(1)
+            : change.content;
+          lines.push(content);
+        }
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
  * Scan the staged diff in a git repo. Pre-commit hook entry point.
  */
 export function scanStagedDiff(
@@ -138,17 +206,13 @@ export function scanStagedDiff(
   if (!repo.isGitRepo) return { hits: [], skipped: [] };
   if (!denySet.combinedRegex) return { hits: [], skipped: [] };
 
-  const diff = execFileSync(
-    "git",
-    ["diff", "--cached", "--diff-filter=ACM", "-U0", "--no-color"],
-    { cwd: repo.cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-  );
-  // Take only added lines; skip diff headers and removed lines.
-  const addedLines = diff
-    .split("\n")
-    .filter(l => l.startsWith("+") && !l.startsWith("+++"))
-    .map(l => l.slice(1))
-    .join("\n");
+  const diff = runGitDiff(repo.cwd, [
+    "--cached",
+    "--diff-filter=ACM",
+    "-U0",
+    "--no-color",
+  ]);
+  const addedLines = extractAdditions(diff);
   return { hits: scanText(addedLines, denySet, undefined, opts), skipped: [] };
 }
 
@@ -156,7 +220,7 @@ export function scanStagedDiff(
  * Scan the diff over an arbitrary git range (e.g. `main..HEAD`,
  * `<remote-sha>..<local-sha>`). Pre-push hook entry point.
  *
- * Only `+`-line content is scanned. The caller is responsible for
+ * Only added-line content is scanned. The caller is responsible for
  * passing a syntactically valid range; if `git diff` exits non-zero,
  * the throw propagates.
  */
@@ -169,16 +233,13 @@ export function scanRange(
   if (!repo.isGitRepo) return { hits: [], skipped: [] };
   if (!denySet.combinedRegex) return { hits: [], skipped: [] };
 
-  const diff = execFileSync(
-    "git",
-    ["diff", range, "--diff-filter=ACM", "-U0", "--no-color"],
-    { cwd: repo.cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-  );
-  const addedLines = diff
-    .split("\n")
-    .filter(l => l.startsWith("+") && !l.startsWith("+++"))
-    .map(l => l.slice(1))
-    .join("\n");
+  const diff = runGitDiff(repo.cwd, [
+    range,
+    "--diff-filter=ACM",
+    "-U0",
+    "--no-color",
+  ]);
+  const addedLines = extractAdditions(diff);
   return { hits: scanText(addedLines, denySet, undefined, opts), skipped: [] };
 }
 

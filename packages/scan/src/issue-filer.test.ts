@@ -73,6 +73,33 @@ describe("fileIssue", () => {
     assert.match(createdBody, /repo-aegis-scan report/);
   });
 
+  it("uses date-based defaultTitle when title option is omitted", async () => {
+    // The dedup contract hinges on the date-based default title — two runs
+    // on the same UTC day must produce the same title so the second run
+    // comments on the existing issue rather than opening a new one.
+    let createdTitle = "";
+    const client: IssueClient = {
+      async findOpenIssueByTitle() {
+        return null;
+      },
+      async createIssue(_o, _r, title) {
+        createdTitle = title;
+        return { number: 1, html_url: "https://example.com/1" };
+      },
+      async addComment() {
+        throw new Error("should not be called");
+      },
+    };
+    const r = await fileIssue(emptySummary(1), fakeHits(1), {
+      reportRepo: "o/r",
+      client,
+      // no `title:` — exercise the default
+    });
+    assert.equal(r.action, "created");
+    assert.match(createdTitle, /^repo-aegis-scan: new hits \d{4}-\d{2}-\d{2}$/);
+    assert.equal(r.title, createdTitle);
+  });
+
   it("comments on existing open issue if title matches", async () => {
     let commentedOn = -1;
     const client: IssueClient = {

@@ -8,6 +8,62 @@ export interface OctokitClientOptions {
 }
 
 /**
+ * Error thrown by the octokit client wrapper for HTTP-shaped failures.
+ * Carries `status` and `retryAfterSeconds` so `runScan` can detect
+ * GitHub secondary-rate-limit responses (403/429 with Retry-After) and
+ * back off without having to type-check the underlying `RequestError`.
+ *
+ * Retains the original error in `cause` for debugging.
+ *
+ * @internal Wire shape between `runScan` and `makeOctokitClient`; not part
+ * of the supported public API surface re-exported from `lib.ts`.
+ */
+export class HttpClientError extends Error {
+  readonly status: number;
+  readonly retryAfterSeconds: number | null;
+  override readonly cause?: unknown;
+  constructor(message: string, status: number, retryAfterSeconds: number | null, cause?: unknown) {
+    super(message);
+    this.name = "HttpClientError";
+    this.status = status;
+    this.retryAfterSeconds = retryAfterSeconds;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+interface MaybeRequestError {
+  status?: unknown;
+  response?: { headers?: Record<string, unknown> } | unknown;
+  message?: unknown;
+}
+
+/**
+ * Inspect an error thrown by `@octokit/request` and, if it has the shape
+ * of a `RequestError` (status + headers), return an `HttpClientError`
+ * with the parsed `Retry-After`. For unrelated errors, returns the
+ * original error untouched so callers can re-throw it.
+ */
+function toHttpClientErrorIfApplicable(err: unknown): unknown {
+  if (!err || typeof err !== "object") return err;
+  const e = err as MaybeRequestError;
+  if (typeof e.status !== "number") return err;
+  const status = e.status;
+  let retryAfterSeconds: number | null = null;
+  const resp = e.response as { headers?: Record<string, unknown> } | undefined;
+  const headers = resp?.headers;
+  if (headers && typeof headers === "object") {
+    // Header names are normalised to lowercase by @octokit/request.
+    const raw = (headers as Record<string, unknown>)["retry-after"];
+    if (typeof raw === "string" || typeof raw === "number") {
+      const n = typeof raw === "number" ? raw : parseInt(raw, 10);
+      if (Number.isFinite(n) && n >= 0) retryAfterSeconds = n;
+    }
+  }
+  const msg = typeof e.message === "string" ? e.message : `HTTP ${status}`;
+  return new HttpClientError(msg, status, retryAfterSeconds, err);
+}
+
+/**
  * Thin wrapper over `@octokit/request` for the four endpoints repo-aegis-scan
  * actually uses:
  *   - GET /search/code
@@ -33,14 +89,19 @@ export function makeOctokitClient(
 
   return {
     async searchCode(query: string, page: number, perPage: number): Promise<SearchClientResult> {
-      const res = await authedRequest("GET /search/code", {
-        q: query,
-        page,
-        per_page: perPage,
-        headers: {
-          accept: "application/vnd.github.v3.text-match+json",
-        },
-      });
+      let res;
+      try {
+        res = await authedRequest("GET /search/code", {
+          q: query,
+          page,
+          per_page: perPage,
+          headers: {
+            accept: "application/vnd.github.v3.text-match+json",
+          },
+        });
+      } catch (err) {
+        throw toHttpClientErrorIfApplicable(err);
+      }
       const data = res.data as {
         total_count: number;
         incomplete_results?: boolean;

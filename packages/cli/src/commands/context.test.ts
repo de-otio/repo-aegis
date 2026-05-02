@@ -3,42 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-// ---------------------------------------------------------------------------
-// Test helpers — capture stdout/stderr
-// ---------------------------------------------------------------------------
-
-interface Captured {
-  stdout: string;
-  stderr: string;
-}
-
-function capture(fn: () => void): Captured {
-  const chunks: string[] = [];
-  const errChunks: string[] = [];
-  const origWrite = process.stdout.write.bind(process.stdout);
-  const origErrWrite = process.stderr.write.bind(process.stderr);
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (process.stdout.write as any) = (chunk: string) => {
-    chunks.push(chunk);
-    return true;
-  };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (process.stderr.write as any) = (chunk: string) => {
-    errChunks.push(chunk);
-    return true;
-  };
-
-  try {
-    fn();
-  } finally {
-    process.stdout.write = origWrite;
-    process.stderr.write = origErrWrite;
-  }
-
-  return { stdout: chunks.join(""), stderr: errChunks.join("") };
-}
+import { captureOutput } from "../_test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Setup: point REPO_AEGIS_HOME at a fresh tmpdir for every test
@@ -91,13 +56,13 @@ import { contextOn, contextOff, contextStatus } from "./context.js";
 describe("context", () => {
   describe("context status", () => {
     it("reports isOn=false when flag absent (text)", () => {
-      const { stdout } = capture(() => contextStatus({}));
+      const { stdout } = captureOutput(() => contextStatus({}));
       assert.match(stdout, /leak-context strict mode is off/);
       restoreHome();
     });
 
     it("reports isOn=false when flag absent (json)", () => {
-      const { stdout } = capture(() => contextStatus({ json: true }));
+      const { stdout } = captureOutput(() => contextStatus({ json: true }));
       const parsed = JSON.parse(stdout) as { action: string; flagPath: string; isOn: boolean };
       assert.equal(parsed.action, "context-status");
       assert.equal(parsed.isOn, false);
@@ -108,14 +73,14 @@ describe("context", () => {
 
   describe("context on", () => {
     it("creates the flag file", () => {
-      capture(() => contextOn({}));
+      captureOutput(() => contextOn({}));
       const flagPath = join(home, "state", "leak-context-mode");
       assert.ok(existsSync(flagPath), "flag file should exist after context on");
       restoreHome();
     });
 
     it("reports wasOn=false, isOn=true on first call (json)", () => {
-      const { stdout } = capture(() => contextOn({ json: true }));
+      const { stdout } = captureOutput(() => contextOn({ json: true }));
       const parsed = JSON.parse(stdout) as {
         action: string;
         flagPath: string;
@@ -129,25 +94,25 @@ describe("context", () => {
     });
 
     it("context on then context status reports isOn=true", () => {
-      capture(() => contextOn({}));
-      const { stdout } = capture(() => contextStatus({ json: true }));
+      captureOutput(() => contextOn({}));
+      const { stdout } = captureOutput(() => contextStatus({ json: true }));
       const parsed = JSON.parse(stdout) as { isOn: boolean };
       assert.equal(parsed.isOn, true);
       restoreHome();
     });
 
     it("is idempotent — calling twice does not error", () => {
-      capture(() => contextOn({}));
+      captureOutput(() => contextOn({}));
       // Second call must not throw
-      assert.doesNotThrow(() => capture(() => contextOn({})));
+      assert.doesNotThrow(() => captureOutput(() => contextOn({})));
       // Flag must still exist
       assert.ok(existsSync(join(home, "state", "leak-context-mode")));
       restoreHome();
     });
 
     it("idempotent second call reports wasOn=true (json)", () => {
-      capture(() => contextOn({}));
-      const { stdout } = capture(() => contextOn({ json: true }));
+      captureOutput(() => contextOn({}));
+      const { stdout } = captureOutput(() => contextOn({ json: true }));
       const parsed = JSON.parse(stdout) as { wasOn: boolean; isOn: boolean };
       assert.equal(parsed.wasOn, true);
       assert.equal(parsed.isOn, true);
@@ -157,17 +122,17 @@ describe("context", () => {
 
   describe("context off", () => {
     it("removes the flag file", () => {
-      capture(() => contextOn({}));
+      captureOutput(() => contextOn({}));
       const flagPath = join(home, "state", "leak-context-mode");
       assert.ok(existsSync(flagPath), "precondition: flag must exist");
-      capture(() => contextOff({}));
+      captureOutput(() => contextOff({}));
       assert.equal(existsSync(flagPath), false, "flag file should be gone after context off");
       restoreHome();
     });
 
     it("reports wasOn=true, isOn=false (json)", () => {
-      capture(() => contextOn({}));
-      const { stdout } = capture(() => contextOff({ json: true }));
+      captureOutput(() => contextOn({}));
+      const { stdout } = captureOutput(() => contextOff({ json: true }));
       const parsed = JSON.parse(stdout) as {
         action: string;
         wasOn: boolean;
@@ -180,12 +145,12 @@ describe("context", () => {
     });
 
     it("is idempotent when already off — does not error", () => {
-      assert.doesNotThrow(() => capture(() => contextOff({})));
+      assert.doesNotThrow(() => captureOutput(() => contextOff({})));
       restoreHome();
     });
 
     it("idempotent off reports wasOn=false (json)", () => {
-      const { stdout } = capture(() => contextOff({ json: true }));
+      const { stdout } = captureOutput(() => contextOff({ json: true }));
       const parsed = JSON.parse(stdout) as { wasOn: boolean; isOn: boolean };
       assert.equal(parsed.wasOn, false);
       assert.equal(parsed.isOn, false);
@@ -195,36 +160,36 @@ describe("context", () => {
 
   describe("text output", () => {
     it("context on prints enabled message", () => {
-      const { stdout } = capture(() => contextOn({}));
+      const { stdout } = captureOutput(() => contextOn({}));
       assert.match(stdout, /leak-context strict mode enabled/);
       restoreHome();
     });
 
     it("context on prints already-on message when called twice", () => {
-      capture(() => contextOn({}));
-      const { stdout } = capture(() => contextOn({}));
+      captureOutput(() => contextOn({}));
+      const { stdout } = captureOutput(() => contextOn({}));
       assert.match(stdout, /already on/);
       restoreHome();
     });
 
     it("context off prints disabled message", () => {
-      capture(() => contextOn({}));
-      const { stdout } = capture(() => contextOff({}));
+      captureOutput(() => contextOn({}));
+      const { stdout } = captureOutput(() => contextOff({}));
       assert.match(stdout, /leak-context strict mode disabled/);
       restoreHome();
     });
 
     it("context off prints already-off message when already off", () => {
-      const { stdout } = capture(() => contextOff({}));
+      const { stdout } = captureOutput(() => contextOff({}));
       assert.match(stdout, /already off/);
       restoreHome();
     });
 
     it("context status prints on/off state", () => {
-      const { stdout: off } = capture(() => contextStatus({}));
+      const { stdout: off } = captureOutput(() => contextStatus({}));
       assert.match(off, /off/);
-      capture(() => contextOn({}));
-      const { stdout: on } = capture(() => contextStatus({}));
+      captureOutput(() => contextOn({}));
+      const { stdout: on } = captureOutput(() => contextStatus({}));
       assert.match(on, / on/);
       restoreHome();
     });

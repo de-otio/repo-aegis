@@ -5,7 +5,7 @@ import type {
   RunSummary,
   ScanState,
 } from "./types.js";
-import { hitKey } from "./state.js";
+import { hitKey, todayIsoDate } from "./state.js";
 
 export interface SearchClientResult {
   items: {
@@ -34,6 +34,17 @@ export interface RunOptions {
   capResultsPerQuery?: number;
   revealMatches?: boolean;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Override the clock used to date-stamp new `seen` entries. Tests inject
+   * a fixed date so the assertions don't flake across UTC midnight.
+   */
+  now?: () => Date;
+  /**
+   * Upper bound on the number of seconds the run will honour from a 429 /
+   * secondary-rate-limit `Retry-After` header before giving up on a query.
+   * Defaults to 60.
+   */
+  maxRetryAfterSeconds?: number;
 }
 
 export interface RunResult {
@@ -43,6 +54,7 @@ export interface RunResult {
 }
 
 const DEFAULT_PAGE_SIZE = 100;
+const DEFAULT_MAX_RETRY_AFTER_SECONDS = 60;
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -59,14 +71,43 @@ function buildExcludedQuery(q: QueryEntry, extraExcludeOrg: string[], extraExclu
   return parts.join(" ");
 }
 
+interface RateLimitedErrorShape {
+  status: number;
+  retryAfterSeconds: number | null;
+}
+
+/**
+ * Detect a GitHub secondary-rate-limit error. `octokit-client` wraps
+ * `RequestError` into `HttpClientError` carrying `status` and
+ * `retryAfterSeconds`; we type-check structurally so this module does
+ * not need to import the wrapper class directly (which keeps run.ts
+ * easy to test against a hand-rolled fake client).
+ */
+function asRateLimited(err: unknown): RateLimitedErrorShape | null {
+  if (!err || typeof err !== "object") return null;
+  const e = err as { status?: unknown; retryAfterSeconds?: unknown };
+  if (typeof e.status !== "number") return null;
+  if (e.status !== 429 && e.status !== 403) return null;
+  const retry =
+    typeof e.retryAfterSeconds === "number" && Number.isFinite(e.retryAfterSeconds)
+      ? e.retryAfterSeconds
+      : null;
+  // 403 without a Retry-After is probably auth/perms, not a rate-limit.
+  if (e.status === 403 && retry === null) return null;
+  return { status: e.status, retryAfterSeconds: retry };
+}
+
 export async function runScan(opts: RunOptions): Promise<RunResult> {
   const interSleep = opts.interRequestSleepMs ?? 2500;
   const maxPages = opts.maxPagesPerQuery ?? 10;
   const cap = opts.capResultsPerQuery ?? 1000;
   const sleep = opts.sleep ?? defaultSleep;
   const reveal = !!opts.revealMatches;
+  const nowFn = opts.now ?? (() => new Date());
+  const maxRetryAfterSeconds =
+    opts.maxRetryAfterSeconds ?? DEFAULT_MAX_RETRY_AFTER_SECONDS;
 
-  const startedIso = new Date().toISOString();
+  const startedIso = nowFn().toISOString();
   const previousRunIso = opts.state.lastRunIso ?? null;
   const queriesStatus: QueryRunStatus[] = [];
   const newHits: CodeSearchHit[] = [];
@@ -77,6 +118,48 @@ export async function runScan(opts: RunOptions): Promise<RunResult> {
     lastRunIso: opts.state.lastRunIso,
   };
 
+  // Date-stamp for any new `seen` entries recorded during this run.
+  // Captured once at run start so a long sweep doesn't straddle UTC
+  // midnight and produce inconsistent values within one run.
+  const seenIsoForNewEntries = todayIsoDate(nowFn());
+
+  /**
+   * Fetch one page with one retry on 429/secondary-rate-limit. Returns the
+   * response on success, throws on hard failure. The `throttled` flag in
+   * the returned object is true iff the SECOND attempt also rate-limited;
+   * callers use it to record `throttled: true` on the QueryRunStatus.
+   */
+  async function fetchPageWithRetry(
+    fullQuery: string,
+    page: number,
+  ): Promise<{ result: SearchClientResult } | { error: Error; throttled: boolean }> {
+    try {
+      const result = await opts.client.searchCode(fullQuery, page, DEFAULT_PAGE_SIZE);
+      return { result };
+    } catch (err) {
+      const rl = asRateLimited(err);
+      if (!rl) {
+        return { error: err as Error, throttled: false };
+      }
+      // Rate-limited. Sleep for min(retry-after, cap) seconds, then retry once.
+      const waitSec = Math.min(
+        rl.retryAfterSeconds ?? maxRetryAfterSeconds,
+        maxRetryAfterSeconds,
+      );
+      await sleep(Math.max(0, waitSec) * 1000);
+      try {
+        const result = await opts.client.searchCode(fullQuery, page, DEFAULT_PAGE_SIZE);
+        return { result };
+      } catch (err2) {
+        const rl2 = asRateLimited(err2);
+        return {
+          error: err2 as Error,
+          throttled: rl2 !== null,
+        };
+      }
+    }
+  }
+
   for (const q of opts.queries) {
     const fullQuery = buildExcludedQuery(q, opts.excludeOrg ?? [], opts.excludeRepo ?? []);
     let page = 1;
@@ -84,15 +167,16 @@ export async function runScan(opts: RunOptions): Promise<RunResult> {
     let newForQuery = 0;
     let truncated = false;
     let queryError: string | undefined;
+    let queryThrottled = false;
 
     while (page <= maxPages && totalForQuery < cap) {
-      let res: SearchClientResult;
-      try {
-        res = await opts.client.searchCode(fullQuery, page, DEFAULT_PAGE_SIZE);
-      } catch (err) {
-        queryError = (err as Error).message;
+      const fetched = await fetchPageWithRetry(fullQuery, page);
+      if ("error" in fetched) {
+        queryError = fetched.error.message;
+        queryThrottled = fetched.throttled;
         break;
       }
+      const res = fetched.result;
 
       for (const item of res.items) {
         const repo = item.repository?.full_name ?? "<unknown>";
@@ -103,7 +187,10 @@ export async function runScan(opts: RunOptions): Promise<RunResult> {
 
         const key = hitKey(q.query, repo, path, line);
         if (updatedState.seen[key]) continue;
-        updatedState.seen[key] = true;
+        // Schema v2: record the date this hit was first seen, so that
+        // `pruneSeenOlderThan` can TTL old entries. v1-upgraded entries
+        // remain `true` (unknown date) and are kept conservatively.
+        updatedState.seen[key] = seenIsoForNewEntries;
 
         const hit: CodeSearchHit = {
           query: q.name,
@@ -141,13 +228,14 @@ export async function runScan(opts: RunOptions): Promise<RunResult> {
       name: q.name,
       ok: queryError === undefined,
       ...(queryError !== undefined ? { error: queryError } : {}),
+      ...(queryThrottled ? { throttled: true } : {}),
       totalResults: totalForQuery,
       newResults: newForQuery,
       truncated,
     });
   }
 
-  const endedIso = new Date().toISOString();
+  const endedIso = nowFn().toISOString();
   updatedState.lastRunIso = endedIso;
 
   const degraded = queriesStatus.some(q => !q.ok);

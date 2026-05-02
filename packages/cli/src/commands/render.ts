@@ -5,6 +5,7 @@ import {
   PatternValidationError,
   RegistryNotFoundError,
   LockTimeoutError,
+  EXIT_USAGE,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
@@ -58,7 +59,7 @@ export function render(opts: RenderOptions): void {
           emitText(`  ${inv.engagementId ?? "?"}: ${inv.reason}`);
         }
       }
-      process.exit(2);
+      process.exit(EXIT_USAGE);
     }
     emitError({ error: (err as Error).message }, opts);
   }

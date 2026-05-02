@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanText, scanFile, scanRange, scanHistory } from "./scan.js";
+import { scanText, scanFile, scanStagedDiff, scanRange, scanHistory } from "./scan.js";
 import type { DenySet } from "./deny-set.js";
 import type { RepoConfig } from "./repo.js";
 
@@ -232,6 +232,150 @@ describe("scanRange", () => {
       `${a}..${b}`,
     );
     assert.ok(!r.hits[0]!.matchPreview.includes("specific-leak"));
+  });
+});
+
+describe("scanRange diff parsing edge cases", () => {
+  it("does NOT flag the literal '+++ b/<name>' header even when the path matches a pattern", () => {
+    // Construct a scenario where the new filename itself contains the
+    // marker. The hand-rolled `+`-line filter would have read
+    // `+++ b/leaked-marker.txt` as added content (after slicing the
+    // first `+`, the content `++ b/leaked-marker.txt` no longer starts
+    // with `+`, but historically `+++` was special-cased only for the
+    // header itself — pattern-matching the path is the false positive
+    // here). parse-diff treats `+++ b/...` as a header and never emits
+    // it as an `add` change.
+    const dir = join(tmp, "range-rename-header");
+    gitInit(dir);
+    const a = commit(dir, { "ordinary.txt": "hello\n" }, "init");
+    // Rename ordinary.txt to a name that contains the marker. No
+    // content changes, so no `add` content lines should be emitted.
+    execFileSync("git", ["mv", "ordinary.txt", "leaked-marker.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "rename"], { cwd: dir });
+    const b = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).trim();
+    const r = scanRange(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["leaked-marker"]),
+      `${a}..${b}`,
+    );
+    assert.equal(
+      r.hits.length,
+      0,
+      "filename in '+++ b/...' header must not be scanned as content",
+    );
+  });
+
+  it("a pure rename (no content changes) yields no additions", () => {
+    const dir = join(tmp, "range-rename-only");
+    gitInit(dir);
+    const a = commit(dir, { "old.txt": "the-secret-marker\n" }, "init");
+    execFileSync("git", ["mv", "old.txt", "new.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "rename"], { cwd: dir });
+    const b = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).trim();
+    const r = scanRange(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["the-secret-marker"]),
+      `${a}..${b}`,
+    );
+    assert.equal(
+      r.hits.length,
+      0,
+      "pure rename has no `add` changes; pre-existing content must not be re-flagged",
+    );
+  });
+
+  it("flags an added line whose literal content begins with '+'", () => {
+    // A hunk line of `++added-marker` is, in unified-diff terms, an
+    // `add` whose content is `+added-marker`. The hand-rolled filter
+    // sliced one `+` off the front (correct), giving `+added-marker`,
+    // so it would still flag — but the property under test is that
+    // parse-diff also flags it (i.e. we didn't regress the
+    // "+`-prefixed in-hunk content gets scanned" case).
+    const dir = join(tmp, "range-plus-prefixed");
+    gitInit(dir);
+    const a = commit(dir, { "f.txt": "hello\n" }, "init");
+    const b = commit(
+      dir,
+      { "f.txt": "hello\n+added-marker\n" },
+      "add plus-prefixed line",
+    );
+    const r = scanRange(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["added-marker"]),
+      `${a}..${b}`,
+    );
+    assert.equal(r.hits.length, 1, "added line whose content starts with '+' must be flagged");
+  });
+
+  it("does NOT flag context (unchanged) lines whose content begins with '+'", () => {
+    // With -U0 there are no context lines in scanRange's git invocation,
+    // but feed a synthetic diff through extractAdditions via scanStagedDiff
+    // would require staging. Instead, exercise the parser directly through
+    // a multi-hunk scenario: two unrelated changes far apart in a file
+    // already containing a '+'-prefixed line; only the actually-added
+    // line should be flagged.
+    const dir = join(tmp, "range-context-plus");
+    gitInit(dir);
+    // Pre-existing line "+context-marker" is committed (so it lives in
+    // the file at base), then an unrelated benign change is added.
+    const a = commit(
+      dir,
+      { "f.txt": "alpha\n+context-marker\nbeta\n" },
+      "init with plus-prefixed context",
+    );
+    const b = commit(
+      dir,
+      { "f.txt": "alpha\n+context-marker\nbeta\nharmless\n" },
+      "append harmless line",
+    );
+    const r = scanRange(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["context-marker"]),
+      `${a}..${b}`,
+    );
+    assert.equal(
+      r.hits.length,
+      0,
+      "context line containing '+context-marker' must not be flagged when only an unrelated line was added",
+    );
+  });
+});
+
+describe("scanStagedDiff", () => {
+  it("flags an added line in the staged diff", () => {
+    const dir = join(tmp, "staged-hit");
+    gitInit(dir);
+    commit(dir, { "f.txt": "hello\n" }, "init");
+    writeFileSync(join(dir, "f.txt"), "hello\nstaged-leak-marker\n");
+    execFileSync("git", ["add", "f.txt"], { cwd: dir });
+    const r = scanStagedDiff(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["staged-leak-marker"]),
+    );
+    assert.equal(r.hits.length, 1);
+  });
+
+  it("does NOT flag the new filename in a staged rename whose path matches a pattern", () => {
+    const dir = join(tmp, "staged-rename");
+    gitInit(dir);
+    commit(dir, { "ordinary.txt": "hello\n" }, "init");
+    execFileSync("git", ["mv", "ordinary.txt", "leaked-marker.txt"], { cwd: dir });
+    // staged but not committed
+    const r = scanStagedDiff(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["leaked-marker"]),
+    );
+    assert.equal(
+      r.hits.length,
+      0,
+      "filename in '+++ b/...' header must not be scanned as content",
+    );
   });
 });
 

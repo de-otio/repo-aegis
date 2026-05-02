@@ -15,25 +15,37 @@ import {
 } from "./repo.js";
 import { NotAGitRepoError } from "./exceptions.js";
 
-let tmp: string;
-let nonGitDir: string;
-let gitDir: string;
+// Each describe block owns its own tmp/gitDir/nonGitDir to avoid cross-block
+// state leakage when a test fails mid-cleanup. Previously a single file-level
+// `before` allocated one tmp directory shared across every describe; a
+// failure inside any `it` could leave git config in a state that broke later
+// blocks. Per-describe fresh dirs make each block hermetic.
 
-before(() => {
-  tmp = mkdtempSync(join(tmpdir(), "repo-aegis-repo-"));
-  nonGitDir = join(tmp, "non-git");
-  gitDir = join(tmp, "git");
-  execFileSync("mkdir", ["-p", nonGitDir, gitDir]);
-  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: gitDir });
-  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: gitDir });
-  execFileSync("git", ["config", "user.name", "test"], { cwd: gitDir });
-});
-
-after(() => {
-  rmSync(tmp, { recursive: true, force: true });
-});
+function mkGitDir(parent: string, name: string): string {
+  const dir = join(parent, name);
+  execFileSync("mkdir", ["-p", dir]);
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "test"], { cwd: dir });
+  return dir;
+}
 
 describe("readRepoConfig", () => {
+  let tmp: string;
+  let nonGitDir: string;
+  let gitDir: string;
+
+  before(() => {
+    tmp = mkdtempSync(join(tmpdir(), "repo-aegis-repo-rrc-"));
+    nonGitDir = join(tmp, "non-git");
+    execFileSync("mkdir", ["-p", nonGitDir]);
+    gitDir = mkGitDir(tmp, "git");
+  });
+
+  after(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
   it("returns isGitRepo=false outside a git repo", () => {
     const cfg = readRepoConfig(nonGitDir);
     assert.equal(cfg.isGitRepo, false);
@@ -65,6 +77,21 @@ describe("readRepoConfig", () => {
 });
 
 describe("addEngagement / removeEngagement", () => {
+  let tmp: string;
+  let nonGitDir: string;
+  let gitDir: string;
+
+  before(() => {
+    tmp = mkdtempSync(join(tmpdir(), "repo-aegis-repo-eng-"));
+    nonGitDir = join(tmp, "non-git");
+    execFileSync("mkdir", ["-p", nonGitDir]);
+    gitDir = mkGitDir(tmp, "git");
+  });
+
+  after(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
   it("adds and removes an engagement idempotently", () => {
     const r1 = addEngagement("customer-a", gitDir);
     assert.equal(r1, true);
@@ -120,6 +147,21 @@ describe("addEngagement / removeEngagement", () => {
 });
 
 describe("setClass / unsetClass", () => {
+  let tmp: string;
+  let nonGitDir: string;
+  let gitDir: string;
+
+  before(() => {
+    tmp = mkdtempSync(join(tmpdir(), "repo-aegis-repo-cls-"));
+    nonGitDir = join(tmp, "non-git");
+    execFileSync("mkdir", ["-p", nonGitDir]);
+    gitDir = mkGitDir(tmp, "git");
+  });
+
+  after(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
   it("each REPO_CLASSES value can round-trip", () => {
     for (const cls of REPO_CLASSES) {
       setClass(cls, gitDir);
@@ -142,6 +184,7 @@ describe("setClass / unsetClass", () => {
 });
 
 describe(".repo-aegis.yml overrides", () => {
+  let tmp: string;
   let overrideRepo: string;
   const yamlPath = (dir: string): string => join(dir, ".repo-aegis.yml");
   const writeOverride = (dir: string, body: string): void => {
@@ -149,11 +192,12 @@ describe(".repo-aegis.yml overrides", () => {
   };
 
   before(() => {
-    overrideRepo = join(tmp, "override-repo");
-    execFileSync("mkdir", ["-p", overrideRepo]);
-    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: overrideRepo });
-    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: overrideRepo });
-    execFileSync("git", ["config", "user.name", "test"], { cwd: overrideRepo });
+    tmp = mkdtempSync(join(tmpdir(), "repo-aegis-repo-yml-"));
+    overrideRepo = mkGitDir(tmp, "override-repo");
+  });
+
+  after(() => {
+    rmSync(tmp, { recursive: true, force: true });
   });
 
   it("yml provides class when git config does not", () => {

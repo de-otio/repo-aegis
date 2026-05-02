@@ -21,44 +21,17 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { execFileSync, spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { runCli, cliBuilt, cliPath } from "./_subprocess-utils.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const cliPath = resolve(__dirname, "..", "dist", "index.js");
-
-interface RunResult {
-  stdout: string;
-  stderr: string;
-  code: number | null;
-  json?: unknown;
-}
-
-function runCli(home: string, cwd: string, args: string[]): RunResult {
-  const result = spawnSync(process.execPath, [cliPath, ...args], {
-    cwd,
-    env: {
-      ...process.env,
-      REPO_AEGIS_HOME: home,
-    },
-    encoding: "utf8",
-  });
-  let json: unknown;
-  if (args.includes("--json") && result.stdout.trim().length > 0) {
-    try {
-      json = JSON.parse(result.stdout);
-    } catch {
-      /* non-JSON output */
-    }
-  }
-  return {
-    stdout: result.stdout,
-    stderr: result.stderr,
-    code: result.status,
-    json,
-  };
-}
+// Subprocess tests need the built CLI bundle. When running ad-hoc against
+// the TS source (no `npm run build` first), skip the suites instead of
+// exploding with ENOENT.
+const skipReason = cliBuilt()
+  ? undefined
+  : `built CLI not found at ${cliPath}; run \`npm run build\` first`;
+const skipOpts = skipReason ? { skip: skipReason } : {};
 
 let tmp: string;
 let home: string;
@@ -73,6 +46,7 @@ function gitInit(path: string): void {
 }
 
 before(() => {
+  if (skipReason) return;
   tmp = mkdtempSync(join(tmpdir(), "repo-aegis-lifecycle-"));
   home = join(tmp, "home");
   repo = join(tmp, "customer-c-tooling");
@@ -80,10 +54,11 @@ before(() => {
 });
 
 after(() => {
+  if (skipReason) return;
   rmSync(tmp, { recursive: true, force: true });
 });
 
-describe("v0.2 full lifecycle", () => {
+describe("v0.2 full lifecycle", skipOpts, () => {
   it("step 1: init scaffolds home and renders empty markers", () => {
     const r = runCli(home, repo, ["init", "--json"]);
     assert.equal(r.code, 0);

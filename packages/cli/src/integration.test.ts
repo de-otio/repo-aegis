@@ -2,44 +2,17 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { execFileSync, spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { runCli, cliBuilt, cliPath } from "./_subprocess-utils.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const cliPath = resolve(__dirname, "..", "dist", "index.js");
-
-interface RunResult {
-  stdout: string;
-  stderr: string;
-  code: number | null;
-  json?: unknown;
-}
-
-function runCli(home: string, cwd: string, args: string[]): RunResult {
-  const result = spawnSync(process.execPath, [cliPath, ...args], {
-    cwd,
-    env: {
-      ...process.env,
-      REPO_AEGIS_HOME: home,
-    },
-    encoding: "utf8",
-  });
-  let json: unknown;
-  if (args.includes("--json") && result.stdout.trim().length > 0) {
-    try {
-      json = JSON.parse(result.stdout);
-    } catch {
-      /* not JSON */
-    }
-  }
-  return {
-    stdout: result.stdout,
-    stderr: result.stderr,
-    code: result.status,
-    json,
-  };
-}
+// Subprocess tests need the built CLI bundle. When running ad-hoc against
+// the TS source (no `npm run build` first), skip the suites instead of
+// exploding with ENOENT.
+const skipReason = cliBuilt()
+  ? undefined
+  : `built CLI not found at ${cliPath}; run \`npm run build\` first`;
+const skipOpts = skipReason ? { skip: skipReason } : {};
 
 let tmp: string;
 let home: string;
@@ -55,6 +28,7 @@ function gitInit(path: string) {
 }
 
 before(() => {
+  if (skipReason) return;
   tmp = mkdtempSync(join(tmpdir(), "repo-aegis-int-"));
   home = join(tmp, "home");
   mkdirSync(home, { recursive: true });
@@ -95,10 +69,11 @@ engagements:
 });
 
 after(() => {
+  if (skipReason) return;
   rmSync(tmp, { recursive: true, force: true });
 });
 
-describe("multi-customer scoping (end-to-end)", () => {
+describe("multi-customer scoping (end-to-end)", skipOpts, () => {
   it("customer-A repo: customer-A content is allowed", () => {
     writeFileSync(join(aRepo, "src.ts"), "see acme-corp.example for details\n");
     execFileSync("git", ["add", "src.ts"], { cwd: aRepo });
@@ -179,7 +154,7 @@ describe("multi-customer scoping (end-to-end)", () => {
   });
 });
 
-describe("redaction policy (CLI surface)", () => {
+describe("redaction policy (CLI surface)", skipOpts, () => {
   it("hits never include the literal match by default", () => {
     writeFileSync(join(aRepo, "src.ts"), "betaco rules everything\n");
     execFileSync("git", ["add", "src.ts"], { cwd: aRepo });
@@ -233,7 +208,7 @@ describe("redaction policy (CLI surface)", () => {
   });
 });
 
-describe("status", () => {
+describe("status", skipOpts, () => {
   it("prints repo state in human-readable form", () => {
     const r = runCli(home, aRepo, ["status"]);
     assert.equal(r.code, 0);
@@ -260,7 +235,7 @@ describe("status", () => {
   });
 });
 
-describe("engagements list", () => {
+describe("engagements list", skipOpts, () => {
   it("prints registered engagements", () => {
     const r = runCli(home, aRepo, ["engagements", "list"]);
     assert.equal(r.code, 0);
@@ -278,7 +253,7 @@ describe("engagements list", () => {
   });
 });
 
-describe("render", () => {
+describe("render", skipOpts, () => {
   it("dry-run does not write files but reports plan", () => {
     const r = runCli(home, aRepo, ["render", "--dry-run", "--json"]);
     assert.equal(r.code, 0);
@@ -288,7 +263,7 @@ describe("render", () => {
   });
 });
 
-describe("variadic allow/deny", () => {
+describe("variadic allow/deny", skipOpts, () => {
   const varRepo = join(tmpdir(), `repo-aegis-var-${Date.now()}`);
 
   before(() => {

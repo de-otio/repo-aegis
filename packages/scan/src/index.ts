@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parseQueryFile, validateQueryFile } from "./queries.js";
-import { loadState, saveStateAtomic } from "./state.js";
+import { loadState, pruneSeenOlderThan, saveStateAtomic } from "./state.js";
 import { runScan } from "./run.js";
 import { makeOctokitClient } from "./octokit-client.js";
 import { renderMarkdown } from "./output.js";
@@ -27,6 +27,7 @@ interface RunCliOptions {
   capResultsPerQuery?: number;
   noUpdateState?: boolean;
   revealMatches?: boolean;
+  pruneStateOlderThan?: number;
 }
 
 function emitError(payload: { code: string; error: string; details?: unknown }, exitCode = 2): never {
@@ -74,6 +75,11 @@ program
   .option("--cap-results-per-query <n>", "stop scanning a query after this many hits", v => parseInt(v, 10))
   .option("--no-update-state", "dry-run; do not write state")
   .option("--reveal-matches", "include literal snippet text in output (default OFF)")
+  .option(
+    "--prune-state-older-than <days>",
+    "drop seen-hit entries first recorded more than N days ago (entries from pre-v2 state with no recorded date are kept)",
+    v => parseInt(v, 10),
+  )
   .action(async (opts: RunCliOptions) => {
     const format = opts.outputFormat ?? "json";
     if (!["json", "markdown", "issue"].includes(format)) {
@@ -137,8 +143,28 @@ program
       revealMatches: opts.revealMatches,
     });
 
+    let stateToWrite = result.updatedState;
+    if (typeof opts.pruneStateOlderThan === "number" && Number.isFinite(opts.pruneStateOlderThan)) {
+      if (opts.pruneStateOlderThan < 0) {
+        emitError({
+          code: "USAGE",
+          error: `--prune-state-older-than must be a non-negative integer (got ${opts.pruneStateOlderThan})`,
+        });
+      }
+      const pruneResult = pruneSeenOlderThan(stateToWrite, opts.pruneStateOlderThan);
+      stateToWrite = pruneResult.state;
+      // Surface the prune count on stderr for operator visibility (the
+      // JSON summary intentionally does NOT include this — it's a
+      // state-housekeeping signal, not a sweep-result signal).
+      if (pruneResult.pruned > 0) {
+        process.stderr.write(
+          `repo-aegis-scan: pruned ${pruneResult.pruned} seen-hit entr${pruneResult.pruned === 1 ? "y" : "ies"} older than ${opts.pruneStateOlderThan}d\n`,
+        );
+      }
+    }
+
     if (!opts.noUpdateState) {
-      saveStateAtomic(opts.state, result.updatedState);
+      saveStateAtomic(opts.state, stateToWrite);
     }
 
     if (format === "json") {
