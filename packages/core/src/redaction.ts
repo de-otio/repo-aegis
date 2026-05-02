@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 import { createHash } from "node:crypto";
 
 export type RedactionMode = "preview" | "hash" | "position-only";

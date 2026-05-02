@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Smoke test for the MCP server: boot it with an in-memory transport pair,
 // list tools, and call one tool end-to-end. Verifies that:
 //   - every tool the server should register is actually registered;

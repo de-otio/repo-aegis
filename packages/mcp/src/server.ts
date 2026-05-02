@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerStatusTool } from "./tools/status.js";
 import { registerCheckTools } from "./tools/check.js";

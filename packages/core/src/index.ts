@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Curated public API surface for `@de-otio/repo-aegis-core`.
 //
 // Every name re-exported below is part of the package's compatibility

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // CLI flag-name contract test.
 //
 // What this guards: the surface area exposed via `repo-aegis --help` is

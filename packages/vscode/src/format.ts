@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Pure formatting helpers. No `vscode` import — kept out of the runtime
 // extension graph so unit tests can exercise them under plain `node
 // --test` without booting the VSCode test harness.

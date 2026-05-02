@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // CLI subcommand group: `audit-log`.
 //
 // Operator-facing controls for the optional compliance trail. Default

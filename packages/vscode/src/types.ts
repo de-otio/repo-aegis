@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Local mirror of the JSON shapes emitted by repo-aegis CLI commands the
 // extension consumes. We import the canonical types from the core
 // package so we stay in sync with the contract; this file just narrows

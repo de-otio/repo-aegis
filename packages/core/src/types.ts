@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Central type re-export. Every module in core defines its own types, but
 // downstream consumers (cli, scan) should import from `@de-otio/repo-aegis-core`
 // (which re-exports everything via index.ts). This file just makes sure the

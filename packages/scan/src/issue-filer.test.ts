@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileIssue, type IssueClient } from "./issue-filer.js";

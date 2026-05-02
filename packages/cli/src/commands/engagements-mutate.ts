@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { parseDocument, YAMLSeq, YAMLMap, Scalar, isMap } from "yaml";
 import {

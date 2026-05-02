@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Thin wrapper around the `age` CLI for symmetric file encryption /
 // decryption. Lives in core so multiple packages (scan,
 // cli/registry-encrypt) can share the same machinery without each

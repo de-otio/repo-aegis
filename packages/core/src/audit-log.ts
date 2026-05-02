@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Operator audit log for repo-aegis.
 //
 // What this is: an append-only JSON Lines file that records

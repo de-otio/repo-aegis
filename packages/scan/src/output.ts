@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 import type { CodeSearchHit, RunSummary } from "./types.js";
 
 export function renderMarkdown(summary: RunSummary, hits: CodeSearchHit[]): string {

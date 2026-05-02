@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Bin entry for the repo-aegis MCP server. Spawns the McpServer over stdio
 // and waits forever — the parent (Claude Code, Cursor, etc.) drives it via
 // JSON-RPC over stdin/stdout.

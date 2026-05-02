@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Thin wrapper around child_process for invoking the repo-aegis CLI.
 // Kept in its own module so unit tests can stub `runCli` without booting
 // VSCode.

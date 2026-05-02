@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Builds the Commander program. Separated from the bin entry (`index.ts`)
 // so the contract test (`program.test.ts`) can walk the command tree
 // without triggering `process.argv` parsing.

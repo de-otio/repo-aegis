@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 import { request } from "@octokit/request";
 import type { SearchClient, SearchClientResult } from "./run.js";
 import type { IssueClient } from "./issue-filer.js";

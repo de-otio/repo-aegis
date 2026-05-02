@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Smoke tests for the repo-aegis VSCode extension.
 //
 // These cover the vscode-free helpers (format / cli) only — the

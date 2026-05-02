@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 import { isHomeOverridden } from "@de-otio/repo-aegis-core";
 
 export interface OutputOptions {

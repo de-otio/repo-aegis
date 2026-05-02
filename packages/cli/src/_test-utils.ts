@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Test-only helpers shared across command test files.
 // Filename underscore-prefixed so it's clearly not a runtime module.
 

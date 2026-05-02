@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 // Single source of truth for on-disk schema definitions.
 //
 // All YAML configuration files repo-aegis reads at runtime — the

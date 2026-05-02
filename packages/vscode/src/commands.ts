@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
 import * as vscode from "vscode";
 import { runCli, parseJson, type RunCliOptions } from "./cli.js";
 import { scanFile, applyDiagnostics } from "./diagnostics.js";
