@@ -221,7 +221,7 @@ describe("init command — --with-hooks wires installHooks", () => {
 });
 
 describe("init command — --with-claude wires installClaudeMd", () => {
-  it("writes scan-after-write.sh and registers the hook in settings.json", async () => {
+  it("registers the bin-name hook command in settings.json (no shell script)", async () => {
     const home = join(tmp, "with-claude-aegis-home");
     mkdirSync(join(home, "state"), { recursive: true });
     const claudeHome = join(tmp, "with-claude-claude-home");
@@ -231,11 +231,16 @@ describe("init command — --with-claude wires installClaudeMd", () => {
       captureOutputAsync(() => init({ withHooks: false, claudeHome })),
     );
 
-    assert.ok(existsSync(join(claudeHome, "hooks", "scan-after-write.sh")));
+    // No shell-script artefact: the hook calls the repo-aegis bin
+    // directly via PATH, so settings.json is the only thing written.
+    assert.ok(!existsSync(join(claudeHome, "hooks")));
+
     const settings = JSON.parse(readFileSync(join(claudeHome, "settings.json"), "utf8")) as {
-      hooks: { PostToolUse: { matcher: string }[] };
+      hooks: { PostToolUse: { matcher: string; hooks: { command: string }[] }[] };
     };
-    assert.ok(settings.hooks.PostToolUse.some(e => e.matcher === "Write|Edit|MultiEdit"));
+    const entry = settings.hooks.PostToolUse.find(e => e.matcher === "Write|Edit|MultiEdit");
+    assert.ok(entry);
+    assert.equal(entry!.hooks[0]!.command, "repo-aegis hook scan-after-write");
   });
 });
 

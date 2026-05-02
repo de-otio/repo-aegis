@@ -3,29 +3,44 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { z } from "zod";
 import {
   readRepoConfig,
   setClass,
   addEngagement,
   validatePattern,
+  formatZodError,
   type RepoClass,
   REPO_CLASSES,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
 // --------------------------------------------------------------------------
-// Types
+// Types and schema
 // --------------------------------------------------------------------------
 
-interface ClassifyRule {
-  match: string;
-  class: RepoClass;
-  engagement?: string;
-}
+const classifyRuleSchema = z
+  .object({
+    match: z.string({ message: "rule missing string 'match'" }),
+    class: z.enum(REPO_CLASSES as readonly [RepoClass, ...RepoClass[]], {
+      message: `invalid class; must be one of: ${REPO_CLASSES.join(", ")}`,
+    }),
+    engagement: z.string().optional(),
+  })
+  .passthrough()
+  .refine(
+    rule => !(rule.class === "customer-coupled" && rule.engagement === undefined),
+    { message: "customer-coupled rules must include an 'engagement' field" },
+  );
 
-interface ClassifyConfig {
-  rules: ClassifyRule[];
-}
+const classifyConfigSchema = z
+  .object({
+    rules: z.array(classifyRuleSchema, { message: "'rules' must be a list" }),
+  })
+  .passthrough();
+
+type ClassifyRule = z.infer<typeof classifyRuleSchema>;
+type ClassifyConfig = z.infer<typeof classifyConfigSchema>;
 
 interface ClassifyOptions extends OutputOptions {
   apply?: boolean;
@@ -54,10 +69,6 @@ function getRemoteUrl(cwd: string): string | null {
   }
 }
 
-function isValidClass(s: string): s is RepoClass {
-  return (REPO_CLASSES as readonly string[]).includes(s);
-}
-
 function loadClassifyConfig(
   rulesPath: string,
   opts: OutputOptions,
@@ -80,7 +91,10 @@ function loadClassifyConfig(
     );
   }
 
-  if (!parsed || typeof parsed !== "object" || !("rules" in parsed)) {
+  // Pre-zod tests pin on this exact wording when the file isn't even a
+  // mapping (e.g. raw scalar). Catch it explicitly so the user sees a
+  // top-level diagnostic instead of zod's nested-path expansion.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     emitError(
       {
         code: "RULES_PARSE_ERROR",
@@ -91,73 +105,48 @@ function loadClassifyConfig(
     );
   }
 
-  const root = parsed as { rules: unknown };
-  if (!Array.isArray(root.rules)) {
-    emitError(
-      {
-        code: "RULES_PARSE_ERROR",
-        error: "'rules' must be a list",
-        details: rulesPath,
-      },
-      opts,
-    );
+  let validated: ClassifyConfig;
+  try {
+    validated = classifyConfigSchema.parse(parsed);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      emitError(
+        {
+          code: "INVALID_RULES",
+          error: `${err.issues.length} invalid rule${err.issues.length === 1 ? "" : "s"} in rules file`,
+          details: formatZodError(err, "rules"),
+        },
+        opts,
+      );
+    }
+    throw err;
   }
 
-  // Validate each rule
-  const invalid: { index: number; reason: string }[] = [];
-
-  for (let i = 0; i < root.rules.length; i++) {
-    const rule = root.rules[i];
-    if (!rule || typeof rule !== "object") {
-      invalid.push({ index: i, reason: "rule must be an object" });
-      continue;
-    }
-
-    const r = rule as Partial<ClassifyRule & { class: string }>;
-
-    if (typeof r.match !== "string") {
-      invalid.push({ index: i, reason: "rule missing string 'match'" });
-      continue;
-    }
-
-    if (typeof r.class !== "string" || !isValidClass(r.class)) {
-      invalid.push({
-        index: i,
-        reason: `invalid class '${String(r.class)}'; must be one of: ${REPO_CLASSES.join(", ")}`,
-      });
-      continue;
-    }
-
-    if (r.class === "customer-coupled" && typeof r.engagement !== "string") {
-      invalid.push({
-        index: i,
-        reason: "customer-coupled rules must include an 'engagement' field",
-      });
-      continue;
-    }
-
-    const validation = validatePattern(r.match);
+  // Pattern-safety validation runs after zod's structural pass: zod
+  // confirmed `match` is a string, regex-safety confirms it compiles
+  // cleanly within our timeout budget.
+  const patternIssues: string[] = [];
+  for (let i = 0; i < validated.rules.length; i++) {
+    const rule = validated.rules[i]!;
+    const validation = validatePattern(rule.match);
     if (!validation.ok) {
-      invalid.push({
-        index: i,
-        reason: `invalid match pattern: ${validation.reason ?? "unknown"}`,
-      });
+      patternIssues.push(
+        `  rules[${i}]: invalid match pattern: ${validation.reason ?? "unknown"}`,
+      );
     }
   }
-
-  if (invalid.length > 0) {
-    const details = invalid.map(e => `  rule[${e.index}]: ${e.reason}`).join("\n");
+  if (patternIssues.length > 0) {
     emitError(
       {
         code: "INVALID_RULES",
-        error: `${invalid.length} invalid rule${invalid.length === 1 ? "" : "s"} in rules file`,
-        details: details,
+        error: `${patternIssues.length} invalid rule${patternIssues.length === 1 ? "" : "s"} in rules file`,
+        details: patternIssues.join("\n"),
       },
       opts,
     );
   }
 
-  return { rules: root.rules as ClassifyRule[] };
+  return validated;
 }
 
 function matchRule(

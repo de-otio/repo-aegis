@@ -102,3 +102,10 @@ export type { LockOptions } from "./lock.js";
 
 // ---- canonical JSON shapes ----------------------------------------------
 export type { RepoJson, EngagementJson } from "./types.js";
+
+// ---- schema helpers ------------------------------------------------------
+// `formatZodError` is the canonical "render a ZodError as a one-line
+// human-readable message" helper. Sibling packages (cli, scan) own their
+// own schemas (classify rules, queries) but import this so error wording
+// is consistent across the surface.
+export { formatZodError } from "./schemas.js";

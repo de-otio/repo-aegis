@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parse } from "yaml";
+import { z } from "zod";
+import { formatZodError } from "@de-otio/repo-aegis-core";
 import type { QueryEntry, QueryFile } from "./types.js";
 
 export interface QueryValidationIssue {
@@ -16,6 +18,26 @@ export interface QueryValidationResult {
 
 const ORG_FILTER = /\borg:[^\s]+/i;
 
+// Schema for the on-disk queries YAML. parse-and-validate splits cleanly
+// here: zod handles structural validation (right shape, right types,
+// required fields), and the second pass (validateQueryFile) handles
+// cross-field rules that aren't expressible structurally — name-uniqueness
+// and the org:-filter mandate.
+const queryEntrySchema = z
+  .object({
+    name: z.string().min(1, "missing or empty 'name'"),
+    query: z.string().min(1, "missing or empty 'query'"),
+    excludeOrg: z.array(z.string()).optional(),
+    excludeRepo: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+const queryFileSchema = z
+  .object({
+    queries: z.array(queryEntrySchema, { message: "'queries' must be a list" }),
+  })
+  .passthrough();
+
 export function parseQueryFile(path: string): QueryFile {
   if (!existsSync(path)) {
     throw new Error(`query file not found: ${path}`);
@@ -27,14 +49,19 @@ export function parseQueryFile(path: string): QueryFile {
   } catch (err) {
     throw new Error(`failed to parse ${path}: ${(err as Error).message}`);
   }
-  if (!parsed || typeof parsed !== "object" || !("queries" in (parsed as object))) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("queries" in (parsed as object))) {
     throw new Error(`${path}: missing top-level 'queries:' list`);
   }
-  const root = parsed as { queries: unknown };
-  if (!Array.isArray(root.queries)) {
-    throw new Error(`${path}: 'queries' must be a list`);
+  let validated;
+  try {
+    validated = queryFileSchema.parse(parsed);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      throw new Error(`${path}: ${formatZodError(err, "queries")}`);
+    }
+    throw err;
   }
-  return { queries: root.queries as QueryEntry[] };
+  return { queries: validated.queries as QueryEntry[] };
 }
 
 export function validateQueryFile(file: QueryFile): QueryValidationResult {

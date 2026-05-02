@@ -1,10 +1,9 @@
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
+import { z } from "zod";
 import { registryPath } from "./paths.js";
-import {
-  RegistryNotFoundError,
-  RegistryParseError,
-} from "./exceptions.js";
+import { RegistryNotFoundError, RegistryParseError } from "./exceptions.js";
+import { registryFileSchema, formatZodError } from "./schemas.js";
 
 export interface Engagement {
   id: string;
@@ -53,85 +52,59 @@ export function loadRegistry(path: string = registryPath()): Registry {
   } catch (err) {
     throw new RegistryParseError(path, err);
   }
-  if (!parsed || typeof parsed !== "object") {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new RegistryParseError(path, new Error("registry must be a YAML mapping"));
   }
+  // The "missing 'engagements:'" failure used to be a separate check
+  // ahead of structural validation. Surfacing it explicitly makes the
+  // common-case error message punchier than zod's generic
+  // "Required" — and several tests pin on this wording.
   if (!("engagements" in parsed)) {
     throw new RegistryParseError(path, new Error("missing 'engagements:' top-level key"));
   }
-  const root = parsed as {
-    engagements: unknown;
-    always_block?: unknown;
-    schemaVersion?: unknown;
-  };
 
-  // Schema-version gate. Absent => 1 (legacy). Present-but-non-number =>
-  // parse error. Higher than this build supports => "please upgrade".
-  let schemaVersion = 1;
-  if (root.schemaVersion !== undefined) {
-    if (typeof root.schemaVersion !== "number" || !Number.isFinite(root.schemaVersion)) {
-      throw new RegistryParseError(
-        path,
-        new Error("'schemaVersion' must be a number"),
-      );
+  let validated;
+  try {
+    validated = registryFileSchema.parse(parsed);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      throw new RegistryParseError(path, new Error(formatZodError(err, "registry")));
     }
-    schemaVersion = root.schemaVersion;
-    if (schemaVersion > MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION) {
-      throw new RegistryParseError(
-        path,
-        new Error(
-          `registry schemaVersion ${schemaVersion} is newer than this build supports ` +
-            `(max ${MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION}); ` +
-            `registry written by a newer repo-aegis — please upgrade`,
-        ),
-      );
-    }
+    throw err;
   }
 
-  if (!Array.isArray(root.engagements)) {
-    throw new RegistryParseError(path, new Error("'engagements' must be a list"));
-  }
-  for (const e of root.engagements) {
-    if (!e || typeof e !== "object") {
-      throw new RegistryParseError(path, new Error(`engagement entry is not an object`));
-    }
-    const obj = e as Partial<Engagement>;
-    if (typeof obj.id !== "string" || obj.id.length === 0) {
-      throw new RegistryParseError(path, new Error(`engagement entry missing string 'id'`));
-    }
-    if (obj.id === ALWAYS_BLOCK_RESERVED_ID) {
-      throw new RegistryParseError(
-        path,
-        new Error(
-          `engagement id "${ALWAYS_BLOCK_RESERVED_ID}" is reserved; ` +
-            `use the top-level 'always_block:' field for org-wide markers`,
-        ),
-      );
-    }
-    if (typeof obj.name !== "string") {
-      throw new RegistryParseError(path, new Error(`engagement '${obj.id}' missing string 'name'`));
-    }
-    if (!Array.isArray(obj.markers)) {
-      throw new RegistryParseError(path, new Error(`engagement '${obj.id}' missing 'markers' list`));
-    }
+  // Schema-version gate (per design B14). Zod has accepted any number;
+  // the policy decision (reject newer-than-supported with an upgrade
+  // hint) is encoded here rather than as a refine() so the error
+  // wording is exactly what the user-facing tests assert on.
+  const schemaVersion = validated.schemaVersion ?? 1;
+  if (schemaVersion > MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION) {
+    throw new RegistryParseError(
+      path,
+      new Error(
+        `registry schemaVersion ${schemaVersion} is newer than this build supports ` +
+          `(max ${MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION}); ` +
+          `registry written by a newer repo-aegis — please upgrade`,
+      ),
+    );
   }
 
-  let alwaysBlock: string[] = [];
-  if (root.always_block !== undefined) {
-    if (!Array.isArray(root.always_block)) {
-      throw new RegistryParseError(path, new Error("'always_block' must be a list of patterns"));
-    }
-    for (const p of root.always_block) {
-      if (typeof p !== "string") {
-        throw new RegistryParseError(path, new Error("'always_block' entries must be strings"));
-      }
-    }
-    alwaysBlock = root.always_block as string[];
-  }
+  // Map zod's struct shape back to the domain types. The `passthrough()`
+  // on the schema preserves unknown sibling fields, but those are not
+  // part of the public Registry interface — drop them at the boundary.
+  const engagements: Engagement[] = validated.engagements.map(e => ({
+    id: e.id,
+    name: e.name,
+    ...(e.started !== undefined && { started: e.started }),
+    ...(e.ended !== undefined && { ended: e.ended }),
+    ...(e.reposActive !== undefined && { reposActive: e.reposActive }),
+    markers: e.markers,
+    ...(e.notes !== undefined && { notes: e.notes }),
+  }));
 
   return {
-    engagements: root.engagements as Engagement[],
-    alwaysBlock,
+    engagements,
+    alwaysBlock: validated.always_block ?? [],
     schemaVersion,
   };
 }

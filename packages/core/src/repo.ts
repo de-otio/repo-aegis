@@ -2,16 +2,18 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { z } from "zod";
 import { NotAGitRepoError } from "./exceptions.js";
+import {
+  repoOverrideSchema,
+  REPO_CLASSES as REPO_CLASSES_SCHEMA,
+  formatZodError,
+  type RepoClassLiteral,
+} from "./schemas.js";
 
-export type RepoClass = "public-eligible" | "private-strict" | "customer-coupled" | "scratch";
+export type RepoClass = RepoClassLiteral;
 
-export const REPO_CLASSES: readonly RepoClass[] = [
-  "public-eligible",
-  "private-strict",
-  "customer-coupled",
-  "scratch",
-];
+export const REPO_CLASSES: readonly RepoClass[] = REPO_CLASSES_SCHEMA;
 
 export interface RepoConfig {
   cwd: string;
@@ -68,28 +70,20 @@ function loadOverride(cwd: string): { override: RepoOverride; path: string } | n
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new RepoOverrideError(path, "must be a YAML mapping");
   }
-  const root2 = parsed as { class?: unknown; engagements?: unknown };
+
+  let validated;
+  try {
+    validated = repoOverrideSchema.parse(parsed);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      throw new RepoOverrideError(path, formatZodError(err, "override"));
+    }
+    throw err;
+  }
+
   const out: RepoOverride = {};
-  if (root2.class !== undefined) {
-    if (typeof root2.class !== "string" || !isValidClass(root2.class)) {
-      throw new RepoOverrideError(
-        path,
-        `'class' must be one of: ${REPO_CLASSES.join(", ")} (got ${JSON.stringify(root2.class)})`,
-      );
-    }
-    out.class = root2.class;
-  }
-  if (root2.engagements !== undefined) {
-    if (!Array.isArray(root2.engagements)) {
-      throw new RepoOverrideError(path, "'engagements' must be a list of strings");
-    }
-    for (const e of root2.engagements) {
-      if (typeof e !== "string" || e.length === 0) {
-        throw new RepoOverrideError(path, "'engagements' entries must be non-empty strings");
-      }
-    }
-    out.engagements = root2.engagements as string[];
-  }
+  if (validated.class !== undefined) out.class = validated.class;
+  if (validated.engagements !== undefined) out.engagements = validated.engagements;
   return { override: out, path };
 }
 

@@ -6,13 +6,14 @@ import {
   existsSync,
   readFileSync,
   writeFileSync,
-  statSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv } from "../_test-utils.js";
 import { installClaudeMd } from "./install-claude-md.js";
+
+const HOOK_COMMAND = "repo-aegis hook scan-after-write";
 
 let tmp: string;
 
@@ -54,20 +55,12 @@ describe("install-claude-md — fresh install", () => {
     assert.ok(body.includes("repo-aegis (data-leak prevention)"));
   });
 
-  it("writes the scan-after-write hook script", () => {
-    const path = join(claudeHome, "hooks", "scan-after-write.sh");
-    assert.ok(existsSync(path));
-    const body = readFileSync(path, "utf8");
-    assert.ok(body.includes("repo-aegis check --path"));
+  it("does not write a hook shell script (settings.json calls the bin directly)", () => {
+    assert.ok(!existsSync(join(claudeHome, "hooks", "scan-after-write.sh")));
+    assert.ok(!existsSync(join(claudeHome, "hooks")));
   });
 
-  it("hook script is executable", () => {
-    const path = join(claudeHome, "hooks", "scan-after-write.sh");
-    const st = statSync(path);
-    assert.equal(st.mode & 0o111, 0o111);
-  });
-
-  it("registers PostToolUse hook in settings.json", () => {
+  it("registers PostToolUse hook in settings.json by bin name", () => {
     const settingsPath = join(claudeHome, "settings.json");
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       hooks: { PostToolUse: { matcher: string; hooks: { type: string; command: string }[] }[] };
@@ -77,7 +70,7 @@ describe("install-claude-md — fresh install", () => {
     assert.equal(post[0]!.matcher, "Write|Edit|MultiEdit");
     assert.equal(post[0]!.hooks.length, 1);
     assert.equal(post[0]!.hooks[0]!.type, "command");
-    assert.equal(post[0]!.hooks[0]!.command, join(claudeHome, "hooks", "scan-after-write.sh"));
+    assert.equal(post[0]!.hooks[0]!.command, HOOK_COMMAND);
   });
 });
 
@@ -143,7 +136,7 @@ describe("install-claude-md — merges into existing settings", () => {
       e => e.matcher === "Write|Edit|MultiEdit",
     );
     assert.ok(aegisEntry);
-    assert.equal(aegisEntry!.hooks[0]!.command, join(claudeHome, "hooks", "scan-after-write.sh"));
+    assert.equal(aegisEntry!.hooks[0]!.command, HOOK_COMMAND);
   });
 
   it("appends to existing matcher entry without duplicating", () => {
@@ -180,7 +173,7 @@ describe("install-claude-md — merges into existing settings", () => {
     assert.equal(entry.matcher, "Write|Edit|MultiEdit");
     assert.equal(entry.hooks.length, 2);
     assert.equal(entry.hooks[0]!.command, "/another/hook.sh");
-    assert.equal(entry.hooks[1]!.command, join(claudeHome, "hooks", "scan-after-write.sh"));
+    assert.equal(entry.hooks[1]!.command, HOOK_COMMAND);
   });
 });
 
@@ -207,7 +200,7 @@ describe("install-claude-md — strict-mode warning", () => {
 });
 
 describe("install-claude-md — --dry-run", () => {
-  it("does not create CLAUDE.md, hooks dir, settings.json, or hook script", () => {
+  it("does not create CLAUDE.md, settings.json, or any hook script", () => {
     const claudeHome = makeClaudeHome("dryrun-fresh");
     const aegisHome = aegisHomeFor("dryrun-fresh");
 
@@ -218,7 +211,6 @@ describe("install-claude-md — --dry-run", () => {
 
     assert.ok(!existsSync(join(claudeHome, "CLAUDE.md")));
     assert.ok(!existsSync(join(claudeHome, "settings.json")));
-    assert.ok(!existsSync(join(claudeHome, "hooks", "scan-after-write.sh")));
     assert.ok(!existsSync(join(claudeHome, "hooks")));
   });
 
@@ -232,10 +224,8 @@ describe("install-claude-md — --dry-run", () => {
     assert.ok(result.stdout.includes("dry run"));
     assert.ok(result.stdout.includes("repo-aegis: managed block"));
     assert.ok(result.stdout.includes("repo-aegis (data-leak prevention)"));
-    // settings.json preview must show the registered command path.
-    assert.ok(
-      result.stdout.includes(join(claudeHome, "hooks", "scan-after-write.sh")),
-    );
+    // settings.json preview must show the registered hook command.
+    assert.ok(result.stdout.includes(HOOK_COMMAND));
     assert.ok(result.stdout.includes("PostToolUse"));
     assert.ok(result.stdout.includes("Write|Edit|MultiEdit"));
   });
@@ -293,7 +283,7 @@ describe("install-claude-md — --dry-run", () => {
       dryRun: boolean;
       claudeHome: string;
       claudeMd: { path: string; wouldAppend: boolean; alreadyPresent: boolean; addition: string };
-      hookScript: { path: string; wouldWrite: boolean; contents: string };
+      hookCommand: string;
       settings: { path: string; wouldAdd: boolean; alreadyPresent: boolean; contents: string };
       strictModeOn: boolean;
     };
@@ -303,16 +293,16 @@ describe("install-claude-md — --dry-run", () => {
     assert.equal(j.claudeMd.wouldAppend, true);
     assert.equal(j.claudeMd.alreadyPresent, false);
     assert.ok(j.claudeMd.addition.includes("repo-aegis: managed block"));
-    assert.equal(j.hookScript.wouldWrite, true);
-    assert.ok(j.hookScript.contents.includes("repo-aegis check --json --path"));
+    assert.equal(j.hookCommand, HOOK_COMMAND);
     assert.equal(j.settings.wouldAdd, true);
     assert.equal(j.settings.alreadyPresent, false);
     assert.ok(j.settings.contents.includes("Write|Edit|MultiEdit"));
+    assert.ok(j.settings.contents.includes(HOOK_COMMAND));
 
     // No filesystem side effects.
     assert.ok(!existsSync(join(claudeHome, "CLAUDE.md")));
     assert.ok(!existsSync(join(claudeHome, "settings.json")));
-    assert.ok(!existsSync(join(claudeHome, "hooks", "scan-after-write.sh")));
+    assert.ok(!existsSync(join(claudeHome, "hooks")));
   });
 
   it("respects silent: no stdout/stderr output", () => {
@@ -341,7 +331,7 @@ describe("install-claude-md — JSON output", () => {
       action: string;
       claudeHome: string;
       claudeMd: { appended: boolean; alreadyPresent: boolean };
-      hookScript: { written: boolean };
+      hookCommand: string;
       settings: { added: boolean; alreadyPresent: boolean };
       strictModeOn: boolean;
     };
@@ -349,7 +339,7 @@ describe("install-claude-md — JSON output", () => {
     assert.equal(j.claudeHome, claudeHome);
     assert.equal(j.claudeMd.appended, true);
     assert.equal(j.claudeMd.alreadyPresent, false);
-    assert.equal(j.hookScript.written, true);
+    assert.equal(j.hookCommand, HOOK_COMMAND);
     assert.equal(j.settings.added, true);
     assert.equal(j.settings.alreadyPresent, false);
     assert.equal(j.strictModeOn, false);

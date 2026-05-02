@@ -11,7 +11,13 @@ marker list when working on customer-A's own code.
 ## Status
 
 **Pre-release. v0.2. CLI and scanner are feature-complete: all
-commands and output formats implemented. Not yet published to npm.**
+commands, output formats, and hook integrations implemented. Not yet
+published to npm.**
+
+If you're driving this from a coding agent (Claude Code, Cursor,
+Aider, Cline, …), start at the [agent operator guide](doc/agent-guide.md).
+For the design rationale and threat model, see
+[doc/design/](doc/design/).
 
 ## What it does
 
@@ -176,7 +182,9 @@ audits), see the data-leak prevention guide referenced under
 
 - Pre-commit / pre-push hooks shell out to `repo-aegis check --staged`
   and translate exit code into the user-facing block.
-- A Claude Code PostToolUse self-catch hook does the same per-write.
+- A Claude Code PostToolUse self-catch hook (registered as
+  `repo-aegis hook scan-after-write` in `~/.claude/settings.json`)
+  does the same per-write.
 - A central registry (`~/.config/repo-aegis/engagements.yaml`) tracks
   engagement → markers → start/end dates. Per-engagement marker files
   (`~/.config/repo-aegis/markers/<id>.txt`) are generated from it.
@@ -191,10 +199,10 @@ The monorepo has three workspace packages:
 - `@de-otio/repo-aegis-scan` — the centralised Layer-2 sweep:
   reads queries from a YAML file, runs them against GitHub
   code-search, filters out previously-seen hits via an atomic state
-  file. Returns new hits as JSON. Issue-filing and markdown output
-  are planned for v0.3. Deployment (the scheduled GitHub Action,
-  encrypted query list, and state file) lives in a private repo of
-  the operator's choosing — see
+  file. Output formats: JSON, markdown report, or a filed GitHub
+  issue. Deployment (the scheduled GitHub Action, encrypted query
+  list, and state file) lives in a private repo of the operator's
+  choosing — see
   [data-leaks-on-github/code-search-solution.md](https://github.com/de-otio/dot-notes/blob/main/doc/topics/data-leaks-on-github/code-search-solution.md).
 
 All three share the same marker list and engagement registry, so a
@@ -204,17 +212,14 @@ string is identified as a leak by the same logic at every layer.
 
 Designed but not yet implemented:
 
-- `audit --published` for VSIX bundles is wired; for npm tarballs it
-  uses `npm pack` to fetch by name. A network-isolated mode (mirror
-  registry) is a future polish.
-- Pattern-attribution in `ScanHit` (which engagement's marker matched
-  this hit) — currently inferable from the deny set's per-file
-  layout but not surfaced per-hit.
+- `audit --published` for npm tarballs uses `npm pack` to fetch by
+  name. A network-isolated mode (mirror registry) is a future polish.
 - `re2` regex backend for hard ReDoS resistance (current strict
   validation uses a subprocess timer; `re2` would obviate it).
 - Age-encrypted registry (the deployment-side query file is
-  encryptable; the engagement registry itself is not).
-- MCP server / VSCode extension / GitHub Action wrapper.
+  age-encryptable; the engagement registry itself is not).
+- MCP server / VSCode extension / GitHub Action wrapper — surface
+  the same machinery to other coding agents.
 
 ## Background
 

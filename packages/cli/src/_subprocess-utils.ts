@@ -35,7 +35,17 @@ export interface RunResult {
  * {@link cliBuilt} so a bare `node --test` against TS source skips
  * gracefully instead of exploding with ENOENT.
  */
-export function runCli(home: string, cwd: string, args: string[]): RunResult {
+export interface RunOptions {
+  /** Optional stdin payload, fed to the subprocess on stdin. */
+  input?: string;
+}
+
+export function runCli(
+  home: string,
+  cwd: string,
+  args: string[],
+  opts: RunOptions = {},
+): RunResult {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
     cwd,
     env: {
@@ -43,9 +53,19 @@ export function runCli(home: string, cwd: string, args: string[]): RunResult {
       REPO_AEGIS_HOME: home,
     },
     encoding: "utf8",
+    ...(opts.input !== undefined && { input: opts.input }),
   });
   let json: unknown;
   if (args.includes("--json") && result.stdout.trim().length > 0) {
+    try {
+      json = JSON.parse(result.stdout);
+    } catch {
+      /* not JSON */
+    }
+  }
+  // The hook subcommand emits JSON without --json (it is implicit),
+  // so when stdout looks like JSON, attempt to parse and attach.
+  if (json === undefined && result.stdout.trim().startsWith("{")) {
     try {
       json = JSON.parse(result.stdout);
     } catch {

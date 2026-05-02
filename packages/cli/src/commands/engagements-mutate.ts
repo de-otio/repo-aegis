@@ -42,6 +42,8 @@ interface EngagementsRemoveOptions extends OutputOptions {
   hard?: boolean;
 }
 
+type Doc = ReturnType<typeof parseDocument>;
+
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -52,13 +54,13 @@ function backdated13MonthsIso(): string {
   return d.toISOString().slice(0, 10);
 }
 
-function loadDoc(path: string): ReturnType<typeof parseDocument> {
+function loadDoc(path: string): Doc {
   if (!existsSync(path)) throw new RegistryNotFoundError(path);
   const raw = readFileSync(path, "utf8");
   return parseDocument(raw);
 }
 
-function saveDoc(doc: ReturnType<typeof parseDocument>, path: string): void {
+function saveDoc(doc: Doc, path: string): void {
   writeFileSync(path, doc.toString(), { mode: 0o600 });
   try {
     chmodSync(path, 0o600);
@@ -67,7 +69,7 @@ function saveDoc(doc: ReturnType<typeof parseDocument>, path: string): void {
   }
 }
 
-function findEngagementNode(doc: ReturnType<typeof parseDocument>, id: string): YAMLMap | null {
+function findEngagementNode(doc: Doc, id: string): YAMLMap | null {
   const seq = doc.get("engagements") as YAMLSeq | null;
   if (!seq || !seq.items) return null;
   for (const item of seq.items) {
@@ -77,6 +79,52 @@ function findEngagementNode(doc: ReturnType<typeof parseDocument>, id: string): 
     if (idNode instanceof Scalar && idNode.value === id) return item as YAMLMap;
   }
   return null;
+}
+
+/**
+ * Load the registry YAML doc or call emitError (which exits 2). Used to
+ * collapse the `let doc; try { doc = ... } catch { emitError(...) }`
+ * pattern into a single expression so TypeScript flow analysis narrows
+ * the result without `!` assertions.
+ */
+function loadDocOrExit(path: string, opts: OutputOptions): Doc {
+  try {
+    return loadDoc(path);
+  } catch (err) {
+    if (err instanceof RegistryNotFoundError) {
+      emitError(
+        {
+          code: "REGISTRY_NOT_FOUND",
+          error: "registry not found; run `repo-aegis init` first",
+          details: err.path,
+        },
+        opts,
+      );
+    }
+    emitError({ error: (err as Error).message }, opts);
+  }
+}
+
+/**
+ * Run a callback under the registry write lock; map known exception types
+ * to their canonical CLI error payloads. Centralises the lock+error dance
+ * shared by add / end / remove.
+ */
+function withRegistryLock<T>(opts: OutputOptions, fn: () => T): T {
+  try {
+    return withLockSync(fn);
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      emitError({ code: err.code, error: err.message }, opts);
+    }
+    if (err instanceof PatternValidationError) {
+      emitError(
+        { code: "PATTERN_VALIDATION", error: err.message, details: err.invalid },
+        opts,
+      );
+    }
+    emitError({ code: "RENDER_ERROR", error: (err as Error).message }, opts);
+  }
 }
 
 export function engagementsAdd(id: string, opts: EngagementsAddOptions): void {
@@ -106,24 +154,9 @@ export function engagementsAdd(id: string, opts: EngagementsAddOptions): void {
     );
   }
 
-  let doc;
-  try {
-    doc = loadDoc(path);
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
-      emitError(
-        {
-          code: "REGISTRY_NOT_FOUND",
-          error: "registry not found; run `repo-aegis init` first",
-          details: err.path,
-        },
-        opts,
-      );
-    }
-    emitError({ error: (err as Error).message }, opts);
-  }
+  const doc = loadDocOrExit(path, opts);
 
-  const existing = findEngagementNode(doc!, id);
+  const existing = findEngagementNode(doc, id);
   if (existing) {
     emitError(
       {
@@ -134,7 +167,7 @@ export function engagementsAdd(id: string, opts: EngagementsAddOptions): void {
     );
   }
 
-  const seq = doc!.get("engagements") as YAMLSeq;
+  const seq = doc.get("engagements") as YAMLSeq;
   const newEntry: Record<string, unknown> = {
     id,
     name: opts.name ?? id,
@@ -142,26 +175,12 @@ export function engagementsAdd(id: string, opts: EngagementsAddOptions): void {
     markers,
   };
 
-  let renderResult;
-  try {
-    renderResult = withLockSync(() => {
-      seq.add(newEntry);
-      saveDoc(doc!, path);
-      const reg = loadRegistry(path);
-      return renderMarkers(reg);
-    });
-  } catch (err) {
-    if (err instanceof LockTimeoutError) {
-      emitError({ code: err.code, error: err.message }, opts);
-    }
-    if (err instanceof PatternValidationError) {
-      emitError(
-        { code: "PATTERN_VALIDATION", error: err.message, details: err.invalid },
-        opts,
-      );
-    }
-    emitError({ code: "RENDER_ERROR", error: (err as Error).message }, opts);
-  }
+  const renderResult = withRegistryLock(opts, () => {
+    seq.add(newEntry);
+    saveDoc(doc, path);
+    const reg = loadRegistry(path);
+    return renderMarkers(reg);
+  });
 
   if (opts.json) {
     emitJson({
@@ -170,7 +189,7 @@ export function engagementsAdd(id: string, opts: EngagementsAddOptions): void {
       name: newEntry["name"],
       started: newEntry["started"],
       markers: markers.length,
-      rendered: { written: renderResult!.written, removed: renderResult!.removed },
+      rendered: { written: renderResult.written, removed: renderResult.removed },
     });
     return;
   }
@@ -183,43 +202,21 @@ export function engagementsEnd(id: string, opts: EngagementsEndOptions): void {
   }
   const path = opts.registryPath ?? defaultRegistryPath();
 
-  let doc;
-  try {
-    doc = loadDoc(path);
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
-      emitError({ code: "REGISTRY_NOT_FOUND", error: "registry not found", details: err.path }, opts);
-    }
-    emitError({ error: (err as Error).message }, opts);
-  }
+  const doc = loadDocOrExit(path, opts);
 
-  const node = findEngagementNode(doc!, id);
+  const node = findEngagementNode(doc, id);
   if (!node) {
     emitError({ code: "ENGAGEMENT_NOT_FOUND", error: `engagement "${id}" not found` }, opts);
   }
 
   const endedDate = opts.purge ? backdated13MonthsIso() : todayIso();
 
-  let renderResult;
-  try {
-    renderResult = withLockSync(() => {
-      node!.set("ended", endedDate);
-      saveDoc(doc!, path);
-      const reg = loadRegistry(path);
-      return renderMarkers(reg);
-    });
-  } catch (err) {
-    if (err instanceof LockTimeoutError) {
-      emitError({ code: err.code, error: err.message }, opts);
-    }
-    if (err instanceof PatternValidationError) {
-      emitError(
-        { code: "PATTERN_VALIDATION", error: err.message, details: err.invalid },
-        opts,
-      );
-    }
-    emitError({ code: "RENDER_ERROR", error: (err as Error).message }, opts);
-  }
+  const renderResult = withRegistryLock(opts, () => {
+    node.set("ended", endedDate);
+    saveDoc(doc, path);
+    const reg = loadRegistry(path);
+    return renderMarkers(reg);
+  });
 
   if (opts.json) {
     emitJson({
@@ -227,7 +224,7 @@ export function engagementsEnd(id: string, opts: EngagementsEndOptions): void {
       id,
       ended: endedDate,
       purged: !!opts.purge,
-      rendered: { written: renderResult!.written, removed: renderResult!.removed },
+      rendered: { written: renderResult.written, removed: renderResult.removed },
     });
     return;
   }
@@ -244,7 +241,7 @@ export function engagementsShow(id: string, opts: EngagementsShowOptions): void 
   }
   const path = opts.registryPath ?? defaultRegistryPath();
 
-  let reg;
+  let reg: ReturnType<typeof loadRegistry>;
   try {
     reg = loadRegistry(path);
   } catch (err) {
@@ -254,36 +251,36 @@ export function engagementsShow(id: string, opts: EngagementsShowOptions): void 
     emitError({ error: (err as Error).message }, opts);
   }
 
-  const e = reg!.engagements.find(x => x.id === id);
+  const e = reg.engagements.find(x => x.id === id);
   if (!e) {
     emitError({ code: "ENGAGEMENT_NOT_FOUND", error: `engagement "${id}" not found` }, opts);
   }
 
-  const active = isActive(e!);
+  const active = isActive(e);
 
   if (opts.json) {
     emitJson({
       action: "engagements-show",
-      id: e!.id,
-      name: e!.name,
-      started: e!.started ?? null,
-      ended: e!.ended ?? null,
+      id: e.id,
+      name: e.name,
+      started: e.started ?? null,
+      ended: e.ended ?? null,
       active,
-      markerCount: e!.markers.length,
-      notes: e!.notes ?? null,
+      markerCount: e.markers.length,
+      notes: e.notes ?? null,
     });
     return;
   }
 
-  emitText(`id:       ${e!.id}`);
-  emitText(`name:     ${e!.name}`);
-  if (e!.started) emitText(`started:  ${e!.started}`);
-  if (e!.ended) emitText(`ended:    ${e!.ended}`);
+  emitText(`id:       ${e.id}`);
+  emitText(`name:     ${e.name}`);
+  if (e.started) emitText(`started:  ${e.started}`);
+  if (e.ended) emitText(`ended:    ${e.ended}`);
   emitText(`active:   ${active}`);
-  emitText(`markers:  ${e!.markers.length} pattern(s)`);
-  if (e!.notes) {
+  emitText(`markers:  ${e.markers.length} pattern(s)`);
+  if (e.notes) {
     emitText("notes:");
-    for (const line of e!.notes.split("\n")) {
+    for (const line of e.notes.split("\n")) {
       emitText(`  ${line}`);
     }
   }
@@ -328,17 +325,9 @@ export function engagementsRemove(id: string, opts: EngagementsRemoveOptions): v
 
   const path = opts.registryPath ?? defaultRegistryPath();
 
-  let doc;
-  try {
-    doc = loadDoc(path);
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
-      emitError({ code: "REGISTRY_NOT_FOUND", error: "registry not found", details: err.path }, opts);
-    }
-    emitError({ error: (err as Error).message }, opts);
-  }
+  const doc = loadDocOrExit(path, opts);
 
-  const seq = doc!.get("engagements") as YAMLSeq | null;
+  const seq = doc.get("engagements") as YAMLSeq | null;
   let removed = false;
   if (seq && Array.isArray(seq.items)) {
     const idx = seq.items.findIndex(item => {
@@ -368,35 +357,21 @@ export function engagementsRemove(id: string, opts: EngagementsRemoveOptions): v
     return;
   }
 
-  let renderResult;
-  try {
-    renderResult = withLockSync(() => {
-      saveDoc(doc!, path);
-      const reg = loadRegistry(path);
-      return renderMarkers(reg);
-    });
-  } catch (err) {
-    if (err instanceof LockTimeoutError) {
-      emitError({ code: err.code, error: err.message }, opts);
-    }
-    if (err instanceof PatternValidationError) {
-      emitError(
-        { code: "PATTERN_VALIDATION", error: err.message, details: err.invalid },
-        opts,
-      );
-    }
-    emitError({ code: "RENDER_ERROR", error: (err as Error).message }, opts);
-  }
+  const renderResult = withRegistryLock(opts, () => {
+    saveDoc(doc, path);
+    const reg = loadRegistry(path);
+    return renderMarkers(reg);
+  });
 
   if (opts.json) {
     emitJson({
       action: "engagements-remove",
       id,
       removed: true,
-      rendered: { written: renderResult!.written, removed: renderResult!.removed },
+      rendered: { written: renderResult.written, removed: renderResult.removed },
     });
     return;
   }
   emitText(`removed engagement ${id} from registry`);
-  emitText(`  marker file removed: ${renderResult!.removed.length} file(s) at next render`);
+  emitText(`  marker file removed: ${renderResult.removed.length} file(s) at next render`);
 }
