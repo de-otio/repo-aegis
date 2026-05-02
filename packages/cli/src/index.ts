@@ -19,27 +19,49 @@ homeWarning();
 const program = new Command()
   .name("repo-aegis")
   .description("Engagement-scoped leak prevention for multi-customer git repos")
-  .version(pkg.version);
+  .version(pkg.version)
+  // Universal flags. Apply to every subcommand uniformly. Specified once.
+  // Per the design doc § Locked decisions table.
+  .option("--cwd <dir>", "evaluate from a different working directory (default: process.cwd())")
+  .option("--registry-path <path>", "override the engagement registry path (default: ~/.config/repo-aegis/engagements.yaml)")
+  .option("--home <dir>", "override the repo-aegis home dir (default: ~/.config/repo-aegis)")
+  .option("--no-color", "disable color in output (reserved; currently no color is used)")
+  .option("--json", "output JSON (also accepted as a per-command flag for back-compat)");
+
+// Translate --home / --registry-path into the env vars that paths.ts
+// reads at call time. Runs before any subcommand action.
+program.hook("preAction", () => {
+  const g = program.opts() as {
+    home?: string;
+    registryPath?: string;
+  };
+  if (g.home) process.env["REPO_AEGIS_HOME"] = g.home;
+  if (g.registryPath) process.env["REPO_AEGIS_REGISTRY"] = g.registryPath;
+});
+
+// Helper: merge global opts with command-specific opts. Per-command
+// values win on collision (so a subcommand-level --json overrides
+// global --json).
+function withGlobals<T extends object>(opts: T, cmd: { optsWithGlobals: () => Record<string, unknown> }): T {
+  return { ...cmd.optsWithGlobals(), ...opts } as T;
+}
 
 program
   .command("allow")
   .argument("<engagement...>", "one or more engagement ids or fuzzy name matches")
   .description("allow references to one or more engagements in the current repo")
-  .option("--json", "output JSON")
-  .action((engagements: string[], opts: { json?: boolean }) => allow(engagements, opts));
+  .action((engagements: string[], opts, cmd) => allow(engagements, withGlobals(opts, cmd)));
 
 program
   .command("deny")
   .argument("<engagement...>", "one or more engagement ids or fuzzy name matches")
   .description("stop allowing references to engagements in the current repo")
-  .option("--json", "output JSON")
-  .action((engagements: string[], opts: { json?: boolean }) => deny(engagements, opts));
+  .action((engagements: string[], opts, cmd) => deny(engagements, withGlobals(opts, cmd)));
 
 program
   .command("status")
   .description("show this repo's class, allowed engagements, and deny-set summary")
-  .option("--json", "output JSON")
-  .action((opts: { json?: boolean }) => status(opts));
+  .action((opts, cmd) => status(withGlobals(opts, cmd)));
 
 program
   .command("check")
@@ -51,15 +73,13 @@ program
   .option("--max-file-bytes <n>", "skip files larger than this (default 1 MiB)", v => parseInt(v, 10))
   .option("--ignore-allowlist-comments", "do not respect `repo-aegis: allow` comments (audit-grade strict)")
   .option("--verbose", "reveal literal matched markers (NEVER pass from hooks)")
-  .option("--json", "output JSON")
-  .action((opts) => check(opts));
+  .action((opts, cmd) => check(withGlobals(opts, cmd)));
 
 program
   .command("render")
   .description("regenerate per-engagement marker files from the registry")
-  .option("--json", "output JSON")
   .option("--dry-run", "show what would be written without writing")
-  .action((opts: { json?: boolean; dryRun?: boolean }) => render(opts));
+  .action((opts, cmd) => render(withGlobals(opts, cmd)));
 
 const engagements = program
   .command("engagements")
@@ -68,9 +88,8 @@ const engagements = program
 engagements
   .command("list")
   .description("list registered engagements")
-  .option("--json", "output JSON")
   .option("--all", "include ended engagements past the retention window")
-  .action((opts: { json?: boolean; all?: boolean }) => engagementsList(opts));
+  .action((opts, cmd) => engagementsList(withGlobals(opts, cmd)));
 
 engagements
   .command("add <id>")
@@ -78,21 +97,18 @@ engagements
   .option("--name <name>", "human-readable name (defaults to id)")
   .option("--started <date>", "started date in YYYY-MM-DD (defaults to today)")
   .option("--marker <pattern...>", "marker pattern; pass multiple times for multiple markers")
-  .option("--json")
-  .action((id: string, opts) => engagementsAdd(id, opts));
+  .action((id: string, opts, cmd) => engagementsAdd(id, withGlobals(opts, cmd)));
 
 engagements
   .command("end <id>")
   .description("mark engagement ended; markers retain for 12 months by default")
   .option("--purge", "back-date so markers are removed at next render")
-  .option("--json")
-  .action((id: string, opts) => engagementsEnd(id, opts));
+  .action((id: string, opts, cmd) => engagementsEnd(id, withGlobals(opts, cmd)));
 
 engagements
   .command("show <id>")
   .description("show one engagement's registered details")
-  .option("--json")
-  .action((id: string, opts) => engagementsShow(id, opts));
+  .action((id: string, opts, cmd) => engagementsShow(id, withGlobals(opts, cmd)));
 
 // v0.2 commands: stubbed so the CLI surface is complete-feeling and the
 // handoff to parallel agents has clear entry points.
@@ -129,26 +145,26 @@ const { audit } = await import("./commands/audit.js");
 
 program
   .command("init")
-  .description("bootstrap repo-aegis: create config dir, scaffold registry, render markers")
-  .option("--with-hooks", "also install git hooks (deferred to v0.2.1)", true)
-  .option("--with-claude", "also install Claude Code hooks (deferred to v0.2.1)", true)
+  .description("bootstrap repo-aegis: create config dir, scaffold registry, render markers, install hooks")
+  .option("--with-hooks", "install git hooks (default on)", true)
+  .option("--with-claude", "install Claude Code PostToolUse hook + CLAUDE.md snippet (default on)", true)
+  .option("--no-with-hooks", "skip git hook installation")
+  .option("--no-with-claude", "skip Claude Code hook installation")
   .option("--force", "overwrite existing engagements.yaml")
-  .option("--json")
-  .action(opts => init(opts));
+  .option("--claude-home <dir>", "override default ~/.claude location (used by --with-claude)")
+  .action((opts, cmd) => init(withGlobals(opts, cmd)));
 
 program
   .command("classify")
   .description("auto-detect class+engagement from this repo's remote URL")
   .option("--apply", "actually set git config (otherwise: print suggestion)")
   .option("--rules <path>", "rules YAML; defaults to ~/.config/repo-aegis/classify.yml")
-  .option("--cwd <dir>", "target a different working directory")
-  .option("--json")
-  .action(opts => classify(opts));
+  .action((opts, cmd) => classify(withGlobals(opts, cmd)));
 
 const ctx = program.command("context").description("toggle leak-context strict mode");
-ctx.command("on").description("enable strict mode").option("--json").action(opts => contextOn(opts));
-ctx.command("off").description("disable strict mode").option("--json").action(opts => contextOff(opts));
-ctx.command("status").description("show whether strict mode is on").option("--json").action(opts => contextStatus(opts));
+ctx.command("on").description("enable strict mode").action((opts, cmd) => contextOn(withGlobals(opts, cmd)));
+ctx.command("off").description("disable strict mode").action((opts, cmd) => contextOff(withGlobals(opts, cmd)));
+ctx.command("status").description("show whether strict mode is on").action((opts, cmd) => contextStatus(withGlobals(opts, cmd)));
 
 const install = program.command("install").description("install hooks, gitignore, claude-md, or ci workflow");
 
@@ -156,32 +172,26 @@ install
   .command("hooks")
   .description("write pre-commit/pre-push to ~/.config/repo-aegis/hooks and set core.hooksPath")
   .option("--force", "overwrite a conflicting core.hooksPath")
-  .option("--cwd <dir>", "target a different repo directory")
-  .option("--json")
-  .action(opts => installHooks(opts));
+  .action((opts, cmd) => installHooks(withGlobals(opts, cmd)));
 
 install
   .command("gitignore")
   .description("append recommended secret-file patterns to ~/.config/git/ignore")
   .option("--gitignore-path <path>", "override default global gitignore path")
-  .option("--json")
-  .action(opts => installGitignore(opts));
+  .action((opts, cmd) => installGitignore(withGlobals(opts, cmd)));
 
 install
   .command("ci")
   .description("emit (or --write) .github/workflows/leak-scan.yml")
   .option("--write", "write to disk instead of printing to stdout")
   .option("--force", "overwrite an existing workflow file")
-  .option("--cwd <dir>", "target a different repo directory")
-  .option("--json")
-  .action(opts => installCi(opts));
+  .action((opts, cmd) => installCi(withGlobals(opts, cmd)));
 
 install
   .command("claude-md")
   .description("install Claude Code PostToolUse hook + CLAUDE.md snippet")
   .option("--claude-home <dir>", "override default ~/.claude location")
-  .option("--json")
-  .action(opts => installClaudeMd(opts));
+  .action((opts, cmd) => installClaudeMd(withGlobals(opts, cmd)));
 
 const markers = program.command("markers").description("inspect and probe the marker deny set");
 
@@ -189,16 +199,13 @@ markers
   .command("list")
   .description("list patterns grouped by source file (redacted by default)")
   .option("--verbose", "reveal literal patterns (NEVER pass from hooks)")
-  .option("--json")
-  .action(opts => markersList(opts));
+  .action((opts, cmd) => markersList(withGlobals(opts, cmd)));
 
 markers
   .command("test <string>")
   .description("report which patterns would match <string> in this repo's deny set")
   .option("--verbose", "reveal literal matches (NEVER pass from hooks)")
-  .option("--cwd <dir>", "evaluate from a different repo directory")
-  .option("--json")
-  .action((input: string, opts) => markersTest(input, opts));
+  .action((input: string, opts, cmd) => markersTest(input, withGlobals(opts, cmd)));
 
 program
   .command("audit")
@@ -211,9 +218,7 @@ program
   .option("--org <org>", "also run a one-shot GitHub code-search sweep against this org (needs GH_TOKEN)")
   .option("--published <pkg-or-tarball>", "also scan a packed npm tarball, VSIX bundle, or npm package name")
   .option("--token <env-var>", "env var holding the GitHub token for --org (default GH_TOKEN)")
-  .option("--cwd <dir>", "audit a different repo directory")
   .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
-  .option("--json")
-  .action(opts => audit(opts));
+  .action((opts, cmd) => audit(withGlobals(opts, cmd)));
 
 await program.parseAsync(process.argv);
