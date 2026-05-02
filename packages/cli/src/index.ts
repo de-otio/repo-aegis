@@ -70,6 +70,7 @@ program
   .option("--path <path>", "scan a single file")
   .option("--range <revspec>", "scan additions in a git range, e.g. <remote>..<local> (used by pre-push hook)")
   .option("--history", "scan full git history with `git log -G` per pattern (slow)")
+  .option("--since <revspec>", "with --history: lower-bound revspec (only commits reachable forward of this point)")
   .option("--max-file-bytes <n>", "skip files larger than this (default 1 MiB)", v => parseInt(v, 10))
   .option("--ignore-allowlist-comments", "do not respect `repo-aegis: allow` comments (audit-grade strict)")
   .option("--verbose", "reveal literal matched markers (NEVER pass from hooks)")

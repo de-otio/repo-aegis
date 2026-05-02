@@ -19,6 +19,8 @@ interface CheckOptions {
   path?: string;
   range?: string;
   history?: boolean;
+  /** With --history, only scan commits reachable from this revspec. */
+  since?: string;
   maxFileBytes?: number;
   ignoreAllowlistComments?: boolean;
   json?: boolean;
@@ -102,7 +104,10 @@ export function check(opts: CheckOptions): void {
     if (!repo.isGitRepo) {
       emitError({ code: "NOT_GIT_REPO", error: "not a git repo; --history requires a git repo" }, opts);
     }
-    historyHits = scanHistory(repo, denySet, scanOpts);
+    historyHits = scanHistory(repo, denySet, {
+      ...scanOpts,
+      ...(opts.since !== undefined && { since: opts.since }),
+    });
   }
 
   const advisory = repo.class === "scratch";

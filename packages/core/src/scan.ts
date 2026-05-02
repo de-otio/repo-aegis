@@ -283,10 +283,18 @@ export interface HistoryHit {
   commitSummary: string;
 }
 
+export interface ScanHistoryOptions extends ScanOptions {
+  /** Lower bound revspec; only commits reachable from the bound forward
+   * are scanned. e.g. "main", "v1.0.0", "HEAD~100". When omitted, scans
+   * the full history (the design's default). */
+  since?: string;
+}
+
 /**
  * Scan the full git history with `git log -G <pattern>` per pattern.
  * Returns one HistoryHit per (pattern, commit) match. Cost scales as
- * O(patterns × history-size); use sparingly.
+ * O(patterns × history-size); use sparingly. Pass `--since` to bound
+ * the lower edge.
  *
  * The pattern field is redacted by default (preview mode) — same
  * policy as scan hits. Pass `revealMatches: true` to opt into
@@ -295,16 +303,22 @@ export interface HistoryHit {
 export function scanHistory(
   repo: RepoConfig,
   denySet: DenySet,
-  opts: ScanOptions = {},
+  opts: ScanHistoryOptions = {},
 ): HistoryHit[] {
   if (!repo.isGitRepo) return [];
   const hits: HistoryHit[] = [];
   for (const pattern of denySet.patterns) {
     let stdout = "";
+    const args = ["log", "-G", pattern, "--oneline", "--no-decorate"];
+    if (opts.since) {
+      // git log <revspec>.. shows commits reachable from HEAD but not
+      // from <revspec>; effectively "since this point forward".
+      args.push(`${opts.since}..`);
+    }
     try {
       stdout = execFileSync(
         "git",
-        ["log", "-G", pattern, "--oneline", "--no-decorate"],
+        args,
         {
           cwd: repo.cwd,
           encoding: "utf8",
