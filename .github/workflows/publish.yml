@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Publish workflow for the repo-aegis npm packages.
+#
+# Triggered by GitHub Releases on this repo. The release tag (e.g.
+# `v0.1.0`) feeds the per-package version checks below — every package
+# whose own `version` field matches the tag (minus the leading `v`) is
+# published.
+#
+# Trusted publishing notes (per global CLAUDE.md):
+# - npm trusted publishing requires npm >= 11.5.1 → Node 24 (Node 22
+#   ships npm 10 which fails with a misleading 404 immediately after
+#   the provenance signature).
+# - `--provenance` requires the source repo to be PUBLIC. If this repo
+#   is private at publish time, --provenance fails with a 422. The
+#   conditional `if [ "${IS_PUBLIC}" = true ]` handles either case.
+# - NEVER set NODE_AUTH_TOKEN. With it set (even empty), npm tries the
+#   token path instead of OIDC and trusted publishing silently never
+#   engages.
+# - `registry-url` on actions/setup-node MUST stay set, otherwise npm
+#   fails with ENEEDAUTH.
+
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Print would-be publish commands without invoking npm"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write   # required for npm trusted publishing (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 24 (npm >= 11.5.1 required for trusted publishing)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - run: npm test
+
+      - name: Determine repo visibility (governs --provenance)
+        id: visibility
+        run: |
+          # gh repo view emits "PUBLIC" / "PRIVATE" / "INTERNAL"
+          vis=$(gh repo view "$GITHUB_REPOSITORY" --json visibility --jq .visibility)
+          if [ "$vis" = "PUBLIC" ]; then
+            echo "is-public=true" >> "$GITHUB_OUTPUT"
+            echo "Repo is PUBLIC — provenance attestation enabled."
+          else
+            echo "is-public=false" >> "$GITHUB_OUTPUT"
+            echo "Repo is $vis — provenance disabled (would 422)."
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Compute provenance flag
+        id: provenance
+        run: |
+          if [ "${{ steps.visibility.outputs.is-public }}" = "true" ]; then
+            echo "flag=--provenance" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish each workspace package
+        run: |
+          set -e
+          DRY_RUN_FLAG=""
+          if [ "${{ inputs.dry-run }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+            echo "DRY RUN — no actual publish."
+          fi
+
+          # Order matters: core must publish before cli/scan/mcp because
+          # they consume @de-otio/repo-aegis-core. Workspaces
+          # cross-reference each other via npm semver, NOT workspace
+          # protocol, so the dependency strings already point at the
+          # registry version (^0.1.0).
+          for pkg in core scan cli mcp; do
+            dir="packages/${pkg}"
+            name=$(node -p "require('./${dir}/package.json').name")
+            ver=$(node -p "require('./${dir}/package.json').version")
+            echo
+            echo "==> Publishing ${name}@${ver} from ${dir}"
+            (cd "$dir" && npm publish --access public ${{ steps.provenance.outputs.flag }} $DRY_RUN_FLAG)
+          done
+        env:
+          # Intentionally NOT setting NODE_AUTH_TOKEN — trusted publishing
+          # uses OIDC. Setting it (even empty) defeats trusted publishing.
+          NPM_CONFIG_PROVENANCE: "" # belt-and-suspenders; we pass --provenance explicitly

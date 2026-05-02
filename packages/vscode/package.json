@@ -62,7 +62,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@de-otio/repo-aegis-core": "^0.0.1"
+    "@de-otio/repo-aegis-core": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.12.0",
