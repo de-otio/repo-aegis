@@ -10,6 +10,7 @@ import {
   addEngagement,
   validatePattern,
   formatZodError,
+  appendAuditRecord,
   type RepoClass,
   REPO_CLASSES,
 } from "@de-otio/repo-aegis-core";
@@ -276,6 +277,25 @@ export function classify(opts: ClassifyOptions): void {
 
   if (rule.engagement) {
     addEngagement(rule.engagement, cwd);
+  }
+
+  // Audit (best-effort). Records the class change + engagement attach
+  // (when present) as a single action so the trail captures the actual
+  // semantics of `classify --apply`.
+  try {
+    appendAuditRecord({
+      action: "classify-apply",
+      cwd,
+      repo: cwd,
+      ...(rule.engagement && { engagement: rule.engagement }),
+      details: {
+        class: rule.class,
+        rule: ruleIndex,
+        previousClass: current.class,
+      },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
   }
 
   const after = readRepoConfig(cwd);

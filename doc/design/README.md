@@ -327,6 +327,7 @@ Stable across all subcommands. Never reused.
 | Cross-border data transfer (`audit --org`)          | Org seed substrings redact through GitHub Code Search. Required `--accept-cross-border` flag (or `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1`) before any seed leaves the box. Maximum query cap (default 30, `--max-queries`).               |
 | Zip-slip on `audit --published`                     | Post-extraction `realpathSync` check that every entry resolves under the temp dir; refuse otherwise.                                                                                                                                    |
 | Flag injection via PostToolUse `file_path`          | The hook subcommand `repo-aegis hook scan-after-write` parses stdin JSON in Node and calls `check({ path })` directly — there is no shell to inject through, and the file_path is never tokenised as a CLI argument.                     |
+| Compliance trail                                    | Audit log (when enabled) writes JSONL records of every state-changing action (`allow`, `deny`, `engagements add/end/remove`, `classify --apply`, `init`, `install hooks/claude-md/gitignore/ci`, `render`, `registry encrypt/decrypt`) to `~/.config/repo-aegis/state/audit.log` (chmod 600, append-only, rotates at 10 MiB). Records carry engagement ids and structural metadata only — never literal markers or matched substrings. Off by default; opt in via `repo-aegis audit-log on`. |
 
 ## Test strategy
 

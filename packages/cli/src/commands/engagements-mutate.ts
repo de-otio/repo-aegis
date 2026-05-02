@@ -11,6 +11,7 @@ import {
   RegistryNotFoundError,
   LockTimeoutError,
   ALWAYS_BLOCK_RESERVED_ID,
+  appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
@@ -182,6 +183,18 @@ export function engagementsAdd(id: string, opts: EngagementsAddOptions): void {
     return renderMarkers(reg);
   });
 
+  // Audit (best-effort). Record id + count only — never the literal
+  // marker patterns themselves.
+  try {
+    appendAuditRecord({
+      action: "engagements-add",
+      engagement: id,
+      details: { markerCount: markers.length, name: opts.name ?? id },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
+  }
+
   if (opts.json) {
     emitJson({
       action: "engagements-add",
@@ -217,6 +230,16 @@ export function engagementsEnd(id: string, opts: EngagementsEndOptions): void {
     const reg = loadRegistry(path);
     return renderMarkers(reg);
   });
+
+  try {
+    appendAuditRecord({
+      action: "engagements-end",
+      engagement: id,
+      details: { ended: endedDate, purged: !!opts.purge },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
+  }
 
   if (opts.json) {
     emitJson({
@@ -362,6 +385,16 @@ export function engagementsRemove(id: string, opts: EngagementsRemoveOptions): v
     const reg = loadRegistry(path);
     return renderMarkers(reg);
   });
+
+  try {
+    appendAuditRecord({
+      action: "engagements-remove",
+      engagement: id,
+      details: { hard: true },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
+  }
 
   if (opts.json) {
     emitJson({

@@ -289,6 +289,50 @@ After successful decryption you can re-run the command that failed.
 At end of session, ask the user whether they want to re-encrypt with
 `registry encrypt` before stopping.
 
+### Audit log
+
+The audit log is an optional compliance trail: when enabled, every
+state-changing CLI invocation appends one JSON Lines record to
+`~/.config/repo-aegis/state/audit.log`. It answers questions like
+"did the operator allow customer-A in this repo on date X" from a
+single file rather than archaeology across `.git/config` and the
+engagement registry.
+
+**What gets captured:** `allow`, `deny`, `engagements add` /
+`engagements end` / `engagements remove`, `classify --apply`, `init`,
+`install hooks` / `install claude-md` / `install gitignore` /
+`install ci`, `render`, `registry encrypt` / `registry decrypt`. One
+record per successful invocation, written *after* the primary action
+persists. Each record carries `ts`, `action`, `actor` (from
+`process.env.USER`), and structural metadata — engagement ids,
+counts, paths. **Never literal marker patterns or matched
+substrings.**
+
+**Default state:** OFF. Existing users see no behaviour change after
+upgrade. Opt in per machine:
+
+```sh
+repo-aegis audit-log on        # enable
+repo-aegis audit-log off       # disable (existing records preserved)
+repo-aegis audit-log show      # last 50 records
+repo-aegis audit-log show --all
+repo-aegis audit-log path      # active log file path
+```
+
+The file is chmod 600, append-only, and rotates to
+`audit.log.<iso>` when it exceeds 10 MiB (configurable via
+`audit-log.json`'s `rotateBytes` field).
+
+**As an agent: do not write to this file directly.** It's the user's
+compliance surface, and the only sanctioned writers are the
+state-changing commands above (which append automatically when the log
+is on). If the user asks you to enable, disable, or inspect the log,
+use the `audit-log` subcommands above. If they ask you to "remove an
+incorrect record", surface the situation: the log is intentionally
+append-only — corrections go in as a new record (e.g. `engagements
+remove --hard` followed by `engagements add` rather than editing the
+log file).
+
 ### "Permanently delete an engagement record (data-subject erasure)"
 
 ```sh
@@ -561,6 +605,10 @@ shape we don't model.
 | `install gitignore` | append global gitignore | `action`, `path`, `appended` |
 | `install ci` | emit GHA workflow | (printed to stdout, not JSON) |
 | `hook scan-after-write` | (PostToolUse entry) | same as `check --path` |
+| `audit-log on` | enable compliance trail | `action`, `wasOn`, `isOn`, `path` |
+| `audit-log off` | disable compliance trail | `action`, `wasOn`, `isOn`, `path` |
+| `audit-log show [--all]` | print recorded events | `action`, `path`, `enabled`, `total`, `shown`, `records` |
+| `audit-log path` | print log file path | `action`, `path`, `enabled`, `exists` |
 
 Always pass `--json` when you want machine-readable output. Without
 it, output is tuned for a human at a terminal.

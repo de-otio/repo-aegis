@@ -12,6 +12,7 @@ import {
   writeBufferTo,
   AgeNotFoundError,
   AgeError,
+  appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
@@ -116,6 +117,19 @@ export function registryEncrypt(opts: EncryptOptions): void {
     2,
   );
   writeFileSync(marker, markerBody, { mode: 0o600 });
+
+  // Audit (best-effort). Emit AFTER the marker is written so the trail
+  // reflects persisted state. The recipient is recorded — it's an
+  // age public key, not sensitive material, and is essential to the
+  // compliance question "who can read the at-rest registry?".
+  try {
+    appendAuditRecord({
+      action: "registry-encrypt",
+      details: { recipient: opts.recipient, marker },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
+  }
 
   if (opts.json) {
     emitJson({

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { appendAuditRecord } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
 const BEGIN_MARKER = "# repo-aegis: managed gitignore block — do not edit between markers";
@@ -103,6 +104,16 @@ export function installGitignore(opts: InstallGitignoreOptions): void {
     appendFileSync(target, (needsLeadingNewline ? "\n" : "") + MANAGED_BLOCK);
   } else {
     writeFileSync(target, MANAGED_BLOCK);
+  }
+
+  // Audit (best-effort). Emit AFTER the file has been written.
+  try {
+    appendAuditRecord({
+      action: "install-gitignore",
+      details: { target, appended: true },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
   }
 
   if (opts.json) {

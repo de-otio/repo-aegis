@@ -6,6 +6,7 @@ import {
   RegistryNotFoundError,
   LockTimeoutError,
   EXIT_USAGE,
+  appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
@@ -75,6 +76,23 @@ export function render(opts: RenderOptions): void {
     removed: result.removed,
     flat: result.flat,
   };
+
+  // Audit (best-effort). Suppress under --dry-run since nothing
+  // persisted to disk. Records counts only; never the per-engagement
+  // pattern contents.
+  if (!opts.dryRun) {
+    try {
+      appendAuditRecord({
+        action: "render",
+        details: {
+          writtenCount: result.written.length,
+          removedCount: result.removed.length,
+        },
+      });
+    } catch {
+      /* audit log must not break user-facing ops */
+    }
+  }
 
   if (opts.json) {
     emitJson(summary);

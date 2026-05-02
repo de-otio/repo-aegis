@@ -7,6 +7,7 @@ import {
   writeBufferTo,
   AgeNotFoundError,
   AgeError,
+  appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
@@ -80,6 +81,18 @@ export function registryDecrypt(opts: DecryptOptions): void {
   unlinkSync(cipher);
   if (existsSync(marker)) {
     unlinkSync(marker);
+  }
+
+  // Audit (best-effort). The identity-file path is a sensitive
+  // (private-key-bearing) value; record only that decrypt happened
+  // and the marker that was removed.
+  try {
+    appendAuditRecord({
+      action: "registry-decrypt",
+      details: { markerRemoved: marker },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
   }
 
   if (opts.json) {

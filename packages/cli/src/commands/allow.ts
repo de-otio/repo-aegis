@@ -6,6 +6,7 @@ import {
   isActive,
   RegistryNotFoundError,
   NotAGitRepoError,
+  appendAuditRecord,
   type Engagement,
   type RepoJson,
   type EngagementJson,
@@ -94,6 +95,24 @@ export function allow(queries: string[], opts: OutputOptions): void {
     classExplicit: repoBefore.classExplicit,
     engagements: [...repoBefore.engagements, ...addedIds],
   };
+
+  // Audit log (best-effort; never break the user-facing operation).
+  // Emit AFTER the git config writes have persisted. Records the
+  // engagement ids that were actually added (not the no-ops) so the
+  // log answers "what changed in this repo on this date" cleanly.
+  if (addedIds.length > 0) {
+    try {
+      appendAuditRecord({
+        action: "allow",
+        cwd: repoBefore.cwd,
+        repo: repoBefore.cwd,
+        engagements: addedIds,
+        details: { class: repoBefore.class },
+      });
+    } catch {
+      /* audit log must not break user-facing ops */
+    }
+  }
 
   if (opts.json) {
     emitJson({ action: "allow", results, repo: repoJson });

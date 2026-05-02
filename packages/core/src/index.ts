@@ -22,7 +22,17 @@ export {
   denySetCachePath,
   isHomeOverridden,
   flatMarkersPath,
+  auditLogPath,
 } from "./paths.js";
+
+// ---- audit log -----------------------------------------------------------
+export {
+  appendAuditRecord,
+  isAuditLogEnabled,
+  setAuditLogEnabled,
+  activeAuditLogPath,
+} from "./audit-log.js";
+export type { AuditRecord } from "./audit-log.js";
 
 // ---- registry ------------------------------------------------------------
 export {

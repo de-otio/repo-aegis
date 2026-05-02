@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { leakContextFlagPath } from "@de-otio/repo-aegis-core";
+import { leakContextFlagPath, appendAuditRecord } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
 const CLAUDE_MD_BEGIN = "<!-- repo-aegis: managed block — do not edit between markers -->";
@@ -190,6 +190,23 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   // 3. Warn if leak-context strict mode is off
   const flagPath = leakContextFlagPath();
   const strictModeOn = existsSync(flagPath);
+
+  // Audit (best-effort). Records what changed (added vs already-present)
+  // for both the CLAUDE.md snippet and the settings.json hook entry.
+  try {
+    appendAuditRecord({
+      action: "install-claude-md",
+      details: {
+        claudeHome,
+        claudeMdAppended,
+        claudeMdAlreadyPresent,
+        settingsAdded: merge.added,
+        settingsAlreadyPresent: merge.alreadyPresent,
+      },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
+  }
 
   if (opts.silent) return;
 

@@ -11,6 +11,7 @@ import {
   PatternValidationError,
   LockTimeoutError,
   EXIT_USAGE,
+  appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
@@ -202,6 +203,23 @@ export async function init(opts: InitOptions): Promise<void> {
     else emitText(`hooks: skipped (${hooksResult.reason})`);
     if (claudeResult.ran) emitText(`claude-md: installed at ${claudeResult.claudeHome}`);
     else emitText(`claude-md: skipped (${claudeResult.reason})`);
+  }
+
+  // Audit (best-effort). One record per init invocation so the trail
+  // captures bootstrap events alongside ongoing operator actions.
+  try {
+    appendAuditRecord({
+      action: "init",
+      details: {
+        home,
+        registryScaffolded,
+        registryAlreadyExisted,
+        withHooks: hooksResult.ran,
+        withClaude: claudeResult.ran,
+      },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
   }
 
   if (opts.json) {

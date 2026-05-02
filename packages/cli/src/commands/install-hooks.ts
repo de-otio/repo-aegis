@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, chmodSync, existsSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { repoAegisHome } from "@de-otio/repo-aegis-core";
+import { repoAegisHome, appendAuditRecord } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
 // Hook scripts. This file is the SINGLE source of truth for the
@@ -248,6 +248,19 @@ export function installHooks(opts: InstallHooksOptions): void {
       { code: "GIT_CONFIG_ERROR", error: `failed to set core.hooksPath: ${(err as Error).message}` },
       opts,
     );
+  }
+
+  // Audit (best-effort). Emit AFTER the git config is set so the
+  // record reflects persisted state. `cwd` carries the targeted repo.
+  try {
+    appendAuditRecord({
+      action: "install-hooks",
+      cwd,
+      repo: cwd,
+      details: { hooksDir, overwritten: conflict, previousCoreHooksPath: previousHooksPath || null },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
   }
 
   if (opts.silent) return;

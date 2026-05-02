@@ -121,6 +121,9 @@ export async function buildProgram(): Promise<Command> {
   );
   const { audit } = await import("./commands/audit.js");
   const { hookScanAfterWrite } = await import("./commands/hook-scan-after-write.js");
+  const { auditLogOn, auditLogOff, auditLogShow, auditLogPathCmd } = await import(
+    "./commands/audit-log.js"
+  );
 
   engagements
     .command("add <id>")
@@ -270,6 +273,38 @@ export async function buildProgram(): Promise<Command> {
     .command("scan-after-write")
     .description("PostToolUse: read tool-result JSON on stdin and run check on the written file")
     .action((opts, cmd) => hookScanAfterWrite(withGlobals(opts, cmd)));
+
+  // `audit-log` subcommand group — operator compliance trail. OFF by
+  // default; opt-in via `audit-log on`. State-changing operations
+  // (allow/deny, engagements add/end/remove, classify --apply, init,
+  // install hooks/claude-md/gitignore/ci, render, registry encrypt/
+  // decrypt) emit one JSONL record per success when enabled. The log
+  // never contains literal marker patterns or matched substrings —
+  // only structural metadata (engagement ids, counts, paths).
+  const auditLog = program
+    .command("audit-log")
+    .description("operator compliance trail (off by default)");
+
+  auditLog
+    .command("on")
+    .description("enable the audit log (writes JSONL records of state-changing actions)")
+    .action((opts, cmd) => auditLogOn(withGlobals(opts, cmd)));
+
+  auditLog
+    .command("off")
+    .description("disable the audit log (existing records preserved on disk)")
+    .action((opts, cmd) => auditLogOff(withGlobals(opts, cmd)));
+
+  auditLog
+    .command("show")
+    .description("print audit-log records (last 50 by default)")
+    .option("--all", "print every record, not just the most recent 50")
+    .action((opts, cmd) => auditLogShow(withGlobals(opts, cmd)));
+
+  auditLog
+    .command("path")
+    .description("print the active audit-log file path")
+    .action((opts, cmd) => auditLogPathCmd(withGlobals(opts, cmd)));
 
   // Stub helper for parity with the original index.ts shape. Every v0.2
   // command is now implemented; if a future v0.3 command lands as a

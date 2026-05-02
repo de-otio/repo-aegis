@@ -89,6 +89,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
     subcommands: [
       "allow",
       "audit",
+      "audit-log",
       "check",
       "classify",
       "context",
@@ -240,6 +241,17 @@ const EXPECTED_SHAPE: CommandShape[] = [
     subcommands: ["scan-after-write"],
   },
   { path: "hook scan-after-write", flags: [], subcommands: [] },
+
+  // ---- audit-log ----
+  {
+    path: "audit-log",
+    flags: [],
+    subcommands: ["off", "on", "path", "show"],
+  },
+  { path: "audit-log on", flags: [], subcommands: [] },
+  { path: "audit-log off", flags: [], subcommands: [] },
+  { path: "audit-log show", flags: ["--all"], subcommands: [] },
+  { path: "audit-log path", flags: [], subcommands: [] },
 ];
 
 describe("CLI flag-name contract", async () => {

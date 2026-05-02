@@ -34,6 +34,16 @@ export function denySetCachePath(home: string = repoAegisHome()): string {
 }
 
 /**
+ * Path of the operator audit log. JSON Lines, append-only, chmod 600.
+ * Off by default; opted into via `~/.config/repo-aegis/state/audit-log.json`
+ * (`{ "enabled": true }`). See `audit-log.ts` for the writer and
+ * `cli/commands/audit-log.ts` for the on/off/show/path subcommands.
+ */
+export function auditLogPath(home: string = repoAegisHome()): string {
+  return join(statePath(home), "audit.log");
+}
+
+/**
  * True if `REPO_AEGIS_HOME` is set in the environment, indicating the user
  * (or a parent process) has overridden the default home. CLI uses this to
  * print a stderr warning that the override is in effect.

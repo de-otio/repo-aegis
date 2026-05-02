@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { appendAuditRecord } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
 const WORKFLOW_PATH_REL = ".github/workflows/leak-scan.yml";
@@ -85,6 +86,18 @@ export function installCi(opts: InstallCiOptions): void {
       { code: "FS_ERROR", error: `failed to write workflow: ${(err as Error).message}` },
       opts,
     );
+  }
+
+  // Audit (best-effort). Emit AFTER the workflow file is written.
+  try {
+    appendAuditRecord({
+      action: "install-ci",
+      cwd,
+      repo: cwd,
+      details: { target, force: !!opts.force },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
   }
 
   if (opts.json) {

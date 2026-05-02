@@ -6,6 +6,7 @@ import {
   isActive,
   RegistryNotFoundError,
   NotAGitRepoError,
+  appendAuditRecord,
   type Engagement,
   type RepoJson,
   type EngagementJson,
@@ -96,6 +97,23 @@ export function deny(queries: string[], opts: OutputOptions): void {
     classExplicit: repoBefore.classExplicit,
     engagements: remaining,
   };
+
+  // Audit log (best-effort). Emit AFTER persistence; record the ids
+  // actually removed (skip no-ops) so the trail reflects state change.
+  const removedIds = results.filter(r => r.removed).map(r => r.engagement.id);
+  if (removedIds.length > 0) {
+    try {
+      appendAuditRecord({
+        action: "deny",
+        cwd: repoBefore.cwd,
+        repo: repoBefore.cwd,
+        engagements: removedIds,
+        details: { class: repoBefore.class },
+      });
+    } catch {
+      /* audit log must not break user-facing ops */
+    }
+  }
 
   if (opts.json) {
     emitJson({ action: "deny", results, repo: repoJson });
