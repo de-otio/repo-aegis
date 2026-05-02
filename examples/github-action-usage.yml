@@ -1,0 +1,90 @@
+# Reference workflow for the de-otio/repo-aegis GitHub Action.
+#
+# Copy this file to `.github/workflows/leak-scan.yml` in the consuming
+# repository. It runs `repo-aegis audit` on every PR and on direct
+# pushes to main, and posts a PR comment summarising any findings.
+#
+# Assumes the consuming repo has either a `.repo-aegis.yml` at the
+# repo root (declaring class + allowed engagements) or sets the
+# `registry` input on the action step.
+name: leak-scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Default to read-only. The optional PR-comment step below requires
+# `pull-requests: write`; keep that scoped to that job only.
+permissions:
+  contents: read
+
+jobs:
+  leak-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required only by the "Comment on PR" step. Remove if you drop
+      # that step.
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # `repo-aegis audit` includes a history sweep; full history
+          # is needed for that to be meaningful.
+          fetch-depth: 0
+
+      - name: repo-aegis audit
+        id: scan
+        uses: de-otio/repo-aegis@v1
+        with:
+          command: audit
+          # Don't fail the job here — we want to post the comment
+          # first, then fail explicitly below.
+          fail-on-hits: 'false'
+
+      - name: Comment on PR with findings
+        if: >-
+          github.event_name == 'pull_request'
+          && steps.scan.outputs.exit-code != '0'
+        uses: actions/github-script@v7
+        env:
+          HITS_JSON: ${{ steps.scan.outputs.hits-json }}
+          EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
+        with:
+          script: |
+            const exitCode = process.env.EXIT_CODE;
+            const hitsJson = process.env.HITS_JSON || '';
+            // Truncate to keep the comment under GitHub's 65 KiB cap.
+            const MAX = 60000;
+            const trimmed = hitsJson.length > MAX
+              ? hitsJson.slice(0, MAX) + '\n... (truncated)'
+              : hitsJson;
+            const body = [
+              '### repo-aegis audit findings',
+              '',
+              `Exit code: \`${exitCode}\` (non-zero = hit or error).`,
+              '',
+              '<details><summary>JSON output</summary>',
+              '',
+              '```json',
+              trimmed,
+              '```',
+              '',
+              '</details>',
+              '',
+              'See the workflow logs for full details.',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Fail the job on hits
+        if: steps.scan.outputs.exit-code != '0'
+        run: |
+          echo "repo-aegis audit exited ${{ steps.scan.outputs.exit-code }}"
+          exit 1

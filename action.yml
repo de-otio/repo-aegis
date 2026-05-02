@@ -1,0 +1,78 @@
+name: repo-aegis
+description: Engagement-scoped data-leak prevention scan
+author: De Otio
+branding:
+  icon: shield
+  color: red
+inputs:
+  command:
+    description: Subcommand to run (default audit)
+    required: false
+    default: audit
+  args:
+    description: Additional CLI args (string, space-separated)
+    required: false
+    default: ''
+  registry:
+    description: >-
+      Path to a custom engagements.yaml. If omitted, the action falls back
+      to a checked-in .repo-aegis.yml or runs without one.
+    required: false
+    default: ''
+  fail-on-hits:
+    description: Whether the action fails the workflow on any hits (default true)
+    required: false
+    default: 'true'
+  version:
+    description: Version of @de-otio/repo-aegis to install (default latest)
+    required: false
+    default: latest
+outputs:
+  exit-code:
+    description: Exit code of the repo-aegis invocation
+    value: ${{ steps.run.outputs.exit-code }}
+  hits-json:
+    description: JSON output of the run (always emitted; --json is implied)
+    value: ${{ steps.run.outputs.hits-json }}
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js 24
+      uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+    - name: Install repo-aegis CLI
+      shell: bash
+      env:
+        REPO_AEGIS_VERSION: ${{ inputs.version }}
+      run: |
+        npm install -g "@de-otio/repo-aegis@${REPO_AEGIS_VERSION}"
+    - name: Run repo-aegis
+      id: run
+      shell: bash
+      env:
+        REPO_AEGIS_COMMAND: ${{ inputs.command }}
+        REPO_AEGIS_ARGS: ${{ inputs.args }}
+        REPO_AEGIS_REGISTRY_INPUT: ${{ inputs.registry }}
+        REPO_AEGIS_FAIL_ON_HITS: ${{ inputs.fail-on-hits }}
+      run: |
+        set +e
+        # Forward registry path via env so the CLI picks it up.
+        if [ -n "${REPO_AEGIS_REGISTRY_INPUT}" ]; then
+          export REPO_AEGIS_REGISTRY="${REPO_AEGIS_REGISTRY_INPUT}"
+        fi
+        # Always emit JSON so the hits-json output is populated.
+        # shellcheck disable=SC2086
+        out=$(repo-aegis ${REPO_AEGIS_COMMAND} --json ${REPO_AEGIS_ARGS})
+        rc=$?
+        {
+          echo "exit-code=${rc}"
+          echo "hits-json<<__REPO_AEGIS_EOF__"
+          printf '%s\n' "${out}"
+          echo "__REPO_AEGIS_EOF__"
+        } >> "${GITHUB_OUTPUT}"
+        printf '%s\n' "${out}"
+        if [ "${REPO_AEGIS_FAIL_ON_HITS}" = "true" ] && [ "${rc}" != "0" ]; then
+          exit "${rc}"
+        fi
+        exit 0

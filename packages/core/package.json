@@ -32,6 +32,9 @@
     "yaml": "^2.4.5",
     "zod": "^4.4.2"
   },
+  "optionalDependencies": {
+    "re2": "^1.21.4"
+  },
   "devDependencies": {
     "@types/proper-lockfile": "^4.1.4"
   }

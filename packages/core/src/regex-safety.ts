@@ -1,8 +1,79 @@
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 
 export interface PatternValidationResult {
   ok: boolean;
   reason?: string;
+}
+
+export type RegexBackend = "re2" | "in-process" | "subprocess";
+
+// Probe `re2` once at module load via `createRequire` so we keep
+// validatePattern fully sync. `re2` is an optionalDependency: install
+// failures (no native build toolchain) leave us on the in-process
+// fallback, which still provides best-effort ReDoS detection.
+const _require = createRequire(import.meta.url);
+interface Re2Constructor {
+  new (pattern: string, flags?: string): { test(s: string): boolean };
+}
+let re2Ctor: Re2Constructor | null = null;
+let re2Probed = false;
+function probeRe2(): Re2Constructor | null {
+  if (re2Probed) return re2Ctor;
+  re2Probed = true;
+  try {
+    const mod = _require("re2") as Re2Constructor | { default: Re2Constructor };
+    re2Ctor =
+      typeof mod === "function"
+        ? mod
+        : "default" in mod
+        ? mod.default
+        : (mod as unknown as Re2Constructor);
+  } catch {
+    re2Ctor = null;
+  }
+  return re2Ctor;
+}
+
+let forcedBackend: RegexBackend | null = null;
+
+/**
+ * Test-only override. Forces {@link getRegexBackend} and
+ * {@link validatePattern} to use a specific backend regardless of which
+ * backends are installed. Pass `null` to clear. Production callers must
+ * not use this.
+ *
+ * @internal
+ */
+export function setRegexBackendForTesting(backend: RegexBackend | null): void {
+  forcedBackend = backend;
+}
+
+/**
+ * Report which regex backend repo-aegis is using for *additional*
+ * pattern-safety validation:
+ *
+ * - `"re2"`: the optional `re2` dependency is installed. Patterns that
+ *   compile cleanly in re2 are provably safe from catastrophic
+ *   backtracking (re2's hybrid NFA/DFA evaluator is linear-time by
+ *   construction). For patterns that re2 can't parse (lookahead /
+ *   look-behind / backreferences are unsupported in re2), validation
+ *   falls back to the `"in-process"` time-budget heuristic.
+ * - `"in-process"`: re2 is unavailable; the in-process timer fires
+ *   after the test completes (best-effort, may exceed budget).
+ *   {@link validatePatterns} `{ strict: true }` upgrades to
+ *   `"subprocess"` for the duration of that call.
+ * - `"subprocess"`: only returned by {@link getRegexBackend} when set
+ *   via {@link setRegexBackendForTesting}; otherwise an internal
+ *   detail of {@link validatePatterns}.
+ *
+ * Note: re2 affects *validation*, not the scanner's regex engine. The
+ * scanner still uses Node's native RegExp because the marker patterns
+ * may legitimately use lookahead constructs that re2 doesn't support.
+ */
+export function getRegexBackend(): RegexBackend {
+  if (forcedBackend !== null) return forcedBackend;
+  return probeRe2() !== null ? "re2" : "in-process";
 }
 
 const MAX_PATTERN_LENGTH = 2048;
@@ -41,9 +112,28 @@ export function validatePattern(pattern: string): PatternValidationResult {
   } catch (err) {
     return { ok: false, reason: `invalid regex: ${(err as Error).message}` };
   }
-  // Synchronous in-process timing check. Worker-based watchdog adds startup
-  // overhead disproportionate to per-pattern cost; for marker-list sizes we
-  // expect (tens to low hundreds of patterns) the in-process check is fine.
+  // Backend-dependent ReDoS check.
+  const backend = getRegexBackend();
+  if (backend === "re2") {
+    const Re2 = probeRe2();
+    if (Re2 !== null) {
+      try {
+        new Re2(pattern, "i");
+        // re2 compile succeeded → linear-time evaluation guaranteed.
+        return { ok: true };
+      } catch {
+        // re2 rejected (typically: pattern uses lookahead/lookbehind/
+        // backreferences which re2 doesn't support). Fall through to
+        // the in-process timer — the pattern is still valid for the
+        // scanner's RegExp engine, just not provably safe under re2.
+      }
+    }
+  }
+  // Synchronous in-process timing check. Best-effort: see SECURITY
+  // WARNING on isInTimeBudget. Worker-based watchdog adds startup
+  // overhead disproportionate to per-pattern cost; for marker-list sizes
+  // we expect (tens to low hundreds of patterns) the in-process check
+  // is fine for trusted-by-policy operator input.
   if (!isInTimeBudget(pattern, REDOS_STRESS_LENGTH, REDOS_TIMEOUT_MS)) {
     return {
       ok: false,

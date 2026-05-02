@@ -1,0 +1,72 @@
+{
+  "name": "repo-aegis-vscode",
+  "displayName": "repo-aegis",
+  "description": "VSCode surface for repo-aegis: status bar, diagnostics, and commands backed by the repo-aegis CLI",
+  "version": "0.1.0",
+  "publisher": "de-otio",
+  "license": "GPL-3.0-or-later",
+  "homepage": "https://github.com/de-otio/repo-aegis",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/de-otio/repo-aegis.git",
+    "directory": "packages/vscode"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "repo-aegis.checkCurrentFile",
+        "title": "repo-aegis: Check current file"
+      },
+      {
+        "command": "repo-aegis.status",
+        "title": "repo-aegis: Show status"
+      },
+      {
+        "command": "repo-aegis.markersTest",
+        "title": "repo-aegis: Test a string against deny set"
+      }
+    ],
+    "configuration": {
+      "title": "repo-aegis",
+      "properties": {
+        "repo-aegis.cli": {
+          "type": "string",
+          "default": "repo-aegis",
+          "description": "Path to the repo-aegis CLI binary"
+        },
+        "repo-aegis.scanOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run check --path when a file is saved"
+        },
+        "repo-aegis.statusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show repo-aegis status in the status bar"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@de-otio/repo-aegis-core": "^0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}

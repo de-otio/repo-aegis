@@ -29,15 +29,20 @@ For the design rationale and threat model, see
 - `repo-aegis deny <name>` — inverse.
 - `repo-aegis status` — show this repo's class, allowed engagements,
   the deny set in effect, and the active pattern count.
-- `repo-aegis check --staged` — scan the staged diff against the
-  scoped deny set; used by pre-commit / pre-push hooks.
-- `repo-aegis check --path <file>` — scan a single file (used by the
-  Claude Code PostToolUse hook).
+- `repo-aegis check --staged` — scan the staged diff (pre-commit hook).
+- `repo-aegis check --range <revspec>` — scan additions in a git range
+  (pre-push hook).
+- `repo-aegis check --path <file>` — scan a single file (Claude Code
+  PostToolUse hook).
+- `repo-aegis check --history` — sweep full git history with
+  `git log -G` per pattern (slow; pair with `--since` for a lower bound).
 - `repo-aegis classify --apply` — auto-detect repo class + engagement
   from the git remote URL using a rules YAML; sets `git config`.
 - `repo-aegis audit` — composite repo health check: marker scan over
   tracked files, optional history sweep, lockfile non-public-registry
   check, fixture-directory scan, remote-vs-class consistency.
+  `--org <org>` adds a one-shot GitHub code-search sweep; `--published
+  <pkg>` scans a packed npm tarball, VSIX bundle, or installed package.
 
 ### Setup and registry
 
@@ -191,7 +196,7 @@ audits), see the data-leak prevention guide referenced under
 
 ## Roadmap
 
-The monorepo has three workspace packages:
+The monorepo has five workspace packages:
 
 - `@de-otio/repo-aegis-core` — the registry/deny-set/scanner library.
 - `@de-otio/repo-aegis` — the developer CLI: blocks leaks at commit
@@ -204,22 +209,36 @@ The monorepo has three workspace packages:
   list, and state file) lives in a private repo of the operator's
   choosing — see
   [data-leaks-on-github/code-search-solution.md](https://github.com/de-otio/dot-notes/blob/main/doc/topics/data-leaks-on-github/code-search-solution.md).
+- `repo-aegis-vscode` — VSCode extension: surfaces the CLI's status
+  and scan output in the editor (status bar, diagnostics, commands).
+  View-only — the deterministic gate stays in the git hooks and the
+  Claude Code PostToolUse hook.
+- `@de-otio/repo-aegis-mcp` — Model Context Protocol server
+  exposing the core library as agent-readable tools (status, check,
+  audit, markers test, engagements list/show). Same JSON shapes as
+  the CLI, no `--verbose` path, redaction policy enforced at the
+  tool boundary. See [packages/mcp/README.md](packages/mcp/README.md).
 
-All three share the same marker list and engagement registry, so a
-string is identified as a leak by the same logic at every layer.
+There is also a thin wrapper:
+
+- `de-otio/repo-aegis` GitHub Action (composite) — `uses:
+  de-otio/repo-aegis@v1` in a workflow installs the CLI and runs
+  `audit` (or any subcommand) against the consuming repo. See
+  [doc/github-action.md](doc/github-action.md).
+
+All five packages share the same marker list and engagement
+registry, so a string is identified as a leak by the same logic at
+every layer.
 
 ### Beyond v0.2
 
 Designed but not yet implemented:
 
-- `audit --published` for npm tarballs uses `npm pack` to fetch by
-  name. A network-isolated mode (mirror registry) is a future polish.
+- Network-isolated mode for `audit --published` (mirror registry).
 - `re2` regex backend for hard ReDoS resistance (current strict
   validation uses a subprocess timer; `re2` would obviate it).
 - Age-encrypted registry (the deployment-side query file is
   age-encryptable; the engagement registry itself is not).
-- MCP server / VSCode extension / GitHub Action wrapper — surface
-  the same machinery to other coding agents.
 
 ## Background
 

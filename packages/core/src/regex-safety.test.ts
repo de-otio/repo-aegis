@@ -1,6 +1,11 @@
-import { describe, it } from "node:test";
+import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { validatePattern, validatePatterns } from "./regex-safety.js";
+import {
+  validatePattern,
+  validatePatterns,
+  getRegexBackend,
+  setRegexBackendForTesting,
+} from "./regex-safety.js";
 
 describe("validatePattern", () => {
   it("accepts ordinary patterns", () => {
@@ -144,5 +149,44 @@ describe("validatePatterns({ strict: true })", () => {
     // Total accounting: every input pattern must show up exactly once
     // across the two buckets.
     assert.equal(r.valid.length + r.invalid.length, 3);
+  });
+});
+
+describe("getRegexBackend", () => {
+  after(() => setRegexBackendForTesting(null));
+
+  it("returns 're2' or 'in-process' depending on optional dep availability", () => {
+    setRegexBackendForTesting(null);
+    const backend = getRegexBackend();
+    assert.ok(
+      backend === "re2" || backend === "in-process",
+      `unexpected backend: ${backend}`,
+    );
+  });
+
+  it("respects setRegexBackendForTesting override", () => {
+    setRegexBackendForTesting("in-process");
+    assert.equal(getRegexBackend(), "in-process");
+    setRegexBackendForTesting("re2");
+    assert.equal(getRegexBackend(), "re2");
+    setRegexBackendForTesting(null);
+  });
+
+  it("validatePattern accepts ordinary patterns under both backends", () => {
+    setRegexBackendForTesting("in-process");
+    assert.equal(validatePattern("acme-corp").ok, true);
+    setRegexBackendForTesting("re2");
+    assert.equal(validatePattern("acme-corp").ok, true);
+    setRegexBackendForTesting(null);
+  });
+
+  it("validatePattern falls back to time-budget when re2 rejects (e.g. lookahead)", () => {
+    // Lookahead is a re2-incompatible feature. Whether re2 is installed
+    // or not, validatePattern must still accept this pattern because
+    // the scanner uses native RegExp, which supports lookahead.
+    setRegexBackendForTesting("re2");
+    const r = validatePattern("foo(?=bar)");
+    assert.equal(r.ok, true, `expected lookahead pattern to validate; reason=${r.reason}`);
+    setRegexBackendForTesting(null);
   });
 });

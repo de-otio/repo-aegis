@@ -3,6 +3,7 @@ import {
   readRepoConfig,
   computeDenySet,
   isActive,
+  getRegexBackend,
   RegistryNotFoundError,
   type RepoJson,
   type EngagementJson,
@@ -51,8 +52,8 @@ export function status(opts: OutputOptions): void {
       patternCount: denySet.patterns.length,
     },
     alwaysBlock: { patternCount: alwaysBlockCount },
+    regexBackend: getRegexBackend(),
     warnings: denySet.warnings,
-    // leakContextMode: planned for v0.2 (context on/off command)
   };
 
   if (opts.json) {
@@ -74,5 +75,6 @@ export function status(opts: OutputOptions): void {
   );
   emitText(`  blocked:  ${denying.length === 0 ? "(none — marker dir empty)" : denying.join(", ")}`);
   emitText(`  patterns: ${denySet.patterns.length} active (+ ${alwaysBlockCount} always-block)`);
+  emitText(`  regex:    ${getRegexBackend()}`);
   for (const w of denySet.warnings) emitText(`  warning:  ${w}`);
 }

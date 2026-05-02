@@ -77,8 +77,17 @@ export type { RedactionMode } from "./redaction.js";
 // (which can run strict, subprocess-backed validation). It remains
 // re-exported here so existing intra-repo imports keep working without
 // a coordinated breaking change.
-export { validatePattern, validatePatterns, validateCombinedSize } from "./regex-safety.js";
-export type { PatternValidationResult, ValidatePatternsOptions } from "./regex-safety.js";
+export {
+  validatePattern,
+  validatePatterns,
+  validateCombinedSize,
+  getRegexBackend,
+} from "./regex-safety.js";
+export type {
+  PatternValidationResult,
+  ValidatePatternsOptions,
+  RegexBackend,
+} from "./regex-safety.js";
 
 // ---- exceptions ----------------------------------------------------------
 export {

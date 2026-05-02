@@ -1,0 +1,35 @@
+{
+  "name": "@de-otio/repo-aegis-mcp",
+  "version": "0.0.1",
+  "description": "Model Context Protocol server wrapping repo-aegis as agent-readable tools",
+  "license": "GPL-3.0-or-later",
+  "author": "Richard Myers",
+  "homepage": "https://github.com/de-otio/repo-aegis",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/de-otio/repo-aegis.git",
+    "directory": "packages/mcp"
+  },
+  "type": "module",
+  "bin": {
+    "repo-aegis-mcp": "./dist/index.js"
+  },
+  "main": "dist/server.js",
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js"
+  },
+  "dependencies": {
+    "@de-otio/repo-aegis-core": "^0.0.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.2"
+  }
+}
