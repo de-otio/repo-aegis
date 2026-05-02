@@ -170,6 +170,16 @@ program
     if (allFailed && result.summary.queries.length > 0) {
       process.exit(2);
     }
+    // For markdown/issue, exit 0 even with new hits (the report is the
+    // signal). Surface partial-failure ("degraded") through stderr so
+    // operators see N/M failed queries without parsing the JSON.
+    if (format !== "json" && result.summary.degraded) {
+      const failed = result.summary.queries.filter(q => !q.ok).length;
+      const total = result.summary.queries.length;
+      process.stderr.write(
+        `repo-aegis-scan: degraded — ${failed}/${total} queries failed\n`,
+      );
+    }
     if (format === "json" && result.summary.totalNew > 0) {
       // Per the design contract: json caller must react; issue/markdown
       // outputs already deliver the report, so they exit 0 even with

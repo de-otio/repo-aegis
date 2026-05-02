@@ -65,7 +65,7 @@ describe("runScan — happy path", () => {
       ],
     });
     const seen: Record<string, true> = {};
-    seen[`"foo" org:de-otio|org/repo1|a.txt|`] = true;
+    seen[`v1|"foo" org:de-otio|org/repo1|a.txt|`] = true;
     const result = await runScan({
       queries: [{ name: "q1", query: '"foo" org:de-otio' }],
       state: { seen },
@@ -207,6 +207,77 @@ describe("runScan — partial failure", () => {
     assert.equal(goodStatus!.totalResults, 1);
     assert.equal(badStatus!.ok, false);
     assert.ok(badStatus!.error?.includes("rate limit"));
+  });
+
+  it("sets degraded=true when any query fails", async () => {
+    const client: SearchClient = {
+      async searchCode(query) {
+        if (query.includes("fail")) throw new Error("rate limit");
+        return { items: [], total_count: 0 };
+      },
+    };
+    const result = await runScan({
+      queries: [
+        { name: "good", query: '"foo" org:de-otio' },
+        { name: "bad", query: '"fail" org:de-otio' },
+      ],
+      state: { seen: {} },
+      client,
+      sleep: noSleep,
+    });
+    assert.equal(result.summary.degraded, true);
+  });
+
+  it("sets degraded=false when all queries succeed", async () => {
+    const client: SearchClient = {
+      async searchCode() {
+        return { items: [], total_count: 0 };
+      },
+    };
+    const result = await runScan({
+      queries: [{ name: "q", query: '"foo" org:de-otio' }],
+      state: { seen: {} },
+      client,
+      sleep: noSleep,
+    });
+    assert.equal(result.summary.degraded, false);
+  });
+});
+
+describe("runScan — previousRunIso", () => {
+  it("threads previousRunIso=null when state has no prior run", async () => {
+    const client: SearchClient = {
+      async searchCode() {
+        return { items: [], total_count: 0 };
+      },
+    };
+    const result = await runScan({
+      queries: [{ name: "q", query: '"foo" org:de-otio' }],
+      state: { seen: {} },
+      client,
+      sleep: noSleep,
+    });
+    assert.equal(result.summary.previousRunIso, null);
+  });
+
+  it("threads previousRunIso from state.lastRunIso", async () => {
+    const client: SearchClient = {
+      async searchCode() {
+        return { items: [], total_count: 0 };
+      },
+    };
+    const result = await runScan({
+      queries: [{ name: "q", query: '"foo" org:de-otio' }],
+      state: { seen: {}, lastRunIso: "2026-04-30T12:00:00Z" },
+      client,
+      sleep: noSleep,
+    });
+    assert.equal(result.summary.previousRunIso, "2026-04-30T12:00:00Z");
+    // The new endedIso is written into updatedState.lastRunIso, but the
+    // summary's previousRunIso must reflect the prior value, not the new
+    // one.
+    assert.notEqual(result.summary.previousRunIso, result.summary.endedIso);
+    assert.equal(result.updatedState.lastRunIso, result.summary.endedIso);
   });
 });
 

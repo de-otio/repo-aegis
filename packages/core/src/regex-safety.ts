@@ -208,6 +208,28 @@ export function validateCombinedSize(combined: string): PatternValidationResult 
   return { ok: true };
 }
 
+/**
+ * SECURITY WARNING — adversary input.
+ *
+ * `isInTimeBudget` (and therefore the non-strict {@link validatePattern}
+ * default that calls it) is **not** a preemptive ReDoS guard. Node's
+ * regex engine has no timeout; this function runs the pattern in-process
+ * against a stress input and measures wall-clock elapsed time *after* it
+ * returns. A genuinely catastrophic pattern can hang the event loop for
+ * seconds-to-minutes before the timer reading even runs, during which
+ * nothing else in the process makes progress.
+ *
+ * As a consequence, the non-strict {@link validatePattern} **must not**
+ * be called on adversary-controlled input. Use it only for marker
+ * patterns the operator has authored (registry / `engagements.yaml`),
+ * which are trusted-by-policy.
+ *
+ * For any path that takes pattern strings from outside that trust
+ * boundary — third-party config, network input, future MCP tool input —
+ * use the strict mode of {@link validatePatterns} (`{ strict: true }`),
+ * which spawns a subprocess that the parent can preemptively kill on
+ * timeout via `SIGTERM`/`SIGKILL`.
+ */
 function isInTimeBudget(pattern: string, stressLength: number, budgetMs: number): boolean {
   // Best-effort time-bounded check. Node has no preemptive regex timeout, so
   // we rely on the regex engine being well-behaved enough that 'a'-fuzzing

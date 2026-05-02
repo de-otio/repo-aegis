@@ -1,3 +1,5 @@
+import { redactMatch } from "./redaction.js";
+
 export class RegistryNotFoundError extends Error {
   readonly code = "REGISTRY_NOT_FOUND" as const;
   constructor(public path: string) {
@@ -45,6 +47,35 @@ export class PatternValidationError extends Error {
   ) {
     super(`${invalid.length} marker pattern${invalid.length === 1 ? "" : "s"} failed validation`);
     this.name = "PatternValidationError";
+  }
+
+  /**
+   * Same shape as {@link invalid} but with each `pattern` field passed
+   * through {@link redactMatch} so the literal customer-derived substring
+   * never leaves the process.
+   *
+   * Marker patterns are user-authored regexes that typically embed
+   * customer-derived strings (e.g. `acmeengineering\.com`). They fall
+   * under the same redaction policy as match values whenever they are
+   * surfaced to JSON, log files, or anything an AI agent might
+   * subsequently read.
+   *
+   * Callers serialising this error to JSON, stderr, or any persisted
+   * artifact should prefer `redactedPatterns`. The raw `invalid` field
+   * remains for the in-process renderer (it needs the literal pattern to
+   * point the user at the offending entry in their own marker file) —
+   * that is an internal contract; do not leak it across a process
+   * boundary.
+   */
+  get redactedPatterns(): { pattern: string; reason: string; engagementId?: string }[] {
+    return this.invalid.map(entry => {
+      const out: { pattern: string; reason: string; engagementId?: string } = {
+        pattern: redactMatch(entry.pattern),
+        reason: entry.reason,
+      };
+      if (entry.engagementId !== undefined) out.engagementId = entry.engagementId;
+      return out;
+    });
   }
 }
 

@@ -67,10 +67,12 @@ export async function runScan(opts: RunOptions): Promise<RunResult> {
   const reveal = !!opts.revealMatches;
 
   const startedIso = new Date().toISOString();
+  const previousRunIso = opts.state.lastRunIso ?? null;
   const queriesStatus: QueryRunStatus[] = [];
   const newHits: CodeSearchHit[] = [];
 
   const updatedState: ScanState = {
+    schemaVersion: opts.state.schemaVersion,
     seen: { ...opts.state.seen },
     lastRunIso: opts.state.lastRunIso,
   };
@@ -148,6 +150,8 @@ export async function runScan(opts: RunOptions): Promise<RunResult> {
   const endedIso = new Date().toISOString();
   updatedState.lastRunIso = endedIso;
 
+  const degraded = queriesStatus.some(q => !q.ok);
+
   return {
     hits: newHits,
     summary: {
@@ -156,6 +160,8 @@ export async function runScan(opts: RunOptions): Promise<RunResult> {
       totalSeen: Object.keys(updatedState.seen).length,
       startedIso,
       endedIso,
+      previousRunIso,
+      degraded,
     },
     updatedState,
   };

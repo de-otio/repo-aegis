@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadRegistry, isActive, resolveEngagement } from "./registry.js";
+import {
+  loadRegistry,
+  isActive,
+  resolveEngagement,
+  MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION,
+} from "./registry.js";
 import { RegistryNotFoundError, RegistryParseError } from "./exceptions.js";
 
 let tmp: string;
@@ -99,6 +104,67 @@ engagements: []`,
     );
     assert.throws(() => loadRegistry(path), RegistryParseError);
   });
+
+  it("treats missing schemaVersion as version 1 (legacy)", () => {
+    const path = writeYaml(
+      "no-schema-version.yaml",
+      `engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+    );
+    const reg = loadRegistry(path);
+    assert.equal(reg.schemaVersion, 1);
+  });
+
+  it("accepts schemaVersion: 1", () => {
+    const path = writeYaml(
+      "schema-v1.yaml",
+      `schemaVersion: 1
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+    );
+    const reg = loadRegistry(path);
+    assert.equal(reg.schemaVersion, 1);
+  });
+
+  it("rejects schemaVersion greater than max supported with an upgrade message", () => {
+    const path = writeYaml(
+      "schema-v99.yaml",
+      `schemaVersion: 99
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+    );
+    assert.throws(
+      () => loadRegistry(path),
+      (err: unknown) =>
+        err instanceof RegistryParseError &&
+        /please upgrade/i.test(err.message) &&
+        /99/.test(err.message),
+    );
+  });
+
+  it("rejects non-numeric schemaVersion", () => {
+    const path = writeYaml(
+      "schema-bad.yaml",
+      `schemaVersion: "not-a-number"
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+    );
+    assert.throws(() => loadRegistry(path), RegistryParseError);
+  });
+
+  it("MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION is the current pinned version", () => {
+    // Sanity guard: bumping this constant is intentional and should be
+    // accompanied by a migration plan and updated tests.
+    assert.equal(MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, 1);
+  });
 });
 
 describe("isActive", () => {
@@ -138,6 +204,7 @@ describe("resolveEngagement", () => {
       { id: "customer-c", name: "Acme Corp", markers: [] },
     ],
     alwaysBlock: [],
+    schemaVersion: 1,
   };
 
   it("matches by exact id", () => {

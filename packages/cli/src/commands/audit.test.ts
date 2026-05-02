@@ -299,6 +299,54 @@ describe("audit — published", () => {
     const c = j.checks.find(c => c.name === "published");
     assert.ok(c!.findings.some(f => f.message.includes("not found")));
   });
+
+  it("refuses a tarball that contains a path-traversal entry (zip-slip)", async () => {
+    const home = setupHome("pub-zipslip", { _always: ["zzz-never"] });
+    const repo = makeRepo("pub-zipslip-repo", { class: "private-strict" });
+
+    // Build a tarball whose member names traverse upward. We stage the
+    // `escape.txt` file at the staging-root level so `tar -C stage`
+    // followed by member `../escape.txt` resolves to a real file (the
+    // member name as recorded in the archive still includes `..`).
+    // GNU tar strips leading `..` on extract; BSD tar (macOS default)
+    // does not. Either way our post-extraction realpath check should
+    // catch the escape — or, when tar refuses extraction outright, the
+    // audit emits a `tar extract failed` finding. Both are acceptable.
+    const stageRoot = mkdtempSync(join(tmp, "zipslip-stageroot-"));
+    const stage = join(stageRoot, "stage");
+    mkdirSync(join(stage, "package"), { recursive: true });
+    writeFileSync(join(stage, "package", "ok.txt"), "benign");
+    writeFileSync(join(stageRoot, "escape.txt"), "I should never be extracted outside the tmp root");
+    const tgz = join(tmp, "zipslip.tgz");
+    execFileSync(
+      "tar",
+      ["-czf", tgz, "-C", stage, "package/ok.txt", "../escape.txt"],
+    );
+
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, published: tgz })),
+    );
+    // When tar refuses (`Cannot ../escape.txt: Path is unsafe`) extraction
+    // fails and we emit a `tar extract failed` finding; when tar accepts
+    // and writes the file, our post-extract check catches it. Either path
+    // is acceptable — the invariant is that the audit refuses the archive.
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as {
+      checks: { name: string; ok: boolean; findings: { message: string; detail?: unknown }[] }[];
+    };
+    const c = j.checks.find(c => c.name === "published");
+    assert.ok(c, "published check should be present");
+    assert.equal(c!.ok, false);
+    const refused = c!.findings.some(f => {
+      const d = f.detail as { code?: string } | undefined;
+      return (
+        d?.code === "PUBLISHED_ARCHIVE_ESCAPE" ||
+        f.message.includes("tar extract failed") ||
+        f.message.includes("escapes the extraction root")
+      );
+    });
+    assert.ok(refused, `expected refusal finding, got: ${JSON.stringify(c!.findings)}`);
+  });
 });
 
 describe("audit — org", () => {

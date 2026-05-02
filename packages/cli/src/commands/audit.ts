@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import {
   computeDenySet,
   loadRegistry,
@@ -322,6 +322,58 @@ async function checkOrg(
   return { name: "org-scan", ok: findings.length === 0, findings };
 }
 
+// After extraction, walk the tree and verify every entry's realpath is
+// rooted under the extraction root. Catches zip-slip / tar-slip entries
+// (e.g. `../../escape.txt`) and symlinks pointing outside the archive.
+// Returns null if the tree is clean, or a string describing the offending
+// entry if any escape is detected.
+function findArchiveEscape(extractDir: string): string | null {
+  let extractReal: string;
+  try {
+    extractReal = realpathSync(extractDir);
+  } catch {
+    return `cannot resolve realpath of extraction dir ${extractDir}`;
+  }
+  const stack: string[] = [extractDir];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      const full = join(dir, name);
+      let real: string;
+      try {
+        real = realpathSync(full);
+      } catch {
+        // Broken / dangling symlink: treat as escape rather than ignore.
+        // Anything we can't realpath cleanly inside the extraction root
+        // is suspicious.
+        return `entry ${full} has unresolvable realpath`;
+      }
+      const rel = relative(extractReal, real);
+      if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+        // entry is rooted under extractReal; recurse if it's a directory
+        // (use lstat so we don't follow symlinks again — realpath already
+        // resolved the link's target safely above).
+        let st;
+        try {
+          st = statSync(real);
+        } catch {
+          continue;
+        }
+        if (st.isDirectory()) stack.push(full);
+        continue;
+      }
+      return `entry ${full} resolves outside extraction root (-> ${real})`;
+    }
+  }
+  return null;
+}
+
 function checkPublished(
   input: string,
   cwd: string,
@@ -397,6 +449,24 @@ function checkPublished(
       }
     }
 
+    // Zip-slip / tar-slip defence: after extraction, verify every entry
+    // (including symlink targets) resolves within the extraction root.
+    // BSD `tar` (default on macOS) and `unzip` do not reliably reject
+    // `../../escape.txt` entries on their own.
+    const escape = findArchiveEscape(extractDir);
+    if (escape !== null) {
+      return {
+        name: "published",
+        ok: false,
+        findings: [
+          {
+            message: "extracted archive contains an entry that escapes the extraction root",
+            detail: { code: "PUBLISHED_ARCHIVE_ESCAPE", reason: escape },
+          },
+        ],
+      };
+    }
+
     function recurse(dir: string): void {
       let entries: string[];
       try {
@@ -417,7 +487,18 @@ function checkPublished(
           continue;
         }
         if (!st.isFile()) continue;
-        const r = scanFile(full, denySet, { revealMatches: reveal });
+        // Pass extractDir as the workingTree so scanFile rejects any
+        // symlink whose realpath points outside the archive (e.g. a
+        // symlink to /etc/passwd that survived the escape check above
+        // — it can't, but defence-in-depth).
+        let r;
+        try {
+          r = scanFile(full, denySet, { revealMatches: reveal }, extractDir);
+        } catch {
+          // OutsideWorkingTreeError or similar: skip this entry; the
+          // archive-escape check above is the authoritative gate.
+          continue;
+        }
         for (const h of r.hits) {
           const rel = relative(extractDir, full);
           findings.push({

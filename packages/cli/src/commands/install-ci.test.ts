@@ -21,7 +21,10 @@ describe("install-ci — print mode (default)", () => {
     const cwd = mkdtempSync(join(tmp, "print-"));
     const result = captureOutput(() => installCi({ cwd }));
     assert.ok(result.stdout.includes("name: leak-scan"));
-    assert.ok(result.stdout.includes("repo-aegis check --path"));
+    assert.ok(result.stdout.includes("repo-aegis audit --json"));
+    assert.ok(!result.stdout.includes("repo-aegis check --path"));
+    assert.ok(!result.stdout.includes("git ls-files | while read"));
+    assert.ok(!result.stdout.includes("done < <(git ls-files)"));
     assert.equal(existsSync(join(cwd, ".github/workflows/leak-scan.yml")), false);
   });
 

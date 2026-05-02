@@ -12,6 +12,8 @@ const baseSummary: RunSummary = {
   totalSeen: 5,
   startedIso: "2026-05-01T00:00:00Z",
   endedIso: "2026-05-01T00:00:30Z",
+  previousRunIso: "2026-04-30T00:00:00Z",
+  degraded: true,
 };
 
 describe("renderMarkdown", () => {
@@ -76,5 +78,16 @@ describe("renderMarkdown", () => {
     };
     const md = renderMarkdown(summary, []);
     assert.match(md, /with\\\|pipe/);
+  });
+
+  it("renders Previous run line with the prior ISO when present", () => {
+    const md = renderMarkdown(baseSummary, []);
+    assert.match(md, /Previous run: 2026-04-30T00:00:00Z/);
+  });
+
+  it("renders Previous run line as 'never' when previousRunIso is null", () => {
+    const summary: RunSummary = { ...baseSummary, previousRunIso: null };
+    const md = renderMarkdown(summary, []);
+    assert.match(md, /Previous run: never/);
   });
 });

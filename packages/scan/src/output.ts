@@ -6,6 +6,7 @@ export function renderMarkdown(summary: RunSummary, hits: CodeSearchHit[]): stri
   lines.push("");
   lines.push(`Started: ${summary.startedIso}`);
   lines.push(`Ended:   ${summary.endedIso}`);
+  lines.push(`Previous run: ${summary.previousRunIso ?? "never"}`);
   lines.push(`New hits: **${summary.totalNew}** (cumulative seen: ${summary.totalSeen})`);
   lines.push("");
 

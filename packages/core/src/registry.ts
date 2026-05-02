@@ -19,9 +19,29 @@ export interface Engagement {
 export interface Registry {
   engagements: Engagement[];
   alwaysBlock: string[];
+  /**
+   * Schema version of the on-disk registry. Defaults to 1 when the YAML has
+   * no `schemaVersion:` field (legacy / current). Readers refuse versions
+   * greater than {@link MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION}. Optional in
+   * the type so callers constructing Registry literals (tests, fixtures)
+   * don't have to specify; loadRegistry always populates it.
+   */
+  schemaVersion?: number;
 }
 
 export const ALWAYS_BLOCK_RESERVED_ID = "_always";
+
+/**
+ * Highest registry `schemaVersion` this build of repo-aegis can read. A
+ * registry written by a newer repo-aegis with a higher version will be
+ * rejected at load time with a `RegistryParseError` instructing the user
+ * to upgrade. The reader-policy (per design B14) is:
+ *   - missing field => treat as version 1 (legacy);
+ *   - version <= MAX => accept (unknown sibling fields are ignored);
+ *   - version  > MAX => refuse.
+ * Writers must never lower the version.
+ */
+export const MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION = 1;
 
 export function loadRegistry(path: string = registryPath()): Registry {
   if (!existsSync(path)) {
@@ -39,7 +59,35 @@ export function loadRegistry(path: string = registryPath()): Registry {
   if (!("engagements" in parsed)) {
     throw new RegistryParseError(path, new Error("missing 'engagements:' top-level key"));
   }
-  const root = parsed as { engagements: unknown; always_block?: unknown };
+  const root = parsed as {
+    engagements: unknown;
+    always_block?: unknown;
+    schemaVersion?: unknown;
+  };
+
+  // Schema-version gate. Absent => 1 (legacy). Present-but-non-number =>
+  // parse error. Higher than this build supports => "please upgrade".
+  let schemaVersion = 1;
+  if (root.schemaVersion !== undefined) {
+    if (typeof root.schemaVersion !== "number" || !Number.isFinite(root.schemaVersion)) {
+      throw new RegistryParseError(
+        path,
+        new Error("'schemaVersion' must be a number"),
+      );
+    }
+    schemaVersion = root.schemaVersion;
+    if (schemaVersion > MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION) {
+      throw new RegistryParseError(
+        path,
+        new Error(
+          `registry schemaVersion ${schemaVersion} is newer than this build supports ` +
+            `(max ${MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION}); ` +
+            `registry written by a newer repo-aegis — please upgrade`,
+        ),
+      );
+    }
+  }
+
   if (!Array.isArray(root.engagements)) {
     throw new RegistryParseError(path, new Error("'engagements' must be a list"));
   }
@@ -84,6 +132,7 @@ export function loadRegistry(path: string = registryPath()): Registry {
   return {
     engagements: root.engagements as Engagement[],
     alwaysBlock,
+    schemaVersion,
   };
 }
 
