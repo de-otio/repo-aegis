@@ -102,9 +102,15 @@ JSON:
   "allowedEngagements": [{ "id": "customer-a", "name": "Customer A", "active": true }],
   "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
   "alwaysBlock": { "patternCount": 3 },
+  "regexBackend": "re2",
   "warnings": []
 }
 ```
+
+`regexBackend` is `"re2"` when the optional `re2` dependency is
+installed and active for pattern validation, or `"in-process"`
+otherwise. See the design doc's locked-decisions row "Regex backend
+(validation)" for what the field means.
 
 To inspect leak-context strict mode, run `repo-aegis context status --json`
 (it is not embedded in `status`).

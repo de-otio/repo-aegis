@@ -71,6 +71,9 @@ semver-major change and requires a design-doc PR.
 | YAML validation                             | `zod` schemas in `core/src/schemas.ts` (registry + override). Per-package schemas in `cli/commands/classify.ts` and `scan/src/queries.ts`. `formatZodError` re-exported from core. |
 | Claude Code PostToolUse hook command        | Bin name (`repo-aegis hook scan-after-write`) registered in `~/.claude/settings.json`. PATH-resolved at hook time. No standalone shell script under `~/.claude/hooks/`. No `jq` dependency. |
 | ScanHit attribution                         | Each hit's `engagement` field carries the marker-file stem the matched pattern came from (engagement id, or `_always`). Backed by `DenySet.patternSources` parallel array. |
+| Regex backend (validation)                  | Dual-mode. `re2` is an optionalDependency; when installed, patterns that compile cleanly under re2 are provably safe (linear-time evaluator). When unavailable or rejected (e.g. lookahead), falls back to the in-process time-budget heuristic. Reported in status JSON as `regexBackend`. The scanner itself still uses native `RegExp` because marker patterns may legitimately use lookahead. |
+| Operator audit log                          | Default OFF. JSONL records of every state-changing action to `~/.config/repo-aegis/state/audit.log`. Toggle with `repo-aegis audit-log on/off`. NEVER logs literal marker patterns — only structural metadata. |
+| Encrypted registry policy                   | Optional age encryption. `repo-aegis registry encrypt/decrypt`. `loadRegistry` refuses an encrypted-state registry with `RegistryEncryptedError`; auto-decrypt is deliberately not implemented. |
 
 ## Architecture
 
@@ -349,10 +352,29 @@ manifest update in the same commit. Protects external artefacts
 (generated GitHub Actions YAML, `~/.claude/settings.json` hook
 command, hand-rolled scripts) against silent breakage.
 
+## Shipped (optional)
+
+- **`re2` regex backend** for marker pattern validation. Listed under
+  `optionalDependencies` in `packages/core/package.json` so install
+  failures (no native build toolchain) leave us on the in-process
+  fallback. When available, patterns that compile cleanly under re2
+  are provably safe from catastrophic backtracking. `getRegexBackend()`
+  reports the active backend; `repo-aegis status --json` carries it as
+  `regexBackend`.
+- **Age-encrypted registry at rest** — `repo-aegis registry encrypt
+  --recipient <pubkey>` / `decrypt --identity <path>`. Reuses the age
+  helper at `packages/core/src/age.ts`. `loadRegistry` refuses an
+  encrypted-state registry with `RegistryEncryptedError`
+  (`REGISTRY_ENCRYPTED`); auto-decrypt is deliberately not implemented.
+- **Operator audit log** — `repo-aegis audit-log on/off/show/path`.
+  JSONL records to `~/.config/repo-aegis/state/audit.log`. Default OFF.
+  Covers state-changing actions only; never logs literal markers.
+- **MCP server** (`@de-otio/repo-aegis-mcp`), **VSCode extension**
+  (`repo-aegis-vscode`), **GitHub Action** (`uses: de-otio/repo-aegis@v1`)
+  — all live in this monorepo.
+
 ## Future hardening (designed but not implemented)
 
-- **`re2` regex backend** — linear-time evaluation makes ReDoS
-  structurally impossible. Tradeoff: native dependency, harder install.
 - **Auto-decrypt-on-demand for the encrypted registry** — currently
   `loadRegistry` throws `RegistryEncryptedError` when the ciphertext
   is present and the user must run `registry decrypt` explicitly. A
@@ -360,8 +382,6 @@ command, hand-rolled scripts) against silent breakage.
   prompt for the identity file inline. Deliberately not the default,
   since at-rest encryption only protects against scenarios where the
   agent itself can be silently coerced into reading the registry.
-- **MCP server / VSCode extension / GitHub Action wrapper** — surface
-  the same machinery to other coding agents.
 - **Network-isolated `audit --published`** — mirror-registry mode
   for organisations that don't want `npm pack` to reach the public
   registry.

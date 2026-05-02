@@ -230,15 +230,25 @@ All five packages share the same marker list and engagement
 registry, so a string is identified as a leak by the same logic at
 every layer.
 
-### Beyond v0.2
+### Beyond v0.1
 
 Designed but not yet implemented:
 
 - Network-isolated mode for `audit --published` (mirror registry).
-- `re2` regex backend for hard ReDoS resistance (current strict
-  validation uses a subprocess timer; `re2` would obviate it).
-- Age-encrypted registry (the deployment-side query file is
-  age-encryptable; the engagement registry itself is not).
+- Auto-decrypt-on-demand for `repo-aegis registry decrypt` so single
+  commands that need the registry can fetch credentials inline rather
+  than requiring an explicit decrypt step.
+
+Already shipped (optional or default):
+
+- `re2` regex backend for hard ReDoS resistance — install the optional
+  `re2` dependency and `getRegexBackend()` reports `"re2"`. Falls back
+  to the in-process time-budget heuristic when re2 is unavailable.
+- Age-encrypted registry — `repo-aegis registry encrypt --recipient
+  <pubkey>` / `decrypt --identity <path>`.
+- Operator audit log — `repo-aegis audit-log on/off/show/path` (off by
+  default).
+- MCP server, VSCode extension, GitHub Action — all in this monorepo.
 
 ## Background
 

@@ -581,7 +581,7 @@ shape we don't model.
 |---|---|---|
 | `allow <id>...` | adds engagement to repo | `action`, `results`, `repo` |
 | `deny <id>...` | removes engagement from repo | `action`, `results`, `repo` |
-| `status` | repo class + allowed engagements | `repo`, `allowedEngagements`, `denySet`, `alwaysBlock`, `warnings` |
+| `status` | repo class + allowed engagements | `repo`, `allowedEngagements`, `denySet`, `alwaysBlock`, `regexBackend`, `warnings` |
 | `check --staged` | scan staged diff | `mode`, `hits`, `skipped`, `repo`, `denySet`, `advisory`, `warnings` |
 | `check --path <f>` | scan single file | (same) |
 | `check --range <r>` | scan commit range | (same) |
