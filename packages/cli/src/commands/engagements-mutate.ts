@@ -30,6 +30,18 @@ interface EngagementsShowOptions extends OutputOptions {
   registryPath?: string;
 }
 
+interface EngagementsRemoveOptions extends OutputOptions {
+  registryPath?: string;
+  /**
+   * Required confirmation. Without it, refuses to delete the entry.
+   * The flag name is intentional: removing an engagement record is a
+   * data-subject-erasure operation; we want the operator's explicit
+   * acknowledgement that registry-resident customer-derived data is
+   * being deleted.
+   */
+  hard?: boolean;
+}
+
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -275,4 +287,116 @@ export function engagementsShow(id: string, opts: EngagementsShowOptions): void 
       emitText(`  ${line}`);
     }
   }
+}
+
+/**
+ * Hard-delete an engagement entry from the registry.
+ *
+ * `engagementsEnd --purge` only back-dates and lets render remove the
+ * marker file; the engagement record itself stays in the YAML
+ * indefinitely. This command is the data-subject-erasure path: it
+ * physically removes the engagement entry from the registry,
+ * triggers a re-render (which removes the marker file), and is
+ * idempotent (no-op + clear message if the engagement is already
+ * absent).
+ *
+ * Requires the explicit `--hard` flag so a typo at the CLI doesn't
+ * destroy a marker registry. Refuses to remove `_always` (reserved).
+ */
+export function engagementsRemove(id: string, opts: EngagementsRemoveOptions): void {
+  if (!id || id.length === 0) {
+    emitError({ code: "USAGE", error: "engagements remove requires an <id> argument" }, opts);
+  }
+  if (id === ALWAYS_BLOCK_RESERVED_ID) {
+    emitError(
+      { code: "RESERVED_ID", error: `cannot remove reserved id "${ALWAYS_BLOCK_RESERVED_ID}"` },
+      opts,
+    );
+  }
+  if (!opts.hard) {
+    emitError(
+      {
+        code: "REMOVE_REQUIRES_HARD",
+        error: "engagements remove is destructive; pass --hard to confirm",
+        details:
+          "this physically deletes the engagement entry from the registry; " +
+          "use `engagements end <id>` (with optional --purge) for soft / retention-window removal",
+      },
+      opts,
+    );
+  }
+
+  const path = opts.registryPath ?? defaultRegistryPath();
+
+  let doc;
+  try {
+    doc = loadDoc(path);
+  } catch (err) {
+    if (err instanceof RegistryNotFoundError) {
+      emitError({ code: "REGISTRY_NOT_FOUND", error: "registry not found", details: err.path }, opts);
+    }
+    emitError({ error: (err as Error).message }, opts);
+  }
+
+  const seq = doc!.get("engagements") as YAMLSeq | null;
+  let removed = false;
+  if (seq && Array.isArray(seq.items)) {
+    const idx = seq.items.findIndex(item => {
+      if (!isMap(item)) return false;
+      const idNode = (item as YAMLMap).get("id");
+      if (typeof idNode === "string") return idNode === id;
+      if (idNode instanceof Scalar) return idNode.value === id;
+      return false;
+    });
+    if (idx >= 0) {
+      seq.items.splice(idx, 1);
+      removed = true;
+    }
+  }
+
+  if (!removed) {
+    if (opts.json) {
+      emitJson({
+        action: "engagements-remove",
+        id,
+        removed: false,
+        reason: "engagement not in registry (already removed?)",
+      });
+      return;
+    }
+    emitText(`engagement ${id} not in registry (already removed?)`);
+    return;
+  }
+
+  let renderResult;
+  try {
+    renderResult = withLockSync(() => {
+      saveDoc(doc!, path);
+      const reg = loadRegistry(path);
+      return renderMarkers(reg);
+    });
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      emitError({ code: err.code, error: err.message }, opts);
+    }
+    if (err instanceof PatternValidationError) {
+      emitError(
+        { code: "PATTERN_VALIDATION", error: err.message, details: err.invalid },
+        opts,
+      );
+    }
+    emitError({ code: "RENDER_ERROR", error: (err as Error).message }, opts);
+  }
+
+  if (opts.json) {
+    emitJson({
+      action: "engagements-remove",
+      id,
+      removed: true,
+      rendered: { written: renderResult!.written, removed: renderResult!.removed },
+    });
+    return;
+  }
+  emitText(`removed engagement ${id} from registry`);
+  emitText(`  marker file removed: ${renderResult!.removed.length} file(s) at next render`);
 }

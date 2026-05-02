@@ -78,31 +78,39 @@ export async function init(opts: InitOptions): Promise<void> {
     emitError({ code: "FS_ERROR", error: `failed to create home directories: ${(err as Error).message}` }, opts);
   }
 
-  // Step 2: scaffold registry if missing or --force
+  // Step 2: scaffold registry if missing or --force.
+  // The scaffold-then-render flow runs under withLockSync so a concurrent
+  // `engagements add` can't race the registry write or the subsequent
+  // render. Without the lock, two parallel `init --force` runs (rare but
+  // possible in scripted setup) could half-write the YAML.
   let registryScaffolded = false;
   let registryAlreadyExisted = false;
 
-  if (!existsSync(registry) || opts.force) {
-    registryAlreadyExisted = existsSync(registry) && !!opts.force;
-    try {
-      writeFileSync(registry, REGISTRY_STUB, { mode: 0o600 });
-      try {
-        chmodSync(registry, 0o600);
-      } catch {
-        /* platform-restricted */
+  try {
+    withLockSync(() => {
+      if (!existsSync(registry) || opts.force) {
+        registryAlreadyExisted = existsSync(registry) && !!opts.force;
+        writeFileSync(registry, REGISTRY_STUB, { mode: 0o600 });
+        try {
+          chmodSync(registry, 0o600);
+        } catch {
+          /* platform-restricted */
+        }
+        registryScaffolded = true;
+      } else {
+        registryAlreadyExisted = true;
       }
-    } catch (err) {
-      emitError({ code: "FS_ERROR", error: `failed to write registry: ${(err as Error).message}` }, opts);
+    });
+  } catch (err) {
+    if (err instanceof LockTimeoutError) {
+      emitError({ code: err.code, error: err.message }, opts);
     }
-    registryScaffolded = true;
-    if (!opts.json) {
-      emitText("scaffolded engagements.yaml");
-    }
-  } else {
-    registryAlreadyExisted = true;
-    if (!opts.json) {
-      emitText(`registry already exists at ${registry}`);
-    }
+    emitError({ code: "FS_ERROR", error: `failed to write registry: ${(err as Error).message}` }, opts);
+  }
+
+  if (!opts.json) {
+    if (registryScaffolded) emitText("scaffolded engagements.yaml");
+    else emitText(`registry already exists at ${registry}`);
   }
 
   // Step 3: render markers

@@ -11,6 +11,7 @@ import { emitJson, emitText, emitError, type OutputOptions } from "../format.js"
 
 interface RenderOptions extends OutputOptions {
   dryRun?: boolean;
+  retentionMonths?: number;
 }
 
 export function render(opts: RenderOptions): void {
@@ -31,12 +32,16 @@ export function render(opts: RenderOptions): void {
     emitError({ error: (err as Error).message }, opts);
   }
 
+  const renderOpts = {
+    ...(opts.retentionMonths !== undefined && { retentionMonths: opts.retentionMonths }),
+  };
+
   let result;
   try {
     if (opts.dryRun) {
-      result = renderMarkers(reg, { dryRun: true });
+      result = renderMarkers(reg, { ...renderOpts, dryRun: true });
     } else {
-      result = withLockSync(() => renderMarkers(reg, { dryRun: false }));
+      result = withLockSync(() => renderMarkers(reg, { ...renderOpts, dryRun: false }));
     }
   } catch (err) {
     if (err instanceof LockTimeoutError) {

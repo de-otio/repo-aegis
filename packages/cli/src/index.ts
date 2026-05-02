@@ -79,6 +79,7 @@ program
   .command("render")
   .description("regenerate per-engagement marker files from the registry")
   .option("--dry-run", "show what would be written without writing")
+  .option("--retention-months <n>", "months an ended engagement's markers stay in the deny set (default 12)", v => parseInt(v, 10))
   .action((opts, cmd) => render(withGlobals(opts, cmd)));
 
 const engagements = program
@@ -110,6 +111,12 @@ engagements
   .description("show one engagement's registered details")
   .action((id: string, opts, cmd) => engagementsShow(id, withGlobals(opts, cmd)));
 
+engagements
+  .command("remove <id>")
+  .description("hard-delete an engagement entry from the registry (data-subject erasure)")
+  .option("--hard", "required: physically delete the entry. Use `engagements end --purge` for soft removal.")
+  .action((id: string, opts, cmd) => engagementsRemove(id, withGlobals(opts, cmd)));
+
 // v0.2 commands: stubbed so the CLI surface is complete-feeling and the
 // handoff to parallel agents has clear entry points.
 const stubbed = (name: string) =>
@@ -140,7 +147,7 @@ const { installGitignore } = await import("./commands/install-gitignore.js");
 const { installCi } = await import("./commands/install-ci.js");
 const { installClaudeMd } = await import("./commands/install-claude-md.js");
 const { markersList, markersTest } = await import("./commands/markers.js");
-const { engagementsAdd, engagementsEnd, engagementsShow } = await import("./commands/engagements-mutate.js");
+const { engagementsAdd, engagementsEnd, engagementsShow, engagementsRemove } = await import("./commands/engagements-mutate.js");
 const { audit } = await import("./commands/audit.js");
 
 program

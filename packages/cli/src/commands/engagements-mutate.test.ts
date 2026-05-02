@@ -15,6 +15,7 @@ import {
   engagementsAdd,
   engagementsEnd,
   engagementsShow,
+  engagementsRemove,
 } from "./engagements-mutate.js";
 
 let tmp: string;
@@ -290,5 +291,89 @@ describe("engagements show", () => {
     );
     assert.equal(result.exitCode, 2);
     assert.ok(result.stderr.includes("not found"));
+  });
+});
+
+describe("engagements remove --hard", () => {
+  it("refuses without --hard and exits 2", () => {
+    const env = setupEnv("remove-no-hard");
+    const result = withEnv("REPO_AEGIS_HOME", env.home, () =>
+      captureOutput(() =>
+        engagementsRemove("existing-customer", { registryPath: env.registryPath }),
+      ),
+    );
+    assert.equal(result.exitCode, 2);
+    assert.ok(result.stderr.includes("--hard"));
+    // Entry should still be in the registry
+    const body = readFileSync(env.registryPath, "utf8");
+    assert.ok(body.includes("existing-customer"));
+  });
+
+  it("with --hard, removes the entry and triggers render", () => {
+    const env = setupEnv("remove-hard");
+    // First confirm the marker file would exist after a regular render
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      captureOutput(() =>
+        engagementsRemove("existing-customer", {
+          hard: true,
+          registryPath: env.registryPath,
+        }),
+      );
+    });
+    const body = readFileSync(env.registryPath, "utf8");
+    assert.ok(!body.includes("existing-customer"), "entry must be physically gone from YAML");
+    const markerFile = join(env.home, "markers", "existing-customer.txt");
+    assert.ok(!existsSync(markerFile), "marker file must be removed by post-remove render");
+  });
+
+  it("rejects the reserved _always id", () => {
+    const env = setupEnv("remove-reserved");
+    const result = withEnv("REPO_AEGIS_HOME", env.home, () =>
+      captureOutput(() =>
+        engagementsRemove("_always", {
+          hard: true,
+          registryPath: env.registryPath,
+        }),
+      ),
+    );
+    assert.equal(result.exitCode, 2);
+    assert.ok(result.stderr.includes("reserved"));
+  });
+
+  it("idempotent: removing a non-existent engagement is a clear no-op", () => {
+    const env = setupEnv("remove-noop");
+    const result = withEnv("REPO_AEGIS_HOME", env.home, () =>
+      captureOutput(() =>
+        engagementsRemove("never-existed", {
+          hard: true,
+          registryPath: env.registryPath,
+        }),
+      ),
+    );
+    assert.equal(result.exitCode, undefined);
+    assert.ok(result.stdout.includes("not in registry"));
+  });
+
+  it("emits the expected JSON shape", () => {
+    const env = setupEnv("remove-json");
+    const result = withEnv("REPO_AEGIS_HOME", env.home, () =>
+      captureOutput(() =>
+        engagementsRemove("existing-customer", {
+          hard: true,
+          registryPath: env.registryPath,
+          json: true,
+        }),
+      ),
+    );
+    const j = JSON.parse(result.stdout) as {
+      action: string;
+      id: string;
+      removed: boolean;
+      rendered: { written: unknown[]; removed: unknown[] };
+    };
+    assert.equal(j.action, "engagements-remove");
+    assert.equal(j.id, "existing-customer");
+    assert.equal(j.removed, true);
+    assert.ok(Array.isArray(j.rendered.removed));
   });
 });
