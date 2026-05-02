@@ -76,6 +76,14 @@ interface InstallClaudeMdOptions extends OutputOptions {
    * emitError still fires on hard failure. Used by `init`.
    */
   silent?: boolean;
+  /**
+   * When true, perform the merge in-memory and print the would-be
+   * settings.json plus the would-be CLAUDE.md additions to stdout
+   * instead of writing anything to disk. Useful for previewing the
+   * effect of `install claude-md` before committing to it. Aliased
+   * as --print-only on the CLI.
+   */
+  dryRun?: boolean;
 }
 
 interface SettingsJson {
@@ -144,6 +152,18 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   const hooksDir = join(claudeHome, "hooks");
   const scriptPath = join(hooksDir, "scan-after-write.sh");
   const settingsPath = join(claudeHome, "settings.json");
+
+  if (opts.dryRun) {
+    dryRunInstallClaudeMd({
+      claudeHome,
+      claudeMdPath,
+      hooksDir,
+      scriptPath,
+      settingsPath,
+      opts,
+    });
+    return;
+  }
 
   try {
     mkdirSync(claudeHome, { recursive: true });
@@ -236,5 +256,108 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     emitText("");
     emitText("note: leak-context strict mode is OFF.");
     emitText("  enable for sensitive sessions: repo-aegis context on");
+  }
+}
+
+interface DryRunContext {
+  claudeHome: string;
+  claudeMdPath: string;
+  hooksDir: string;
+  scriptPath: string;
+  settingsPath: string;
+  opts: InstallClaudeMdOptions;
+}
+
+function dryRunInstallClaudeMd(ctx: DryRunContext): void {
+  const { claudeHome, claudeMdPath, hooksDir, scriptPath, settingsPath, opts } = ctx;
+
+  // 1. CLAUDE.md — compute would-be additions without writing.
+  let existingClaudeMd = "";
+  if (existsSync(claudeMdPath)) existingClaudeMd = readFileSync(claudeMdPath, "utf8");
+
+  const claudeMdAlreadyPresent = existingClaudeMd.includes(CLAUDE_MD_BEGIN);
+  let claudeMdAddition = "";
+  if (!claudeMdAlreadyPresent) {
+    const needsLeadingNewline =
+      existingClaudeMd.length > 0 && !existingClaudeMd.endsWith("\n");
+    const prefix =
+      existingClaudeMd.length === 0 ? "" : (needsLeadingNewline ? "\n\n" : "\n");
+    claudeMdAddition = prefix + CLAUDE_MD_BLOCK;
+  }
+
+  // 2. settings.json — compute the merged JSON in memory.
+  let settings: SettingsJson;
+  try {
+    settings = readSettings(settingsPath);
+  } catch (err) {
+    emitError(
+      { code: "SETTINGS_PARSE_ERROR", error: (err as Error).message },
+      opts,
+    );
+    return;
+  }
+  // mergeHook mutates settings in place; that's fine here because
+  // `settings` is a fresh object parsed inside this function and is
+  // not persisted.
+  const merge = mergeHook(settings, scriptPath);
+  const wouldBeSettings = JSON.stringify(settings, null, 2) + "\n";
+
+  // 3. strict-mode flag (read-only check)
+  const flagPath = leakContextFlagPath();
+  const strictModeOn = existsSync(flagPath);
+
+  if (opts.silent) return;
+
+  if (opts.json) {
+    emitJson({
+      action: "install-claude-md",
+      dryRun: true,
+      claudeHome,
+      claudeMd: {
+        path: claudeMdPath,
+        wouldAppend: !claudeMdAlreadyPresent,
+        alreadyPresent: claudeMdAlreadyPresent,
+        addition: claudeMdAddition,
+      },
+      hookScript: {
+        path: scriptPath,
+        hooksDir,
+        wouldWrite: true,
+        contents: SCAN_AFTER_WRITE_SCRIPT,
+      },
+      settings: {
+        path: settingsPath,
+        wouldAdd: merge.added,
+        alreadyPresent: merge.alreadyPresent,
+        contents: wouldBeSettings,
+      },
+      strictModeOn,
+    });
+    return;
+  }
+
+  emitText("# repo-aegis install claude-md (dry run — nothing written)");
+  emitText("");
+  emitText(`# Would-be CLAUDE.md additions to: ${claudeMdPath}`);
+  if (claudeMdAlreadyPresent) {
+    emitText("# (managed block already present; no addition)");
+  } else if (claudeMdAddition === "") {
+    emitText("# (no additions needed)");
+  } else {
+    emitText(claudeMdAddition);
+  }
+  emitText("");
+  emitText(`# Would-be hook script at: ${scriptPath}`);
+  emitText(SCAN_AFTER_WRITE_SCRIPT);
+  emitText("");
+  emitText(`# Would-be settings.json at: ${settingsPath}`);
+  if (merge.alreadyPresent) {
+    emitText("# (PostToolUse hook already registered; settings.json unchanged)");
+  }
+  emitText(wouldBeSettings);
+  if (!strictModeOn) {
+    emitText("");
+    emitText("# note: leak-context strict mode is OFF.");
+    emitText("#   enable for sensitive sessions: repo-aegis context on");
   }
 }

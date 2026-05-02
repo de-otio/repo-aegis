@@ -110,3 +110,105 @@ describe("install-gitignore — directory creation", () => {
     assert.ok(existsSync(target));
   });
 });
+
+describe("install-gitignore — --uninstall", () => {
+  it("strips the managed block while preserving surrounding lines", () => {
+    const dir = mkdtempSync(join(tmp, "uninstall-"));
+    const target = join(dir, "ignore");
+    writeFileSync(target, "*.log\nbuild/\n");
+    captureOutput(() => installGitignore({ gitignorePath: target }));
+
+    const before = readFileSync(target, "utf8");
+    assert.ok(before.includes("repo-aegis: managed gitignore block"));
+    assert.ok(before.includes("*.log"));
+
+    const result = captureOutput(() =>
+      installGitignore({ gitignorePath: target, uninstall: true }),
+    );
+    assert.equal(result.exitCode, undefined);
+
+    const after = readFileSync(target, "utf8");
+    assert.ok(!after.includes("repo-aegis: managed gitignore block"));
+    assert.ok(!after.includes("repo-aegis: end managed block"));
+    assert.ok(after.includes("*.log"), "non-managed entries must remain");
+    assert.ok(after.includes("build/"));
+  });
+
+  it("is idempotent — running uninstall when no block exists is a clear no-op", () => {
+    const dir = mkdtempSync(join(tmp, "uninstall-idem-"));
+    const target = join(dir, "ignore");
+    writeFileSync(target, "*.log\n");
+
+    const result = captureOutput(() =>
+      installGitignore({ gitignorePath: target, uninstall: true }),
+    );
+    assert.equal(result.exitCode, undefined);
+    assert.ok(
+      result.stdout.includes("nothing to remove"),
+      "should report a clear no-op message",
+    );
+    assert.equal(readFileSync(target, "utf8"), "*.log\n");
+  });
+
+  it("is a clear no-op when the target file is missing", () => {
+    const dir = mkdtempSync(join(tmp, "uninstall-missing-"));
+    const target = join(dir, "ignore");
+
+    const result = captureOutput(() =>
+      installGitignore({ gitignorePath: target, uninstall: true }),
+    );
+    assert.equal(result.exitCode, undefined);
+    assert.ok(result.stdout.includes("nothing to remove"));
+    assert.ok(!existsSync(target), "uninstall must not create the file");
+  });
+
+  it("emits the expected JSON shape on successful removal", () => {
+    const dir = mkdtempSync(join(tmp, "uninstall-json-"));
+    const target = join(dir, "ignore");
+    captureOutput(() => installGitignore({ gitignorePath: target }));
+
+    const result = captureOutput(() =>
+      installGitignore({ gitignorePath: target, uninstall: true, json: true }),
+    );
+    const j = JSON.parse(result.stdout) as {
+      action: string;
+      target: string;
+      removed: boolean;
+      reason?: string;
+    };
+    assert.equal(j.action, "uninstall-gitignore");
+    assert.equal(j.target, target);
+    assert.equal(j.removed, true);
+  });
+
+  it("emits a JSON no-op shape when there's nothing to remove", () => {
+    const dir = mkdtempSync(join(tmp, "uninstall-noop-json-"));
+    const target = join(dir, "ignore");
+
+    const result = captureOutput(() =>
+      installGitignore({ gitignorePath: target, uninstall: true, json: true }),
+    );
+    const j = JSON.parse(result.stdout) as {
+      action: string;
+      removed: boolean;
+      reason?: string;
+    };
+    assert.equal(j.action, "uninstall-gitignore");
+    assert.equal(j.removed, false);
+    assert.ok(typeof j.reason === "string" && j.reason.length > 0);
+  });
+
+  it("install then uninstall returns the file to its prior contents", () => {
+    const dir = mkdtempSync(join(tmp, "round-trip-"));
+    const target = join(dir, "ignore");
+    const original = "*.log\nbuild/\n";
+    writeFileSync(target, original);
+
+    captureOutput(() => installGitignore({ gitignorePath: target }));
+    captureOutput(() =>
+      installGitignore({ gitignorePath: target, uninstall: true }),
+    );
+
+    assert.equal(readFileSync(target, "utf8"), original);
+  });
+});

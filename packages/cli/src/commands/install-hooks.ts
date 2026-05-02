@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, writeFileSync, chmodSync, existsSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { repoAegisHome } from "@de-otio/repo-aegis-core";
@@ -76,6 +76,14 @@ interface InstallHooksOptions extends OutputOptions {
    * inline without polluting init's own output stream.
    */
   silent?: boolean;
+  /**
+   * When true, reverse the install: unset core.hooksPath (idempotent;
+   * a "not set" failure is silently ignored) and remove the
+   * pre-commit / pre-push files under <repoAegisHome>/hooks if they
+   * exist. The hooks directory itself is left in place because other
+   * tooling may store files there.
+   */
+  uninstall?: boolean;
 }
 
 function git(cwd: string, args: string[]): { ok: boolean; stdout: string } {
@@ -91,6 +99,83 @@ function git(cwd: string, args: string[]): { ok: boolean; stdout: string } {
   }
 }
 
+interface UninstallHooksContext {
+  cwd: string;
+  hooksDir: string;
+  preCommitPath: string;
+  prePushPath: string;
+  opts: InstallHooksOptions;
+}
+
+function uninstallHooks(ctx: UninstallHooksContext): void {
+  const { cwd, hooksDir, preCommitPath, prePushPath, opts } = ctx;
+
+  // Capture the pre-existing core.hooksPath so the report can describe
+  // what was unset. Falls back to empty string when the key is unset.
+  const before = git(cwd, ["config", "--get", "core.hooksPath"]);
+  const previousHooksPath = before.ok ? before.stdout : "";
+
+  // `git config --unset` exits 5 when the key is not set; treat that as
+  // a no-op so the command is idempotent.
+  let unsetPerformed = false;
+  try {
+    execFileSync("git", ["config", "--unset", "core.hooksPath"], {
+      cwd,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    unsetPerformed = true;
+  } catch {
+    // Already unset (or git emitted an error we can safely swallow);
+    // remain idempotent.
+  }
+
+  const removed: string[] = [];
+  for (const p of [preCommitPath, prePushPath]) {
+    if (existsSync(p)) {
+      try {
+        unlinkSync(p);
+        removed.push(p);
+      } catch (err) {
+        emitError(
+          {
+            code: "FS_ERROR",
+            error: `failed to remove ${p}: ${(err as Error).message}`,
+          },
+          opts,
+        );
+      }
+    }
+  }
+
+  if (opts.silent) return;
+
+  if (opts.json) {
+    emitJson({
+      action: "uninstall-hooks",
+      hooksDir,
+      removed,
+      coreHooksPathUnset: unsetPerformed,
+      previousCoreHooksPath: previousHooksPath || null,
+    });
+    return;
+  }
+
+  if (unsetPerformed) {
+    emitText(
+      previousHooksPath
+        ? `unset core.hooksPath (was: ${previousHooksPath})`
+        : "unset core.hooksPath",
+    );
+  } else {
+    emitText("core.hooksPath was not set (nothing to unset)");
+  }
+  if (removed.length > 0) {
+    for (const p of removed) emitText(`removed ${p}`);
+  } else {
+    emitText(`no hook scripts to remove under ${hooksDir}`);
+  }
+}
+
 export function installHooks(opts: InstallHooksOptions): void {
   const cwd = opts.cwd ?? process.cwd();
 
@@ -103,6 +188,17 @@ export function installHooks(opts: InstallHooksOptions): void {
   const preCommitPath = join(hooksDir, "pre-commit");
   const prePushPath = join(hooksDir, "pre-push");
 
+  if (opts.uninstall) {
+    uninstallHooks({
+      cwd,
+      hooksDir,
+      preCommitPath,
+      prePushPath,
+      opts,
+    });
+    return;
+  }
+
   const existing = git(cwd, ["config", "--get", "core.hooksPath"]);
   const previousHooksPath = existing.ok ? existing.stdout : "";
   const conflict = previousHooksPath !== "" && previousHooksPath !== hooksDir;
@@ -112,7 +208,11 @@ export function installHooks(opts: InstallHooksOptions): void {
       {
         code: "HOOKS_PATH_CONFLICT",
         error: "core.hooksPath is already set to a different path",
-        details: `current: ${previousHooksPath}\n  target: ${hooksDir}\n  pass --force to overwrite`,
+        details:
+          `current: ${previousHooksPath}\n` +
+          `  target:  ${hooksDir}\n` +
+          `  --force will OVERWRITE (destroy) the prior value "${previousHooksPath}"; ` +
+          `if that path is still needed, save it before re-running with --force.`,
       },
       opts,
     );

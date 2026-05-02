@@ -36,9 +36,11 @@ function makeIdentity(): { identityPath: string; pubkey: string } {
 }
 
 describe("encryptFile + decryptFile", () => {
-  it("round-trips a file through age encrypt and decrypt (skipped if age not installed)", () => {
+  it("round-trips a file through age encrypt and decrypt (skipped if age not installed)", t => {
     if (!ageAvailable) {
-      // The wrapper still throws cleanly; just don't run the round-trip.
+      // Surface as a real skip so the test runner reports
+      // it accurately rather than silently passing.
+      t.skip("age binary not installed");
       return;
     }
     const { identityPath, pubkey } = makeIdentity();
@@ -81,8 +83,11 @@ describe("encryptFile + decryptFile", () => {
     );
   });
 
-  it("AgeError surfaces on malformed input (skipped if age not installed)", () => {
-    if (!ageAvailable) return;
+  it("AgeError surfaces on malformed input (skipped if age not installed)", t => {
+    if (!ageAvailable) {
+      t.skip("age binary not installed");
+      return;
+    }
     const { identityPath } = makeIdentity();
     const garbage = join(tmp, "garbage.age");
     writeFileSync(garbage, "this is not an age ciphertext");

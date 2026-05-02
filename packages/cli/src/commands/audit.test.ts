@@ -350,30 +350,290 @@ describe("audit — published", () => {
 });
 
 describe("audit — org", () => {
-  it("reports missing token cleanly when --org is set without GH_TOKEN", async () => {
-    const home = setupHome("org-no-token", { _always: ["acme-something"] });
-    // Set up registry for loadRegistry()
+  it("requires consent before sending seeds across border", async () => {
+    const home = setupHome("org-no-consent", { _always: ["acme-something"] });
     writeFileSync(
       join(home, "engagements.yaml"),
       `always_block: ["acme-something"]\nengagements: []\n`,
     );
-    const repo = makeRepo("org-no-token-repo", { class: "private-strict" });
-    const env = { ...process.env };
-    delete env["GH_TOKEN"];
-    const prev = process.env["GH_TOKEN"];
+    const repo = makeRepo("org-no-consent-repo", { class: "private-strict" });
+    const prevToken = process.env["GH_TOKEN"];
+    const prevConsent = process.env["REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER"];
     delete process.env["GH_TOKEN"];
+    delete process.env["REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER"];
     try {
       const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
         captureOutputAsync(() => audit({ cwd: repo, json: true, org: "fake-org" })),
       );
       const j = JSON.parse(result.stdout) as {
-        checks: { name: string; findings: { message: string }[] }[];
+        checks: {
+          name: string;
+          ok: boolean;
+          findings: { message: string; detail?: { code?: string } }[];
+        }[];
+      };
+      const c = j.checks.find(c => c.name === "org-scan");
+      assert.ok(c, "org-scan check should be present");
+      assert.equal(c!.ok, false);
+      assert.ok(
+        c!.findings.some(f => f.detail?.code === "ORG_SCAN_CONSENT_REQUIRED"),
+        `expected ORG_SCAN_CONSENT_REQUIRED finding, got: ${JSON.stringify(c!.findings)}`,
+      );
+      // Consent gate runs before the token check, so we should not see
+      // the GH_TOKEN message here.
+      assert.ok(
+        !c!.findings.some(f => f.message.includes("env var is not set")),
+        "token-not-set finding should not surface before consent is given",
+      );
+    } finally {
+      if (prevToken !== undefined) process.env["GH_TOKEN"] = prevToken;
+      if (prevConsent !== undefined)
+        process.env["REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER"] = prevConsent;
+    }
+  });
+
+  it("with consent but no GH_TOKEN, reports missing token cleanly", async () => {
+    const home = setupHome("org-consent-no-token", { _always: ["acme-something"] });
+    writeFileSync(
+      join(home, "engagements.yaml"),
+      `always_block: ["acme-something"]\nengagements: []\n`,
+    );
+    const repo = makeRepo("org-consent-no-token-repo", { class: "private-strict" });
+    const prevToken = process.env["GH_TOKEN"];
+    delete process.env["GH_TOKEN"];
+    try {
+      const result = await withEnvAsync(
+        "REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER",
+        "1",
+        () =>
+          withEnvAsync("REPO_AEGIS_HOME", home, () =>
+            captureOutputAsync(() => audit({ cwd: repo, json: true, org: "fake-org" })),
+          ),
+      );
+      const j = JSON.parse(result.stdout) as {
+        checks: {
+          name: string;
+          findings: { message: string; detail?: { code?: string } }[];
+        }[];
       };
       const c = j.checks.find(c => c.name === "org-scan");
       assert.ok(c);
       assert.ok(c!.findings.some(f => f.message.includes("env var is not set")));
+      assert.ok(
+        !c!.findings.some(f => f.detail?.code === "ORG_SCAN_CONSENT_REQUIRED"),
+        "should not surface consent finding once consent is given",
+      );
     } finally {
-      if (prev !== undefined) process.env["GH_TOKEN"] = prev;
+      if (prevToken !== undefined) process.env["GH_TOKEN"] = prevToken;
+    }
+  });
+
+  it("--accept-cross-border flag also satisfies the consent gate", async () => {
+    const home = setupHome("org-flag-consent", { _always: ["acme-something"] });
+    writeFileSync(
+      join(home, "engagements.yaml"),
+      `always_block: ["acme-something"]\nengagements: []\n`,
+    );
+    const repo = makeRepo("org-flag-consent-repo", { class: "private-strict" });
+    const prevToken = process.env["GH_TOKEN"];
+    const prevConsent = process.env["REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER"];
+    delete process.env["GH_TOKEN"];
+    delete process.env["REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER"];
+    try {
+      const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+        captureOutputAsync(() =>
+          audit({
+            cwd: repo,
+            json: true,
+            org: "fake-org",
+            acceptCrossBorder: true,
+          }),
+        ),
+      );
+      const j = JSON.parse(result.stdout) as {
+        checks: {
+          name: string;
+          findings: { message: string; detail?: { code?: string } }[];
+        }[];
+      };
+      const c = j.checks.find(c => c.name === "org-scan");
+      assert.ok(c);
+      // With consent + no token, we expect the token-not-set finding,
+      // not the consent finding.
+      assert.ok(c!.findings.some(f => f.message.includes("env var is not set")));
+      assert.ok(
+        !c!.findings.some(f => f.detail?.code === "ORG_SCAN_CONSENT_REQUIRED"),
+      );
+    } finally {
+      if (prevToken !== undefined) process.env["GH_TOKEN"] = prevToken;
+      if (prevConsent !== undefined)
+        process.env["REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER"] = prevConsent;
+    }
+  });
+
+  it("emits ORG_SCAN_TRUNCATED when seeds exceed --max-queries budget", async (t) => {
+    const ghToken = process.env["GH_TOKEN"];
+    if (!ghToken) {
+      t.skip("requires GH_TOKEN to drive checkOrg past the seed-extraction step");
+      return;
+    }
+    const home = setupHome("org-truncated", {});
+    // Build a registry with 5 seeds; cap at 2; expect 3 skipped.
+    const seeds = [
+      "seed-aaaaa",
+      "seed-bbbbb",
+      "seed-ccccc",
+      "seed-ddddd",
+      "seed-eeeee",
+    ];
+    writeFileSync(
+      join(home, "engagements.yaml"),
+      `always_block:\n${seeds.map(s => `  - "${s}"`).join("\n")}\nengagements: []\n`,
+    );
+    const repo = makeRepo("org-truncated-repo", { class: "private-strict" });
+    try {
+      const result = await withEnvAsync(
+        "REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER",
+        "1",
+        () =>
+          withEnvAsync("REPO_AEGIS_HOME", home, () =>
+            captureOutputAsync(() =>
+              audit({
+                cwd: repo,
+                json: true,
+                org: "this-org-very-likely-does-not-exist-zzz",
+                maxQueries: 2,
+              }),
+            ),
+          ),
+      );
+      const j = JSON.parse(result.stdout) as {
+        checks: {
+          name: string;
+          findings: {
+            message: string;
+            detail?: { code?: string; cap?: number; skippedCount?: number };
+          }[];
+        }[];
+      };
+      const c = j.checks.find(c => c.name === "org-scan");
+      assert.ok(c, "org-scan check should be present");
+      const trunc = c!.findings.find(
+        f => f.detail?.code === "ORG_SCAN_TRUNCATED",
+      );
+      assert.ok(
+        trunc,
+        `expected ORG_SCAN_TRUNCATED finding, got: ${JSON.stringify(c!.findings)}`,
+      );
+      assert.equal(trunc!.detail?.cap, 2);
+      assert.equal(trunc!.detail?.skippedCount, 3);
+    } finally {
+      // No env restore needed: withEnvAsync handles its own scopes.
+    }
+  });
+});
+
+describe("audit --published — pre-flight binary checks", () => {
+  it("emits NPM_NOT_FOUND when npm is not on PATH", async () => {
+    const home = setupHome("preflight-no-npm", {});
+    const repo = makeRepo("preflight-no-npm-repo", { class: "private-strict" });
+    // PATH-mask: point PATH at an empty dir so npm/tar/unzip resolve to
+    // nothing, but keep `git` available via absolute calls in makeRepo
+    // (already done before this point).
+    const emptyDir = join(tmp, "empty-path-1");
+    mkdirSync(emptyDir, { recursive: true });
+    const prevPath = process.env["PATH"];
+    process.env["PATH"] = emptyDir;
+    try {
+      // Use a bare package name so checkPublished takes the npm-pack path.
+      const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+        captureOutputAsync(() =>
+          audit({ cwd: repo, json: true, published: "some-fake-package" }),
+        ),
+      );
+      const j = JSON.parse(result.stdout) as {
+        checks: {
+          name: string;
+          findings: { message: string; detail?: { code?: string } }[];
+        }[];
+      };
+      const c = j.checks.find(c => c.name === "published");
+      assert.ok(c);
+      assert.ok(
+        c!.findings.some(f => f.detail?.code === "NPM_NOT_FOUND"),
+        `expected NPM_NOT_FOUND finding, got: ${JSON.stringify(c!.findings)}`,
+      );
+    } finally {
+      if (prevPath !== undefined) process.env["PATH"] = prevPath;
+      else delete process.env["PATH"];
+    }
+  });
+
+  it("emits TAR_NOT_FOUND when tar is not on PATH for a .tgz input", async () => {
+    const home = setupHome("preflight-no-tar", {});
+    const repo = makeRepo("preflight-no-tar-repo", { class: "private-strict" });
+    // Make a dummy .tgz so the existsSync check passes; the file does not
+    // need to be a valid archive because the binary check fires first.
+    const tgz = join(tmp, "dummy-preflight.tgz");
+    writeFileSync(tgz, "not a real tarball");
+    const emptyDir = join(tmp, "empty-path-2");
+    mkdirSync(emptyDir, { recursive: true });
+    const prevPath = process.env["PATH"];
+    process.env["PATH"] = emptyDir;
+    try {
+      const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+        captureOutputAsync(() =>
+          audit({ cwd: repo, json: true, published: tgz }),
+        ),
+      );
+      const j = JSON.parse(result.stdout) as {
+        checks: {
+          name: string;
+          findings: { message: string; detail?: { code?: string } }[];
+        }[];
+      };
+      const c = j.checks.find(c => c.name === "published");
+      assert.ok(c);
+      assert.ok(
+        c!.findings.some(f => f.detail?.code === "TAR_NOT_FOUND"),
+        `expected TAR_NOT_FOUND finding, got: ${JSON.stringify(c!.findings)}`,
+      );
+    } finally {
+      if (prevPath !== undefined) process.env["PATH"] = prevPath;
+      else delete process.env["PATH"];
+    }
+  });
+
+  it("emits UNZIP_NOT_FOUND when unzip is not on PATH for a .vsix input", async () => {
+    const home = setupHome("preflight-no-unzip", {});
+    const repo = makeRepo("preflight-no-unzip-repo", { class: "private-strict" });
+    const vsix = join(tmp, "dummy-preflight.vsix");
+    writeFileSync(vsix, "not a real vsix");
+    const emptyDir = join(tmp, "empty-path-3");
+    mkdirSync(emptyDir, { recursive: true });
+    const prevPath = process.env["PATH"];
+    process.env["PATH"] = emptyDir;
+    try {
+      const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+        captureOutputAsync(() =>
+          audit({ cwd: repo, json: true, published: vsix }),
+        ),
+      );
+      const j = JSON.parse(result.stdout) as {
+        checks: {
+          name: string;
+          findings: { message: string; detail?: { code?: string } }[];
+        }[];
+      };
+      const c = j.checks.find(c => c.name === "published");
+      assert.ok(c);
+      assert.ok(
+        c!.findings.some(f => f.detail?.code === "UNZIP_NOT_FOUND"),
+        `expected UNZIP_NOT_FOUND finding, got: ${JSON.stringify(c!.findings)}`,
+      );
+    } finally {
+      if (prevPath !== undefined) process.env["PATH"] = prevPath;
+      else delete process.env["PATH"];
     }
   });
 });

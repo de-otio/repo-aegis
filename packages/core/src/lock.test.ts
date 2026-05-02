@@ -78,4 +78,72 @@ describe("withLock (async)", () => {
     const r = await withLock(() => "ok", { lockPath: lp });
     assert.equal(r, "ok");
   });
+
+  it("serializes two parallel withLock calls against the same lockPath", async () => {
+    // Two concurrent withLock calls on the same path must NOT overlap.
+    // We record entry/exit timestamps for each and assert one's interval
+    // fully precedes the other.
+    const lp = lockPathFor("async-serialize.lock");
+    const HOLD_MS = 60;
+
+    interface Span { start: number; end: number; label: string }
+    const spans: Span[] = [];
+
+    async function critical(label: string): Promise<Span> {
+      return withLock(async () => {
+        const start = Date.now();
+        await new Promise(r => setTimeout(r, HOLD_MS));
+        const end = Date.now();
+        const span: Span = { start, end, label };
+        spans.push(span);
+        return span;
+      }, { lockPath: lp, timeoutMs: 5000 });
+    }
+
+    const [a, b] = await Promise.all([critical("a"), critical("b")]);
+    // Sort by start time and assert non-overlap.
+    const sorted = [a, b].sort((x, y) => x.start - y.start);
+    assert.ok(
+      sorted[0]!.end <= sorted[1]!.start,
+      `expected serialized intervals; got a=[${a.start},${a.end}] b=[${b.start},${b.end}]`,
+    );
+    assert.equal(spans.length, 2);
+  });
+
+  it("throws LockTimeoutError when the path is held by lockfile.lockSync", async () => {
+    const lp = lockPathFor("async-contended.lock");
+    const release = lockfile.lockSync(lp, { stale: 30_000 });
+    try {
+      await assert.rejects(
+        withLock(() => 1, { lockPath: lp, timeoutMs: 100 }),
+        LockTimeoutError,
+      );
+    } finally {
+      release();
+    }
+  });
+
+  it("honours timeoutMs (rejects within the timeout window)", async () => {
+    const lp = lockPathFor("async-timeout.lock");
+    const release = lockfile.lockSync(lp, { stale: 30_000 });
+    try {
+      const t0 = Date.now();
+      await assert.rejects(
+        withLock(() => 1, { lockPath: lp, timeoutMs: 100 }),
+        LockTimeoutError,
+      );
+      const elapsed = Date.now() - t0;
+      // proper-lockfile retry math + jitter: a 100ms timeout typically
+      // settles in well under 500ms. Generous upper bound to avoid CI
+      // flake on busy runners; the lower bound asserts we waited at all
+      // (i.e. that timeoutMs wasn't ignored entirely and rejected
+      // immediately at the very first retry).
+      assert.ok(
+        elapsed < 1500,
+        `withLock should reject promptly under timeoutMs=100; elapsed=${elapsed}ms`,
+      );
+    } finally {
+      release();
+    }
+  });
 });

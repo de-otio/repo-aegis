@@ -25,7 +25,13 @@ interface AuditOptions extends OutputOptions {
   published?: string;
   token?: string;
   verbose?: boolean;
+  maxQueries?: number;
+  acceptCrossBorder?: boolean;
 }
+
+const DEFAULT_MAX_ORG_QUERIES = 30;
+
+const ORG_CROSS_BORDER_CONSENT_ENV = "REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER";
 
 interface Finding {
   message: string;
@@ -268,6 +274,7 @@ async function checkOrg(
   org: string,
   reg: { engagements: import("@de-otio/repo-aegis-core").Engagement[]; alwaysBlock: string[] },
   token: string,
+  maxQueries: number,
 ): Promise<CheckResult> {
   const seedSet = new Set<string>();
   for (const e of reg.engagements) {
@@ -276,8 +283,11 @@ async function checkOrg(
   }
   for (const p of reg.alwaysBlock) for (const s of literalSeeds(p)) seedSet.add(s);
 
-  const seeds = Array.from(seedSet);
-  if (seeds.length === 0) {
+  // Sort alphabetically so the truncation, when it happens, is deterministic
+  // across runs and across machines. Stable order also makes the "skipped"
+  // finding actionable: the operator sees the same prefix every time.
+  const allSeeds = Array.from(seedSet).sort();
+  if (allSeeds.length === 0) {
     return {
       name: "org-scan",
       ok: true,
@@ -286,6 +296,23 @@ async function checkOrg(
       skipReason: "no usable literal seeds extracted from registry patterns",
     };
   }
+
+  const cap = Math.max(1, maxQueries);
+  const seeds = allSeeds.slice(0, cap);
+  const skippedCount = allSeeds.length - seeds.length;
+
+  const truncationFinding: Finding | null =
+    skippedCount > 0
+      ? {
+          message: `${skippedCount} seed(s) skipped due to --max-queries budget (cap=${cap}, total=${allSeeds.length})`,
+          detail: {
+            code: "ORG_SCAN_TRUNCATED",
+            cap,
+            totalSeeds: allSeeds.length,
+            skippedCount,
+          },
+        }
+      : null;
 
   const queries = seeds.map((s, i) => ({
     name: `audit-seed-${i}`,
@@ -303,6 +330,7 @@ async function checkOrg(
   });
 
   const findings: Finding[] = [];
+  if (truncationFinding) findings.push(truncationFinding);
   for (const h of result.hits) {
     findings.push({
       message: `${h.repo}:${h.path}${h.line !== null ? `:${h.line}` : ""}`,
@@ -315,11 +343,22 @@ async function checkOrg(
     return {
       name: "org-scan",
       ok: false,
-      findings: [{ message: "all org-scan queries failed", detail: { queries: result.summary.queries } }],
+      findings: [
+        ...(truncationFinding ? [truncationFinding] : []),
+        { message: "all org-scan queries failed", detail: { queries: result.summary.queries } },
+      ],
     };
   }
 
-  return { name: "org-scan", ok: findings.length === 0, findings };
+  // The result is "ok" only when no real hits and no truncation. A truncated
+  // run is strictly worse than a clean clean run because some seeds were not
+  // queried at all — surface as a failure so the operator sees it.
+  const hitCount = result.hits.length;
+  return {
+    name: "org-scan",
+    ok: hitCount === 0 && skippedCount === 0,
+    findings,
+  };
 }
 
 // After extraction, walk the tree and verify every entry's realpath is
@@ -374,6 +413,35 @@ function findArchiveEscape(extractDir: string): string | null {
   return null;
 }
 
+// Probe a binary's presence on PATH by running `<bin> --version`. We use
+// the binary itself (not `which`) so the result reflects exactly what
+// `spawnSync(bin, ...)` will see later — this guards against shim/PATH
+// mismatches where `which` succeeds but spawn fails or vice versa.
+// Returns a finding describing the missing binary, or null if the binary
+// runs cleanly. Mirrors the AgeNotFoundError pattern from age.ts.
+function checkBinaryAvailable(bin: string, code: string): Finding | null {
+  const probe = spawnSync(bin, ["--version"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (probe.error) {
+    const errCode = (probe.error as NodeJS.ErrnoException).code;
+    if (errCode === "ENOENT") {
+      return {
+        message: `\`${bin}\` not found on PATH; install it and retry`,
+        detail: { code, binary: bin, reason: "ENOENT" },
+      };
+    }
+    return {
+      message: `\`${bin} --version\` probe failed: ${probe.error.message}`,
+      detail: { code, binary: bin, reason: probe.error.message },
+    };
+  }
+  // Some tools exit non-zero on `--version` (rare). Treat any spawnable
+  // result as "present"; we only care that the binary is on PATH.
+  return null;
+}
+
 function checkPublished(
   input: string,
   cwd: string,
@@ -393,6 +461,10 @@ function checkPublished(
           findings: [{ message: `tarball not found: ${input}` }],
         };
       }
+      const missing = checkBinaryAvailable("tar", "TAR_NOT_FOUND");
+      if (missing) {
+        return { name: "published", ok: false, findings: [missing] };
+      }
       const r = spawnSync("tar", ["-xzf", input, "-C", tmp], { encoding: "utf8" });
       if (r.status !== 0) {
         return {
@@ -409,6 +481,10 @@ function checkPublished(
           findings: [{ message: `vsix not found: ${input}` }],
         };
       }
+      const missing = checkBinaryAvailable("unzip", "UNZIP_NOT_FOUND");
+      if (missing) {
+        return { name: "published", ok: false, findings: [missing] };
+      }
       const r = spawnSync("unzip", ["-q", input, "-d", tmp], { encoding: "utf8" });
       if (r.status !== 0) {
         return {
@@ -419,6 +495,14 @@ function checkPublished(
       }
     } else {
       // Treat as npm package name; pack first.
+      const missingNpm = checkBinaryAvailable("npm", "NPM_NOT_FOUND");
+      if (missingNpm) {
+        return { name: "published", ok: false, findings: [missingNpm] };
+      }
+      const missingTar = checkBinaryAvailable("tar", "TAR_NOT_FOUND");
+      if (missingTar) {
+        return { name: "published", ok: false, findings: [missingTar] };
+      }
       const packResult = spawnSync("npm", ["pack", "--silent", input], {
         cwd: tmp,
         encoding: "utf8",
@@ -587,24 +671,53 @@ export async function audit(opts: AuditOptions): Promise<void> {
   if (runRemote) results.push(checkRemote(cwd, repo));
 
   if (opts.org) {
-    const tokenVar = opts.token ?? "GH_TOKEN";
-    const token = process.env[tokenVar];
-    if (!token) {
+    // Compliance gate: --org sends literal seeds derived from registry
+    // patterns (which can carry customer-derived strings) to GitHub.com,
+    // typically a cross-border data transfer. Require explicit consent
+    // before any network call. The check runs before the token check so
+    // the operator sees the cross-border message even when they haven't
+    // set GH_TOKEN yet.
+    const consentEnv = process.env[ORG_CROSS_BORDER_CONSENT_ENV];
+    const hasConsent = consentEnv === "1" || opts.acceptCrossBorder === true;
+    if (!hasConsent) {
       results.push({
         name: "org-scan",
         ok: false,
-        findings: [{ message: `${tokenVar} env var is not set; cannot run --org sweep` }],
+        findings: [
+          {
+            message:
+              "--org sends literal seed substrings (potentially customer-derived) to github.com, " +
+              "which is a cross-border data transfer; explicit consent required. " +
+              `Set ${ORG_CROSS_BORDER_CONSENT_ENV}=1 or pass --accept-cross-border to proceed.`,
+            detail: {
+              code: "ORG_SCAN_CONSENT_REQUIRED",
+              consentEnv: ORG_CROSS_BORDER_CONSENT_ENV,
+              consentFlag: "--accept-cross-border",
+            },
+          },
+        ],
       });
     } else {
-      try {
-        const reg = loadRegistry();
-        results.push(await checkOrg(opts.org, reg, token));
-      } catch (err) {
+      const tokenVar = opts.token ?? "GH_TOKEN";
+      const token = process.env[tokenVar];
+      if (!token) {
         results.push({
           name: "org-scan",
           ok: false,
-          findings: [{ message: `org-scan setup failed: ${(err as Error).message}` }],
+          findings: [{ message: `${tokenVar} env var is not set; cannot run --org sweep` }],
         });
+      } else {
+        try {
+          const reg = loadRegistry();
+          const maxQueries = opts.maxQueries ?? DEFAULT_MAX_ORG_QUERIES;
+          results.push(await checkOrg(opts.org, reg, token, maxQueries));
+        } catch (err) {
+          results.push({
+            name: "org-scan",
+            ok: false,
+            findings: [{ message: `org-scan setup failed: ${(err as Error).message}` }],
+          });
+        }
       }
     }
   }

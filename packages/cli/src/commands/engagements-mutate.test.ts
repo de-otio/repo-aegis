@@ -182,10 +182,28 @@ describe("engagements end — default (retain markers)", () => {
   });
 
   it("sets ended date in registry", () => {
+    // Timing-sensitive: `engagementsEnd` writes `ended: <todayIso()>` at
+    // the moment the `before()` hook ran. Comparing strict-equality to
+    // `new Date().toISOString().slice(0,10)` here flakes across UTC
+    // midnight (the before hook ran on day N, the assertion runs on day
+    // N+1). We instead verify the format and tolerate today-or-yesterday
+    // (UTC) — the only two values it can legitimately have under
+    // realistic test execution windows.
     const body = readFileSync(env.registryPath, "utf8");
-    const today = new Date().toISOString().slice(0, 10);
     assert.ok(body.includes("ended:"));
-    assert.ok(body.includes(today));
+    const m = body.match(/ended:\s*(\d{4}-\d{2}-\d{2})/);
+    assert.ok(m, `expected an ISO-date 'ended:' line; got body:\n${body}`);
+    const ended = m![1]!;
+    assert.match(ended, /^\d{4}-\d{2}-\d{2}$/);
+    const now = Date.now();
+    const today = new Date(now).toISOString().slice(0, 10);
+    const yesterday = new Date(now - 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    assert.ok(
+      ended === today || ended === yesterday,
+      `ended=${ended} should be today (${today}) or yesterday (${yesterday}) UTC`,
+    );
   });
 
   it("retains marker file (within retention window)", () => {

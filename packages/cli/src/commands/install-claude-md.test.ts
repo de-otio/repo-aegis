@@ -206,6 +206,130 @@ describe("install-claude-md — strict-mode warning", () => {
   });
 });
 
+describe("install-claude-md — --dry-run", () => {
+  it("does not create CLAUDE.md, hooks dir, settings.json, or hook script", () => {
+    const claudeHome = makeClaudeHome("dryrun-fresh");
+    const aegisHome = aegisHomeFor("dryrun-fresh");
+
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+    );
+    assert.equal(result.exitCode, undefined);
+
+    assert.ok(!existsSync(join(claudeHome, "CLAUDE.md")));
+    assert.ok(!existsSync(join(claudeHome, "settings.json")));
+    assert.ok(!existsSync(join(claudeHome, "hooks", "scan-after-write.sh")));
+    assert.ok(!existsSync(join(claudeHome, "hooks")));
+  });
+
+  it("prints the would-be CLAUDE.md additions and merged settings.json to stdout", () => {
+    const claudeHome = makeClaudeHome("dryrun-stdout");
+    const aegisHome = aegisHomeFor("dryrun-stdout");
+
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+    );
+    assert.ok(result.stdout.includes("dry run"));
+    assert.ok(result.stdout.includes("repo-aegis: managed block"));
+    assert.ok(result.stdout.includes("repo-aegis (data-leak prevention)"));
+    // settings.json preview must show the registered command path.
+    assert.ok(
+      result.stdout.includes(join(claudeHome, "hooks", "scan-after-write.sh")),
+    );
+    assert.ok(result.stdout.includes("PostToolUse"));
+    assert.ok(result.stdout.includes("Write|Edit|MultiEdit"));
+  });
+
+  it("preserves existing settings keys in the preview", () => {
+    const claudeHome = makeClaudeHome("dryrun-merge");
+    const aegisHome = aegisHomeFor("dryrun-merge");
+
+    const settingsPath = join(claudeHome, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify(
+        {
+          theme: "dark",
+          hooks: {
+            PostToolUse: [
+              {
+                matcher: "Bash",
+                hooks: [{ type: "command", command: "/some/other/script.sh" }],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    const before = readFileSync(settingsPath, "utf8");
+
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+    );
+
+    // Disk file untouched.
+    assert.equal(readFileSync(settingsPath, "utf8"), before);
+
+    // Preview shows both old + new entries.
+    assert.ok(result.stdout.includes("dark"));
+    assert.ok(result.stdout.includes("Bash"));
+    assert.ok(result.stdout.includes("/some/other/script.sh"));
+    assert.ok(result.stdout.includes("Write|Edit|MultiEdit"));
+  });
+
+  it("emits the expected dry-run JSON shape", () => {
+    const claudeHome = makeClaudeHome("dryrun-json");
+    const aegisHome = aegisHomeFor("dryrun-json");
+
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() =>
+        installClaudeMd({ claudeHome, dryRun: true, json: true }),
+      ),
+    );
+    const j = JSON.parse(result.stdout) as {
+      action: string;
+      dryRun: boolean;
+      claudeHome: string;
+      claudeMd: { path: string; wouldAppend: boolean; alreadyPresent: boolean; addition: string };
+      hookScript: { path: string; wouldWrite: boolean; contents: string };
+      settings: { path: string; wouldAdd: boolean; alreadyPresent: boolean; contents: string };
+      strictModeOn: boolean;
+    };
+    assert.equal(j.action, "install-claude-md");
+    assert.equal(j.dryRun, true);
+    assert.equal(j.claudeHome, claudeHome);
+    assert.equal(j.claudeMd.wouldAppend, true);
+    assert.equal(j.claudeMd.alreadyPresent, false);
+    assert.ok(j.claudeMd.addition.includes("repo-aegis: managed block"));
+    assert.equal(j.hookScript.wouldWrite, true);
+    assert.ok(j.hookScript.contents.includes("repo-aegis check --json --path"));
+    assert.equal(j.settings.wouldAdd, true);
+    assert.equal(j.settings.alreadyPresent, false);
+    assert.ok(j.settings.contents.includes("Write|Edit|MultiEdit"));
+
+    // No filesystem side effects.
+    assert.ok(!existsSync(join(claudeHome, "CLAUDE.md")));
+    assert.ok(!existsSync(join(claudeHome, "settings.json")));
+    assert.ok(!existsSync(join(claudeHome, "hooks", "scan-after-write.sh")));
+  });
+
+  it("respects silent: no stdout/stderr output", () => {
+    const claudeHome = makeClaudeHome("dryrun-silent");
+    const aegisHome = aegisHomeFor("dryrun-silent");
+
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() =>
+        installClaudeMd({ claudeHome, dryRun: true, silent: true }),
+      ),
+    );
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "");
+    assert.ok(!existsSync(join(claudeHome, "CLAUDE.md")));
+  });
+});
+
 describe("install-claude-md — JSON output", () => {
   it("emits the expected shape", () => {
     const claudeHome = makeClaudeHome("json");

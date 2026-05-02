@@ -103,6 +103,23 @@ describe("install-hooks — conflict with existing core.hooksPath", () => {
     assert.ok(result.stderr.includes("core.hooksPath"));
   });
 
+  it("conflict message names the prior path verbatim and warns --force destroys it", () => {
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => installHooks({ cwd: repo })),
+    );
+    assert.equal(result.exitCode, 2);
+    // The prior path must appear verbatim so the operator can see what
+    // they would lose; the message must also flag that --force overwrites.
+    assert.ok(
+      result.stderr.includes("/some/other/path"),
+      "conflict message should include the prior core.hooksPath verbatim",
+    );
+    assert.ok(
+      /OVERWRITE|overwrite/.test(result.stderr) && /--force/.test(result.stderr),
+      "conflict message should warn that --force overwrites the prior path",
+    );
+  });
+
   it("--force overwrites the conflicting config", () => {
     const result = withEnv("REPO_AEGIS_HOME", home, () =>
       captureOutput(() => installHooks({ cwd: repo, force: true })),
@@ -113,6 +130,96 @@ describe("install-hooks — conflict with existing core.hooksPath", () => {
       encoding: "utf8",
     }).trim();
     assert.equal(out, join(home, "hooks"));
+  });
+});
+
+describe("install-hooks — --uninstall", () => {
+  it("unsets core.hooksPath and removes pre-commit/pre-push", () => {
+    const home = join(tmp, "uninstall-home");
+    mkdirSync(home, { recursive: true });
+    const repo = makeRepo("uninstall-repo");
+
+    withEnv("REPO_AEGIS_HOME", home, () => {
+      captureOutput(() => installHooks({ cwd: repo }));
+      const result = captureOutput(() => installHooks({ cwd: repo, uninstall: true }));
+      assert.equal(result.exitCode, undefined);
+      assert.ok(result.stdout.includes("unset core.hooksPath"));
+      assert.ok(result.stdout.includes("removed"));
+    });
+
+    // core.hooksPath is no longer set
+    let stillSet = "";
+    try {
+      stillSet = execFileSync("git", ["config", "--get", "core.hooksPath"], {
+        cwd: repo,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      // git config exits 1 when the key is unset; swallow.
+    }
+    assert.equal(stillSet, "", "core.hooksPath should be unset after uninstall");
+
+    assert.ok(!existsSync(join(home, "hooks", "pre-commit")));
+    assert.ok(!existsSync(join(home, "hooks", "pre-push")));
+    // Hooks dir itself is preserved (other tools may live there).
+    assert.ok(existsSync(join(home, "hooks")));
+  });
+
+  it("is idempotent when nothing is installed", () => {
+    const home = join(tmp, "uninstall-noop-home");
+    mkdirSync(home, { recursive: true });
+    const repo = makeRepo("uninstall-noop-repo");
+
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => installHooks({ cwd: repo, uninstall: true })),
+    );
+    assert.equal(result.exitCode, undefined);
+    assert.ok(
+      result.stdout.includes("not set") || result.stdout.includes("nothing to remove"),
+      "uninstall on a clean repo should report a clear no-op",
+    );
+  });
+
+  it("emits the expected JSON shape", () => {
+    const home = join(tmp, "uninstall-json-home");
+    mkdirSync(home, { recursive: true });
+    const repo = makeRepo("uninstall-json-repo");
+
+    const result = withEnv("REPO_AEGIS_HOME", home, () => {
+      captureOutput(() => installHooks({ cwd: repo }));
+      return captureOutput(() =>
+        installHooks({ cwd: repo, uninstall: true, json: true }),
+      );
+    });
+
+    const j = JSON.parse(result.stdout) as {
+      action: string;
+      hooksDir: string;
+      removed: string[];
+      coreHooksPathUnset: boolean;
+      previousCoreHooksPath: string | null;
+    };
+    assert.equal(j.action, "uninstall-hooks");
+    assert.equal(j.hooksDir, join(home, "hooks"));
+    assert.equal(j.coreHooksPathUnset, true);
+    assert.equal(j.previousCoreHooksPath, join(home, "hooks"));
+    assert.equal(j.removed.length, 2);
+  });
+
+  it("respects silent: no stdout/stderr on uninstall", () => {
+    const home = join(tmp, "uninstall-silent-home");
+    mkdirSync(home, { recursive: true });
+    const repo = makeRepo("uninstall-silent-repo");
+
+    const result = withEnv("REPO_AEGIS_HOME", home, () => {
+      captureOutput(() => installHooks({ cwd: repo }));
+      return captureOutput(() =>
+        installHooks({ cwd: repo, uninstall: true, silent: true }),
+      );
+    });
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr, "");
   });
 });
 

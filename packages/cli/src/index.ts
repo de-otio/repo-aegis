@@ -172,12 +172,14 @@ install
   .command("hooks")
   .description("write pre-commit/pre-push to ~/.config/repo-aegis/hooks and set core.hooksPath")
   .option("--force", "overwrite a conflicting core.hooksPath")
+  .option("--uninstall", "unset core.hooksPath and remove pre-commit/pre-push from <home>/hooks")
   .action((opts, cmd) => installHooks(withGlobals(opts, cmd)));
 
 install
   .command("gitignore")
   .description("append recommended secret-file patterns to ~/.config/git/ignore")
   .option("--gitignore-path <path>", "override default global gitignore path")
+  .option("--uninstall", "strip the managed block from the target gitignore (idempotent)")
   .action((opts, cmd) => installGitignore(withGlobals(opts, cmd)));
 
 install
@@ -191,7 +193,13 @@ install
   .command("claude-md")
   .description("install Claude Code PostToolUse hook + CLAUDE.md snippet")
   .option("--claude-home <dir>", "override default ~/.claude location")
-  .action((opts, cmd) => installClaudeMd(withGlobals(opts, cmd)));
+  .option("--dry-run", "preview the would-be settings.json + CLAUDE.md additions without writing")
+  .option("--print-only", "alias for --dry-run")
+  .action((opts, cmd) => {
+    const merged = withGlobals(opts, cmd) as { dryRun?: boolean; printOnly?: boolean };
+    if (merged.printOnly) merged.dryRun = true;
+    installClaudeMd(merged);
+  });
 
 const markers = program.command("markers").description("inspect and probe the marker deny set");
 
@@ -218,6 +226,8 @@ program
   .option("--org <org>", "also run a one-shot GitHub code-search sweep against this org (needs GH_TOKEN)")
   .option("--published <pkg-or-tarball>", "also scan a packed npm tarball, VSIX bundle, or npm package name")
   .option("--token <env-var>", "env var holding the GitHub token for --org (default GH_TOKEN)")
+  .option("--max-queries <n>", "cap on --org seed-derived queries per run (default 30)", v => parseInt(v, 10))
+  .option("--accept-cross-border", "consent to sending --org seed substrings to GitHub (or set REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1)")
   .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
   .action((opts, cmd) => audit(withGlobals(opts, cmd)));
 
