@@ -29,6 +29,10 @@ export function lockFilePath(home: string = repoAegisHome()): string {
   return join(statePath(home), ".lock");
 }
 
+export function denySetCachePath(home: string = repoAegisHome()): string {
+  return join(statePath(home), "deny-set.cache.json");
+}
+
 /**
  * True if `REPO_AEGIS_HOME` is set in the environment, indicating the user
  * (or a parent process) has overridden the default home. CLI uses this to

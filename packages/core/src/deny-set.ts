@@ -1,6 +1,17 @@
-import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { markersDir as defaultMarkersDir } from "./paths.js";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+import {
+  denySetCachePath as defaultDenySetCachePath,
+  markersDir as defaultMarkersDir,
+} from "./paths.js";
 import type { RepoConfig } from "./repo.js";
 
 export const ALWAYS_FILE_STEM = "_always";
@@ -19,6 +30,73 @@ export interface DenySet {
 
 export interface DenySetOptions {
   markersDir?: string;
+  /**
+   * Path to the cache file. Default: `<home>/state/deny-set.cache.json`.
+   * Pass `null` to disable caching entirely (useful for tests).
+   */
+  cachePath?: string | null;
+}
+
+const DENY_SET_CACHE_VERSION = 1;
+
+interface CacheEntry {
+  schemaVersion: number;
+  key: string;
+  files: DenySetFile[];
+  patterns: string[];
+  combinedRegex: string;
+  warnings: string[];
+}
+
+/**
+ * Build a fingerprint of the inputs to computeDenySet. Two calls with the
+ * same fingerprint produce the same deny set. Includes:
+ *   - repo class + sorted engagements (these change the per-engagement
+ *     filtering applied to the marker file set)
+ *   - the marker dir's file list, mtimes, and sizes (any edit to a marker
+ *     file or addition/removal invalidates the cache)
+ */
+function computeFingerprint(repo: RepoConfig, dir: string): string {
+  const fileSummaries: string[] = [];
+  if (existsSync(dir)) {
+    const files = readdirSync(dir).filter(f => f.endsWith(".txt")).sort();
+    for (const f of files) {
+      const st = statSync(join(dir, f));
+      fileSummaries.push(`${f}:${st.mtimeMs}:${st.size}`);
+    }
+  }
+  const sortedEng = [...repo.engagements].sort().join(",");
+  const input = `v${DENY_SET_CACHE_VERSION}|${repo.class}|${sortedEng}|${fileSummaries.join(";")}`;
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function readCache(cachePath: string): CacheEntry | null {
+  if (!existsSync(cachePath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<CacheEntry>;
+    if (
+      parsed.schemaVersion !== DENY_SET_CACHE_VERSION ||
+      typeof parsed.key !== "string" ||
+      !Array.isArray(parsed.files) ||
+      !Array.isArray(parsed.patterns) ||
+      typeof parsed.combinedRegex !== "string" ||
+      !Array.isArray(parsed.warnings)
+    ) {
+      return null;
+    }
+    return parsed as CacheEntry;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(cachePath: string, entry: CacheEntry): void {
+  try {
+    mkdirSync(dirname(cachePath), { recursive: true });
+    writeFileSync(cachePath, JSON.stringify(entry, null, 2), { mode: 0o600 });
+  } catch {
+    /* cache is best-effort; failure to write is not fatal */
+  }
 }
 
 /**
@@ -43,8 +121,41 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
     );
   }
 
+  // Cache fast-path. Cache is keyed on (class, engagements, marker-file
+  // mtimes+sizes). An exact key match returns the cached deny set without
+  // re-reading any marker file. Caller can disable with cachePath: null
+  // (tests) or override the path. The base warnings (repo-class engagement
+  // mismatch, computed above) are always recomputed so they reflect the
+  // current call rather than what the cache wrote at fingerprint time.
+  const cachePath =
+    opts.cachePath === null ? null : opts.cachePath ?? defaultDenySetCachePath();
+  const fingerprint = computeFingerprint(repo, dir);
+
+  if (cachePath !== null) {
+    const cached = readCache(cachePath);
+    if (cached !== null && cached.key === fingerprint) {
+      return {
+        files: cached.files,
+        patterns: cached.patterns,
+        combinedRegex: cached.combinedRegex,
+        warnings: [...warnings, ...cached.warnings.filter(w => !warnings.includes(w))],
+      };
+    }
+  }
+
   if (!existsSync(dir)) {
-    return { files: [], patterns: [], combinedRegex: "", warnings };
+    const empty = { files: [], patterns: [], combinedRegex: "", warnings };
+    if (cachePath !== null) {
+      writeCache(cachePath, {
+        schemaVersion: DENY_SET_CACHE_VERSION,
+        key: fingerprint,
+        files: [],
+        patterns: [],
+        combinedRegex: "",
+        warnings: [],
+      });
+    }
+    return empty;
   }
 
   const own = new Set(repo.engagements);
@@ -71,10 +182,25 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
       patterns.push(trimmed);
     }
   }
-  return {
+  const result: DenySet = {
     files,
     patterns,
     combinedRegex: patterns.join("|"),
     warnings,
   };
+
+  if (cachePath !== null) {
+    writeCache(cachePath, {
+      schemaVersion: DENY_SET_CACHE_VERSION,
+      key: fingerprint,
+      files,
+      patterns,
+      combinedRegex: result.combinedRegex,
+      // Cache only the input-derived warnings; the call-time class mismatch
+      // warning is recomputed above per call.
+      warnings: [],
+    });
+  }
+
+  return result;
 }

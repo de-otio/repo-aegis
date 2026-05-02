@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { computeDenySet, ALWAYS_FILE_STEM } from "./deny-set.js";
@@ -124,6 +124,50 @@ describe("computeDenySet", () => {
     assert.ok(!ds.patterns.some(p => p.includes("comment")));
     // restore
     rmSync(join(markersDir, "customer-c.txt"));
+  });
+
+  it("writes a cache file with the expected shape on miss", () => {
+    const cachePath = join(tmp, "cache-shape.json");
+    const repo = makeRepo("private-strict");
+    const ds = computeDenySet(repo, { markersDir, cachePath });
+    assert.ok(existsSync(cachePath), "cache file written");
+    const cached = JSON.parse(readFileSync(cachePath, "utf8")) as {
+      schemaVersion: number;
+      key: string;
+      files: unknown[];
+      patterns: string[];
+      combinedRegex: string;
+    };
+    assert.equal(cached.schemaVersion, 1);
+    assert.equal(typeof cached.key, "string");
+    assert.equal(cached.key.length, 64, "fingerprint is sha256 hex");
+    assert.deepEqual(cached.patterns, ds.patterns);
+    assert.equal(cached.combinedRegex, ds.combinedRegex);
+  });
+
+  it("invalidates cache when a marker file changes (mtime updated)", () => {
+    const cachePath = join(tmp, "cache-invalidate.json");
+    const repo = makeRepo("private-strict");
+    const ds1 = computeDenySet(repo, { markersDir, cachePath });
+
+    // Change a marker file with a NEW mtime + different size.
+    const acmePath = join(markersDir, "customer-a.txt");
+    writeFileSync(acmePath, "completely-different-content\n");
+
+    const ds2 = computeDenySet(repo, { markersDir, cachePath });
+    assert.notDeepEqual(ds2.patterns, ds1.patterns, "cache must invalidate on marker change");
+    assert.ok(ds2.patterns.includes("completely-different-content"));
+
+    // Restore for downstream tests.
+    setupMarkers();
+  });
+
+  it("cachePath: null disables caching", () => {
+    const repo = makeRepo("private-strict");
+    const initialFiles = readdirSync(tmp).filter(f => f.endsWith(".json")).length;
+    computeDenySet(repo, { markersDir, cachePath: null });
+    const after = readdirSync(tmp).filter(f => f.endsWith(".json")).length;
+    assert.equal(after, initialFiles, "no cache file should be written");
   });
 
   it("preserves mid-line ; characters in marker patterns", () => {
