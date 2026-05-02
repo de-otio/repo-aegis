@@ -50,6 +50,20 @@ describe("redactMatch", () => {
     assert.ok(redactMatch("éâô-corp", "preview").length > 0);
     assert.ok(redactMatch("中文corp", "hash").length > 0);
   });
+
+  it("preview mode does not split surrogate pairs", () => {
+    // 🔒 is U+1F512, a surrogate pair in UTF-16. .slice(0,3) on the raw
+    // string would split the surrogate; code-point iteration must not.
+    const s = "🔒🔑🔓abcd";
+    const out = redactMatch(s, "preview");
+    // Length is 7 code points; preview returns the first 3 code points + ***N
+    assert.match(out, /^🔒🔑🔓\*\*\*7$/);
+  });
+
+  it("preview mode counts length in code points, not UTF-16 units", () => {
+    const s = "🔒🔑🔓"; // 3 code points, 6 UTF-16 units
+    assert.equal(redactMatch(s, "preview"), "[redacted]"); // length 3 < 4
+  });
 });
 
 describe("revealMatch", () => {

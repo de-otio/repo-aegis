@@ -1,4 +1,4 @@
-import { isHomeOverridden, repoAegisHome } from "@de-otio/repo-aegis-core";
+import { isHomeOverridden } from "@de-otio/repo-aegis-core";
 
 export interface OutputOptions {
   json?: boolean;
@@ -35,27 +35,33 @@ export function emitError(value: ErrorPayload | string, opts: OutputOptions = {}
 /**
  * Print a stderr warning if `REPO_AEGIS_HOME` is overridden in the env.
  *
- * Suppressed when stdin is a pipe (heuristic: hook context); the warning
- * itself would be a recency-pressure signal in the agent's tool result,
- * which is what we're trying to avoid. The user must run interactively
- * to see the warning.
+ * Suppressed when stderr is a pipe (heuristic: hook context); the
+ * warning itself would be a recency-pressure signal in the agent's
+ * tool result, which is what we're trying to avoid. The override
+ * path is intentionally NOT echoed — it could itself contain
+ * customer-derived directory names. Run `echo $REPO_AEGIS_HOME`
+ * interactively to inspect.
  */
 export function homeWarning(): void {
   if (!isHomeOverridden()) return;
   if (!process.stderr.isTTY) return;
   process.stderr.write(
-    `repo-aegis: warning: REPO_AEGIS_HOME is overridden to ${repoAegisHome()}\n`,
+    `repo-aegis: warning: REPO_AEGIS_HOME is overridden (run \`echo $REPO_AEGIS_HOME\` to inspect)\n`,
   );
 }
 
 /**
- * True if the user has opted into revealing literal matched markers, via
- * the `--verbose` CLI flag or `REPO_AEGIS_REVEAL_MATCHES` env var.
+ * True if the user has opted into revealing literal matched markers
+ * via the `--verbose` CLI flag.
  *
- * Hooks must NEVER pass `--verbose`. The flag is for human inspection
- * only.
+ * Hooks must NEVER pass `--verbose`. The flag is for interactive human
+ * inspection only.
+ *
+ * The previous `REPO_AEGIS_REVEAL_MATCHES` env-var path was removed:
+ * env vars propagate to subprocess hooks unintentionally and could
+ * cause literal markers to flow into AI tool-result context — exactly
+ * the recency-pressure failure mode the tool exists to prevent.
  */
 export function shouldRevealMatches(opts: { verbose?: boolean }): boolean {
-  if (opts.verbose) return true;
-  return process.env["REPO_AEGIS_REVEAL_MATCHES"] === "1";
+  return !!opts.verbose;
 }

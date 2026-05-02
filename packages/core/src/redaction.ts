@@ -18,23 +18,29 @@ export type RedactionMode = "preview" | "hash" | "position-only";
  * `position-only` returns the constant `[redacted]`.
  */
 export function redactMatch(match: string, mode: RedactionMode = "preview"): string {
+  // Use code-point iteration to avoid splitting surrogate pairs in the
+  // first 3 characters of multi-byte unicode markers.
+  const codePoints = Array.from(match);
   if (mode === "position-only") return "[redacted]";
   if (mode === "hash") {
     const h = createHash("sha256").update(match).digest("hex").slice(0, 8);
-    return `[hash:${h}:${match.length}]`;
+    return `[hash:${h}:${codePoints.length}]`;
   }
   // preview
-  if (match.length < 4) return "[redacted]";
-  const head = match.slice(0, 3);
-  return `${head}***${match.length}`;
+  if (codePoints.length < 4) return "[redacted]";
+  const head = codePoints.slice(0, 3).join("");
+  return `${head}***${codePoints.length}`;
 }
 
 /**
  * Pass-through; explicit "this is the literal".
  *
- * Should ONLY be called when the user has explicitly opted in via
- * `--verbose` flag or `REPO_AEGIS_REVEAL_MATCHES=1`. Hooks must never
- * pass through this function.
+ * Should ONLY be called when the user has explicitly opted in via the
+ * `--verbose` CLI flag. Hooks must never pass through this function.
+ *
+ * The previous `REPO_AEGIS_REVEAL_MATCHES` env-var was removed: env
+ * vars propagate to subprocess hooks unintentionally and could cause
+ * literal markers to flow into AI tool-result context.
  */
 export function revealMatch(match: string): string {
   return match;

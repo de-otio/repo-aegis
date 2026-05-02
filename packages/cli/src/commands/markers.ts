@@ -34,8 +34,9 @@ function readMarkerFiles(dir: string): MarkersFile[] {
       const lines = readFileSync(path, "utf8").split("\n");
       const patterns: string[] = [];
       for (const raw of lines) {
-        const stripped = raw.replace(/[ \t]*;.*$/, "").trim();
-        if (stripped) patterns.push(stripped);
+        const trimmed = raw.trim();
+        if (trimmed.length === 0 || trimmed.startsWith(";")) continue;
+        patterns.push(trimmed);
       }
       return {
         stem: f.replace(/\.txt$/, ""),
@@ -113,13 +114,13 @@ export function markersTest(input: string, opts: MarkersTestOptions): void {
 
   const hits: { fileStem: string; index: number; pattern?: string; preview?: string }[] = [];
 
-  let baseIndex = 0;
   for (const f of denySet.files) {
     const lines = readFileSync(f.path, "utf8").split("\n");
     const patterns: string[] = [];
     for (const raw of lines) {
-      const stripped = raw.replace(/[ \t]*;.*$/, "").trim();
-      if (stripped) patterns.push(stripped);
+      const trimmed = raw.trim();
+      if (trimmed.length === 0 || trimmed.startsWith(";")) continue;
+      patterns.push(trimmed);
     }
     for (let i = 0; i < patterns.length; i++) {
       const p = patterns[i]!;
@@ -137,9 +138,7 @@ export function markersTest(input: string, opts: MarkersTestOptions): void {
         });
       }
     }
-    baseIndex += patterns.length;
   }
-  void baseIndex;
 
   if (opts.json) {
     emitJson({

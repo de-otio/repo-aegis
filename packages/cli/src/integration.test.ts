@@ -22,7 +22,6 @@ function runCli(home: string, cwd: string, args: string[]): RunResult {
     env: {
       ...process.env,
       REPO_AEGIS_HOME: home,
-      REPO_AEGIS_REVEAL_MATCHES: "0",
     },
     encoding: "utf8",
   });

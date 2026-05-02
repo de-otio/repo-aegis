@@ -125,4 +125,23 @@ describe("computeDenySet", () => {
     // restore
     rmSync(join(markersDir, "customer-c.txt"));
   });
+
+  it("preserves mid-line ; characters in marker patterns", () => {
+    // Regression: legitimate patterns containing `;` (e.g. `db;internal`,
+    // `key;value` form codenames) used to be silently truncated at the
+    // first `;`. Only lines whose first non-whitespace character is `;`
+    // are comments.
+    writeFileSync(
+      join(markersDir, "customer-d.txt"),
+      "db;internal\nkey;val;more\n  ; leading-space-comment\n",
+    );
+    const ds = computeDenySet(makeRepo("private-strict"), { markersDir });
+    assert.ok(ds.patterns.includes("db;internal"), "mid-line ; must not truncate");
+    assert.ok(ds.patterns.includes("key;val;more"), "multiple mid-line ; must survive");
+    assert.ok(
+      !ds.patterns.some(p => p.includes("leading-space-comment")),
+      "leading-whitespace ; lines are still comments",
+    );
+    rmSync(join(markersDir, "customer-d.txt"));
+  });
 });

@@ -63,8 +63,12 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
   for (const f of files) {
     const lines = readFileSync(f.path, "utf8").split("\n");
     for (const raw of lines) {
-      const stripped = raw.replace(/[ \t]*;.*$/, "").trim();
-      if (stripped) patterns.push(stripped);
+      const trimmed = raw.trim();
+      // A line is a comment only if its first non-whitespace character is `;`.
+      // Mid-line `;` is part of the pattern (e.g. `db;internal` is a literal
+      // marker, not "db" with a comment).
+      if (trimmed.length === 0 || trimmed.startsWith(";")) continue;
+      patterns.push(trimmed);
     }
   }
   return {

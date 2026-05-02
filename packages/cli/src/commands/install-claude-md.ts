@@ -59,7 +59,14 @@ if [ -z "$file_path" ] || [ ! -f "$file_path" ]; then
   exit 0
 fi
 
-repo-aegis check --path "$file_path" --json 2>&1 || true
+# The agent supplies file_path; treat it strictly as a value, never a flag.
+# Use the \`--path=VALUE\` form so a path beginning with \`-\` cannot inject
+# CLI flags (e.g. \`--verbose\` would otherwise enable literal-reveal).
+out=$(repo-aegis check --json --path="$file_path" 2>&1 || true)
+
+if [ -n "$out" ]; then
+  echo "$out"
+fi
 `;
 
 interface InstallClaudeMdOptions extends OutputOptions {
