@@ -24,6 +24,17 @@ export interface DenySetFile {
 export interface DenySet {
   files: DenySetFile[];
   patterns: string[];
+  /**
+   * Parallel to `patterns`: `patternSources[i]` is the file stem (engagement
+   * id or `_always`) that pattern i was loaded from. Used by scanText to
+   * attribute each hit to its source engagement, surfaced as
+   * {@link ScanHit.engagement}.
+   *
+   * Optional for backward compatibility with fixtures and ad-hoc DenySet
+   * literals; runtime callers (computeDenySet) always populate it. When
+   * absent or length-mismatched, scanText falls back to no-attribution.
+   */
+  patternSources?: string[];
   combinedRegex: string;
   warnings: string[];
 }
@@ -37,13 +48,17 @@ export interface DenySetOptions {
   cachePath?: string | null;
 }
 
-const DENY_SET_CACHE_VERSION = 1;
+// Bumped to 2 when patternSources was added; v1 caches are invalidated
+// (the read path's schemaVersion check returns null, falling through to
+// recompute).
+const DENY_SET_CACHE_VERSION = 2;
 
 interface CacheEntry {
   schemaVersion: number;
   key: string;
   files: DenySetFile[];
   patterns: string[];
+  patternSources: string[];
   combinedRegex: string;
   warnings: string[];
 }
@@ -79,6 +94,8 @@ function readCache(cachePath: string): CacheEntry | null {
       typeof parsed.key !== "string" ||
       !Array.isArray(parsed.files) ||
       !Array.isArray(parsed.patterns) ||
+      !Array.isArray(parsed.patternSources) ||
+      parsed.patternSources.length !== parsed.patterns.length ||
       typeof parsed.combinedRegex !== "string" ||
       !Array.isArray(parsed.warnings)
     ) {
@@ -137,6 +154,7 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
       return {
         files: cached.files,
         patterns: cached.patterns,
+        patternSources: cached.patternSources,
         combinedRegex: cached.combinedRegex,
         warnings: [...warnings, ...cached.warnings.filter(w => !warnings.includes(w))],
       };
@@ -144,13 +162,14 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
   }
 
   if (!existsSync(dir)) {
-    const empty = { files: [], patterns: [], combinedRegex: "", warnings };
+    const empty: DenySet = { files: [], patterns: [], patternSources: [], combinedRegex: "", warnings };
     if (cachePath !== null) {
       writeCache(cachePath, {
         schemaVersion: DENY_SET_CACHE_VERSION,
         key: fingerprint,
         files: [],
         patterns: [],
+        patternSources: [],
         combinedRegex: "",
         warnings: [],
       });
@@ -171,6 +190,7 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
     });
 
   const patterns: string[] = [];
+  const patternSources: string[] = [];
   for (const f of files) {
     const lines = readFileSync(f.path, "utf8").split("\n");
     for (const raw of lines) {
@@ -180,11 +200,13 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
       // marker, not "db" with a comment).
       if (trimmed.length === 0 || trimmed.startsWith(";")) continue;
       patterns.push(trimmed);
+      patternSources.push(f.stem);
     }
   }
   const result: DenySet = {
     files,
     patterns,
+    patternSources,
     combinedRegex: patterns.join("|"),
     warnings,
   };
@@ -195,6 +217,7 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
       key: fingerprint,
       files,
       patterns,
+      patternSources,
       combinedRegex: result.combinedRegex,
       // Cache only the input-derived warnings; the call-time class mismatch
       // warning is recomputed above per call.

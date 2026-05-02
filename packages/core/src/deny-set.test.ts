@@ -138,7 +138,7 @@ describe("computeDenySet", () => {
       patterns: string[];
       combinedRegex: string;
     };
-    assert.equal(cached.schemaVersion, 1);
+    assert.equal(cached.schemaVersion, 2);
     assert.equal(typeof cached.key, "string");
     assert.equal(cached.key.length, 64, "fingerprint is sha256 hex");
     assert.deepEqual(cached.patterns, ds.patterns);
@@ -168,6 +168,21 @@ describe("computeDenySet", () => {
     computeDenySet(repo, { markersDir, cachePath: null });
     const after = readdirSync(tmp).filter(f => f.endsWith(".json")).length;
     assert.equal(after, initialFiles, "no cache file should be written");
+  });
+
+  it("populates patternSources parallel to patterns", () => {
+    const repo = makeRepo("private-strict");
+    const ds = computeDenySet(repo, { markersDir, cachePath: null });
+    assert.equal(ds.patternSources?.length, ds.patterns.length, "lengths must match");
+    // Spot-check: alphabetical file order is _always, customer-a, customer-b
+    const alwaysIdx = ds.patterns.findIndex(p => p === "PROJECT-CODENAME-ALPHA");
+    if (alwaysIdx >= 0) {
+      assert.equal(ds.patternSources![alwaysIdx], "_always");
+    }
+    const acmeIdx = ds.patterns.findIndex(p => p === "acme-corp");
+    if (acmeIdx >= 0) {
+      assert.equal(ds.patternSources![acmeIdx], "customer-a");
+    }
   });
 
   it("preserves mid-line ; characters in marker patterns", () => {

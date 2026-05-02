@@ -139,7 +139,8 @@ export function check(opts: CheckOptions): void {
     if (hits.length > 0) {
       emitText(`repo-aegis: ${hits.length} marker hit${hits.length === 1 ? "" : "s"}${advisory ? " (advisory)" : ""}`);
       for (const h of hits) {
-        emitText(`  ${h.path ?? "<staged>"}:${h.line}:${h.column}  ${h.matchPreview}`);
+        const eng = h.engagement ? ` [${h.engagement}]` : "";
+        emitText(`  ${h.path ?? "<staged>"}:${h.line}:${h.column}  ${h.matchPreview}${eng}`);
       }
     }
     if (historyHits.length > 0) {

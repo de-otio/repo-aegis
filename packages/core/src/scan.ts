@@ -20,7 +20,13 @@ export interface ScanHit {
   line: number;
   column: number;
   matchPreview: string;
-  // Future (v0.3): pattern, engagement attribution
+  /**
+   * The marker file stem (engagement id, or `_always`) the matched pattern
+   * was loaded from. Filled in by scanText when the deny set carries
+   * `patternSources`. Optional for backward compatibility with deny sets
+   * that don't supply attribution (synthetic test fixtures, older callers).
+   */
+  engagement?: string;
 }
 
 export interface SkippedFile {
@@ -52,6 +58,32 @@ function formatMatch(literal: string, opts: ScanOptions): string {
 }
 
 /**
+ * Find which deny-set pattern produced a given match, returning the
+ * engagement attribution from `patternSources`. Falls back to undefined
+ * when the deny set doesn't carry attribution (older fixtures).
+ *
+ * Iterates patterns in declaration order — first match wins. For typical
+ * marker counts (tens to low hundreds) this is microseconds; the
+ * resulting per-line cost is dominated by the combined-regex test that
+ * already happened.
+ */
+function attributeMatch(matched: string, denySet: DenySet): string | undefined {
+  const sources = denySet.patternSources;
+  if (!sources || sources.length !== denySet.patterns.length) return undefined;
+  for (let i = 0; i < denySet.patterns.length; i++) {
+    const p = denySet.patterns[i]!;
+    try {
+      if (new RegExp(p, "i").test(matched)) {
+        return sources[i];
+      }
+    } catch {
+      /* malformed pattern slipped past validation; skip */
+    }
+  }
+  return undefined;
+}
+
+/**
  * Scan an arbitrary text body. The most general primitive; called by
  * the more specific scanners after they've extracted text from their
  * input (staged diff, file contents, commit range diff).
@@ -72,11 +104,13 @@ export function scanText(
     const m = line.match(re);
     if (m && m[0]) {
       if (respectAllow && ALLOW_COMMENT.test(line)) continue;
+      const engagement = attributeMatch(m[0], denySet);
       hits.push({
         ...(path !== undefined && { path }),
         line: i + 1,
         column: (m.index ?? 0) + 1,
         matchPreview: formatMatch(m[0], opts),
+        ...(engagement !== undefined && { engagement }),
       });
     }
   }

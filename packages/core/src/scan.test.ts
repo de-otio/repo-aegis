@@ -121,6 +121,40 @@ describe("scanText", () => {
     const hits = scanText(text, ds, undefined, { respectAllowComments: false });
     assert.equal(hits.length, 1);
   });
+
+  it("attributes the matched pattern to its source engagement", () => {
+    // Two patterns from two different "engagements". Hit on the second
+    // pattern should report engagement = "customer-b".
+    const ds: DenySet = {
+      files: [],
+      patterns: ["alpha-marker", "bravo-marker"],
+      patternSources: ["customer-a", "customer-b"],
+      combinedRegex: "alpha-marker|bravo-marker",
+      warnings: [],
+    };
+    const hits = scanText("see bravo-marker", ds);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.engagement, "customer-b");
+  });
+
+  it("omits engagement when patternSources is missing", () => {
+    const ds = denySetWithPatterns(["lone-marker"]);
+    const hits = scanText("see lone-marker", ds);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.engagement, undefined);
+  });
+
+  it("omits engagement when patternSources length mismatches", () => {
+    const ds: DenySet = {
+      files: [],
+      patterns: ["a-marker", "b-marker"],
+      patternSources: ["only-one"], // length mismatch
+      combinedRegex: "a-marker|b-marker",
+      warnings: [],
+    };
+    const hits = scanText("see a-marker", ds);
+    assert.equal(hits[0]!.engagement, undefined);
+  });
 });
 
 describe("scanFile", () => {
