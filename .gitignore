@@ -11,3 +11,8 @@ coverage/
 .doc-search-index
 # review artefacts
 tmp/
+# local working notes
+plans/
+# npm-link / `npm install --prefix .` artefacts
+bin/
+lib/
