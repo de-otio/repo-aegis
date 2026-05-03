@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One-command uninstall.** New top-level `repo-aegis uninstall`
+  reverses every `install …` step in one shot. Defaults to a dry-run;
+  `--yes` applies. Opt-in `--purge-repos` walks `~/repos`, `~/code`,
+  `~/src`, `~/projects` (override via `--scan-root`) and unsets
+  `repo-aegis.*` keys from every git working tree it finds. Opt-in
+  `--purge-home` deletes `~/.config/repo-aegis/` (with an
+  anti-fat-finger `PURGE_HOME_REFUSED` guard) and surfaces audit-log
+  presence in the dry-run report so the user can back it up first.
+- **`install claude-md --uninstall`.** Strips the managed `CLAUDE.md`
+  block and removes every PostToolUse / SessionStart hook entry
+  attributable to repo-aegis (matches the canonical `repo-aegis hook
+  scan-after-write` / `repo-aegis hook first-touch` commands plus a
+  legacy absolute-path-to-shell-script form). Preserves third-party
+  hooks in the same matcher entry. Idempotent.
+- **`install ci --uninstall`.** Deletes
+  `.github/workflows/leak-scan.yml` if its body matches a known
+  emitted template. Surfaces `WORKFLOW_MODIFIED` (and refuses
+  deletion) when the user has edited it.
+- **`uninstall sweep-repos`** verb. Walks one or more `--scan-root`
+  paths and unsets `repo-aegis.class` / `repo-aegis.engagement` keys
+  from every git working tree underneath. Dry-run by default;
+  `--yes` to apply. Idempotent.
+- **`install gitignore` honours `silent`** so the top-level
+  uninstall can call it without polluting its own output.
+
+### Changed
+
+- **PostToolUse hook is now path-aware.** `repo-aegis hook
+  scan-after-write` resolves the destination working tree from the
+  written `file_path` (walking up to the nearest `.git`) instead of
+  from the launcher's `cwd`. The destination repo's classification
+  and deny set apply, so cross-repo writes inside the same trust
+  boundary now scan cleanly instead of fail-closing on
+  `OUTSIDE_WORKING_TREE`. New `core` exports: `findEnclosingWorkingTree`,
+  `resolveGitDir`, `getRemoteOrg`, `computeTrustBoundary`,
+  `trustBoundariesOverlap`.
+
+### Added
+
+- **`CROSS_ORG_WRITE` error code** (PostToolUse hook). When the
+  destination working tree's trust boundary (engagement
+  `githubOrgs` ∪ `personalOrgs` ∪ remote-org fallback) does not
+  overlap the launcher's, the hook refuses with this code and exits
+  2. The file is already on disk (PostToolUse fires after the
+  write); the hook surfaces the offending path and asks the agent
+  to revert. Trust boundaries inferred from classification beat the
+  remote URL — forks don't accidentally widen scope.
+- **`DEST_UNCLASSIFIED` warning code** (PostToolUse hook). Emitted
+  alongside a normal scan result when the destination repo has no
+  class, no engagements, and no parseable remote. The scan still
+  runs against `_always`; the warning prompts the agent to suggest
+  classifying the destination.
 - **Phase 1 — zero-config onboarding (org-keyed JIT classification).**
   - Registry schema v2: `personalOrgs` (top-level) and
     `engagements[*].githubOrgs` (per-engagement). v1 files continue to

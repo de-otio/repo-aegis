@@ -115,6 +115,28 @@ For the design rationale and threat model, see
 Redacted by default everywhere; `--verbose` / `--reveal-matches` opt-in.
 Hooks must never pass these flags.
 
+### Uninstalling
+
+If repo-aegis isn't right for you, `repo-aegis uninstall` reverses every
+`install …` step in one shot:
+
+```sh
+repo-aegis uninstall                                # dry-run; shows what would change
+repo-aegis uninstall --yes                          # apply: hooks, gitignore, claude-md, ci
+repo-aegis uninstall --yes --purge-repos            # also unset repo-aegis.* in every classified repo
+repo-aegis uninstall --yes --purge-home             # also delete ~/.config/repo-aegis/ (registry, audit log, profiles)
+repo-aegis uninstall --yes --purge-repos --purge-home  # full reset
+```
+
+Defaults to dry-run; nothing destructive happens until you pass `--yes`.
+
+`--purge-repos` walks `~/repos`, `~/code`, `~/src`, `~/projects` by
+default (override with `--scan-root <path>`). `--purge-home` removes
+the registry, audit log, marker files, deny-set cache, embedding
+profiles — back the audit log up first if you need a compliance
+record (the dry-run report flags it). To remove the npm package
+itself, run `npm uninstall -g @de-otio/repo-aegis` afterwards.
+
 ### Per-line allowlist comments
 
 Add `repo-aegis: allow` to a line (in any comment style) to suppress
@@ -220,7 +242,12 @@ audits), see the data-leak prevention guide referenced under
   and translate exit code into the user-facing block.
 - A Claude Code PostToolUse self-catch hook (registered as
   `repo-aegis hook scan-after-write` in `~/.claude/settings.json`)
-  does the same per-write.
+  does the same per-write. The hook is path-aware: it resolves the
+  destination working tree from the written path (not from the
+  launcher's `cwd`) and applies *that* repo's rules, so cross-repo
+  writes inside the same trust boundary just work. Writes whose
+  destination crosses an org boundary are refused with
+  `CROSS_ORG_WRITE`.
 - A central registry (`~/.config/repo-aegis/engagements.yaml`) tracks
   engagement → markers → start/end dates. Per-engagement marker files
   (`~/.config/repo-aegis/markers/<id>.txt`) are generated from it.

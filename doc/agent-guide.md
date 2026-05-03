@@ -453,8 +453,17 @@ absolute path to a shell script.
 
 The hook fires on every `Write`, `Edit`, and `MultiEdit` tool call.
 It reads your tool-result JSON on stdin, extracts the file_path,
-and runs `check --path` against the deny set. Output (always JSON,
-never literal markers) flows back into your tool result.
+and **resolves the destination working tree from that path** (not
+from the launcher's `cwd`). It then applies the destination repo's
+classification + deny set. Output (always JSON, never literal
+markers) flows back into your tool result.
+
+This means cross-repo writes (an agent rooted in repo A writing to a
+file in repo B) are scanned against B's rules. As long as A and B are
+in the same trust boundary — i.e. share an engagement's `githubOrgs`
+or both sit in `personalOrgs` — the write goes through. Crossing
+trust boundaries is refused with `CROSS_ORG_WRITE` (see
+[Cross-repo writes](#cross-repo-writes)).
 
 It exits 0 silently when:
 - stdin is empty / unparseable
@@ -463,6 +472,42 @@ It exits 0 silently when:
 
 So a "no marker hit" looks the same to you as "no scan ran". That's
 intentional — the hook is invisible to you on the happy path.
+
+### Cross-repo writes
+
+When the file_path lives in a different working tree than the
+launcher's `cwd`, the hook's policy layer decides what to do based
+on the **trust boundary** of each repo. A trust boundary is the set
+of GitHub orgs the repo is associated with:
+
+- **engagement orgs**: `engagements[*].githubOrgs` of every
+  engagement the repo is `allow`'d into.
+- **personal orgs**: `personalOrgs` from the registry, if the repo's
+  class is `public-eligible`.
+- **remote fallback**: the parsed org from `git remote get-url
+  origin`, but only when the classification supplies no orgs.
+
+Two repos share a trust boundary if their org sets overlap.
+
+| Situation | Hook action |
+|---|---|
+| Same working tree (regular write) | scan against repo's rules |
+| Different working tree, overlapping trust boundary | scan against destination's rules |
+| Different working tree, destination unclassified (no class, no engagements, no remote) | scan against `_always`, emit `DEST_UNCLASSIFIED` warning |
+| Different working tree, disjoint trust boundaries | refuse with `CROSS_ORG_WRITE` (exit 2) |
+| File outside any git working tree (`/tmp/...`) | scan against `_always`-only deny set |
+
+When you see `CROSS_ORG_WRITE`, the file is **already on disk**
+(PostToolUse fires after the write succeeds). Surface to the user,
+propose reverting the file, do not silently retry. The agent should
+**not** add `--allow-remote` or otherwise widen the trust boundary
+on its own initiative — that's a compliance decision.
+
+When you see `DEST_UNCLASSIFIED`, the destination repo has not been
+classified. The scan still ran (against `_always`) but you have no
+positive evidence the destination is in scope. Suggest to the user
+that they classify the destination repo (`repo-aegis classify
+--apply` from inside it).
 
 ## Failure modes
 
@@ -510,6 +555,67 @@ The pattern is **redacted in the JSON output by default**. To see
 the literal pattern, the user runs
 `repo-aegis render` (no `--json`) at the terminal. **You** never see
 the literal pattern from a hook.
+
+## Uninstalling
+
+If the user says "stop using repo-aegis," "remove repo-aegis," or
+similar, **do not** manually edit `~/.claude/settings.json`,
+`~/.claude/CLAUDE.md`, the workflow file, or per-repo git config. There
+is a verb for this: `repo-aegis uninstall`.
+
+Recommended flow:
+
+```sh
+repo-aegis uninstall                                # dry-run by default
+```
+
+Surface the dry-run plan to the user. Then, with their explicit
+confirmation:
+
+```sh
+repo-aegis uninstall --yes                          # reverse all install … steps
+repo-aegis uninstall --yes --purge-repos            # also unset repo-aegis.* in every classified repo
+repo-aegis uninstall --yes --purge-home             # also delete ~/.config/repo-aegis/
+repo-aegis uninstall --yes --purge-repos --purge-home   # full reset
+```
+
+What the steps do:
+
+- **Always-on:** strips the managed `CLAUDE.md` block, removes
+  PostToolUse + SessionStart hook entries from `settings.json`
+  (preserving any third-party hooks in the same matcher entry),
+  unsets `core.hooksPath` and removes the per-repo pre-commit /
+  pre-push files, strips the managed block from `~/.config/git/ignore`,
+  and removes the CI workflow file (only if it matches a known
+  emitted template — a user-edited workflow is preserved with
+  `WORKFLOW_MODIFIED`).
+- **`--purge-repos`:** walks `~/repos`, `~/code`, `~/src`, `~/projects`
+  by default (override with `--scan-root <path>`, repeatable), finds
+  every git working tree underneath, and unsets `repo-aegis.class` /
+  `repo-aegis.engagement` from each. Idempotent.
+- **`--purge-home`:** deletes `~/.config/repo-aegis/` (the registry,
+  audit log, marker files, deny-set cache, embedding profiles, age
+  ciphertext, leak-context flag). Refused if the home path doesn't
+  end in `repo-aegis` (anti-fat-finger guard against a
+  `REPO_AEGIS_HOME` pointing somewhere unrelated).
+
+If the audit log is enabled, the dry-run report flags
+`auditLogPresent: true`. **Suggest backing it up before
+`--purge-home`** — it may be a compliance artefact (`repo-aegis
+audit-log show > /tmp/audit-backup.jsonl`). Do not propose
+`--purge-home` without surfacing this.
+
+`--yes` is the user's explicit confirmation. Don't add it on your own
+initiative; surface the dry-run, wait for the user's word.
+
+The npm package itself is removed separately:
+
+```sh
+npm uninstall -g @de-otio/repo-aegis
+```
+
+`repo-aegis uninstall` doesn't run that for you — it's outside the
+CLI's purview.
 
 ## Output redaction policy — internalise this
 
@@ -577,12 +683,16 @@ Codes you should recognise and act on:
 | `RESERVED_ID` | tried to create or remove `_always` as an engagement id | use the top-level `always_block:` field in the registry |
 | `REMOVE_REQUIRES_HARD` | `engagements remove` without `--hard` | for soft removal use `engagements end <id> --purge`; for hard removal pass `--hard` (data-subject-erasure semantics) |
 | `LOCK_TIMEOUT` | another repo-aegis process is holding the registry lock | wait and retry; if persistent, the user has a stale lockfile to investigate |
-| `OUTSIDE_WORKING_TREE` | `check --path` resolved to a file outside the repo working tree | a likely symlink-attack indicator; do NOT auto-rerun on a different path. Surface to the user. |
+| `OUTSIDE_WORKING_TREE` | `check --path` (CLI invocation, not the hook) resolved a file outside the *named* repo's working tree, even after symlink resolution | the file is genuinely outside any git tree the call was scoped to. Surface to the user; do NOT auto-rerun on a different path. The PostToolUse hook does NOT raise this — it resolves the destination tree from the path automatically. |
+| `CROSS_ORG_WRITE` | PostToolUse hook saw a write whose destination tree's trust boundary does not overlap the launcher's | the file is already on disk. Surface to the user, name the offending path, propose reverting. Do NOT add `--allow-remote` or modify `personalOrgs` / `githubOrgs` to widen the boundary; that's a compliance decision the user owns. |
+| `DEST_UNCLASSIFIED` (warning, not fatal) | PostToolUse hook scanned a write into a destination repo with no class, no engagements, and no remote it could parse | the scan ran against `_always` only. Suggest the user classify the destination (`cd <dest> && repo-aegis classify --apply`). The hit (if any) is still real; treat it like a normal scan result. |
 | `CUSTOMER_COUPLED_NO_ENGAGEMENT` | `check` ran in a `customer-coupled` repo with no engagement set | run `repo-aegis allow <id>` after confirming with the user which engagement(s) the repo references |
 | `HOOKS_PATH_CONFLICT` | `install hooks` saw a different `core.hooksPath` already set | tell the user the prior value verbatim; ask if they want to overwrite with `--force` |
 | `SETTINGS_PARSE_ERROR` | `~/.claude/settings.json` is not valid JSON | the user has a corrupt settings file; do not auto-fix |
 | `RULES_PARSE_ERROR` / `INVALID_RULES` | `classify --rules` YAML parse / validation failed | `details` carries which rules; user fixes the file |
 | `WORKFLOW_EXISTS` | `install ci` saw an existing workflow file | the user must explicitly pass `--force` to overwrite |
+| `WORKFLOW_MODIFIED` | `install ci --uninstall` saw a workflow file whose body doesn't match any known emitted template | a user-edited workflow; refusing to delete it. Surface to the user with the path so they can review and `rm` manually. |
+| `PURGE_HOME_REFUSED` | `uninstall --purge-home` saw a `REPO_AEGIS_HOME` that doesn't end in `repo-aegis` (or resolves to `/`, `$HOME`, etc.) | anti-fat-finger guard. Surface to the user with the resolved path; they either correct `REPO_AEGIS_HOME` or delete manually. Do NOT auto-bypass. |
 | `TOKEN_MISSING` | `scan run` could not find the GitHub token env var | the user must export `GH_TOKEN` (or whatever `--token <env-var>` names) |
 | `QUERY_VALIDATION` | `scan run`/`validate-queries` rejected a query file | `details` carries the per-query reasons |
 | `STATE_PARSE_ERROR` | `scan run` state file is corrupt | the user resolves it manually; do not auto-truncate |
@@ -741,6 +851,12 @@ shape we don't model.
 | `audit-log off` | disable compliance trail | `action`, `wasOn`, `isOn`, `path` |
 | `audit-log show [--all]` | print recorded events | `action`, `path`, `enabled`, `total`, `shown`, `records` |
 | `audit-log path` | print log file path | `action`, `path`, `enabled`, `exists` |
+| `install hooks --uninstall` | reverse `install hooks` | `action`, `hooksDir`, `removed`, `coreHooksPathUnset`, `previousCoreHooksPath` |
+| `install gitignore --uninstall` | strip managed block | `action`, `target`, `removed`, `reason?` |
+| `install claude-md --uninstall` | strip managed block + hook entries | `action`, `claudeMd`, `settings` |
+| `install ci --uninstall` | remove the workflow file | `action`, `target`, `removed`, `absent?` |
+| `uninstall` (top-level) | reverse all install steps; opt-in flags purge home + per-repo config | `action`, `dryRun`, `steps`, `purgeRepos?`, `purgeHome?` |
+| `uninstall sweep-repos` | walk roots, unset `repo-aegis.*` git config | `action`, `dryRun`, `roots`, `results` |
 
 Always pass `--json` when you want machine-readable output. Without
 it, output is tuned for a human at a terminal.
