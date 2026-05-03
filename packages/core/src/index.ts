@@ -50,6 +50,20 @@ export type { Engagement, Registry, ResolveResult } from "./registry.js";
 export { parseRemoteUrl } from "./remote-url.js";
 export type { ParsedRemote } from "./remote-url.js";
 
+// ---- working-tree resolution (path-aware hook) --------------------------
+export {
+  findEnclosingWorkingTree,
+  resolveGitDir,
+  getRemoteOrg,
+} from "./working-tree.js";
+
+// ---- trust-boundary (path-aware hook) -----------------------------------
+export {
+  computeTrustBoundary,
+  trustBoundariesOverlap,
+} from "./trust-boundary.js";
+export type { TrustBoundary } from "./trust-boundary.js";
+
 // ---- first-touch classification (Phase 1 onboarding) --------------------
 export { firstTouchClassify, redactOrg } from "./first-touch.js";
 export type {
