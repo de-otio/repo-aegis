@@ -10,9 +10,12 @@ marker list when working on customer-A's own code.
 
 ## Status
 
-**Pre-release. v0.2. CLI and scanner are feature-complete: all
-commands, output formats, and hook integrations implemented. Not yet
-published to npm.**
+**Pre-release. v0.1.0 published; Phase 1–3 onboarding work merged on
+`main` for the next release. CLI and scanner are feature-complete:
+all commands, output formats, and hook integrations implemented.
+Phase 1 (org-keyed JIT classification) and Phase 2 (LLM-assisted
+marker discovery) ship in the developer CLI; Phase 3 (semantic audit
+sweep) ships in `@de-otio/repo-aegis-scan` as opt-in.**
 
 If you're driving this from a coding agent (Claude Code, Cursor,
 Aider, Cline, …), start at the [agent operator guide](doc/agent-guide.md).
@@ -37,7 +40,10 @@ For the design rationale and threat model, see
 - `repo-aegis check --history` — sweep full git history with
   `git log -G` per pattern (slow; pair with `--since` for a lower bound).
 - `repo-aegis classify --apply` — auto-detect repo class + engagement
-  from the git remote URL using a rules YAML; sets `git config`.
+  from the git remote URL. Reads org membership directly from the
+  engagement registry (`engagements[*].githubOrgs`, `personalOrgs`).
+  Falls back to a legacy `classify.yml` rules file with a deprecation
+  warning if present.
 - `repo-aegis audit` — composite repo health check: marker scan over
   tracked files, optional history sweep, lockfile non-public-registry
   check, fixture-directory scan, remote-vs-class consistency.
@@ -47,6 +53,8 @@ For the design rationale and threat model, see
 ### Setup and registry
 
 - `repo-aegis init` — bootstrap the home directory and registry stub.
+  `--migrate-classify` ports a legacy `classify.yml` to the
+  `personalOrgs` / `engagements[*].githubOrgs` shape (Phase 1).
 - `repo-aegis install hooks` — write pre-commit and pre-push to
   `~/.config/repo-aegis/hooks` and set `core.hooksPath` for the
   current repo.
@@ -56,6 +64,18 @@ For the design rationale and threat model, see
 - `repo-aegis install claude-md` — wire a Claude Code PostToolUse
   hook + a CLAUDE.md snippet into `~/.claude`.
 - `repo-aegis engagements list|add|end|show` — manage the registry.
+  `add [id] --github-org <org>` (or `--personal-org`) attaches GitHub
+  orgs to an engagement so the next git remote in that org auto-classifies.
+- `repo-aegis suggest-markers [--apply]` — Phase 2: extract prose from
+  the current repo, ask a local Ollama model to identify customer
+  tokens, filter (dictionary, dependency names, existing patterns),
+  synthesise word-boundary regexes, and (with `--apply`) append them
+  to an engagement's marker list. Local-only by default; `--allow-remote`
+  permits a non-loopback Ollama endpoint.
+- `repo-aegis hook first-touch` — JIT classification hook that fires
+  the first time an agent touches a previously-unclassified repo.
+  Emitted as a Claude Code SessionStart hook by `install claude-md`
+  (and `init`).
 - `repo-aegis render` — regenerate per-engagement marker files from
   the registry.
 - `repo-aegis context on|off|status` — toggle leak-context strict mode.
@@ -76,6 +96,17 @@ For the design rationale and threat model, see
   json|markdown|issue` (with `--report-issue-repo owner/repo` for
   issue mode); state file tracks seen hits across runs (atomic
   writes).
+- `repo-aegis-scan run --semantic` — Phase 3: in addition to the
+  regex sweep, fetch each new candidate's blob from GitHub, embed it
+  via Ollama, and surface engagements whose reference docs are
+  similar above their per-profile threshold. Output gains a `semantic`
+  section (JSON) or "Semantic hits" table (markdown). Best-effort —
+  Ollama failures do not abort the regex sweep.
+- `repo-aegis-scan rebuild-profiles` — Phase 3: read each active
+  engagement's `reposActive`, extract representative prose, embed,
+  and write a profile to `~/.config/repo-aegis/profiles/<id>.json`.
+  `--diff` reports stored-vs-current manifest drift without
+  embedding (`[SEC H-3]`).
 - `repo-aegis-scan encrypt-query <file> --recipient <pubkey>` —
   encrypt a queries YAML file with `age`. Used for committing
   encrypted query lists in a public deployment repo.
@@ -196,28 +227,37 @@ audits), see the data-leak prevention guide referenced under
 
 ## Roadmap
 
-The monorepo has five workspace packages:
+The monorepo has six workspace packages:
 
 - `@de-otio/repo-aegis-core` — the registry/deny-set/scanner library.
+  Hot-path code only — deterministic, free of LLM dependencies. The
+  import-graph guard test in `packages/core/src/import-graph.test.ts`
+  enforces this property.
 - `@de-otio/repo-aegis` — the developer CLI: blocks leaks at commit
-  time on the developer machine. Feature-complete for v0.2.
+  time on the developer machine. Feature-complete.
 - `@de-otio/repo-aegis-scan` — the centralised Layer-2 sweep:
   reads queries from a YAML file, runs them against GitHub
   code-search, filters out previously-seen hits via an atomic state
   file. Output formats: JSON, markdown report, or a filed GitHub
-  issue. Deployment (the scheduled GitHub Action, encrypted query
-  list, and state file) lives in a private repo of the operator's
-  choosing — see
+  issue. Phase 3 adds an opt-in `--semantic` mode and
+  `rebuild-profiles` verb. Deployment (the scheduled GitHub Action,
+  encrypted query list, and state file) lives in a private repo of
+  the operator's choosing — see
   [data-leaks-on-github/code-search-solution.md](https://github.com/de-otio/dot-notes/blob/main/doc/topics/data-leaks-on-github/code-search-solution.md).
+- `@de-otio/repo-aegis-llm` — LLM-assisted helpers (Ollama HTTP
+  client, prose extraction, token synthesis, embedding profiles).
+  Off the deterministic gate path: only consumed by the CLI's
+  `suggest-markers` verb and the scanner's `--semantic` /
+  `rebuild-profiles` verbs. See [packages/llm/README.md](packages/llm/README.md).
 - `repo-aegis-vscode` — VSCode extension: surfaces the CLI's status
   and scan output in the editor (status bar, diagnostics, commands).
   View-only — the deterministic gate stays in the git hooks and the
   Claude Code PostToolUse hook.
 - `@de-otio/repo-aegis-mcp` — Model Context Protocol server
   exposing the core library as agent-readable tools (status, check,
-  audit, markers test, engagements list/show). Same JSON shapes as
-  the CLI, no `--verbose` path, redaction policy enforced at the
-  tool boundary. See [packages/mcp/README.md](packages/mcp/README.md).
+  audit, markers test, engagements list/show, classify-first-touch).
+  Same JSON shapes as the CLI, no `--verbose` path, redaction policy
+  enforced at the tool boundary. See [packages/mcp/README.md](packages/mcp/README.md).
 
 There is also a thin wrapper:
 
@@ -249,6 +289,15 @@ Already shipped (optional or default):
 - Operator audit log — `repo-aegis audit-log on/off/show/path` (off by
   default).
 - MCP server, VSCode extension, GitHub Action — all in this monorepo.
+- Phase 1 — zero-config onboarding: org-keyed JIT classification on
+  first agent touch (`hook first-touch` + `engagements add --github-org`).
+- Phase 2 — LLM-assisted marker discovery: `suggest-markers` proposes
+  customer tokens via a local Ollama model. The deterministic gate
+  remains regex-only.
+- Phase 3 — semantic audit sweep: `repo-aegis-scan --semantic` /
+  `rebuild-profiles`. Off-machine, asynchronous, advisory. Hot-path
+  determinism is preserved — see
+  [doc/design/zero-config-onboarding.md](doc/design/zero-config-onboarding.md).
 
 ## Background
 

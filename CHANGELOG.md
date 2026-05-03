@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Phase 1 — zero-config onboarding (org-keyed JIT classification).**
+  - Registry schema v2: `personalOrgs` (top-level) and
+    `engagements[*].githubOrgs` (per-engagement). v1 files continue to
+    parse with `personalOrgs: []` defaults.
+  - `repo-aegis hook first-touch` — Claude Code SessionStart hook that
+    classifies a previously-unclassified repo from its git remote +
+    registry org membership, with a redacted "needs confirmation"
+    output for ambiguous cases (`[SEC H-5]`).
+  - `repo-aegis engagements add [id] --github-org <org>` /
+    `--personal-org <org>` — attach orgs to engagements; mutual
+    exclusion + cross-engagement uniqueness validation.
+  - `repo-aegis init --migrate-classify` — port a legacy `classify.yml`
+    to the registry schema (idempotent, atomic write).
+  - `repo-aegis classify` falls back to legacy `classify.yml` with a
+    one-time deprecation warning naming the matched rule
+    (`[SEC M-7]`).
+  - `aegis_classify_first_touch` MCP tool exposing the same pipeline
+    to other agent runtimes.
+- **Phase 2 — LLM-assisted marker discovery.**
+  - New workspace package `@de-otio/repo-aegis-llm` (Ollama HTTP
+    client, prose extraction, token synthesis, filters,
+    token-extraction prompt).
+  - `repo-aegis suggest-markers [--apply]` — extract prose, ask a
+    local Ollama model to identify customer tokens, filter
+    (dictionary, dependencies, existing patterns), synthesise
+    word-boundary regexes, and (with `--apply`) append them to an
+    engagement's marker list.
+  - `[SEC H-1]` Ollama endpoint validation (loopback-only by default,
+    `--allow-remote` opt-in, `localhost` DNS lookup guarded against
+    `/etc/hosts` redirection).
+  - `[SEC C-3]` LLM prompt-injection defence: anti-injection preamble
+    + fence delimiters around user-provided prose; structured response
+    parsed via Zod.
+  - `[SEC H-2]` user-identity cross-check: tokens that match
+    `personalOrgs`, `$USER`, or `$HOME` basename are filtered out
+    before the candidate list is surfaced.
+  - `[SEC H-6]` audit-log redaction for `suggest-markers` runs.
+- **Phase 3 — semantic audit sweep (off-machine, advisory).**
+  - Per-engagement embedding profiles stored at
+    `~/.config/repo-aegis/profiles/<engagement-id>.json` (chmod 0600,
+    atomic tmp+fsync+rename, schema-versioned).
+  - `[SEC H-3]` source-document manifest with sha256 hashes; rebuild
+    surfaces a stored-vs-current diff before re-embedding.
+  - `repo-aegis-scan run --semantic` — for each new regex hit,
+    fetches the candidate blob, embeds it, scores it against all
+    active engagement profiles, and surfaces engagements over the
+    per-profile cosine threshold. Output gains a `semantic` section
+    (JSON) or "Semantic hits" table (markdown). Best-effort —
+    Ollama failures do not abort the regex sweep.
+  - `repo-aegis-scan rebuild-profiles [--diff] [--engagement <id>...]` —
+    build / refresh profiles from each engagement's `reposActive`.
+- **Hot-path determinism guard.** New test
+  `packages/core/src/import-graph.test.ts` walks the static import
+  graph from each gate-path entry point (PostToolUse hook,
+  pre-commit, pre-push, `check`) and fails if any node resolves under
+  `packages/llm/` or imports `@de-otio/repo-aegis-llm`. `[SEC M-1]`
+  also greps for forbidden literals in case of dynamic imports.
+
 ## [0.1.0] - 2026-05-02
 
 First published release. Engagement-scoped leak prevention for multi-customer

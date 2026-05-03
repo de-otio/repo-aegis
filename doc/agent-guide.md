@@ -166,18 +166,101 @@ they know their customer's identifiers better than you do.
 
 ```sh
 cd /path/to/customer-a-repo
-repo-aegis classify --apply  # if a classify.yml rule matches the remote
+repo-aegis classify --apply
 # or, manually:
 git config repo-aegis.class customer-coupled
 repo-aegis allow customer-a
 ```
 
-`classify --apply` reads `~/.config/repo-aegis/classify.yml` and
-matches the repo's `git remote get-url origin` against the rules.
-First match wins; sets `repo-aegis.class` and adds the engagement.
+`classify --apply` reads the engagement registry, looks up the GitHub
+org from the repo's `git remote get-url origin`, and:
 
-If there's no classify.yml or no rule matches, set both manually with
-`git config` and `repo-aegis allow`.
+- If the org is in any engagement's `githubOrgs`, classifies the repo
+  `customer-coupled` and `allow`s that engagement.
+- If the org is in `personalOrgs`, classifies the repo `public-eligible`.
+- If neither, falls back to a legacy `~/.config/repo-aegis/classify.yml`
+  rules file (one-time deprecation warning naming the matched rule).
+- If nothing matches, sets nothing and reports `matched: null`. Ask
+  the user.
+
+You can attach an org to an engagement (so the next repo in that org
+auto-classifies) with `engagements add` — see the next workflow.
+
+### "I just opened a repo I haven't seen before"
+
+If installed via `init` or `install claude-md --first-touch`, a Claude
+Code SessionStart hook runs `repo-aegis hook first-touch` automatically
+on every session-start. Possible outcomes:
+
+- **`already-classified`** — the repo already has `repo-aegis.class`
+  set. No action.
+- **`applied`** — the repo's GitHub org matched an engagement /
+  `personalOrgs` entry. Class + engagements are now set; you can
+  proceed.
+- **`needs-confirmation`** — the org is unknown to the registry. The
+  hook output names the org (redacted with `[SEC H-5]` for orgs ≥ 4
+  chars: `xx***y`); ask the user whether to add it to an engagement
+  (`engagements add --github-org`) or to `personalOrgs`. Do NOT
+  guess.
+- **`skipped`** — no remote, not a git repo, etc. Surface to the
+  user only if they're confused about why class is unset.
+
+### "Add a GitHub org to an engagement so future repos auto-classify"
+
+```sh
+repo-aegis engagements add customer-a --github-org acme-corp
+# or, on a brand-new engagement:
+repo-aegis engagements add customer-a --name "Customer A" \
+  --github-org acme-corp \
+  --marker "acme-corp" \
+  --marker "acme\\.com"
+```
+
+`--github-org` and `--personal-org` are mutually exclusive (a single
+org belongs to either an engagement or to the user's personal orgs,
+not both). Cross-engagement uniqueness is enforced — if the org is
+already attached elsewhere, the command fails with a clear error.
+
+The first time you write to a v1 registry that lacks a
+`schemaVersion`, the command bumps it to v2 and prints a one-time
+warning. v1 readers can no longer parse the file after this; the
+upgrade is intentional.
+
+### "Suggest markers for this engagement from the repo's prose"
+
+```sh
+# Dry-run — print the candidates as JSON, do not modify anything:
+repo-aegis suggest-markers --engagement customer-a --json
+
+# Apply — append the (filtered) regexes to the engagement's marker list:
+repo-aegis suggest-markers --engagement customer-a --apply
+```
+
+Phase 2 pipeline:
+
+1. **Extract prose.** Walks the current repo with hard-coded depth/file
+   caps; reads README, CONTRIBUTING, CODEOWNERS, package.json metadata,
+   docs, top-of-file comments. Hard-skipped: `.env*`, secrets, anything
+   under `.git/`, `.ssh/`, `.aws/`, `.gnupg/`.
+2. **Ask Ollama** (local, default `http://127.0.0.1:11434`,
+   loopback-only by default) which strings look like customer
+   identifiers. Anti-injection preamble + fenced delimiters protect
+   the prompt.
+3. **Filter:** dictionary words, dependency names from
+   `package.json` / `Cargo.toml` / `go.mod` / `pyproject.toml`,
+   patterns already in this engagement's marker list, tokens that
+   match `personalOrgs` / `$USER` / `$HOME` basename.
+4. **Synthesise** word-boundary regexes per token kind (company,
+   codename, person-name, domain, ticket-prefix, account-id).
+5. With `--apply`, append to the engagement's marker list under a
+   single registry lock; render; report.
+
+This is **discovery only** — never run on a hot path. The
+deterministic gate (PostToolUse, pre-commit, pre-push) remains regex
+against fixed marker files.
+
+If Ollama isn't installed or running, the command exits with a clear
+`OLLAMA_ERROR` rather than falling back. Ask the user.
 
 ### "I just got a hit, what do I do"
 
@@ -508,6 +591,11 @@ Codes you should recognise and act on:
 | `GIT_CONFIG_ERROR` / `GIT_ERROR` | a git plumbing call failed | `details` carries the underlying git stderr |
 | `RENDER_ERROR` | unexpected render failure | unusual; surface to user |
 | `REGISTRY_ERROR` | unexpected registry-load failure | unusual; surface to user |
+| `OLLAMA_ERROR` | `suggest-markers` could not reach the Ollama server | the user must `ollama serve` and pull the model; do not retry blindly |
+| `REMOTE_DISALLOWED` | `--ollama-endpoint` failed `[SEC H-1]` validation (non-loopback without `--allow-remote`, bad protocol, user-info, `localhost` resolves to non-loopback) | surface to user; do not auto-add `--allow-remote` |
+| `BUNDLE_TOO_LARGE` | extracted prose exceeded the model's context budget | `details.bytes` carries the size; the user owns whether to shrink the corpus |
+| `BUNDLE_FENCE_COLLISION` | extracted prose contained the chosen fence delimiter | retry happens automatically with a fresh delimiter; surfacing this means the retry also failed |
+| `ROOT_CONTAINMENT` | `extractProse` resolved a forbidden ancestor path (`~/.config/repo-aegis`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/git`) | a likely symlink-attack indicator; do NOT bypass |
 
 `audit` also emits per-finding diagnostic codes inside its
 `checks[].findings[].detail.code` field (NOT top-level error codes —
@@ -524,6 +612,47 @@ the audit command's own exit code reflects the aggregate). Watch for:
 
 Generic codes you should ignore in favour of recovery:
 - `error` (no `code` field) — fatal but not categorised; surface to the user.
+
+## Centralised sweep (`repo-aegis-scan`) and Phase 3 semantic mode
+
+The `repo-aegis-scan` binary is a *separate* tool from the developer
+gate: it runs in CI / cron / on a scheduled job server, sweeps GitHub
+code-search for marker hits across orgs, and reports findings as
+JSON / markdown / GitHub issues.
+
+Phase 3 adds two opt-in extensions:
+
+- `repo-aegis-scan rebuild-profiles` — for each engagement with
+  `reposActive`, walks the first available repo, embeds its
+  representative prose via Ollama, and writes
+  `~/.config/repo-aegis/profiles/<engagement-id>.json` (chmod 0600,
+  schema-versioned, sha256-stamped manifest).
+  - `--diff` re-hashes the current reference docs and reports drift
+    against the stored manifest *without* embedding or writing.
+    Surface the diff to the user before agreeing to rebuild
+    (`[SEC H-3]` defends against silent reference-document
+    manipulation).
+  - `--engagement <id>...` restricts to specific engagements.
+- `repo-aegis-scan run --semantic` — after the regex sweep, fetches
+  each new candidate's blob, embeds it, scores it against every
+  profile, and reports engagements over the per-profile threshold.
+  Best-effort: Ollama failures increment a counter (`embedErrors`)
+  but never abort the regex sweep.
+
+Output gains a `semantic` JSON section / "Semantic hits" markdown
+table with columns: engagement, similarity, threshold, candidate
+URL. **Never** the candidate's text or the profile's reference
+content — only the scalar similarity and the URL.
+
+If you're running this from an agent context:
+
+- `--allow-remote-ollama` is gated behind the same `[SEC H-1]`
+  validation as Phase 2; do not auto-set it.
+- The semantic sweep is *advisory*. Treat it as a triage signal,
+  not a block. A semantic hit without a regex hit means "this file
+  looks semantically like customer X's content but didn't match a
+  literal marker" — possibly a real leak, possibly a false positive
+  on technical similarity.
 
 ## Environment variables
 
@@ -588,7 +717,7 @@ shape we don't model.
 | `check --history` | scan full git log | (same; `historyHits` populated) |
 | `render` | regenerate marker files | `RenderResult` |
 | `engagements list` | list engagements | `engagements`, `alwaysBlock` |
-| `engagements add <id>` | add new engagement | `action`, `id`, `name`, `markers`, `rendered` |
+| `engagements add [id]` | add new engagement (id optional with `--github-org` / `--personal-org`) | `action`, `id`, `name`, `markers`, `rendered`, `githubOrgs`, `personalOrgs` |
 | `engagements end <id>` | mark ended | `action`, `id`, `ended`, `purged`, `rendered` |
 | `engagements show <id>` | show one engagement | `action`, `id`, `name`, `started`, `ended`, `active`, `markerCount`, `notes` |
 | `engagements remove <id> --hard` | hard-delete | `action`, `id`, `removed`, `rendered` |
@@ -605,6 +734,9 @@ shape we don't model.
 | `install gitignore` | append global gitignore | `action`, `path`, `appended` |
 | `install ci` | emit GHA workflow | (printed to stdout, not JSON) |
 | `hook scan-after-write` | (PostToolUse entry) | same as `check --path` |
+| `hook first-touch` | (SessionStart entry) classify previously-unclassified repo | `status` (`already-classified`/`applied`/`needs-confirmation`/`skipped`), redacted `details` |
+| `suggest-markers [--engagement <id>] [--apply]` | LLM-assisted marker discovery (Phase 2) | `engagement`, `proposed`, `applied`, `dryRun`, `auditLog?` |
+| `init --migrate-classify` | port legacy `classify.yml` to registry | `action`, `migrated`, `personalOrgs`, `engagements` |
 | `audit-log on` | enable compliance trail | `action`, `wasOn`, `isOn`, `path` |
 | `audit-log off` | disable compliance trail | `action`, `wasOn`, `isOn`, `path` |
 | `audit-log show [--all]` | print recorded events | `action`, `path`, `enabled`, `total`, `shown`, `records` |
