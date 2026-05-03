@@ -52,3 +52,23 @@ export { encryptFile, decryptFile, writeBufferTo, AgeNotFoundError, AgeError } f
 
 // ---- octokit client ------------------------------------------------------
 export { makeOctokitClient } from "./octokit-client.js";
+export type { BlobClient } from "./octokit-client.js";
+
+// ---- semantic sweep (Phase 3, P3-B) -------------------------------------
+export { runSemanticSweep } from "./semantic-sweep.js";
+export type {
+  SemanticCandidate,
+  SemanticSweepHit,
+  SemanticSweepResult,
+  RunSemanticSweepOptions,
+} from "./semantic-sweep.js";
+
+// ---- profile loading + rebuild (Phase 3, P3-B) --------------------------
+export { loadAllProfiles } from "./profile-loader.js";
+export type { LoadProfilesResult } from "./profile-loader.js";
+export { rebuildProfiles } from "./rebuild-profiles.js";
+export type {
+  RebuildProfilesOptions,
+  RebuildProfilesResult,
+  PerEngagementResult,
+} from "./rebuild-profiles.js";

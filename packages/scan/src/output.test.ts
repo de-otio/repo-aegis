@@ -92,4 +92,47 @@ describe("renderMarkdown", () => {
     const md = renderMarkdown(summary, []);
     assert.match(md, /Previous run: never/);
   });
+
+  it("renders semantic section with no hits when sweep ran but found nothing", () => {
+    const md = renderMarkdown(baseSummary, [], {
+      hits: [],
+      embedded: 3,
+      embedErrors: 0,
+      candidates: 3,
+    });
+    assert.match(md, /## Semantic hits/);
+    assert.match(md, /Embedded 3\/3 candidates\./);
+    assert.match(md, /_No semantic hits over threshold._/);
+  });
+
+  it("renders semantic hit table with engagement, similarity, threshold, candidate", () => {
+    const md = renderMarkdown(baseSummary, [], {
+      hits: [
+        {
+          engagementId: "customer-a",
+          similarity: 0.876,
+          threshold: 0.78,
+          repo: "owner/repo",
+          path: "src/leak.md",
+          url: "https://github.com/owner/repo/blob/main/src/leak.md",
+          query: "q1",
+        },
+      ],
+      embedded: 1,
+      embedErrors: 0,
+      candidates: 1,
+    });
+    assert.match(md, /\| customer-a \| 0\.876 \| 0\.780 \|/);
+    assert.match(md, /\[owner\/repo:src\/leak\.md\]\(https:\/\/github/);
+  });
+
+  it("notes embed errors in the semantic section header", () => {
+    const md = renderMarkdown(baseSummary, [], {
+      hits: [],
+      embedded: 1,
+      embedErrors: 2,
+      candidates: 3,
+    });
+    assert.match(md, /Embedded 1\/3 candidates \(2 embed errors\)\./);
+  });
 });

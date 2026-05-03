@@ -33,6 +33,20 @@ export class HttpClientError extends Error {
   }
 }
 
+/**
+ * Heuristic: a byte buffer is likely UTF-8 text if it contains no NUL
+ * bytes in the first 8 KiB. Cheap, used to skip binary payloads
+ * (compiled artifacts, images) returned by `GET /contents/{path}`
+ * without burning an Ollama embed call.
+ */
+function isLikelyText(buf: Buffer): boolean {
+  const span = Math.min(buf.byteLength, 8192);
+  for (let i = 0; i < span; i++) {
+    if (buf[i] === 0) return false;
+  }
+  return true;
+}
+
 interface MaybeRequestError {
   status?: unknown;
   response?: { headers?: Record<string, unknown> } | unknown;
@@ -65,10 +79,33 @@ function toHttpClientErrorIfApplicable(err: unknown): unknown {
   return new HttpClientError(msg, status, retryAfterSeconds, err);
 }
 
+export interface BlobClient {
+  /**
+   * Fetch the raw text contents of a file at a given repo+path. Used by
+   * the Phase 3 semantic sweep to retrieve the candidate body so it
+   * can be embedded.
+   *
+   * Returns `null` when the file is not text (binary), too large, or
+   * not found — callers must tolerate missing content (the semantic
+   * sweep is advisory).
+   *
+   * @param maxBytes optional upper bound on the file size returned;
+   * default 1 MiB (`1 << 20`).
+   */
+  fetchBlobText(
+    owner: string,
+    repo: string,
+    path: string,
+    ref?: string,
+    maxBytes?: number,
+  ): Promise<string | null>;
+}
+
 /**
- * Thin wrapper over `@octokit/request` for the four endpoints repo-aegis-scan
+ * Thin wrapper over `@octokit/request` for the endpoints repo-aegis-scan
  * actually uses:
  *   - GET /search/code
+ *   - GET /repos/{owner}/{repo}/contents/{path}    (semantic sweep, P3-B)
  *   - GET /repos/{owner}/{repo}/issues
  *   - POST /repos/{owner}/{repo}/issues
  *   - POST /repos/{owner}/{repo}/issues/{issue_number}/comments
@@ -80,7 +117,7 @@ function toHttpClientErrorIfApplicable(err: unknown): unknown {
  */
 export function makeOctokitClient(
   opts: OctokitClientOptions,
-): SearchClient & IssueClient {
+): SearchClient & IssueClient & BlobClient {
   const userAgent = opts.userAgent ?? "repo-aegis-scan";
   const authedRequest = request.defaults({
     headers: {
@@ -137,6 +174,58 @@ export function makeOctokitClient(
       });
       const d = res.data as { number: number; html_url: string };
       return { number: d.number, html_url: d.html_url };
+    },
+
+    async fetchBlobText(
+      owner: string,
+      repo: string,
+      path: string,
+      ref?: string,
+      maxBytes = 1 << 20,
+    ): Promise<string | null> {
+      let res;
+      try {
+        res = await authedRequest("GET /repos/{owner}/{repo}/contents/{path}", {
+          owner,
+          repo,
+          path,
+          ...(ref ? { ref } : {}),
+          headers: { accept: "application/vnd.github.v3.raw" },
+        });
+      } catch (err) {
+        const e = err as { status?: number };
+        // 404 / 403 → tolerate (file gone, rate-limited, or permission). The
+        // sweep is advisory; one missing blob does not warrant a hard failure.
+        if (e.status === 404 || e.status === 403) return null;
+        throw toHttpClientErrorIfApplicable(err);
+      }
+      // With the `raw` Accept header GitHub returns the file body as-is.
+      // @octokit/request decodes utf-8 strings as `string`; binary as Buffer.
+      const data = res.data as unknown;
+      if (typeof data === "string") {
+        if (Buffer.byteLength(data, "utf8") > maxBytes) return null;
+        return data;
+      }
+      if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+        const buf = Buffer.from(data as ArrayBuffer);
+        if (buf.byteLength > maxBytes) return null;
+        // Reject non-text payloads — embedding model expects UTF-8 text.
+        if (!isLikelyText(buf)) return null;
+        return buf.toString("utf8");
+      }
+      // Some clients fall back to the JSON representation when the
+      // accept header is ignored; in that case the body has a base64
+      // `content` field. Decode and validate.
+      if (data && typeof data === "object" && "content" in data) {
+        const d = data as { content?: string; encoding?: string };
+        if (d.encoding === "base64" && typeof d.content === "string") {
+          const buf = Buffer.from(d.content, "base64");
+          if (buf.byteLength > maxBytes) return null;
+          if (!isLikelyText(buf)) return null;
+          return buf.toString("utf8");
+        }
+      }
+      return null;
     },
 
     async addComment(owner, repo, issueNumber, body): Promise<{ html_url: string }> {

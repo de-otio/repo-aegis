@@ -12,6 +12,11 @@ import { makeOctokitClient } from "./octokit-client.js";
 import { renderMarkdown } from "./output.js";
 import { fileIssue } from "./issue-filer.js";
 import { encryptFile, decryptFile, writeBufferTo, AgeNotFoundError, AgeError } from "./age.js";
+import { runSemanticSweep, type SemanticCandidate } from "./semantic-sweep.js";
+import { loadAllProfiles } from "./profile-loader.js";
+import { rebuildProfiles } from "./rebuild-profiles.js";
+import { loadRegistry, repoAegisHome } from "@de-otio/repo-aegis-core";
+import type { OllamaConfig } from "@de-otio/repo-aegis-llm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as { version: string };
@@ -30,6 +35,48 @@ interface RunCliOptions {
   noUpdateState?: boolean;
   revealMatches?: boolean;
   pruneStateOlderThan?: number;
+  // ─ semantic sweep (Phase 3, P3-B-2) ─
+  semantic?: boolean;
+  ollamaEndpoint?: string;
+  ollamaModel?: string;
+  ollamaTimeoutMs?: number;
+  allowRemoteOllama?: boolean;
+  semanticMaxBytesPerCandidate?: number;
+}
+
+interface RebuildProfilesCliOptions {
+  ollamaEndpoint?: string;
+  ollamaModel?: string;
+  ollamaTimeoutMs?: number;
+  allowRemoteOllama?: boolean;
+  threshold?: number;
+  diff?: boolean;
+  engagement?: string[];
+  registry?: string;
+}
+
+const DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434";
+const DEFAULT_OLLAMA_EMBED_MODEL = "nomic-embed-text";
+const DEFAULT_OLLAMA_TIMEOUT_MS = 30_000;
+
+function buildOllamaConfig(opts: {
+  ollamaEndpoint?: string;
+  ollamaModel?: string;
+  ollamaTimeoutMs?: number;
+  allowRemoteOllama?: boolean;
+}): OllamaConfig {
+  return {
+    endpoint: opts.ollamaEndpoint ?? DEFAULT_OLLAMA_ENDPOINT,
+    model: opts.ollamaModel ?? DEFAULT_OLLAMA_EMBED_MODEL,
+    timeoutMs: opts.ollamaTimeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS,
+    allowRemote: !!opts.allowRemoteOllama,
+  };
+}
+
+function splitOwnerRepo(full: string): { owner: string; repo: string } | null {
+  const i = full.indexOf("/");
+  if (i <= 0 || i === full.length - 1) return null;
+  return { owner: full.slice(0, i), repo: full.slice(i + 1) };
 }
 
 function emitError(payload: { code: string; error: string; details?: unknown }, exitCode = 2): never {
@@ -80,6 +127,18 @@ program
   .option(
     "--prune-state-older-than <days>",
     "drop seen-hit entries first recorded more than N days ago (entries from pre-v2 state with no recorded date are kept)",
+    v => parseInt(v, 10),
+  )
+  // Semantic sweep (Phase 3). Off by default. Requires Ollama and an
+  // engagements registry with reposActive + corresponding profile files.
+  .option("--semantic", "run the embedding-based semantic sweep alongside regex (Phase 3)")
+  .option("--ollama-endpoint <url>", `Ollama base URL (default ${DEFAULT_OLLAMA_ENDPOINT})`)
+  .option("--ollama-model <id>", `embedding model id (default ${DEFAULT_OLLAMA_EMBED_MODEL})`)
+  .option("--ollama-timeout-ms <n>", "Ollama request timeout", v => parseInt(v, 10))
+  .option("--allow-remote-ollama", "permit non-loopback Ollama endpoints (default OFF)")
+  .option(
+    "--semantic-max-bytes-per-candidate <n>",
+    "trim each fetched candidate to this many UTF-8 bytes before embedding (default 16384)",
     v => parseInt(v, 10),
   )
   .action(async (opts: RunCliOptions) => {
@@ -169,12 +228,70 @@ program
       saveStateAtomic(opts.state, stateToWrite);
     }
 
+    // ─ Phase 3 semantic sweep ────────────────────────────────────────────
+    let semanticReport: Awaited<ReturnType<typeof runSemanticSweep>> | undefined;
+    if (opts.semantic) {
+      const home = repoAegisHome();
+      const { profiles, errors: profileErrors } = loadAllProfiles(home);
+      for (const e of profileErrors) {
+        process.stderr.write(
+          `repo-aegis-scan: profile "${e.engagementId}" failed to load: ${e.error}\n`,
+        );
+      }
+      if (profiles.length === 0) {
+        process.stderr.write(
+          `repo-aegis-scan: --semantic requested but no profiles found under ${home}/profiles/. ` +
+            `Run \`repo-aegis-scan rebuild-profiles\` first.\n`,
+        );
+      } else {
+        const ollama = buildOllamaConfig(opts);
+        // Pull contents for each new regex hit; skip entries we can't fetch.
+        const candidates: SemanticCandidate[] = [];
+        for (const h of result.hits) {
+          const rep = splitOwnerRepo(h.repo);
+          if (!rep) continue;
+          let content: string | null = null;
+          try {
+            content = await client.fetchBlobText(rep.owner, rep.repo, h.path);
+          } catch (err) {
+            process.stderr.write(
+              `repo-aegis-scan: blob fetch failed for ${h.repo}:${h.path}: ${(err as Error).message}\n`,
+            );
+            continue;
+          }
+          if (content === null) continue;
+          candidates.push({ hit: h, content });
+        }
+        semanticReport = await runSemanticSweep({
+          candidates,
+          profiles,
+          ollama,
+          ...(opts.semanticMaxBytesPerCandidate !== undefined
+            ? { maxBytesPerCandidate: opts.semanticMaxBytesPerCandidate }
+            : {}),
+        });
+        if (semanticReport.embedErrors > 0) {
+          process.stderr.write(
+            `repo-aegis-scan: semantic sweep had ${semanticReport.embedErrors} embed error(s)\n`,
+          );
+        }
+      }
+    }
+
     if (format === "json") {
       process.stdout.write(
-        JSON.stringify({ summary: result.summary, hits: result.hits }, null, 2) + "\n",
+        JSON.stringify(
+          {
+            summary: result.summary,
+            hits: result.hits,
+            ...(semanticReport ? { semantic: semanticReport } : {}),
+          },
+          null,
+          2,
+        ) + "\n",
       );
     } else if (format === "markdown") {
-      process.stdout.write(renderMarkdown(result.summary, result.hits));
+      process.stdout.write(renderMarkdown(result.summary, result.hits, semanticReport));
     } else if (format === "issue") {
       const filed = await fileIssue(result.summary, result.hits, {
         reportRepo: opts.reportIssueRepo!,
@@ -208,10 +325,14 @@ program
         `repo-aegis-scan: degraded — ${failed}/${total} queries failed\n`,
       );
     }
-    if (format === "json" && result.summary.totalNew > 0) {
+    if (
+      format === "json" &&
+      (result.summary.totalNew > 0 || (semanticReport && semanticReport.hits.length > 0))
+    ) {
       // Per the design contract: json caller must react; issue/markdown
       // outputs already deliver the report, so they exit 0 even with
-      // new hits.
+      // new hits. Semantic hits count too — a similarity hit without a
+      // regex hit is still a finding the caller should look at.
       process.exit(1);
     }
     process.exit(0);
@@ -268,6 +389,53 @@ program
       }
       emitError({ code: "DECRYPT_ERROR", error: (err as Error).message });
     }
+  });
+
+// ─ rebuild-profiles (Phase 3) ──────────────────────────────────────────────
+program
+  .command("rebuild-profiles")
+  .description(
+    "build embedding profiles for active engagements (Phase 3 semantic sweep)",
+  )
+  .option("--ollama-endpoint <url>", `Ollama base URL (default ${DEFAULT_OLLAMA_ENDPOINT})`)
+  .option("--ollama-model <id>", `embedding model id (default ${DEFAULT_OLLAMA_EMBED_MODEL})`)
+  .option("--ollama-timeout-ms <n>", "Ollama request timeout", v => parseInt(v, 10))
+  .option("--allow-remote-ollama", "permit non-loopback Ollama endpoints (default OFF)")
+  .option("--threshold <n>", "cosine threshold for new profiles (default 0.78)", v => parseFloat(v))
+  .option(
+    "--diff",
+    "report stored-vs-current manifest drift; do not embed or write profiles",
+  )
+  .option(
+    "--engagement <id...>",
+    "restrict the operation to specific engagement ids (repeatable)",
+  )
+  .option("--registry <path>", "override the engagements.yaml path")
+  .action(async (opts: RebuildProfilesCliOptions) => {
+    let registry;
+    try {
+      registry = opts.registry ? loadRegistry(opts.registry) : loadRegistry();
+    } catch (err) {
+      emitError({
+        code: "REGISTRY_LOAD_ERROR",
+        error: (err as Error).message,
+      });
+    }
+    const ollama = buildOllamaConfig(opts);
+
+    const result = await rebuildProfiles({
+      registry: registry!,
+      ollama,
+      ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}),
+      ...(opts.diff ? { dryRun: true } : {}),
+      ...(opts.engagement ? { onlyEngagements: opts.engagement } : {}),
+    });
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+    // Exit 1 when at least one engagement reported an error during a
+    // real (non-diff) rebuild, so CI / cron treat partial failure as a
+    // hard signal.
+    if (!opts.diff && result.failed > 0) process.exit(1);
+    process.exit(0);
   });
 
 await program.parseAsync(process.argv);

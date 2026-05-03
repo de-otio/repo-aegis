@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 import type { CodeSearchHit, RunSummary } from "./types.js";
+import type { SemanticSweepResult } from "./semantic-sweep.js";
 
-export function renderMarkdown(summary: RunSummary, hits: CodeSearchHit[]): string {
+export function renderMarkdown(
+  summary: RunSummary,
+  hits: CodeSearchHit[],
+  semantic?: SemanticSweepResult,
+): string {
   const lines: string[] = [];
   lines.push(`# repo-aegis-scan report`);
   lines.push("");
@@ -28,6 +33,7 @@ export function renderMarkdown(summary: RunSummary, hits: CodeSearchHit[]): stri
     lines.push(`## Hits`);
     lines.push("");
     lines.push("_No new hits._");
+    if (semantic) appendSemanticSection(lines, semantic);
     return lines.join("\n") + "\n";
   }
 
@@ -53,7 +59,44 @@ export function renderMarkdown(summary: RunSummary, hits: CodeSearchHit[]): stri
     }
     lines.push("");
   }
+  if (semantic) appendSemanticSection(lines, semantic);
   return lines.join("\n") + "\n";
+}
+
+/**
+ * Append a "Semantic hits" section to the rendered markdown. Always
+ * called separately from the regex-hit section per design §3.4: the
+ * two are reported side by side, never merged.
+ *
+ * Redaction: never includes the candidate's body or the profile's
+ * reference text — only `engagementId`, similarity, threshold, and the
+ * candidate's repo+path+url.
+ */
+function appendSemanticSection(lines: string[], sweep: SemanticSweepResult): void {
+  lines.push(`## Semantic hits`);
+  lines.push("");
+  lines.push(
+    `Embedded ${sweep.embedded}/${sweep.candidates} candidates` +
+      (sweep.embedErrors > 0 ? ` (${sweep.embedErrors} embed errors)` : "") +
+      `.`,
+  );
+  lines.push("");
+  if (sweep.hits.length === 0) {
+    lines.push("_No semantic hits over threshold._");
+    lines.push("");
+    return;
+  }
+  lines.push("| Engagement | Similarity | Threshold | Candidate |");
+  lines.push("|---|---:|---:|---|");
+  for (const h of sweep.hits) {
+    const sim = h.similarity.toFixed(3);
+    const thr = h.threshold.toFixed(3);
+    const link = h.url
+      ? `[${escapeMd(h.repo)}:${escapeMd(h.path)}](${h.url})`
+      : `${escapeMd(h.repo)}:${escapeMd(h.path)}`;
+    lines.push(`| ${escapeMd(h.engagementId)} | ${sim} | ${thr} | ${link} |`);
+  }
+  lines.push("");
 }
 
 function escapeMd(s: string): string {
