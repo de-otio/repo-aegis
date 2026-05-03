@@ -6,9 +6,5 @@
     "composite": true
   },
   "include": ["src/**/*"],
-  "references": [
-    { "path": "../core" },
-    { "path": "../llm" },
-    { "path": "../scan" }
-  ]
+  "references": [{ "path": "../core" }]
 }

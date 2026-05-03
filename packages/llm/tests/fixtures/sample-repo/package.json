@@ -1,0 +1,24 @@
+{
+  "name": "sample-project",
+  "version": "1.0.0",
+  "description": "A synthetic fixture project for prose-extraction tests",
+  "author": "Test Author <test@example.com>",
+  "homepage": "https://github.com/example-org/sample-project",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/example-org/sample-project.git"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "lodash": "^4.17.21"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "jest": "^29.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "keywords": ["fixture", "test", "sample"]
+}

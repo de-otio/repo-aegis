@@ -14,7 +14,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b packages/core packages/cli packages/scan packages/vscode packages/mcp",
+    "build": "tsc -b packages/core packages/llm packages/cli packages/scan packages/vscode packages/mcp",
     "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo coverage",
     "test": "find packages -path '*/dist/*' -name '*.test.js' -print0 | xargs -0 node --test --test-reporter=spec",
     "test:cov": "c8 --reporter=text --reporter=html --check-coverage --lines 80 --branches 75 --include 'packages/*/dist/**/*.js' --exclude 'packages/*/dist/**/*.test.js' --exclude 'packages/*/dist/**/*.d.ts' --exclude 'packages/*/dist/**/types.js' --exclude 'packages/*/dist/**/index.js' npm test",

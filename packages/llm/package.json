@@ -1,31 +1,33 @@
 {
-  "name": "@de-otio/repo-aegis",
+  "name": "@de-otio/repo-aegis-llm",
   "version": "0.1.0",
-  "description": "Engagement-scoped leak prevention CLI for multi-customer git repos",
+  "description": "LLM-assisted helpers for repo-aegis: prose extraction, token suggestion, embedding profiles. Off the deterministic gate path.",
   "license": "GPL-3.0-or-later",
   "author": "Richard Myers",
   "homepage": "https://github.com/de-otio/repo-aegis",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/de-otio/repo-aegis.git",
-    "directory": "packages/cli"
+    "directory": "packages/llm"
   },
   "type": "module",
-  "bin": {
-    "repo-aegis": "./dist/index.js"
-  },
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js"
+    "build": "tsc"
   },
   "dependencies": {
     "@de-otio/repo-aegis-core": "^0.1.0",
-    "@de-otio/repo-aegis-llm": "^0.1.0",
-    "@de-otio/repo-aegis-scan": "^0.1.0",
-    "commander": "^12.1.0",
     "zod": "^4.4.2"
   }
 }

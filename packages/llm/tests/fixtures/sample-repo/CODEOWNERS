@@ -1,0 +1,6 @@
+# CODEOWNERS for sample-project
+# Each line is a file pattern followed by one or more owners.
+
+* @example-org/core-team
+/docs/ @example-org/docs-team
+/src/ @example-org/dev-team
