@@ -132,7 +132,7 @@ Before opening a PR:
 - [ ] `npm run build` is clean.
 - [ ] `npm test` passes.
 - [ ] If you renamed a CLI flag, `program.test.ts` reflects it.
-- [ ] If you changed CLI surface beyond a flag, `doc/design/cli-reference.md`
+- [ ] If you changed CLI surface beyond a flag, `doc/cli-reference.md`
       reflects it.
 - [ ] No real customer names in the diff (sources, tests, fixtures, commit
       message).

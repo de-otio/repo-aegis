@@ -388,5 +388,5 @@ command, hand-rolled scripts) against silent breakage.
 
 ## Reference
 
-- CLI command reference: [cli-reference.md](cli-reference.md).
+- CLI command reference: [../cli-reference.md](../cli-reference.md).
 - Operator guide for coding agents: [../agent-guide.md](../agent-guide.md).

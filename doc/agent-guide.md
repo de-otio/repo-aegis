@@ -888,4 +888,4 @@ it, output is tuned for a human at a terminal.
 
 - Tool home page: https://github.com/de-otio/repo-aegis
 - Design: [doc/design/README.md](design/README.md)
-- CLI reference: [doc/design/cli-reference.md](design/cli-reference.md)
+- CLI reference: [doc/cli-reference.md](cli-reference.md)

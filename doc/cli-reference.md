@@ -2,7 +2,7 @@
 
 > Every subcommand's flags, behaviour, exit codes, and JSON shape.
 > The flag set is contract-tested in
-> [`packages/cli/src/program.test.ts`](../../packages/cli/src/program.test.ts);
+> [`packages/cli/src/program.test.ts`](../packages/cli/src/program.test.ts);
 > renaming any flag here is a coordinated change across that test, this
 > file, and any downstream artefact (settings.json hook command,
 > generated GHA workflow, agent guide).
