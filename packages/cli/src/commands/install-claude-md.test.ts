@@ -446,3 +446,174 @@ describe("install-claude-md — --first-touch", () => {
     assert.equal(j.firstTouch!.added, true);
   });
 });
+
+describe("install-claude-md — uninstall", () => {
+  it("strips the managed block from CLAUDE.md and removes hook entries", () => {
+    const claudeHome = makeClaudeHome("uninstall-basic");
+    const aegisHome = aegisHomeFor("uninstall-basic");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true }));
+      captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
+    });
+
+    const md = readFileSync(join(claudeHome, "CLAUDE.md"), "utf8");
+    assert.ok(!md.includes("repo-aegis: managed block"));
+    assert.ok(!md.includes("repo-aegis (data-leak prevention)"));
+
+    const settings = JSON.parse(
+      readFileSync(join(claudeHome, "settings.json"), "utf8"),
+    ) as { hooks?: Record<string, unknown> };
+    // Both hook keys should be gone (or at least the repo-aegis entries
+    // are gone — the keys themselves should be cleaned up too).
+    assert.ok(!settings.hooks || !("PostToolUse" in settings.hooks));
+    assert.ok(!settings.hooks || !("SessionStart" in settings.hooks));
+  });
+
+  it("preserves user-authored CLAUDE.md content around the managed block", () => {
+    const claudeHome = makeClaudeHome("uninstall-preserve");
+    const aegisHome = aegisHomeFor("uninstall-preserve");
+    const claudeMd = join(claudeHome, "CLAUDE.md");
+    const userBefore = "# My personal CLAUDE.md\n\nSome user notes here.\n";
+    const userAfter = "\n## My other section\n\nMore notes.\n";
+    writeFileSync(claudeMd, userBefore);
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome }));
+    });
+    // Append more user content AFTER the managed block landed.
+    writeFileSync(claudeMd, readFileSync(claudeMd, "utf8") + userAfter);
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
+    });
+    const final = readFileSync(claudeMd, "utf8");
+    assert.ok(final.includes("# My personal CLAUDE.md"));
+    assert.ok(final.includes("Some user notes here."));
+    assert.ok(final.includes("## My other section"));
+    assert.ok(!final.includes("repo-aegis: managed block"));
+    assert.ok(!final.includes("repo-aegis (data-leak prevention)"));
+  });
+
+  it("preserves unrelated keys in settings.json", () => {
+    const claudeHome = makeClaudeHome("uninstall-settings-other");
+    const aegisHome = aegisHomeFor("uninstall-settings-other");
+    const settingsPath = join(claudeHome, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        env: { MY_VAR: "value" },
+        permissions: { allow: ["Bash(ls)"] },
+      }),
+    );
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
+    });
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      env?: { MY_VAR: string };
+      permissions?: { allow: string[] };
+      hooks?: unknown;
+    };
+    assert.equal(settings.env?.MY_VAR, "value");
+    assert.deepEqual(settings.permissions?.allow, ["Bash(ls)"]);
+    assert.ok(!settings.hooks || Object.keys(settings.hooks as object).length === 0);
+  });
+
+  it("preserves third-party PostToolUse hooks", () => {
+    const claudeHome = makeClaudeHome("uninstall-coexist");
+    const aegisHome = aegisHomeFor("uninstall-coexist");
+    const settingsPath = join(claudeHome, "settings.json");
+    // Pre-existing third-party hook in the same matcher entry.
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: "Write|Edit|MultiEdit",
+              hooks: [{ type: "command", command: "/path/to/other-tool/audit.sh" }],
+            },
+          ],
+        },
+      }),
+    );
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
+    });
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      hooks?: {
+        PostToolUse?: { matcher: string; hooks: { command: string }[] }[];
+      };
+    };
+    const post = settings.hooks!.PostToolUse!;
+    assert.equal(post.length, 1);
+    const cmds = post[0]!.hooks.map(h => h.command);
+    assert.deepEqual(cmds, ["/path/to/other-tool/audit.sh"]);
+  });
+
+  it("is idempotent — second uninstall is a no-op", () => {
+    const claudeHome = makeClaudeHome("uninstall-idempotent");
+    const aegisHome = aegisHomeFor("uninstall-idempotent");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
+      const second = captureOutput(() =>
+        installClaudeMd({ claudeHome, uninstall: true, json: true }),
+      );
+      const j = JSON.parse(second.stdout) as {
+        action: string;
+        claudeMd: { stripped: boolean; absent: boolean };
+        settings: { hookEntriesRemoved: number };
+      };
+      assert.equal(j.action, "uninstall-claude-md");
+      assert.equal(j.claudeMd.stripped, false);
+      assert.equal(j.settings.hookEntriesRemoved, 0);
+    });
+  });
+
+  it("succeeds when neither file exists yet (cold uninstall is a no-op)", () => {
+    const claudeHome = makeClaudeHome("uninstall-cold");
+    const aegisHome = aegisHomeFor("uninstall-cold");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      const out = captureOutput(() =>
+        installClaudeMd({ claudeHome, uninstall: true, json: true }),
+      );
+      const j = JSON.parse(out.stdout) as {
+        claudeMd: { absent: boolean };
+        settings: { absent: boolean };
+      };
+      assert.equal(j.claudeMd.absent, true);
+      assert.equal(j.settings.absent, true);
+    });
+  });
+
+  it("recognises a legacy absolute-path hook command", () => {
+    const claudeHome = makeClaudeHome("uninstall-legacy");
+    const aegisHome = aegisHomeFor("uninstall-legacy");
+    const settingsPath = join(claudeHome, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: "Write|Edit|MultiEdit",
+              hooks: [
+                {
+                  type: "command",
+                  command: "/Users/x/.claude/hooks/repo-aegis-scan-after-write.sh",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
+    });
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      hooks?: { PostToolUse?: unknown };
+    };
+    assert.ok(!settings.hooks || !("PostToolUse" in settings.hooks));
+  });
+});

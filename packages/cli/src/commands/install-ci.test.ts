@@ -90,3 +90,42 @@ describe("install-ci — write mode", () => {
     assert.ok(j.target.endsWith(".github/workflows/leak-scan.yml"));
   });
 });
+
+describe("install-ci — uninstall", () => {
+  it("removes the workflow file when its body matches the emitted template", () => {
+    const cwd = mkdtempSync(join(tmp, "uninstall-clean-"));
+    const target = join(cwd, ".github/workflows/leak-scan.yml");
+    captureOutput(() => installCi({ cwd, write: true }));
+    assert.ok(existsSync(target));
+    captureOutput(() => installCi({ cwd, uninstall: true }));
+    assert.equal(existsSync(target), false);
+  });
+
+  it("refuses to remove a user-edited workflow", () => {
+    const cwd = mkdtempSync(join(tmp, "uninstall-edited-"));
+    const target = join(cwd, ".github/workflows/leak-scan.yml");
+    captureOutput(() => installCi({ cwd, write: true }));
+    writeFileSync(target, readFileSync(target, "utf8") + "\n# user-added comment\n");
+    const r = captureOutput(() => installCi({ cwd, uninstall: true }));
+    assert.equal(r.exitCode, 2);
+    assert.ok(r.stderr.includes("differs from any known repo-aegis-emitted template"));
+    assert.ok(existsSync(target));
+  });
+
+  it("is a silent no-op when the workflow file is missing", () => {
+    const cwd = mkdtempSync(join(tmp, "uninstall-missing-"));
+    const r = captureOutput(() => installCi({ cwd, uninstall: true, json: true }));
+    const j = JSON.parse(r.stdout) as { absent: boolean; removed: boolean };
+    assert.equal(j.absent, true);
+    assert.equal(j.removed, false);
+  });
+
+  it("emits JSON on successful uninstall", () => {
+    const cwd = mkdtempSync(join(tmp, "uninstall-json-"));
+    captureOutput(() => installCi({ cwd, write: true }));
+    const r = captureOutput(() => installCi({ cwd, uninstall: true, json: true }));
+    const j = JSON.parse(r.stdout) as { action: string; removed: boolean };
+    assert.equal(j.action, "uninstall-ci");
+    assert.equal(j.removed, true);
+  });
+});

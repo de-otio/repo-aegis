@@ -126,6 +126,8 @@ export async function buildProgram(): Promise<Command> {
   const { auditLogOn, auditLogOff, auditLogShow, auditLogPathCmd } = await import(
     "./commands/audit-log.js"
   );
+  const { uninstall } = await import("./commands/uninstall.js");
+  const { uninstallSweepRepos } = await import("./commands/uninstall-sweep-repos.js");
 
   engagements
     .command("add [id]")
@@ -240,6 +242,10 @@ export async function buildProgram(): Promise<Command> {
     .description("emit (or --write) .github/workflows/leak-scan.yml")
     .option("--write", "write to disk instead of printing to stdout")
     .option("--force", "overwrite an existing workflow file")
+    .option(
+      "--uninstall",
+      "remove the workflow file (refuses if user-edited; idempotent on missing file)",
+    )
     .action((opts, cmd) => installCi(withGlobals(opts, cmd)));
 
   install
@@ -251,6 +257,10 @@ export async function buildProgram(): Promise<Command> {
     .option(
       "--first-touch",
       "also register a SessionStart hook that calls `repo-aegis hook first-touch` (Phase 1 onboarding)",
+    )
+    .option(
+      "--uninstall",
+      "strip the managed CLAUDE.md block and remove repo-aegis hook entries from settings.json (idempotent)",
     )
     .action((opts, cmd) => {
       const merged = withGlobals(opts, cmd) as {
@@ -387,6 +397,32 @@ export async function buildProgram(): Promise<Command> {
           {},
         );
       }));
+
+  const uninstallCmd = program
+    .command("uninstall")
+    .description("reverse the install (hooks, gitignore, claude-md, ci); --purge-* for state")
+    .option("--yes", "apply changes (default: dry-run)")
+    .option("--purge-repos", "also unset repo-aegis.* git config in every classified repo")
+    .option(
+      "--scan-root <path...>",
+      "directories to walk for --purge-repos (default: ~/repos, ~/code, ~/src, ~/projects)",
+    )
+    .option(
+      "--purge-home",
+      "also delete ~/.config/repo-aegis/ (registry, audit log, profiles, cached state)",
+    )
+    .option("--claude-home <dir>", "override default ~/.claude location")
+    .action((opts, cmd) => uninstall(withGlobals(opts, cmd)));
+
+  uninstallCmd
+    .command("sweep-repos")
+    .description("walk repos under --scan-root and unset repo-aegis.* git config keys")
+    .option("--yes", "apply changes (default: dry-run)")
+    .option(
+      "--scan-root <path...>",
+      "directories to walk (default: ~/repos, ~/code, ~/src, ~/projects)",
+    )
+    .action((opts, cmd) => uninstallSweepRepos(withGlobals(opts, cmd)));
 
   return program;
 }

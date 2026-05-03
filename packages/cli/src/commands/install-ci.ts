@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { appendAuditRecord } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
@@ -45,15 +46,52 @@ jobs:
         run: repo-aegis audit --json --no-history --no-lockfile-check --no-fixture-check --no-remote-check
 `;
 
+/**
+ * sha256 hashes of every workflow body this CLI has ever written
+ * verbatim. `--uninstall` will only delete a file whose body matches
+ * one of these — anything else is treated as user-modified and
+ * `WORKFLOW_MODIFIED` is returned so the user decides how to handle
+ * it.
+ *
+ * When the template above changes, prepend the OLD content's hash
+ * to this list so previously-installed copies remain
+ * uninstall-eligible.
+ */
+const KNOWN_WORKFLOW_HASHES: readonly string[] = [
+  hashContent(WORKFLOW_CONTENT),
+];
+
+function hashContent(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
 interface InstallCiOptions extends OutputOptions {
   cwd?: string;
   write?: boolean;
   force?: boolean;
+  /**
+   * Reverse the install: delete the workflow file at the canonical
+   * path if (and only if) its body matches a known-emitted template.
+   * A user-modified file is preserved and `WORKFLOW_MODIFIED` is
+   * surfaced. A missing file is a silent no-op.
+   */
+  uninstall?: boolean;
+  /**
+   * Suppress stdout/stderr emission. emitError still fires on hard
+   * failure. Used by the top-level `repo-aegis uninstall` so it can
+   * orchestrate without polluting its own output.
+   */
+  silent?: boolean;
 }
 
 export function installCi(opts: InstallCiOptions): void {
   const cwd = opts.cwd ?? process.cwd();
   const target = join(cwd, WORKFLOW_PATH_REL);
+
+  if (opts.uninstall) {
+    uninstallCi({ cwd, target, opts });
+    return;
+  }
 
   if (!opts.write) {
     if (opts.json) {
@@ -112,4 +150,77 @@ export function installCi(opts: InstallCiOptions): void {
     return;
   }
   emitText(`wrote ${target}`);
+}
+
+interface UninstallCiContext {
+  cwd: string;
+  target: string;
+  opts: InstallCiOptions;
+}
+
+function uninstallCi(ctx: UninstallCiContext): void {
+  const { cwd, target, opts } = ctx;
+
+  if (!existsSync(target)) {
+    if (opts.silent) return;
+    if (opts.json) {
+      emitJson({ action: "uninstall-ci", target, removed: false, absent: true });
+      return;
+    }
+    emitText(`${WORKFLOW_PATH_REL} not present (nothing to remove)`);
+    return;
+  }
+
+  let body: string;
+  try {
+    body = readFileSync(target, "utf8");
+  } catch (err) {
+    emitError(
+      { code: "FS_ERROR", error: `failed to read ${target}: ${(err as Error).message}` },
+      opts,
+    );
+  }
+  const hash = hashContent(body!);
+  const known = KNOWN_WORKFLOW_HASHES.includes(hash);
+
+  if (!known) {
+    emitError(
+      {
+        code: "WORKFLOW_MODIFIED",
+        error:
+          `${WORKFLOW_PATH_REL} differs from any known repo-aegis-emitted template; ` +
+          `refusing to delete. If you're sure, remove the file manually: \`rm ${target}\`.`,
+        details: target,
+      },
+      opts,
+    );
+  }
+
+  try {
+    unlinkSync(target);
+  } catch (err) {
+    emitError(
+      { code: "FS_ERROR", error: `failed to remove ${target}: ${(err as Error).message}` },
+      opts,
+    );
+  }
+
+  // Audit (best-effort).
+  try {
+    appendAuditRecord({
+      action: "uninstall-ci",
+      cwd,
+      repo: cwd,
+      details: { target, hash },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
+  }
+
+  if (opts.silent) return;
+  if (opts.json) {
+    emitJson({ action: "uninstall-ci", target, removed: true });
+    return;
+  }
+  emitText(`removed ${target}`);
 }

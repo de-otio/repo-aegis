@@ -105,6 +105,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "render",
       "status",
       "suggest-markers",
+      "uninstall",
     ],
   },
 
@@ -231,7 +232,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   },
   {
     path: "install ci",
-    flags: ["--force", "--write"],
+    flags: ["--force", "--uninstall", "--write"],
     subcommands: [],
   },
   {
@@ -241,6 +242,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "--dry-run",
       "--first-touch",
       "--print-only",
+      "--uninstall",
     ],
     subcommands: [],
   },
@@ -282,6 +284,18 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "audit-log off", flags: [], subcommands: [] },
   { path: "audit-log show", flags: ["--all"], subcommands: [] },
   { path: "audit-log path", flags: [], subcommands: [] },
+
+  // ---- uninstall ----
+  {
+    path: "uninstall",
+    flags: ["--claude-home", "--purge-home", "--purge-repos", "--scan-root", "--yes"],
+    subcommands: ["sweep-repos"],
+  },
+  {
+    path: "uninstall sweep-repos",
+    flags: ["--scan-root", "--yes"],
+    subcommands: [],
+  },
 ];
 
 describe("CLI flag-name contract", async () => {

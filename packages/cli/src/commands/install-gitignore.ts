@@ -45,6 +45,12 @@ interface InstallGitignoreOptions extends OutputOptions {
    * have been there before install).
    */
   uninstall?: boolean;
+  /**
+   * Suppress stdout/stderr emission. emitError still fires on hard
+   * failure. Used by the top-level `repo-aegis uninstall` to
+   * orchestrate without polluting its own output stream.
+   */
+  silent?: boolean;
 }
 
 function defaultGitignorePath(): string {
@@ -132,6 +138,7 @@ export function installGitignore(opts: InstallGitignoreOptions): void {
 
 function uninstallGitignore(target: string, opts: InstallGitignoreOptions): void {
   if (!existsSync(target)) {
+    if (opts.silent) return;
     if (opts.json) {
       emitJson({
         action: "uninstall-gitignore",
@@ -149,6 +156,7 @@ function uninstallGitignore(target: string, opts: InstallGitignoreOptions): void
   const next = stripManagedBlock(existing);
 
   if (next === null) {
+    if (opts.silent) return;
     if (opts.json) {
       emitJson({
         action: "uninstall-gitignore",
@@ -174,6 +182,7 @@ function uninstallGitignore(target: string, opts: InstallGitignoreOptions): void
     );
   }
 
+  if (opts.silent) return;
   if (opts.json) {
     emitJson({
       action: "uninstall-gitignore",

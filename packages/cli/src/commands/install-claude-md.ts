@@ -79,6 +79,14 @@ interface InstallClaudeMdOptions extends OutputOptions {
    * classify wired up by default.
    */
   firstTouch?: boolean;
+  /**
+   * Reverse the install: strip the managed block from CLAUDE.md
+   * (preserving the rest of the file) and remove every PostToolUse /
+   * SessionStart hook entry whose `command` matches a repo-aegis
+   * hook. Idempotent: re-running on an already-uninstalled state is
+   * a no-op.
+   */
+  uninstall?: boolean;
 }
 
 interface SettingsJson {
@@ -177,6 +185,11 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   const claudeHome = opts.claudeHome ?? defaultClaudeHome();
   const claudeMdPath = join(claudeHome, "CLAUDE.md");
   const settingsPath = join(claudeHome, "settings.json");
+
+  if (opts.uninstall) {
+    uninstallClaudeMd({ claudeHome, claudeMdPath, settingsPath, opts });
+    return;
+  }
 
   if (opts.dryRun) {
     dryRunInstallClaudeMd({ claudeHome, claudeMdPath, settingsPath, opts });
@@ -400,5 +413,178 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
     emitText("");
     emitText("# note: leak-context strict mode is OFF.");
     emitText("#   enable for sensitive sessions: repo-aegis context on");
+  }
+}
+
+/**
+ * String fragments that identify a repo-aegis hook command so we can
+ * recognise both the canonical PATH-resolved form (`repo-aegis hook
+ * scan-after-write`) and the legacy absolute-path-to-shell-script
+ * form some users may still have. The match is intentionally
+ * permissive: any command whose value contains `repo-aegis` AND
+ * `scan-after-write` (or `first-touch`) is treated as ours.
+ */
+function isRepoAegisHookCommand(command: string, kind: "scan-after-write" | "first-touch"): boolean {
+  return command.includes("repo-aegis") && command.includes(kind);
+}
+
+interface SettingsCleanupResult {
+  removed: number;
+  scanRemoved: number;
+  firstTouchRemoved: number;
+}
+
+/**
+ * Remove every repo-aegis-attributable hook entry from a parsed
+ * settings.json shape. Mutates `settings` in place. Returns counts
+ * for the report. Idempotent — re-running on an already-clean
+ * settings is a no-op (counts all zero).
+ *
+ * Cleanup also collapses empty matcher entries (no hooks left) and
+ * drops the `PostToolUse` / `SessionStart` keys when their arrays
+ * become empty, so a "fresh" settings.json doesn't end up with
+ * empty stub keys after uninstall.
+ */
+function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
+  const result: SettingsCleanupResult = { removed: 0, scanRemoved: 0, firstTouchRemoved: 0 };
+  if (!settings.hooks) return result;
+
+  const filterEvent = (eventName: "PostToolUse" | "SessionStart", kind: "scan-after-write" | "first-touch") => {
+    const entries = settings.hooks?.[eventName];
+    if (!entries) return;
+    for (const entry of entries) {
+      if (!entry.hooks) continue;
+      const before = entry.hooks.length;
+      entry.hooks = entry.hooks.filter(
+        h => !(h.type === "command" && typeof h.command === "string" && isRepoAegisHookCommand(h.command, kind)),
+      );
+      const removed = before - entry.hooks.length;
+      result.removed += removed;
+      if (kind === "scan-after-write") result.scanRemoved += removed;
+      else result.firstTouchRemoved += removed;
+    }
+    // Collapse any matcher entry whose hooks array is now empty.
+    settings.hooks![eventName] = entries.filter(e => e.hooks && e.hooks.length > 0);
+    if (settings.hooks![eventName]!.length === 0) {
+      delete settings.hooks![eventName];
+    }
+  };
+
+  filterEvent("PostToolUse", "scan-after-write");
+  filterEvent("SessionStart", "first-touch");
+
+  if (Object.keys(settings.hooks).length === 0) {
+    delete settings.hooks;
+  }
+  return result;
+}
+
+interface UninstallClaudeMdContext {
+  claudeHome: string;
+  claudeMdPath: string;
+  settingsPath: string;
+  opts: InstallClaudeMdOptions;
+}
+
+function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
+  const { claudeHome, claudeMdPath, settingsPath, opts } = ctx;
+
+  // 1. Strip the managed block from CLAUDE.md (if present).
+  let claudeMdStripped = false;
+  let claudeMdAbsent = !existsSync(claudeMdPath);
+  if (!claudeMdAbsent) {
+    const body = readFileSync(claudeMdPath, "utf8");
+    const beginIdx = body.indexOf(CLAUDE_MD_BEGIN);
+    const endIdx = body.indexOf(CLAUDE_MD_END);
+    if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
+      // Strip from the begin marker up to and including the end
+      // marker line. Also collapse any leading blank line(s) that
+      // installClaudeMd added as a separator.
+      let cutStart = beginIdx;
+      while (cutStart > 0 && body[cutStart - 1] === "\n") cutStart--;
+      let cutEnd = endIdx + CLAUDE_MD_END.length;
+      // Consume the trailing newline that sits right after the end marker.
+      if (body[cutEnd] === "\n") cutEnd++;
+      const next = body.slice(0, cutStart) + body.slice(cutEnd);
+      writeFileSync(claudeMdPath, next);
+      claudeMdStripped = true;
+    }
+  }
+
+  // 2. Strip hook entries from settings.json (if present).
+  let settingsResult: SettingsCleanupResult = { removed: 0, scanRemoved: 0, firstTouchRemoved: 0 };
+  let settingsAbsent = !existsSync(settingsPath);
+  if (!settingsAbsent) {
+    let settings: SettingsJson;
+    try {
+      settings = readSettings(settingsPath);
+    } catch (err) {
+      emitError(
+        { code: "SETTINGS_PARSE_ERROR", error: (err as Error).message },
+        opts,
+      );
+    }
+    settingsResult = stripHookEntries(settings!);
+    if (settingsResult.removed > 0) {
+      try {
+        writeFileSync(settingsPath, JSON.stringify(settings!, null, 2) + "\n");
+      } catch (err) {
+        emitError(
+          { code: "FS_ERROR", error: `failed to write ${settingsPath}: ${(err as Error).message}` },
+          opts,
+        );
+      }
+    }
+  }
+
+  // Audit (best-effort).
+  try {
+    appendAuditRecord({
+      action: "uninstall-claude-md",
+      details: {
+        claudeHome,
+        claudeMdStripped,
+        claudeMdAbsent,
+        hookEntriesRemoved: settingsResult.removed,
+        scanHookEntriesRemoved: settingsResult.scanRemoved,
+        firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
+        settingsAbsent,
+      },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
+  }
+
+  if (opts.silent) return;
+
+  if (opts.json) {
+    emitJson({
+      action: "uninstall-claude-md",
+      claudeHome,
+      claudeMd: { path: claudeMdPath, stripped: claudeMdStripped, absent: claudeMdAbsent },
+      settings: {
+        path: settingsPath,
+        absent: settingsAbsent,
+        hookEntriesRemoved: settingsResult.removed,
+        scanHookEntriesRemoved: settingsResult.scanRemoved,
+        firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
+      },
+    });
+    return;
+  }
+
+  if (claudeMdAbsent) emitText(`${claudeMdPath} not present (nothing to strip)`);
+  else if (claudeMdStripped) emitText(`stripped managed block from ${claudeMdPath}`);
+  else emitText(`no managed block found in ${claudeMdPath}`);
+
+  if (settingsAbsent) {
+    emitText(`${settingsPath} not present (nothing to remove)`);
+  } else if (settingsResult.removed === 0) {
+    emitText(`no repo-aegis hook entries in ${settingsPath}`);
+  } else {
+    emitText(
+      `removed ${settingsResult.removed} hook entr${settingsResult.removed === 1 ? "y" : "ies"} from ${settingsPath}` +
+        ` (PostToolUse: ${settingsResult.scanRemoved}, SessionStart: ${settingsResult.firstTouchRemoved})`,
+    );
   }
 }
