@@ -265,3 +265,210 @@ describe("init command — renderMarkers behaviour", () => {
     assert.ok(existsSync(join(home, "markers", "_always.txt")));
   });
 });
+
+// ---------------------------------------------------------------------------
+// init --migrate-classify
+// ---------------------------------------------------------------------------
+
+describe("init --migrate-classify", () => {
+  /**
+   * Bootstrap a fresh home with the stub registry but no classify.yml.
+   * Returns the home path; tests write a classify.yml then invoke
+   * `init --migrate-classify`.
+   */
+  async function setupHome(name: string): Promise<string> {
+    const home = join(tmp, `migrate-${name}`);
+    mkdirSync(home, { recursive: true });
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => init({ withHooks: false, withClaude: false })),
+    );
+    return home;
+  }
+
+  it("no classify.yml → no-op", async () => {
+    const home = await setupHome("no-classify");
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        init({
+          withHooks: false,
+          withClaude: false,
+          migrateClassify: true,
+          json: true,
+        }),
+      ),
+    );
+    const j = JSON.parse(r.stdout) as { status: string };
+    assert.equal(j.status, "no-classify-yml");
+  });
+
+  it("migrates a public-eligible literal-org rule into personalOrgs", async () => {
+    const home = await setupHome("public-eligible");
+    writeFileSync(
+      join(home, "classify.yml"),
+      `rules:
+  - match: "github\\\\.com[:/]my-handle/"
+    class: public-eligible
+`,
+    );
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        init({
+          withHooks: false,
+          withClaude: false,
+          migrateClassify: true,
+        }),
+      ),
+    );
+    const reg = readFileSync(join(home, "engagements.yaml"), "utf8");
+    assert.ok(/personalOrgs:/.test(reg), `registry: ${reg}`);
+    assert.ok(/my-handle/.test(reg));
+    // classify.yml renamed to .legacy
+    assert.ok(!existsSync(join(home, "classify.yml")));
+    assert.ok(existsSync(join(home, "classify.yml.legacy")));
+  });
+
+  it("migrates a customer-coupled rule into the matching engagement's githubOrgs", async () => {
+    const home = await setupHome("customer-coupled");
+    // The bootstrap stub creates an `example-customer` engagement; we'll
+    // target it.
+    writeFileSync(
+      join(home, "classify.yml"),
+      `rules:
+  - match: "github\\\\.com[:/]example-customer/"
+    class: customer-coupled
+    engagement: example-customer
+`,
+    );
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        init({
+          withHooks: false,
+          withClaude: false,
+          migrateClassify: true,
+        }),
+      ),
+    );
+    const reg = readFileSync(join(home, "engagements.yaml"), "utf8");
+    assert.ok(/githubOrgs:/.test(reg));
+    assert.ok(/example-customer/.test(reg));
+  });
+
+  it("idempotent — second invocation is a no-op", async () => {
+    const home = await setupHome("idempotent");
+    writeFileSync(
+      join(home, "classify.yml"),
+      `rules:
+  - match: "github\\\\.com[:/]me/"
+    class: public-eligible
+`,
+    );
+    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        init({
+          withHooks: false,
+          withClaude: false,
+          migrateClassify: true,
+        }),
+      ),
+    );
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        init({
+          withHooks: false,
+          withClaude: false,
+          migrateClassify: true,
+          json: true,
+        }),
+      ),
+    );
+    const j = JSON.parse(r.stdout) as { status: string };
+    assert.equal(j.status, "already-migrated");
+  });
+
+  it("non-literal regex rule is skipped with a reason", async () => {
+    const home = await setupHome("non-literal");
+    writeFileSync(
+      join(home, "classify.yml"),
+      `rules:
+  - match: "github\\\\.com[:/](alpha|beta)/"
+    class: public-eligible
+`,
+    );
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        init({
+          withHooks: false,
+          withClaude: false,
+          migrateClassify: true,
+          json: true,
+        }),
+      ),
+    );
+    const j = JSON.parse(r.stdout) as {
+      status: string;
+      outcome: { skipped: Array<{ ruleIndex: number; reason: string }> };
+    };
+    assert.equal(j.status, "migrated");
+    assert.equal(j.outcome.skipped.length, 1);
+    assert.equal(j.outcome.skipped[0]!.ruleIndex, 0);
+  });
+
+  it("customer-coupled rule with unknown engagement id is reported", async () => {
+    const home = await setupHome("unknown-engagement");
+    writeFileSync(
+      join(home, "classify.yml"),
+      `rules:
+  - match: "github\\\\.com[:/]some-org/"
+    class: customer-coupled
+    engagement: nonexistent-engagement
+`,
+    );
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        init({
+          withHooks: false,
+          withClaude: false,
+          migrateClassify: true,
+          json: true,
+        }),
+      ),
+    );
+    const j = JSON.parse(r.stdout) as {
+      status: string;
+      outcome: { unknownEngagements: Array<{ engagementId: string }> };
+    };
+    assert.equal(j.status, "migrated");
+    assert.equal(j.outcome.unknownEngagements.length, 1);
+    assert.equal(
+      j.outcome.unknownEngagements[0]!.engagementId,
+      "nonexistent-engagement",
+    );
+  });
+
+  it("bumps schemaVersion 1 → 2 when migrating a v1 registry", async () => {
+    const home = await setupHome("schema-bump");
+    // Stub registry from setupHome has no schemaVersion (v1). Add a
+    // simple migration.
+    writeFileSync(
+      join(home, "classify.yml"),
+      `rules:
+  - match: "github\\\\.com[:/]me/"
+    class: public-eligible
+`,
+    );
+    const r = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        init({
+          withHooks: false,
+          withClaude: false,
+          migrateClassify: true,
+          json: true,
+        }),
+      ),
+    );
+    const j = JSON.parse(r.stdout) as { schemaBumped: boolean };
+    assert.equal(j.schemaBumped, true);
+    const reg = readFileSync(join(home, "engagements.yaml"), "utf8");
+    assert.ok(/schemaVersion:\s*2/.test(reg), `registry: ${reg}`);
+  });
+});

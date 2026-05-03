@@ -29,6 +29,7 @@ const EXPECTED_TOOLS = [
   "repo_aegis_markers_test",
   "repo_aegis_markers_list",
   "repo_aegis_audit",
+  "aegis_classify_first_touch",
 ] as const;
 
 async function loadHarness(): Promise<{

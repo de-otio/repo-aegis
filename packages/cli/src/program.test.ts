@@ -104,6 +104,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "registry",
       "render",
       "status",
+      "suggest-markers",
     ],
   },
 
@@ -135,6 +136,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
     flags: [
       "--claude-home",
       "--force",
+      "--migrate-classify",
       "--no-with-claude",
       "--no-with-hooks",
       "--with-claude",
@@ -145,6 +147,20 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "classify",
     flags: ["--apply", "--rules"],
+    subcommands: [],
+  },
+  {
+    path: "suggest-markers",
+    flags: [
+      "--accept-remote-author-domains",
+      "--allow-remote-model",
+      "--auto-accept-above",
+      "--dry-run",
+      "--endpoint",
+      "--engagement",
+      "--from",
+      "--model",
+    ],
     subcommands: [],
   },
   {
@@ -174,7 +190,13 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "engagements list", flags: ["--all"], subcommands: [] },
   {
     path: "engagements add",
-    flags: ["--marker", "--name", "--started"],
+    flags: [
+      "--github-org",
+      "--marker",
+      "--name",
+      "--personal-org",
+      "--started",
+    ],
     subcommands: [],
   },
   { path: "engagements end", flags: ["--purge"], subcommands: [] },
@@ -214,7 +236,12 @@ const EXPECTED_SHAPE: CommandShape[] = [
   },
   {
     path: "install claude-md",
-    flags: ["--claude-home", "--dry-run", "--print-only"],
+    flags: [
+      "--claude-home",
+      "--dry-run",
+      "--first-touch",
+      "--print-only",
+    ],
     subcommands: [],
   },
 
@@ -240,9 +267,10 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "hook",
     flags: [],
-    subcommands: ["scan-after-write"],
+    subcommands: ["first-touch", "scan-after-write"],
   },
   { path: "hook scan-after-write", flags: [], subcommands: [] },
+  { path: "hook first-touch", flags: [], subcommands: [] },
 
   // ---- audit-log ----
   {

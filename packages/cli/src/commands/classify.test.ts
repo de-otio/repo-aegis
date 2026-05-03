@@ -476,3 +476,289 @@ describe("classify — JSON output shape", () => {
     resetRepoAegis(gitDir);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tests: registry-derived classification (Phase 1 onboarding)
+// ---------------------------------------------------------------------------
+
+/**
+ * Set REPO_AEGIS_REGISTRY env var for the duration of `fn`. Restores the
+ * previous value (or unsets) on exit so test isolation is preserved.
+ */
+function withRegistry<T>(path: string, fn: () => T): T {
+  const prev = process.env["REPO_AEGIS_REGISTRY"];
+  process.env["REPO_AEGIS_REGISTRY"] = path;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) {
+      delete process.env["REPO_AEGIS_REGISTRY"];
+    } else {
+      process.env["REPO_AEGIS_REGISTRY"] = prev;
+    }
+  }
+}
+
+describe("classify — registry-derived", () => {
+  it("personalOrgs match → public-eligible (dry-run)", () => {
+    const reg = join(tmp, "reg-personal.yaml");
+    writeFileSync(
+      reg,
+      `schemaVersion: 2
+personalOrgs: [my-handle]
+engagements: []
+`,
+    );
+    setRemote(gitDir, "git@github.com:my-handle/dotfiles.git");
+    resetRepoAegis(gitDir);
+
+    const { stdout } = withRegistry(reg, () =>
+      captureOutput(() =>
+        classify({ cwd: gitDir, json: true, rules: join(rulesDir, "no-rules.yml") }),
+      ),
+    );
+
+    const out = JSON.parse(stdout) as {
+      matched: { source: string; class: string; engagement: string | null };
+    };
+    assert.equal(out.matched.source, "registry-personal");
+    assert.equal(out.matched.class, "public-eligible");
+    assert.equal(out.matched.engagement, null);
+  });
+
+  it("engagement.githubOrgs match → customer-coupled with engagement (dry-run)", () => {
+    const reg = join(tmp, "reg-engagement.yaml");
+    writeFileSync(
+      reg,
+      `schemaVersion: 2
+engagements:
+  - id: foo-corp
+    name: Foo Corp
+    githubOrgs: [foo-corp]
+    markers: [foo]
+`,
+    );
+    setRemote(gitDir, "git@github.com:foo-corp/some-repo.git");
+    resetRepoAegis(gitDir);
+
+    const { stdout } = withRegistry(reg, () =>
+      captureOutput(() =>
+        classify({ cwd: gitDir, json: true, rules: join(rulesDir, "no-rules.yml") }),
+      ),
+    );
+
+    const out = JSON.parse(stdout) as {
+      matched: { source: string; class: string; engagement: string | null };
+    };
+    assert.equal(out.matched.source, "registry-engagement");
+    assert.equal(out.matched.class, "customer-coupled");
+    assert.equal(out.matched.engagement, "foo-corp");
+  });
+
+  it("apply: registry-engagement match calls setClass + addEngagement", () => {
+    const reg = join(tmp, "reg-apply.yaml");
+    writeFileSync(
+      reg,
+      `schemaVersion: 2
+engagements:
+  - id: bar-co
+    name: Bar Co
+    githubOrgs: [bar-co]
+    markers: [bar]
+`,
+    );
+    setRemote(gitDir, "git@github.com:bar-co/proj.git");
+    resetRepoAegis(gitDir);
+
+    const { stdout } = withRegistry(reg, () =>
+      captureOutput(() =>
+        classify({
+          cwd: gitDir,
+          json: true,
+          rules: join(rulesDir, "no-rules.yml"),
+          apply: true,
+        }),
+      ),
+    );
+    const out = JSON.parse(stdout) as {
+      applied: boolean;
+      after: { class: string; engagements: string[] };
+    };
+    assert.equal(out.applied, true);
+    assert.equal(out.after.class, "customer-coupled");
+    assert.deepEqual(out.after.engagements, ["bar-co"]);
+
+    resetRepoAegis(gitDir);
+  });
+
+  it("registry wins over classify.yml when both match (deprecation warning)", () => {
+    const reg = join(tmp, "reg-precedence.yaml");
+    writeFileSync(
+      reg,
+      `schemaVersion: 2
+personalOrgs: [me]
+engagements: []
+`,
+    );
+    const rulesFile = join(rulesDir, "rules-precedence.yml");
+    writeRules(
+      rulesFile,
+      `rules:
+  - match: "github\\\\.com[:/]me/"
+    class: private-strict
+`,
+    );
+    setRemote(gitDir, "git@github.com:me/whatever.git");
+    resetRepoAegis(gitDir);
+
+    const { stdout, stderr } = withRegistry(reg, () =>
+      captureOutput(() =>
+        classify({ cwd: gitDir, json: true, rules: rulesFile }),
+      ),
+    );
+
+    const out = JSON.parse(stdout) as {
+      matched: { source: string; class: string };
+      warnings: string[];
+    };
+    // Registry wins.
+    assert.equal(out.matched.source, "registry-personal");
+    assert.equal(out.matched.class, "public-eligible");
+    // Deprecation warning surfaced.
+    assert.ok(
+      out.warnings.some(w => /superseded/.test(w)),
+      `warnings: ${JSON.stringify(out.warnings)}`,
+    );
+    assert.ok(
+      stderr.includes("warning:"),
+      `stderr: ${stderr}`,
+    );
+  });
+
+  it("[SEC M-7] classify.yml fallback emits a warning when registry has no match", () => {
+    const reg = join(tmp, "reg-fallback.yaml");
+    writeFileSync(
+      reg,
+      `schemaVersion: 2
+personalOrgs: []
+engagements: []
+`,
+    );
+    const rulesFile = join(rulesDir, "rules-fallback.yml");
+    writeRules(
+      rulesFile,
+      `rules:
+  - match: "github\\\\.com[:/]legacy-org/"
+    class: customer-coupled
+    engagement: legacy-engagement
+`,
+    );
+    setRemote(gitDir, "git@github.com:legacy-org/repo.git");
+    resetRepoAegis(gitDir);
+
+    const { stdout } = withRegistry(reg, () =>
+      captureOutput(() => classify({ cwd: gitDir, json: true, rules: rulesFile })),
+    );
+
+    const out = JSON.parse(stdout) as {
+      matched: { source: string; rule: number | null; class: string };
+      warnings: string[];
+    };
+    assert.equal(out.matched.source, "classify-yml");
+    assert.equal(out.matched.rule, 0);
+    assert.equal(out.matched.class, "customer-coupled");
+    assert.ok(
+      out.warnings.some(
+        w => /classify\.yml fallback/.test(w) && /legacy-engagement/.test(w),
+      ),
+      `warnings: ${JSON.stringify(out.warnings)}`,
+    );
+  });
+
+  it("non-github remote falls through to classify.yml without registry attempt", () => {
+    const reg = join(tmp, "reg-nongithub.yaml");
+    writeFileSync(
+      reg,
+      `schemaVersion: 2
+personalOrgs: [me]
+engagements: []
+`,
+    );
+    const rulesFile = join(rulesDir, "rules-nongithub.yml");
+    writeRules(
+      rulesFile,
+      `rules:
+  - match: "gitlab\\\\.com[:/]"
+    class: private-strict
+`,
+    );
+    setRemote(gitDir, "git@gitlab.com:foo/bar.git");
+    resetRepoAegis(gitDir);
+
+    const { stdout } = withRegistry(reg, () =>
+      captureOutput(() => classify({ cwd: gitDir, json: true, rules: rulesFile })),
+    );
+
+    const out = JSON.parse(stdout) as {
+      matched: { source: string; class: string };
+    };
+    // Registry parser returned null for gitlab; classify.yml took over.
+    assert.equal(out.matched.source, "classify-yml");
+    assert.equal(out.matched.class, "private-strict");
+  });
+
+  it("registry produces no match and no classify.yml → no-rules suggestion", () => {
+    const reg = join(tmp, "reg-empty.yaml");
+    writeFileSync(
+      reg,
+      `schemaVersion: 2
+engagements: []
+`,
+    );
+    setRemote(gitDir, "git@github.com:unknown-org/repo.git");
+    resetRepoAegis(gitDir);
+
+    const { stdout } = withRegistry(reg, () =>
+      captureOutput(() =>
+        classify({
+          cwd: gitDir,
+          json: true,
+          rules: join(rulesDir, "absolutely-does-not-exist.yml"),
+        }),
+      ),
+    );
+
+    const out = JSON.parse(stdout) as {
+      matched: null;
+      suggestion: string;
+    };
+    assert.equal(out.matched, null);
+    assert.ok(/githubOrgs/.test(out.suggestion), `suggestion: ${out.suggestion}`);
+  });
+
+  it("missing registry file silently falls through to classify.yml", () => {
+    const rulesFile = join(rulesDir, "rules-when-no-registry.yml");
+    writeRules(
+      rulesFile,
+      `rules:
+  - match: "github\\\\.com[:/]foo/"
+    class: private-strict
+`,
+    );
+    setRemote(gitDir, "git@github.com:foo/repo.git");
+    resetRepoAegis(gitDir);
+
+    const { stdout } = withRegistry(
+      join(tmp, "registry-that-does-not-exist.yaml"),
+      () =>
+        captureOutput(() => classify({ cwd: gitDir, json: true, rules: rulesFile })),
+    );
+
+    const out = JSON.parse(stdout) as {
+      matched: { source: string };
+    };
+    // Should still find a match via classify.yml; registry being absent
+    // is silent (regMatch returned null, fell through).
+    assert.equal(out.matched.source, "classify-yml");
+  });
+});

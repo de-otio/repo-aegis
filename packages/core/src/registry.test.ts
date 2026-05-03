@@ -212,7 +212,177 @@ engagements:
   it("MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION is the current pinned version", () => {
     // Sanity guard: bumping this constant is intentional and should be
     // accompanied by a migration plan and updated tests.
-    assert.equal(MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, 1);
+    assert.equal(MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, 2);
+  });
+
+  // -- schemaVersion 2: personalOrgs + engagements[*].githubOrgs --
+
+  it("v1 file (no schemaVersion, no personalOrgs/githubOrgs) loads with empty defaults", () => {
+    const path = writeYaml(
+      "v1-defaults.yaml",
+      `engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+    );
+    const reg = loadRegistry(path);
+    assert.equal(reg.schemaVersion, 1);
+    assert.deepEqual(reg.personalOrgs, []);
+    assert.equal(reg.engagements[0]!.githubOrgs, undefined);
+  });
+
+  it("loads schemaVersion 2 with personalOrgs and engagements[*].githubOrgs", () => {
+    const path = writeYaml(
+      "v2-full.yaml",
+      `schemaVersion: 2
+personalOrgs:
+  - my-handle
+  - my-oss-org
+engagements:
+  - id: foo-corp
+    name: Foo Corp
+    githubOrgs: [foo-corp, foo-corp-archived]
+    markers: [foo]
+  - id: bar-co
+    name: Bar Co
+    githubOrgs: [bar-co]
+    markers: [bar]`,
+    );
+    const reg = loadRegistry(path);
+    assert.equal(reg.schemaVersion, 2);
+    assert.deepEqual(reg.personalOrgs, ["my-handle", "my-oss-org"]);
+    assert.deepEqual(reg.engagements[0]!.githubOrgs, ["foo-corp", "foo-corp-archived"]);
+    assert.deepEqual(reg.engagements[1]!.githubOrgs, ["bar-co"]);
+  });
+
+  it("rejects org name with uppercase characters", () => {
+    const path = writeYaml(
+      "v2-uppercase.yaml",
+      `schemaVersion: 2
+personalOrgs: [Bad-Org]
+engagements: []`,
+    );
+    assert.throws(
+      () => loadRegistry(path),
+      (err: unknown) =>
+        err instanceof RegistryParseError && /lowercase/i.test(err.message),
+    );
+  });
+
+  it("rejects org name with leading hyphen", () => {
+    const path = writeYaml(
+      "v2-leading-hyphen.yaml",
+      `schemaVersion: 2
+engagements:
+  - id: foo
+    name: Foo
+    githubOrgs: ["-bad"]
+    markers: []`,
+    );
+    assert.throws(() => loadRegistry(path), RegistryParseError);
+  });
+
+  it("rejects org name with whitespace", () => {
+    const path = writeYaml(
+      "v2-whitespace.yaml",
+      `schemaVersion: 2
+engagements:
+  - id: foo
+    name: Foo
+    githubOrgs: ["bad org"]
+    markers: []`,
+    );
+    assert.throws(() => loadRegistry(path), RegistryParseError);
+  });
+
+  it("rejects empty string in githubOrgs", () => {
+    const path = writeYaml(
+      "v2-empty.yaml",
+      `schemaVersion: 2
+engagements:
+  - id: foo
+    name: Foo
+    githubOrgs: [""]
+    markers: []`,
+    );
+    assert.throws(() => loadRegistry(path), RegistryParseError);
+  });
+
+  it("rejects same org appearing in personalOrgs and engagements[*].githubOrgs (disjointness)", () => {
+    const path = writeYaml(
+      "v2-overlap.yaml",
+      `schemaVersion: 2
+personalOrgs: [my-handle]
+engagements:
+  - id: foo
+    name: Foo
+    githubOrgs: [my-handle]
+    markers: []`,
+    );
+    assert.throws(
+      () => loadRegistry(path),
+      (err: unknown) =>
+        err instanceof RegistryParseError &&
+        /personalOrgs/.test(err.message) &&
+        /my-handle/.test(err.message) &&
+        /mutually exclusive/.test(err.message),
+    );
+  });
+
+  it("rejects same org listed in two different engagements' githubOrgs (uniqueness)", () => {
+    const path = writeYaml(
+      "v2-dup.yaml",
+      `schemaVersion: 2
+engagements:
+  - id: foo
+    name: Foo
+    githubOrgs: [shared-org]
+    markers: []
+  - id: bar
+    name: Bar
+    githubOrgs: [shared-org]
+    markers: []`,
+    );
+    assert.throws(
+      () => loadRegistry(path),
+      (err: unknown) =>
+        err instanceof RegistryParseError &&
+        /shared-org/.test(err.message) &&
+        /at most one engagement/.test(err.message) &&
+        /foo/.test(err.message),
+    );
+  });
+
+  it("rejects duplicate entries inside personalOrgs", () => {
+    const path = writeYaml(
+      "v2-personal-dup.yaml",
+      `schemaVersion: 2
+personalOrgs: [me, me]
+engagements: []`,
+    );
+    assert.throws(
+      () => loadRegistry(path),
+      (err: unknown) =>
+        err instanceof RegistryParseError && /duplicate/i.test(err.message),
+    );
+  });
+
+  it("rejects schemaVersion 3 with the existing 'newer than supported' message", () => {
+    const path = writeYaml(
+      "v3.yaml",
+      `schemaVersion: 3
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+    );
+    assert.throws(
+      () => loadRegistry(path),
+      (err: unknown) =>
+        err instanceof RegistryParseError &&
+        /please upgrade/i.test(err.message) &&
+        /3/.test(err.message),
+    );
   });
 });
 

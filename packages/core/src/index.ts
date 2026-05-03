@@ -46,6 +46,32 @@ export {
 } from "./registry.js";
 export type { Engagement, Registry, ResolveResult } from "./registry.js";
 
+// ---- remote URL parser ---------------------------------------------------
+export { parseRemoteUrl } from "./remote-url.js";
+export type { ParsedRemote } from "./remote-url.js";
+
+// ---- first-touch classification (Phase 1 onboarding) --------------------
+export { firstTouchClassify, redactOrg } from "./first-touch.js";
+export type {
+  FirstTouchResult,
+  FirstTouchOptions,
+  FirstTouchSkipReason,
+  FirstTouchAlreadyClassified,
+  FirstTouchApplied,
+  FirstTouchNeedsConfirmation,
+  FirstTouchSkipped,
+} from "./first-touch.js";
+
+// ---- registry mutation (Phase 2 onboarding) -----------------------------
+export {
+  addMarkerPattern,
+  addMarkerPatterns,
+} from "./registry-mutate.js";
+export type {
+  AddMarkerPatternOptions,
+  AddMarkerPatternResult,
+} from "./registry-mutate.js";
+
 // ---- repo (per-repo config + engagement membership mutators) -------------
 export {
   readRepoConfig,
@@ -144,4 +170,4 @@ export type { RepoJson, EngagementJson } from "./types.js";
 // human-readable message" helper. Sibling packages (cli, scan) own their
 // own schemas (classify rules, queries) but import this so error wording
 // is consistent across the surface.
-export { formatZodError } from "./schemas.js";
+export { formatZodError, ORG_NAME_REGEX } from "./schemas.js";

@@ -47,6 +47,15 @@ ${CLAUDE_MD_END}
  */
 const HOOK_COMMAND = "repo-aegis hook scan-after-write";
 
+/**
+ * SessionStart hook command — Phase 1 onboarding. Calls
+ * `firstTouchClassify` and emits the result as JSON. Same naming
+ * stability rule as `HOOK_COMMAND` above.
+ */
+const FIRST_TOUCH_HOOK_COMMAND = "repo-aegis hook first-touch";
+
+const FIRST_TOUCH_HOOK_MATCHER = "*";
+
 interface InstallClaudeMdOptions extends OutputOptions {
   claudeHome?: string;
   /**
@@ -62,6 +71,14 @@ interface InstallClaudeMdOptions extends OutputOptions {
    * as --print-only on the CLI.
    */
   dryRun?: boolean;
+  /**
+   * Phase 1 onboarding: also register the SessionStart hook that
+   * calls `repo-aegis hook first-touch`. Defaults to false on
+   * standalone `install claude-md` (preserves existing-user opt-in);
+   * `init` passes `firstTouch: true` so fresh installs get the JIT
+   * classify wired up by default.
+   */
+  firstTouch?: boolean;
 }
 
 interface SettingsJson {
@@ -111,6 +128,38 @@ function mergeHook(settings: SettingsJson, hookCommand: string): MergeResult {
   if (!entry) {
     entry = { matcher: HOOK_MATCHER, hooks: [] };
     post.push(entry);
+  }
+  if (!entry.hooks) entry.hooks = [];
+
+  const exists = entry.hooks.some(
+    h => h.type === "command" && h.command === hookCommand,
+  );
+  if (exists) {
+    return { added: false, alreadyPresent: true };
+  }
+  entry.hooks.push({ type: "command", command: hookCommand });
+  return { added: true, alreadyPresent: false };
+}
+
+/**
+ * Merge the SessionStart hook entry that calls
+ * `repo-aegis hook first-touch`. Idempotent on the (matcher,
+ * command) pair so `install claude-md --first-touch` re-runs are
+ * safe.
+ */
+function mergeFirstTouchHook(
+  settings: SettingsJson,
+  hookCommand: string,
+): MergeResult {
+  if (!settings.hooks) settings.hooks = {};
+  if (!settings.hooks["SessionStart"]) settings.hooks["SessionStart"] = [];
+
+  const sess = settings.hooks["SessionStart"]!;
+
+  let entry = sess.find(e => e.matcher === FIRST_TOUCH_HOOK_MATCHER);
+  if (!entry) {
+    entry = { matcher: FIRST_TOUCH_HOOK_MATCHER, hooks: [] };
+    sess.push(entry);
   }
   if (!entry.hooks) entry.hooks = [];
 
@@ -177,8 +226,12 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     );
   }
   const merge = mergeHook(settings!, HOOK_COMMAND);
+  const firstTouchMerge: MergeResult | null = opts.firstTouch
+    ? mergeFirstTouchHook(settings!, FIRST_TOUCH_HOOK_COMMAND)
+    : null;
 
-  if (merge.added) {
+  // Write if either hook was added (or both).
+  if (merge.added || (firstTouchMerge && firstTouchMerge.added)) {
     try {
       writeFileSync(settingsPath, JSON.stringify(settings!, null, 2) + "\n");
     } catch (err) {
@@ -204,6 +257,10 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
         claudeMdAlreadyPresent,
         settingsAdded: merge.added,
         settingsAlreadyPresent: merge.alreadyPresent,
+        ...(firstTouchMerge && {
+          firstTouchAdded: firstTouchMerge.added,
+          firstTouchAlreadyPresent: firstTouchMerge.alreadyPresent,
+        }),
       },
     });
   } catch {
@@ -219,6 +276,13 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
       claudeMd: { path: claudeMdPath, appended: claudeMdAppended, alreadyPresent: claudeMdAlreadyPresent },
       hookCommand: HOOK_COMMAND,
       settings: { path: settingsPath, added: merge.added, alreadyPresent: merge.alreadyPresent },
+      ...(firstTouchMerge && {
+        firstTouch: {
+          hookCommand: FIRST_TOUCH_HOOK_COMMAND,
+          added: firstTouchMerge.added,
+          alreadyPresent: firstTouchMerge.alreadyPresent,
+        },
+      }),
       strictModeOn,
     });
     return;
@@ -229,6 +293,14 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   if (merge.added) emitText(`registered PostToolUse hook in ${settingsPath}`);
   else emitText(`PostToolUse hook already registered in ${settingsPath}`);
   emitText(`  command: ${HOOK_COMMAND}`);
+  if (firstTouchMerge) {
+    if (firstTouchMerge.added) {
+      emitText(`registered SessionStart hook in ${settingsPath}`);
+    } else {
+      emitText(`SessionStart hook already registered in ${settingsPath}`);
+    }
+    emitText(`  command: ${FIRST_TOUCH_HOOK_COMMAND}`);
+  }
   if (!strictModeOn) {
     emitText("");
     emitText("note: leak-context strict mode is OFF.");

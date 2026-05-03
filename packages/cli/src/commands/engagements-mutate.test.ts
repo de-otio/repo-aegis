@@ -379,3 +379,219 @@ describe("engagements remove --hard", () => {
     assert.ok(Array.isArray(j.rendered.removed));
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 1: --github-org and --personal-org
+// ---------------------------------------------------------------------------
+
+describe("engagements add — --github-org", () => {
+  it("populates githubOrgs on the new engagement and bumps schemaVersion", () => {
+    const env = setupEnv("add-github-org");
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      captureOutput(() =>
+        engagementsAdd("foo-corp", {
+          name: "Foo Corp",
+          githubOrg: ["foo-corp", "foo-corp-archived"],
+          registryPath: env.registryPath,
+        }),
+      );
+    });
+    const body = readFileSync(env.registryPath, "utf8");
+    assert.ok(body.includes("githubOrgs"));
+    assert.ok(body.includes("foo-corp"));
+    assert.ok(body.includes("foo-corp-archived"));
+    assert.ok(/schemaVersion:\s*2/.test(body), `body: ${body}`);
+  });
+
+  it("[SEC M-8] emits a warning on v1 → v2 schemaVersion bump", () => {
+    const env = setupEnv("add-github-org-bump");
+    let stderrOutput = "";
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      const result = captureOutput(() =>
+        engagementsAdd("bar-co", {
+          name: "Bar Co",
+          githubOrg: ["bar-co"],
+          registryPath: env.registryPath,
+        }),
+      );
+      stderrOutput = result.stderr;
+    });
+    assert.ok(
+      /schemaVersion bumped from 1 to 2/.test(stderrOutput),
+      `stderr: ${stderrOutput}`,
+    );
+  });
+
+  it("does not bump or warn when registry is already schemaVersion 2", () => {
+    const env = setupEnv("add-github-org-no-bump");
+    writeFileSync(
+      env.registryPath,
+      `schemaVersion: 2
+always_block: []
+engagements:
+  - id: existing-customer
+    name: Existing
+    started: 2026-01-01
+    markers: [existing-marker]
+`,
+    );
+    let stderrOutput = "";
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      const result = captureOutput(() =>
+        engagementsAdd("new-corp", {
+          name: "New Corp",
+          githubOrg: ["new-corp"],
+          registryPath: env.registryPath,
+        }),
+      );
+      stderrOutput = result.stderr;
+    });
+    assert.ok(
+      !/schemaVersion bumped/.test(stderrOutput),
+      `stderr should not contain bump warning: ${stderrOutput}`,
+    );
+  });
+
+  it("rejects invalid org names (uppercase, leading hyphen, empty)", () => {
+    const env = setupEnv("add-github-org-invalid");
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      const result = captureOutput(() =>
+        engagementsAdd("foo", {
+          githubOrg: ["FOO-Corp", "-bad", ""],
+          registryPath: env.registryPath,
+          json: true,
+        }),
+      );
+      assert.equal(result.exitCode, 2);
+      // emitError writes JSON to stderr in --json mode; uppercase and
+      // empty are rejected, leading-hyphen is also rejected.
+      const j = JSON.parse(result.stderr) as { code: string };
+      assert.equal(j.code, "INVALID_ORG_NAME");
+    });
+  });
+
+  it("lowercases org names automatically", () => {
+    const env = setupEnv("add-github-org-lowercase");
+    writeFileSync(
+      env.registryPath,
+      `schemaVersion: 2
+always_block: []
+engagements: []
+`,
+    );
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      captureOutput(() =>
+        engagementsAdd("foo-mixed", {
+          githubOrg: ["Foo-Corp"], // mixed case input
+          registryPath: env.registryPath,
+        }),
+      );
+    });
+    const body = readFileSync(env.registryPath, "utf8");
+    assert.ok(body.includes("foo-corp"), `body: ${body}`);
+    assert.ok(!body.includes("Foo-Corp"), `body should be lowercased: ${body}`);
+  });
+
+  it("dedupes within a single --github-org invocation", () => {
+    const env = setupEnv("add-github-org-dedupe");
+    writeFileSync(
+      env.registryPath,
+      `schemaVersion: 2
+always_block: []
+engagements: []
+`,
+    );
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      const result = captureOutput(() =>
+        engagementsAdd("dup-corp", {
+          githubOrg: ["dup-corp", "DUP-Corp", "dup-corp"],
+          registryPath: env.registryPath,
+          json: true,
+        }),
+      );
+      const j = JSON.parse(result.stdout) as { githubOrgs: string[] };
+      assert.deepEqual(j.githubOrgs, ["dup-corp"]);
+    });
+  });
+});
+
+describe("engagements add — --personal-org", () => {
+  it("appends to top-level personalOrgs and skips engagement creation", () => {
+    const env = setupEnv("add-personal-org");
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      captureOutput(() =>
+        engagementsAdd(undefined, {
+          personalOrg: ["my-handle"],
+          registryPath: env.registryPath,
+        }),
+      );
+    });
+    const body = readFileSync(env.registryPath, "utf8");
+    assert.ok(/personalOrgs:/.test(body), `body: ${body}`);
+    assert.ok(/my-handle/.test(body));
+    // Should NOT have created an engagement; existing list unchanged
+    assert.ok(/existing-customer/.test(body));
+  });
+
+  it("idempotent — re-adding an existing personal org is a no-op", () => {
+    const env = setupEnv("add-personal-org-idempotent");
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      captureOutput(() =>
+        engagementsAdd(undefined, {
+          personalOrg: ["my-handle"],
+          registryPath: env.registryPath,
+        }),
+      );
+      const result = captureOutput(() =>
+        engagementsAdd(undefined, {
+          personalOrg: ["my-handle"],
+          registryPath: env.registryPath,
+          json: true,
+        }),
+      );
+      const j = JSON.parse(result.stdout) as {
+        added: string[];
+        skipped: string[];
+      };
+      assert.deepEqual(j.added, []);
+      assert.deepEqual(j.skipped, ["my-handle"]);
+    });
+  });
+
+  it("rejects when --personal-org is combined with a positional <id>", () => {
+    const env = setupEnv("personal-with-id");
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      const result = captureOutput(() =>
+        engagementsAdd("an-engagement", {
+          personalOrg: ["my-handle"],
+          registryPath: env.registryPath,
+          json: true,
+        }),
+      );
+      assert.equal(result.exitCode, 2);
+      const j = JSON.parse(result.stderr) as { code: string; error: string };
+      assert.equal(j.code, "USAGE");
+      assert.ok(/does not take a positional/.test(j.error));
+    });
+  });
+});
+
+describe("engagements add — flag conflict", () => {
+  it("rejects --github-org + --personal-org together", () => {
+    const env = setupEnv("conflict");
+    withEnv("REPO_AEGIS_HOME", env.home, () => {
+      const result = captureOutput(() =>
+        engagementsAdd("foo", {
+          githubOrg: ["a"],
+          personalOrg: ["b"],
+          registryPath: env.registryPath,
+          json: true,
+        }),
+      );
+      assert.equal(result.exitCode, 2);
+      const j = JSON.parse(result.stderr) as { code: string; error: string };
+      assert.equal(j.code, "USAGE");
+      assert.ok(/mutually exclusive/.test(j.error));
+    });
+  });
+});

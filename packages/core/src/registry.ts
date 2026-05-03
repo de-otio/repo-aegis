@@ -19,14 +19,32 @@ export interface Engagement {
   reposActive?: string[];
   markers: string[];
   notes?: string;
+  /**
+   * GitHub orgs that map to this engagement (Phase 1, schemaVersion 2+).
+   * A repo whose origin's org appears here is auto-classified
+   * `customer-coupled` with this engagement. Lowercased, GitHub
+   * org-name shape; cross-validated for uniqueness across all
+   * engagements and disjointness with {@link Registry.personalOrgs}.
+   */
+  githubOrgs?: string[];
 }
 
 export interface Registry {
   engagements: Engagement[];
   alwaysBlock: string[];
   /**
+   * GitHub orgs the user owns / treats as public (schemaVersion 2+).
+   * A repo whose origin's org is in this list is auto-classified
+   * `public-eligible`. Disjoint from any engagement's `githubOrgs`.
+   * Optional in the type so callers constructing Registry literals
+   * (tests, fixtures) don't have to specify; `loadRegistry` always
+   * populates it (defaults to `[]` for v1 registries that don't
+   * declare the field).
+   */
+  personalOrgs?: string[];
+  /**
    * Schema version of the on-disk registry. Defaults to 1 when the YAML has
-   * no `schemaVersion:` field (legacy / current). Readers refuse versions
+   * no `schemaVersion:` field (legacy). Readers refuse versions
    * greater than {@link MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION}. Optional in
    * the type so callers constructing Registry literals (tests, fixtures)
    * don't have to specify; loadRegistry always populates it.
@@ -37,16 +55,21 @@ export interface Registry {
 export const ALWAYS_BLOCK_RESERVED_ID = "_always";
 
 /**
- * Highest registry `schemaVersion` this build of repo-aegis can read. A
- * registry written by a newer repo-aegis with a higher version will be
- * rejected at load time with a `RegistryParseError` instructing the user
- * to upgrade. The reader-policy (per design B14) is:
+ * Highest registry `schemaVersion` this build of repo-aegis can read.
+ *
+ * - v1 (legacy): no `schemaVersion`, no `personalOrgs`, no
+ *   `engagements[*].githubOrgs`. Loaded with `personalOrgs: []` and every
+ *   engagement's `githubOrgs` undefined.
+ * - v2 (Phase 1 onboarding): adds `personalOrgs` and
+ *   `engagements[*].githubOrgs` for org-keyed JIT classification.
+ *
+ * Reader policy:
  *   - missing field => treat as version 1 (legacy);
  *   - version <= MAX => accept (unknown sibling fields are ignored);
- *   - version  > MAX => refuse.
+ *   - version  > MAX => refuse with "upgrade required".
  * Writers must never lower the version.
  */
-export const MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION = 1;
+export const MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION = 2;
 
 export function loadRegistry(path: string = registryPath()): Registry {
   // If the plaintext registry is absent but a sibling `<path>.age`
@@ -116,11 +139,13 @@ export function loadRegistry(path: string = registryPath()): Registry {
     ...(e.reposActive !== undefined && { reposActive: e.reposActive }),
     markers: e.markers,
     ...(e.notes !== undefined && { notes: e.notes }),
+    ...(e.githubOrgs !== undefined && { githubOrgs: e.githubOrgs }),
   }));
 
   return {
     engagements,
     alwaysBlock: validated.always_block ?? [],
+    personalOrgs: validated.personalOrgs ?? [],
     schemaVersion,
   };
 }

@@ -56,6 +56,7 @@ For local development:
 | `repo_aegis_markers_test` | Probe a string against the scoped deny set; returns engagement attribution + redacted previews. Same shape as `repo-aegis markers test <s> --json`. |
 | `repo_aegis_markers_list` | List active marker files (engagement-id + redacted pattern previews). Same shape as `repo-aegis markers list --json`. |
 | `repo_aegis_audit` | Composite repo audit (marker scan, lockfile, fixtures, remote-vs-class). Same shape as `repo-aegis audit --json`. |
+| `aegis_classify_first_touch` | JIT classify a previously-unclassified repo from its git remote + the engagement registry's `githubOrgs` / `personalOrgs`. Returns `status: already-classified | applied | needs-confirmation | skipped` with `[SEC H-5]` redacted org names for ambiguous cases. |
 
 Three CLI flags are deliberately **not** exposed over MCP:
 

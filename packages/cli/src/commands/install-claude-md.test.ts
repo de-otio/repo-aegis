@@ -347,3 +347,102 @@ describe("install-claude-md — JSON output", () => {
     assert.equal(j.strictModeOn, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 1: --first-touch SessionStart hook
+// ---------------------------------------------------------------------------
+
+interface SettingsShape {
+  hooks?: {
+    PostToolUse?: Array<{
+      matcher?: string;
+      hooks?: Array<{ type?: string; command?: string }>;
+    }>;
+    SessionStart?: Array<{
+      matcher?: string;
+      hooks?: Array<{ type?: string; command?: string }>;
+    }>;
+  };
+}
+
+describe("install-claude-md — --first-touch", () => {
+  it("does NOT add SessionStart hook by default (firstTouch off)", () => {
+    const claudeHome = makeClaudeHome("first-touch-default");
+    const aegisHome = aegisHomeFor("first-touch-default");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome })),
+    );
+    const settings = JSON.parse(
+      readFileSync(join(claudeHome, "settings.json"), "utf8"),
+    ) as SettingsShape;
+    assert.equal(settings.hooks?.SessionStart, undefined);
+  });
+
+  it("with firstTouch:true, registers SessionStart hook", () => {
+    const claudeHome = makeClaudeHome("first-touch-on");
+    const aegisHome = aegisHomeFor("first-touch-on");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+    );
+    const settings = JSON.parse(
+      readFileSync(join(claudeHome, "settings.json"), "utf8"),
+    ) as SettingsShape;
+    const sessionEntries = settings.hooks?.SessionStart ?? [];
+    assert.equal(sessionEntries.length, 1);
+    assert.equal(sessionEntries[0]!.matcher, "*");
+    assert.equal(
+      sessionEntries[0]!.hooks?.[0]?.command,
+      "repo-aegis hook first-touch",
+    );
+  });
+
+  it("idempotent — running twice with --first-touch does not duplicate", () => {
+    const claudeHome = makeClaudeHome("first-touch-idempotent");
+    const aegisHome = aegisHomeFor("first-touch-idempotent");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+    );
+    withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+    );
+    const settings = JSON.parse(
+      readFileSync(join(claudeHome, "settings.json"), "utf8"),
+    ) as SettingsShape;
+    const sessionEntries = settings.hooks?.SessionStart ?? [];
+    assert.equal(sessionEntries.length, 1);
+    assert.equal(sessionEntries[0]!.hooks?.length, 1);
+  });
+
+  it("preserves the PostToolUse hook when firstTouch:true is used", () => {
+    const claudeHome = makeClaudeHome("first-touch-preserves");
+    const aegisHome = aegisHomeFor("first-touch-preserves");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+    );
+    const settings = JSON.parse(
+      readFileSync(join(claudeHome, "settings.json"), "utf8"),
+    ) as SettingsShape;
+    const postEntries = settings.hooks?.PostToolUse ?? [];
+    assert.equal(postEntries.length, 1);
+    assert.equal(
+      postEntries[0]!.hooks?.[0]?.command,
+      "repo-aegis hook scan-after-write",
+    );
+  });
+
+  it("JSON output includes firstTouch field", () => {
+    const claudeHome = makeClaudeHome("first-touch-json");
+    const aegisHome = aegisHomeFor("first-touch-json");
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() =>
+        installClaudeMd({ claudeHome, firstTouch: true, json: true }),
+      ),
+    );
+    const j = JSON.parse(result.stdout) as {
+      firstTouch?: { hookCommand: string; added: boolean };
+    };
+    assert.ok(j.firstTouch);
+    assert.equal(j.firstTouch!.hookCommand, "repo-aegis hook first-touch");
+    assert.equal(j.firstTouch!.added, true);
+  });
+});

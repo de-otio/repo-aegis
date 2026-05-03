@@ -6,6 +6,7 @@ import { registerCheckTools } from "./tools/check.js";
 import { registerMarkersTools } from "./tools/markers.js";
 import { registerEngagementsTools } from "./tools/engagements.js";
 import { registerAuditTool } from "./tools/audit.js";
+import { registerFirstTouchTool } from "./tools/first-touch.js";
 
 /**
  * Server identity. Bumping `version` is a coordinated change with the
@@ -37,5 +38,6 @@ export function buildServer(): McpServer {
   registerMarkersTools(server);
   registerEngagementsTools(server);
   registerAuditTool(server);
+  registerFirstTouchTool(server);
   return server;
 }
