@@ -83,14 +83,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New workspace package `@de-otio/repo-aegis-llm` (Ollama HTTP
     client, prose extraction, token synthesis, filters,
     token-extraction prompt).
-  - `repo-aegis suggest-markers [--apply]` — extract prose, ask a
-    local Ollama model to identify customer tokens, filter
-    (dictionary, dependencies, existing patterns), synthesise
-    word-boundary regexes, and (with `--apply`) append them to an
-    engagement's marker list.
+  - `repo-aegis suggest-markers --engagement <id>
+    [--auto-accept-above <n> | --dry-run]` — extract prose, ask a
+    local Ollama model to identify customer tokens, synthesise
+    word-boundary regexes, filter (dictionary, dependencies,
+    existing patterns, user-identity guard), and either auto-accept
+    above a confidence threshold or print a review-required
+    candidate list for the user to inspect before re-running.
   - `[SEC H-1]` Ollama endpoint validation (loopback-only by default,
-    `--allow-remote` opt-in, `localhost` DNS lookup guarded against
-    `/etc/hosts` redirection).
+    `--allow-remote-model` opt-in, `localhost` DNS lookup guarded
+    against `/etc/hosts` redirection).
   - `[SEC C-3]` LLM prompt-injection defence: anti-injection preamble
     + fence delimiters around user-provided prose; structured response
     parsed via Zod.

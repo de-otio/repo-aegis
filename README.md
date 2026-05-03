@@ -10,12 +10,13 @@ marker list when working on customer-A's own code.
 
 ## Status
 
-**Pre-release. v0.1.0 published; Phase 1–3 onboarding work merged on
-`main` for the next release. CLI and scanner are feature-complete:
-all commands, output formats, and hook integrations implemented.
-Phase 1 (org-keyed JIT classification) and Phase 2 (LLM-assisted
-marker discovery) ship in the developer CLI; Phase 3 (semantic audit
-sweep) ships in `@de-otio/repo-aegis-scan` as opt-in.**
+**Pre-release. v0.1.0 published; Phase 1–3 onboarding work is
+implemented on `main` and awaiting the next release tag. CLI and
+scanner are feature-complete: all commands, output formats, and
+hook integrations implemented. Phase 1 (org-keyed JIT classification)
+and Phase 2 (LLM-assisted marker discovery) are complete in the
+developer CLI; Phase 3 (semantic audit sweep) is complete in
+`@de-otio/repo-aegis-scan` as opt-in.**
 
 If you're driving this from a coding agent (Claude Code, Cursor,
 Aider, Cline, …), start at the [agent operator guide](doc/agent-guide.md).
@@ -66,12 +67,16 @@ For the design rationale and threat model, see
 - `repo-aegis engagements list|add|end|show` — manage the registry.
   `add [id] --github-org <org>` (or `--personal-org`) attaches GitHub
   orgs to an engagement so the next git remote in that org auto-classifies.
-- `repo-aegis suggest-markers [--apply]` — Phase 2: extract prose from
-  the current repo, ask a local Ollama model to identify customer
-  tokens, filter (dictionary, dependency names, existing patterns),
-  synthesise word-boundary regexes, and (with `--apply`) append them
-  to an engagement's marker list. Local-only by default; `--allow-remote`
-  permits a non-loopback Ollama endpoint.
+- `repo-aegis suggest-markers --engagement <id> [--from <path>]
+  [--auto-accept-above <0..1> | --dry-run]` — Phase 2: extract prose
+  from the repo, ask a local Ollama model to identify customer
+  tokens, filter (dictionary, dependency names, existing patterns,
+  user-identity guard), synthesise word-boundary regexes, and append
+  approved patterns to the engagement's marker list. Without
+  `--auto-accept-above` or `--dry-run`, prints the surviving
+  candidates and exits without persisting (review-required mode).
+  Local-only by default; `--allow-remote-model` opts in to a
+  non-loopback Ollama endpoint.
 - `repo-aegis hook first-touch` — JIT classification hook that fires
   the first time an agent touches a previously-unclassified repo.
   Emitted as a Claude Code SessionStart hook by `install claude-md`

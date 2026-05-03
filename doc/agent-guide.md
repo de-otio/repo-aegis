@@ -230,10 +230,15 @@ upgrade is intentional.
 
 ```sh
 # Dry-run — print the candidates as JSON, do not modify anything:
-repo-aegis suggest-markers --engagement customer-a --json
+repo-aegis suggest-markers --engagement customer-a --dry-run --json
 
-# Apply — append the (filtered) regexes to the engagement's marker list:
-repo-aegis suggest-markers --engagement customer-a --apply
+# Auto-accept candidates above a confidence threshold:
+repo-aegis suggest-markers --engagement customer-a --auto-accept-above 0.7
+
+# Without --auto-accept-above and --dry-run, prints "review-required":
+# the surviving candidate list is printed and nothing is written.
+# Re-run with --auto-accept-above (or --dry-run) once the user has reviewed.
+repo-aegis suggest-markers --engagement customer-a --json
 ```
 
 Phase 2 pipeline:
@@ -246,14 +251,25 @@ Phase 2 pipeline:
    loopback-only by default) which strings look like customer
    identifiers. Anti-injection preamble + fenced delimiters protect
    the prompt.
-3. **Filter:** dictionary words, dependency names from
+3. **Synthesise** word-boundary regexes per token kind (company,
+   codename, person-name, domain, ticket-prefix, account-id, other).
+4. **Filter:** dictionary words, dependency names from
    `package.json` / `Cargo.toml` / `go.mod` / `pyproject.toml`,
    patterns already in this engagement's marker list, tokens that
-   match `personalOrgs` / `$USER` / `$HOME` basename.
-4. **Synthesise** word-boundary regexes per token kind (company,
-   codename, person-name, domain, ticket-prefix, account-id).
-5. With `--apply`, append to the engagement's marker list under a
-   single registry lock; render; report.
+   match `personalOrgs` / `$USER` / `$HOME` basename (`[SEC H-2]`).
+5. **Decide:**
+   - `--dry-run` → print, exit 0, no writes.
+   - `--auto-accept-above <T>` → accept candidates with `confidence >= T`
+     that pass the identity guard; identity-rejected candidates are
+     dropped (cannot be auto-accepted).
+   - Neither → print "review-required" candidate list and exit 0
+     without persisting. The user re-runs with one of the two flags.
+6. Approved patterns are appended to the engagement's marker list
+   under a single registry lock (`addMarkerPatterns`), `render` runs,
+   and the audit log records source basename, model id, endpoint host
+   kind, candidate / accepted / identity-rejected counts, and the
+   prompt version (`[SEC H-6]`). **Never** the literal patterns or
+   tokens.
 
 This is **discovery only** — never run on a hot path. The
 deterministic gate (PostToolUse, pre-commit, pre-push) remains regex
@@ -261,6 +277,12 @@ against fixed marker files.
 
 If Ollama isn't installed or running, the command exits with a clear
 `OLLAMA_ERROR` rather than falling back. Ask the user.
+
+If the endpoint is non-loopback and you didn't pass
+`--allow-remote-model`, the command exits `REMOTE_DISALLOWED` before
+opening any connection. Do **not** add `--allow-remote-model` on
+your own initiative — sending customer prose to a non-local model is
+a compliance decision the user owns.
 
 ### "I just got a hit, what do I do"
 
@@ -500,8 +522,9 @@ Two repos share a trust boundary if their org sets overlap.
 When you see `CROSS_ORG_WRITE`, the file is **already on disk**
 (PostToolUse fires after the write succeeds). Surface to the user,
 propose reverting the file, do not silently retry. The agent should
-**not** add `--allow-remote` or otherwise widen the trust boundary
-on its own initiative — that's a compliance decision.
+**not** widen the trust boundary on its own initiative (e.g. by
+adding the destination's org to `personalOrgs` or to an engagement's
+`githubOrgs`) — that's a compliance decision.
 
 When you see `DEST_UNCLASSIFIED`, the destination repo has not been
 classified. The scan still ran (against `_always`) but you have no
@@ -684,7 +707,7 @@ Codes you should recognise and act on:
 | `REMOVE_REQUIRES_HARD` | `engagements remove` without `--hard` | for soft removal use `engagements end <id> --purge`; for hard removal pass `--hard` (data-subject-erasure semantics) |
 | `LOCK_TIMEOUT` | another repo-aegis process is holding the registry lock | wait and retry; if persistent, the user has a stale lockfile to investigate |
 | `OUTSIDE_WORKING_TREE` | `check --path` (CLI invocation, not the hook) resolved a file outside the *named* repo's working tree, even after symlink resolution | the file is genuinely outside any git tree the call was scoped to. Surface to the user; do NOT auto-rerun on a different path. The PostToolUse hook does NOT raise this — it resolves the destination tree from the path automatically. |
-| `CROSS_ORG_WRITE` | PostToolUse hook saw a write whose destination tree's trust boundary does not overlap the launcher's | the file is already on disk. Surface to the user, name the offending path, propose reverting. Do NOT add `--allow-remote` or modify `personalOrgs` / `githubOrgs` to widen the boundary; that's a compliance decision the user owns. |
+| `CROSS_ORG_WRITE` | PostToolUse hook saw a write whose destination tree's trust boundary does not overlap the launcher's | the file is already on disk. Surface to the user, name the offending path, propose reverting. Do NOT modify `personalOrgs` / `githubOrgs` to widen the boundary; that's a compliance decision the user owns. |
 | `DEST_UNCLASSIFIED` (warning, not fatal) | PostToolUse hook scanned a write into a destination repo with no class, no engagements, and no remote it could parse | the scan ran against `_always` only. Suggest the user classify the destination (`cd <dest> && repo-aegis classify --apply`). The hit (if any) is still real; treat it like a normal scan result. |
 | `CUSTOMER_COUPLED_NO_ENGAGEMENT` | `check` ran in a `customer-coupled` repo with no engagement set | run `repo-aegis allow <id>` after confirming with the user which engagement(s) the repo references |
 | `HOOKS_PATH_CONFLICT` | `install hooks` saw a different `core.hooksPath` already set | tell the user the prior value verbatim; ask if they want to overwrite with `--force` |
@@ -702,7 +725,7 @@ Codes you should recognise and act on:
 | `RENDER_ERROR` | unexpected render failure | unusual; surface to user |
 | `REGISTRY_ERROR` | unexpected registry-load failure | unusual; surface to user |
 | `OLLAMA_ERROR` | `suggest-markers` could not reach the Ollama server | the user must `ollama serve` and pull the model; do not retry blindly |
-| `REMOTE_DISALLOWED` | `--ollama-endpoint` failed `[SEC H-1]` validation (non-loopback without `--allow-remote`, bad protocol, user-info, `localhost` resolves to non-loopback) | surface to user; do not auto-add `--allow-remote` |
+| `REMOTE_DISALLOWED` | Ollama endpoint failed `[SEC H-1]` validation (non-loopback without the matching opt-in flag, bad protocol, user-info, `localhost` resolves to non-loopback). Raised by `suggest-markers` (flag: `--allow-remote-model`) and by `repo-aegis-scan` (flag: `--allow-remote-ollama`). | surface to user; do not auto-add either opt-in flag |
 | `BUNDLE_TOO_LARGE` | extracted prose exceeded the model's context budget | `details.bytes` carries the size; the user owns whether to shrink the corpus |
 | `BUNDLE_FENCE_COLLISION` | extracted prose contained the chosen fence delimiter | retry happens automatically with a fresh delimiter; surfacing this means the retry also failed |
 | `ROOT_CONTAINMENT` | `extractProse` resolved a forbidden ancestor path (`~/.config/repo-aegis`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/git`) | a likely symlink-attack indicator; do NOT bypass |
@@ -845,7 +868,7 @@ shape we don't model.
 | `install ci` | emit GHA workflow | (printed to stdout, not JSON) |
 | `hook scan-after-write` | (PostToolUse entry) | same as `check --path` |
 | `hook first-touch` | (SessionStart entry) classify previously-unclassified repo | `status` (`already-classified`/`applied`/`needs-confirmation`/`skipped`), redacted `details` |
-| `suggest-markers [--engagement <id>] [--apply]` | LLM-assisted marker discovery (Phase 2) | `engagement`, `proposed`, `applied`, `dryRun`, `auditLog?` |
+| `suggest-markers --engagement <id> [--auto-accept-above <n>\|--dry-run]` | LLM-assisted marker discovery (Phase 2) | `action`, `engagement`, `candidates`, `accepted` (when persisting), `dryRun?`, `review?`, `identityRejected?`, `skippedDuplicates?`, `rendered?` |
 | `init --migrate-classify` | port legacy `classify.yml` to registry | `action`, `migrated`, `personalOrgs`, `engagements` |
 | `audit-log on` | enable compliance trail | `action`, `wasOn`, `isOn`, `path` |
 | `audit-log off` | disable compliance trail | `action`, `wasOn`, `isOn`, `path` |

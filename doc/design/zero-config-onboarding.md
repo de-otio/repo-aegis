@@ -5,7 +5,10 @@
 > and the implementation checklist at
 > [`plans/zero-config-onboarding-checklist.md`](../../plans/zero-config-onboarding-checklist.md).
 >
-> Status: design accepted; implementation in progress.
+> Status: design accepted; Phase 1 (org-keyed JIT classification),
+> Phase 2 (LLM-assisted marker discovery), and Phase 3 (semantic
+> audit sweep) are implemented on `main` and awaiting the next
+> release tag.
 
 This document is the source of truth for the *as-designed* shape of:
 
@@ -453,29 +456,38 @@ repo-aegis suggest-markers \
   [--dry-run]                         # show, don't write
 ```
 
-Interactive flow (TTY):
+Flow:
 
 1. `extractProse(--from)` → bundle.
 2. Show: *"Extracted N files / M KiB / D author domains. Calling
    model. This is local; no network egress."*
 3. Token extraction call.
-4. Synthesis + filter.
-5. Display table: `[ ] confidence  kind  pattern  source`.
-6. User selects entries (space toggles, enter accepts). Or
-   `--auto-accept-above 0.7` accepts entries above the threshold.
-7. Approved patterns appended to engagement's `markers` via
-   `addMarkerPattern(engagementId, pattern)` (new core helper).
-8. `render` runs. Audit log records: source path, model id,
-   candidate count, accepted count, prompt version. **Never** records
-   the literal patterns or tokens.
+4. Synthesis + filter (dictionary, dependency-name, existing-pattern,
+   plus the `[SEC H-2]` user-identity guard).
+5. Decide what to do with survivors:
+   - `--dry-run` → print candidate table, exit 0, no writes.
+   - `--auto-accept-above <T>` → accept candidates with `confidence >= T`
+     that pass the identity guard; identity-rejected candidates are
+     dropped with a stderr note (cannot be auto-accepted).
+   - Neither flag set → print "review-required" with the candidate
+     table and exit 0 without mutating. The user re-runs with
+     `--auto-accept-above` (or `--dry-run`) once they've reviewed.
+6. Approved patterns are appended to the engagement's `markers` via
+   `addMarkerPatterns(engagementId, patterns[])` (a single
+   `withLock`-guarded core helper) and `render` runs.
+7. Audit log records: source basename `[SEC H-6]`, model id, endpoint
+   host kind, candidate count, accepted count, identity-rejected count,
+   prompt version. **Never** records the literal patterns or tokens.
 
-Non-interactive mode (no TTY or `--auto-accept-above` set): same as
-above, skipping step 6.
+Exit codes: 0 success (including the review-required path), 2 config
+/ endpoint / validation error.
 
-`--dry-run` prints the candidate table and exits 0 without mutating.
-
-Exit codes: 0 success, 1 user cancelled, 2 config / endpoint /
-validation error.
+> **Implementation note (MVP).** The "review-required" path above is
+> the MVP fallback in place of the originally-designed TTY checkbox
+> UI. A future revision may add interactive selection; the structured
+> JSON output of the review-required mode is intentionally
+> machine-readable so an agent can drive selection on the user's
+> behalf in the meantime.
 
 ## Phase 3 — semantic audit sweep
 
