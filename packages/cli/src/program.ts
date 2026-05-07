@@ -338,6 +338,15 @@ export async function buildProgram(): Promise<Command> {
     .action((opts, cmd) => hookScanAfterWrite(withGlobals(opts, cmd)));
 
   hook
+    .command("scan-bash-output")
+    .description("PostToolUse(Bash): scan Bash tool stdout/stderr for secret-shaped strings (PEM, JWT, GitHub tokens)")
+    .option("--advisory", "exit 0 on hit (still emits structured payload)")
+    .action(async (opts, cmd) => {
+      const { hookScanBashOutput } = await import("./commands/hook-scan-bash-output.js");
+      hookScanBashOutput(withGlobals(opts, cmd));
+    });
+
+  hook
     .command("first-touch")
     .description(
       "SessionStart: classify the current repo from its remote against the engagement registry; emits FirstTouchResult JSON",

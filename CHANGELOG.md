@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Secret-shape scanning for Bash tool output.** New PostToolUse hook
+  `repo-aegis hook scan-bash-output` reads the Claude Code tool-result
+  JSON from stdin, extracts the Bash stdout/stderr, and scans for
+  universal secret-shaped patterns: PEM private-key headers (RSA / EC
+  / OPENSSH / encrypted variants), the macOS keychain hex-encoded form
+  of `-----BEGIN ` (the failure mode where `security ... -w` round-
+  trips a PEM as ASCII hex), GitHub token prefixes (`ghs_`, `ghp_`,
+  `gho_`, `ghu_`, `ghr_`, `github_pat_`), and three-segment JWT
+  shapes anchored on the `eyJ` header. On a hit, exits 1 with a
+  structured `SECRET_LEAK` payload that names the kinds and offsets
+  detected (no matched bytes — by construction). `--advisory` keeps
+  the payload but exits 0 for soft-rollout scenarios.
+  - `install claude-md` automatically registers the new hook with a
+    `Bash` matcher alongside the existing `Write|Edit|MultiEdit`
+    matcher; merge is idempotent on the (matcher, command) pair so
+    existing users picking up the upgrade re-run safely.
+  - `install claude-md --uninstall` strips the new hook entries.
+  - The pattern set is universal — not engagement-scoped, not
+    configurable. New `core` exports: `scanForSecrets`,
+    `summariseHits`, `SecretMarkerKind`, `SecretMarkerHit`.
+  - PostToolUse fires *after* the tool runs, so the leak has already
+    reached the agent context by the time the hook detects it. The
+    hook is therefore framed as detection-and-alert, not prevention:
+    its `remediation` block points the agent at credential rotation
+    (e.g. `de-otio/treat-agent-as-a-dev` Step 9) rather than
+    pretending the leak can be unsent.
+
 - **One-command uninstall.** New top-level `repo-aegis uninstall`
   reverses every `install …` step in one shot. Defaults to a dry-run;
   `--yes` applies. Opt-in `--purge-repos` walks `~/repos`, `~/code`,

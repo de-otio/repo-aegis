@@ -115,6 +115,10 @@ export {
 } from "./scan.js";
 export type { ScanHit, SkippedFile, HistoryHit, ScanOptions } from "./scan.js";
 
+// ---- secret-shaped markers (universal, not engagement-scoped) -----------
+export { scanForSecrets, summariseHits } from "./secret-markers.js";
+export type { SecretMarkerKind, SecretMarkerHit } from "./secret-markers.js";
+
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";
 export type { RenderOptions, RenderedFile, RenderResult } from "./render.js";

@@ -269,10 +269,11 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "hook",
     flags: [],
-    subcommands: ["first-touch", "scan-after-write"],
+    subcommands: ["first-touch", "scan-after-write", "scan-bash-output"],
   },
   { path: "hook scan-after-write", flags: [], subcommands: [] },
   { path: "hook first-touch", flags: [], subcommands: [] },
+  { path: "hook scan-bash-output", flags: ["--advisory"], subcommands: [] },
 
   // ---- audit-log ----
   {

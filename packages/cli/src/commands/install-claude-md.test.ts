@@ -62,17 +62,25 @@ describe("install-claude-md — fresh install", () => {
     assert.ok(!existsSync(join(claudeHome, "hooks")));
   });
 
-  it("registers PostToolUse hook in settings.json by bin name", () => {
+  it("registers PostToolUse hooks in settings.json by bin name", () => {
     const settingsPath = join(claudeHome, "settings.json");
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       hooks: { PostToolUse: { matcher: string; hooks: { type: string; command: string }[] }[] };
     };
     const post = settings.hooks.PostToolUse;
-    assert.equal(post.length, 1);
-    assert.equal(post[0]!.matcher, "Write|Edit|MultiEdit");
-    assert.equal(post[0]!.hooks.length, 1);
-    assert.equal(post[0]!.hooks[0]!.type, "command");
-    assert.equal(post[0]!.hooks[0]!.command, HOOK_COMMAND);
+    assert.equal(post.length, 2, "expect both file-write and Bash matcher entries");
+
+    const fileEntry = post.find(e => e.matcher === "Write|Edit|MultiEdit");
+    assert.ok(fileEntry, "missing file-write matcher entry");
+    assert.equal(fileEntry!.hooks.length, 1);
+    assert.equal(fileEntry!.hooks[0]!.type, "command");
+    assert.equal(fileEntry!.hooks[0]!.command, "repo-aegis hook scan-after-write");
+
+    const bashEntry = post.find(e => e.matcher === "Bash");
+    assert.ok(bashEntry, "missing Bash matcher entry");
+    assert.equal(bashEntry!.hooks.length, 1);
+    assert.equal(bashEntry!.hooks[0]!.type, "command");
+    assert.equal(bashEntry!.hooks[0]!.command, "repo-aegis hook scan-bash-output");
   });
 });
 
@@ -94,8 +102,10 @@ describe("install-claude-md — idempotency", () => {
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
     ) as { hooks: { PostToolUse: { matcher: string; hooks: unknown[] }[] } };
     const post = settings.hooks.PostToolUse;
-    assert.equal(post.length, 1);
-    assert.equal(post[0]!.hooks.length, 1, "hook command should appear exactly once");
+    assert.equal(post.length, 2, "two matcher entries (Write|Edit|MultiEdit and Bash)");
+    for (const entry of post) {
+      assert.equal(entry.hooks.length, 1, `hook command should appear exactly once in ${entry.matcher}`);
+    }
   });
 });
 
@@ -413,7 +423,7 @@ describe("install-claude-md — --first-touch", () => {
     assert.equal(sessionEntries[0]!.hooks?.length, 1);
   });
 
-  it("preserves the PostToolUse hook when firstTouch:true is used", () => {
+  it("preserves the PostToolUse hooks when firstTouch:true is used", () => {
     const claudeHome = makeClaudeHome("first-touch-preserves");
     const aegisHome = aegisHomeFor("first-touch-preserves");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
@@ -423,10 +433,18 @@ describe("install-claude-md — --first-touch", () => {
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
     ) as SettingsShape;
     const postEntries = settings.hooks?.PostToolUse ?? [];
-    assert.equal(postEntries.length, 1);
+    assert.equal(postEntries.length, 2, "file-write + Bash matchers");
+    const fileEntry = postEntries.find(e => e.matcher === "Write|Edit|MultiEdit");
+    assert.ok(fileEntry);
     assert.equal(
-      postEntries[0]!.hooks?.[0]?.command,
+      fileEntry!.hooks?.[0]?.command,
       "repo-aegis hook scan-after-write",
+    );
+    const bashEntry = postEntries.find(e => e.matcher === "Bash");
+    assert.ok(bashEntry);
+    assert.equal(
+      bashEntry!.hooks?.[0]?.command,
+      "repo-aegis hook scan-bash-output",
     );
   });
 
