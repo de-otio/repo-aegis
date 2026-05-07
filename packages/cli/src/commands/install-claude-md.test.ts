@@ -16,6 +16,7 @@ import { captureOutput, withEnv } from "../_test-utils.js";
 import { installClaudeMd } from "./install-claude-md.js";
 
 const HOOK_COMMAND = "repo-aegis hook scan-after-write";
+const CHECK_WRITE_HOOK_COMMAND = "repo-aegis hook check-write";
 
 let tmp: string;
 
@@ -82,6 +83,25 @@ describe("install-claude-md — fresh install", () => {
     assert.equal(bashEntry!.hooks[0]!.type, "command");
     assert.equal(bashEntry!.hooks[0]!.command, "repo-aegis hook scan-bash-output");
   });
+
+  it("registers PreToolUse check-write hook in settings.json by bin name", () => {
+    // v0.3.0: cross-org-write refusal moved to PreToolUse so a non-zero
+    // exit blocks the tool *before* it runs. Same matcher as the
+    // PostToolUse scan-after-write hook (Write|Edit|MultiEdit).
+    const settingsPath = join(claudeHome, "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      hooks: { PreToolUse?: { matcher: string; hooks: { type: string; command: string }[] }[] };
+    };
+    const pre = settings.hooks.PreToolUse;
+    assert.ok(pre, "expect PreToolUse key in settings.hooks");
+    assert.equal(pre!.length, 1, "expect single Write|Edit|MultiEdit matcher entry");
+
+    const entry = pre![0]!;
+    assert.equal(entry.matcher, "Write|Edit|MultiEdit");
+    assert.equal(entry.hooks.length, 1);
+    assert.equal(entry.hooks[0]!.type, "command");
+    assert.equal(entry.hooks[0]!.command, CHECK_WRITE_HOOK_COMMAND);
+  });
 });
 
 describe("install-claude-md — idempotency", () => {
@@ -100,12 +120,23 @@ describe("install-claude-md — idempotency", () => {
 
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
-    ) as { hooks: { PostToolUse: { matcher: string; hooks: unknown[] }[] } };
+    ) as {
+      hooks: {
+        PreToolUse?: { matcher: string; hooks: unknown[] }[];
+        PostToolUse: { matcher: string; hooks: unknown[] }[];
+      };
+    };
     const post = settings.hooks.PostToolUse;
     assert.equal(post.length, 2, "two matcher entries (Write|Edit|MultiEdit and Bash)");
     for (const entry of post) {
       assert.equal(entry.hooks.length, 1, `hook command should appear exactly once in ${entry.matcher}`);
     }
+
+    // PreToolUse check-write should also be deduplicated.
+    const pre = settings.hooks.PreToolUse;
+    assert.ok(pre, "PreToolUse key still present after re-run");
+    assert.equal(pre!.length, 1, "single Write|Edit|MultiEdit PreToolUse matcher");
+    assert.equal(pre![0]!.hooks.length, 1, "check-write should appear exactly once");
   });
 });
 
@@ -481,8 +512,9 @@ describe("install-claude-md — uninstall", () => {
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
     ) as { hooks?: Record<string, unknown> };
-    // Both hook keys should be gone (or at least the repo-aegis entries
-    // are gone — the keys themselves should be cleaned up too).
+    // All three hook keys should be gone (or at least the repo-aegis
+    // entries are gone — the keys themselves should be cleaned up too).
+    assert.ok(!settings.hooks || !("PreToolUse" in settings.hooks));
     assert.ok(!settings.hooks || !("PostToolUse" in settings.hooks));
     assert.ok(!settings.hooks || !("SessionStart" in settings.hooks));
   });
@@ -566,6 +598,38 @@ describe("install-claude-md — uninstall", () => {
     assert.equal(post.length, 1);
     const cmds = post[0]!.hooks.map(h => h.command);
     assert.deepEqual(cmds, ["/path/to/other-tool/audit.sh"]);
+  });
+
+  it("preserves third-party PreToolUse hooks", () => {
+    const claudeHome = makeClaudeHome("uninstall-coexist-pre");
+    const aegisHome = aegisHomeFor("uninstall-coexist-pre");
+    const settingsPath = join(claudeHome, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Write|Edit|MultiEdit",
+              hooks: [{ type: "command", command: "/path/to/other-tool/pre-check.sh" }],
+            },
+          ],
+        },
+      }),
+    );
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
+    });
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      hooks?: {
+        PreToolUse?: { matcher: string; hooks: { command: string }[] }[];
+      };
+    };
+    const pre = settings.hooks!.PreToolUse!;
+    assert.equal(pre.length, 1);
+    const cmds = pre[0]!.hooks.map(h => h.command);
+    assert.deepEqual(cmds, ["/path/to/other-tool/pre-check.sh"]);
   });
 
   it("is idempotent — second uninstall is a no-op", () => {
