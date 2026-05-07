@@ -16,3 +16,5 @@ plans/
 # npm-link / `npm install --prefix .` artefacts
 bin/
 lib/
+analysis/
+tmp/
