@@ -2,7 +2,7 @@
   "name": "repo-aegis-vscode",
   "displayName": "repo-aegis",
   "description": "VSCode surface for repo-aegis: status bar, diagnostics, and commands backed by the repo-aegis CLI",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "de-otio",
   "license": "GPL-3.0-or-later",
   "homepage": "https://github.com/de-otio/repo-aegis",
@@ -62,7 +62,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@de-otio/repo-aegis-core": "^0.1.0"
+    "@de-otio/repo-aegis-core": "^0.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.12.0",
