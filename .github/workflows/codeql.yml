@@ -46,3 +46,19 @@ jobs:
         uses: github/codeql-action/analyze@0daab03d71ff584ef619d027a3fd9146679c5d84 # v3
         with:
           category: "/language:${{ matrix.language }}"
+
+  # Aggregator: stable check-run name for branch-protection. The
+  # matrix expands `analyze` into ugly doubled names like
+  # `analyze (javascript-typescript) (javascript-typescript)`, which
+  # we don't want to pin in the ruleset.
+  codeql-success:
+    if: always()
+    needs: [analyze]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify analyze job succeeded
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" == "true" ]]; then
+            echo "CodeQL analyze did not succeed."
+            exit 1
+          fi
