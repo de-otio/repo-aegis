@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# CODEOWNERS — automatic reviewer assignment.
+#
+# Once branch protection requires PR review, GitHub uses this file
+# to suggest (or require, with "Require review from Code Owners")
+# the owning reviewer for each path. Keep it simple while there's
+# only one maintainer; expand per-area as the contributor base grows.
+
+* @rkm1

@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Dependabot configuration. Two ecosystems: npm (workspace deps and
+# transitive lockfile entries) and github-actions (the action SHAs we
+# pin in workflow files). Both run weekly so the noise is bounded.
+#
+# When a security advisory lands on a dependency, Dependabot opens a
+# higher-priority alert + PR regardless of this schedule (governed by
+# the repo-level "Dependabot security updates" toggle, not this file).
+
+version: 2
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "npm"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      # Bundle non-major dev-tooling bumps into one PR to cut review
+      # noise. Major bumps of these still come through individually.
+      dev-tooling:
+        patterns:
+          - "typescript"
+          - "@types/*"
+          - "c8"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(actions)"
+      include: "scope"
