@@ -26,10 +26,12 @@ developer CLI; Phase 3 (semantic audit sweep) is complete in
 - **Deterministic gate at every write path.** Pre-commit, pre-push,
   and a Claude Code PostToolUse hook all run the same scanner; same
   JSON output, same exit codes (0 = clean, 1 = hit, 2 = error).
-- **Path-aware cross-repo writes.** The PostToolUse hook resolves
-  the destination working tree from the written path, scans against
-  *that* repo's rules, and refuses with `CROSS_ORG_WRITE` when the
-  trust boundaries don't overlap.
+- **Path-aware cross-repo writes.** A PreToolUse hook
+  (`hook check-write`) refuses with `CROSS_ORG_WRITE` *before* the
+  tool runs when the source and destination working trees belong to
+  different trust boundaries. The PostToolUse hook then resolves the
+  destination working tree from the written path and scans against
+  *that* repo's deny set.
 - **Zero-config onboarding.** First time an agent touches an
   unclassified repo, `repo-aegis hook first-touch` matches the git
   remote against the engagement registry's `githubOrgs` /

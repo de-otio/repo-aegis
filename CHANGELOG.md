@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.1] - 2026-05-07
 
+### Security
+
+- **Cross-org-write refusal is now genuine prevention, not
+  post-write detection.** The 0.2.0 `repo-aegis hook
+  scan-after-write` (PostToolUse) docstring and README claimed the
+  hook *refuses* writes whose destination working tree's trust
+  boundary did not overlap the launcher's. That claim was
+  incorrect: PostToolUse fires *after* the tool's effect lands, so
+  a non-zero exit cannot un-write the file. A new PreToolUse hook,
+  `repo-aegis hook check-write`, runs the same `decideHookAction`
+  policy *before* the tool runs and exits 2 on a cross-boundary
+  write — at which point Claude Code blocks the tool from running.
+  `install claude-md` registers the new hook automatically;
+  existing installs need to re-run `repo-aegis install claude-md`
+  to pick up the PreToolUse entry. Not exploitable in a
+  privilege-escalation sense; recategorised as a correctness fix
+  to a published prevention claim. The PostToolUse refuse-path is
+  retained as defence-in-depth for installs that have not yet
+  upgraded; its error message now acknowledges the file is already
+  on disk and points at remediation.
+
+### Added
+
+- **`repo-aegis hook check-write` (PreToolUse).** New CLI
+  subcommand wired into `Write|Edit|MultiEdit` PreToolUse. Reads
+  `tool_input.file_path` from stdin, runs the path-aware trust-
+  boundary policy, and exits 2 with `CROSS_ORG_WRITE` when the
+  destination tree's trust boundary does not overlap the
+  launcher's. Same payload shape as the existing PostToolUse
+  surface (`code`, `details.srcOrgs`, `details.destOrgs`,
+  `details.destTree`).
+- **`install claude-md` registers the PreToolUse hook by default.**
+  Idempotent on the (event, matcher, command) triple. Re-running
+  the installer on an existing v0.2.0 setup adds the new entry
+  without touching the existing PostToolUse / SessionStart entries
+  or the `CLAUDE.md` managed block. `install claude-md --uninstall`
+  strips PreToolUse entries alongside the PostToolUse and
+  SessionStart cleanups; the cleanup result counters distinguish
+  the three event types.
+- **`doc/agent-install.md` — agent install guide.** New top-level
+  doc walking a coding agent through the install + interactive
+  engagement-configuration flow when a developer says "install and
+  configure repo-aegis". Complements the existing
+  `doc/agent-guide.md` (operator guide for ongoing use).
+
 ### Fixed
 
 - **`[SEC C-1]` containment guard now fires on non-existent forbidden
