@@ -30,7 +30,7 @@
     "@de-otio/repo-aegis-llm": "^0.3.0",
     "@octokit/request": "^8.4.1",
     "commander": "^12.1.0",
-    "yaml": "^2.4.0",
+    "yaml": "^2.8.4",
     "zod": "^4.4.3"
   }
 }
