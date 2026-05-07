@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-07
+
+### Fixed
+
+- **`[SEC C-1]` containment guard now fires on non-existent forbidden
+  paths.** `extractProse` ran `realpathSync(root)` before the
+  forbidden-prefix check, so a non-existent path under a forbidden
+  prefix (e.g. `~/.gnupg/...` on a system without gnupg installed)
+  threw a generic `Error` from realpath's ENOENT and bypassed the
+  containment guard entirely. Added a pre-canonicalisation literal-
+  prefix check that throws `RootContainmentError` regardless of
+  filesystem state. The post-realpath check is preserved for symlink-
+  escape protection. Surfaced by Linux CI runs where the runner's
+  home doesn't contain `.gnupg` / `.config/git`; previously masked on
+  developer macOS boxes where those paths happen to exist.
+
 ## [0.2.0] - 2026-05-07
 
 ### Added
