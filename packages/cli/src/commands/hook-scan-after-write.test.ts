@@ -167,7 +167,21 @@ always_block:
     assert.equal(json.hits[0]!.engagement, "_always");
   });
 
-  it("refuses with CROSS_ORG_WRITE when src and dest have disjoint orgs", () => {
+  it("emits CROSS_ORG_WRITE (defence-in-depth) when src and dest have disjoint orgs", () => {
+    // As of v0.3.0, genuine prevention of cross-org writes is handled
+    // by the PreToolUse `hook check-write`. This PostToolUse path is
+    // retained as defence-in-depth for installs that predate v0.3.0
+    // and have not re-run `install claude-md` to pick up the
+    // PreToolUse registration. The runtime contract (exit 2 +
+    // CROSS_ORG_WRITE payload + srcOrgs/destOrgs detail) is preserved
+    // so existing agents handle this case unchanged.
+    //
+    // The test fixture pre-creates the file (writeFileSync below) to
+    // exercise the PostToolUse code path exactly as it would run in
+    // the real world: the file is already on disk by the time the
+    // hook fires. The corresponding hook-check-write test asserts
+    // the inverse — that the PreToolUse hook can refuse without the
+    // file existing.
     const env = setupAegisHome("xtree-cross-org");
     writeRegistry(
       env.aegisHome,

@@ -528,6 +528,19 @@ export async function extractProse(
     maxAuthorDomains = DEFAULT_MAX_AUTHOR_DOMAINS,
   } = opts;
 
+  // ── [SEC C-1] Pre-canonicalisation containment check ─────────────────────
+  // Run the forbidden-prefix check on the LITERAL `root` before
+  // attempting `realpathSync`. Without this, a non-existent path under
+  // a forbidden prefix (e.g. `~/.gnupg/maybe-future` on a system that
+  // never installed gnupg) makes `realpathSync` throw ENOENT, the
+  // generic catch-all below fires, and the containment guard is
+  // bypassed entirely. The literal-prefix match is the cheap,
+  // existence-independent gate.
+  const literalForbidden = forbiddenPrefixOf(root);
+  if (literalForbidden !== null) {
+    throw new RootContainmentError(root, literalForbidden);
+  }
+
   // ── [SEC C-1] Canonicalise root ───────────────────────────────────────────
   let realRoot: string;
   try {
@@ -538,7 +551,9 @@ export async function extractProse(
     );
   }
 
-  // [SEC C-1] Check containment in forbidden roots
+  // [SEC C-1] Post-canonicalisation containment check. Defends against
+  // symlink-escape: a path that doesn't literally match a forbidden
+  // prefix but resolves into one via a symlink.
   const forbidden = forbiddenPrefixOf(realRoot);
   if (forbidden !== null) {
     throw new RootContainmentError(realRoot, forbidden);

@@ -338,6 +338,14 @@ export async function buildProgram(): Promise<Command> {
     .action((opts, cmd) => hookScanAfterWrite(withGlobals(opts, cmd)));
 
   hook
+    .command("check-write")
+    .description("PreToolUse: read tool-call JSON on stdin and refuse cross-org Write/Edit/MultiEdit before the tool runs")
+    .action(async (_opts, _cmd) => {
+      const { hookCheckWrite } = await import("./commands/hook-check-write.js");
+      await hookCheckWrite();
+    });
+
+  hook
     .command("scan-bash-output")
     .description("PostToolUse(Bash): scan Bash tool stdout/stderr for secret-shaped strings (PEM, JWT, GitHub tokens)")
     .option("--advisory", "exit 0 on hit (still emits structured payload)")

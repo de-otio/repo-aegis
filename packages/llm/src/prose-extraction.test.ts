@@ -389,19 +389,16 @@ describe("[SEC C-1] path containment", () => {
     );
   });
 
-  it("[SEC C-1] throws RootContainmentError for path constructed under ~/.aws", async () => {
-    // Use ~/.aws/subdir — doesn't need to exist, the containment check runs
-    // against the literal forbidden prefix before realpathSync
-    // We manufacture a path under a forbidden root that does exist (use aegisHome)
-    const aegisHome =
-      process.env["REPO_AEGIS_HOME"] ?? join(homedir(), ".config", "repo-aegis");
-    const subPath = join(aegisHome, "subdir-that-does-not-exist");
+  it("[SEC C-1] throws RootContainmentError for non-existent path under ~/.aws", async () => {
+    // Path under a forbidden prefix that doesn't exist on disk. The
+    // pre-canonicalisation literal-prefix check fires before
+    // `realpathSync` would have thrown ENOENT, so the function refuses
+    // with the right error type regardless of filesystem state.
+    const subPath = join(homedir(), ".aws", "subdir-that-does-not-exist-x9q7");
     await assert.rejects(
       () => extractProse({ root: subPath, allowNonGit: true }),
       (err: unknown) => {
-        // Either RootContainmentError (forbidden check) or a plain Error (path doesn't exist)
-        // Both indicate the function correctly refused to process the path.
-        assert.ok(err instanceof Error);
+        assert.ok(err instanceof RootContainmentError);
         return true;
       },
     );
