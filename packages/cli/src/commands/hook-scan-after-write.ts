@@ -79,24 +79,32 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
 /**
  * `repo-aegis hook scan-after-write` — the Claude Code PostToolUse hook
  * entry point. Reads the tool-result JSON from stdin, extracts the
- * file_path the agent just wrote, and runs the path-aware policy:
+ * file_path the agent just wrote, and:
  *
  *   - Resolves the destination working tree from `file_path` (not from
  *     `cwd`), so writes into a different repo are scanned against
  *     *that* repo's classification + deny set rather than fail-closing
  *     on `OUTSIDE_WORKING_TREE`.
- *   - When the source and destination working trees belong to
- *     different trust boundaries (different engagement orgs, no shared
- *     `personalOrgs` membership), refuses with `CROSS_ORG_WRITE`.
  *   - When the destination is unclassified, scans against `_always`
  *     and emits a `DEST_UNCLASSIFIED` warning.
  *   - When the file lives outside any git tree (e.g. `/tmp/foo`),
  *     scans against `_always`-only.
+ *   - Scans the post-write file content against the resolved deny set;
+ *     a marker hit exits 1 with a redacted `hits` payload.
+ *
+ * Cross-org write refusal lives in PreToolUse — `repo-aegis hook
+ * check-write` — where a non-zero exit blocks the tool *before* it
+ * runs. PostToolUse fires after the tool's effect lands, so its exit
+ * cannot un-write the file. The `CROSS_ORG_WRITE` branch below is
+ * retained as defence-in-depth for installs that predate v0.3.0 and
+ * have not re-run `install claude-md` to pick up the PreToolUse
+ * registration; for those installs it surfaces detection-and-alert,
+ * not prevention.
  *
  * Exit semantics:
  *   - 0 if no file_path / file missing / clean,
  *   - 1 on a marker hit,
- *   - 2 on `CROSS_ORG_WRITE` or hard registry errors.
+ *   - 2 on `CROSS_ORG_WRITE` (defence-in-depth) or hard registry errors.
  *
  * The hook NEVER reveals literal markers. `--verbose` is not honoured.
  */
@@ -145,17 +153,26 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   });
 
   if (decision.action === "refuse") {
+    // Defence-in-depth path: with the v0.3.0 PreToolUse hook installed
+    // we never reach here (the tool was blocked before running). For
+    // installs that predate v0.3.0 this branch surfaces the cross-org
+    // write to the agent — but the file is already on disk, so the
+    // recovery is to revert, not to retry. The error message says
+    // so explicitly.
     emitJsonAndExit(
       {
         code: decision.code,
         error:
-          `cross-org write refused: file ${filePath} lives in a working tree ` +
+          `cross-org write detected post-write: file ${filePath} lives in a working tree ` +
           `whose trust boundary (${decision.destOrgs.join(", ") || "unknown"}) ` +
-          `does not overlap the launcher's (${decision.srcOrgs.join(", ") || "unknown"})`,
+          `does not overlap the launcher's (${decision.srcOrgs.join(", ") || "unknown"}). ` +
+          `The file is already on disk; revert it and re-run \`repo-aegis install claude-md\` ` +
+          `to register the PreToolUse hook that prevents this class of write.`,
         details: {
           srcOrgs: decision.srcOrgs,
           destOrgs: decision.destOrgs,
           destTree: decision.destTree,
+          remediation: "revert-and-upgrade-install",
         },
       },
       2,
