@@ -48,6 +48,15 @@ ${CLAUDE_MD_END}
 const HOOK_COMMAND = "repo-aegis hook scan-after-write";
 
 /**
+ * PreToolUse hook command for cross-org write refusal. Same matcher
+ * as `HOOK_COMMAND` (Write|Edit|MultiEdit) but a different event
+ * (PreToolUse), so a non-zero exit blocks the tool *before* it runs.
+ * Added in v0.3.0 to make the cross-org-write refusal genuine
+ * prevention rather than post-write detection.
+ */
+const CHECK_WRITE_HOOK_COMMAND = "repo-aegis hook check-write";
+
+/**
  * SessionStart hook command — Phase 1 onboarding. Calls
  * `firstTouchClassify` and emits the result as JSON. Same naming
  * stability rule as `HOOK_COMMAND` above.
@@ -140,24 +149,26 @@ function mergeHook(settings: SettingsJson, hookCommand: string): MergeResult {
 }
 
 /**
- * Generalised PostToolUse hook merger. Idempotent on the
- * (matcher, command) pair. Used for both the file-write matcher
- * (`Write|Edit|MultiEdit`) and the Bash matcher.
+ * Generalised hook merger keyed on (event, matcher, command).
+ * Idempotent. Used for the PostToolUse Write/Edit/MultiEdit hook,
+ * the PostToolUse Bash hook, and the v0.3.0 PreToolUse Write/Edit/
+ * MultiEdit hook.
  */
-function mergePostToolUseHook(
+function mergeHookOnEvent(
   settings: SettingsJson,
+  event: "PreToolUse" | "PostToolUse",
   matcher: string,
   hookCommand: string,
 ): MergeResult {
   if (!settings.hooks) settings.hooks = {};
-  if (!settings.hooks["PostToolUse"]) settings.hooks["PostToolUse"] = [];
+  if (!settings.hooks[event]) settings.hooks[event] = [];
 
-  const post = settings.hooks["PostToolUse"]!;
+  const entries = settings.hooks[event]!;
 
-  let entry = post.find(e => e.matcher === matcher);
+  let entry = entries.find(e => e.matcher === matcher);
   if (!entry) {
     entry = { matcher, hooks: [] };
-    post.push(entry);
+    entries.push(entry);
   }
   if (!entry.hooks) entry.hooks = [];
 
@@ -169,6 +180,22 @@ function mergePostToolUseHook(
   }
   entry.hooks.push({ type: "command", command: hookCommand });
   return { added: true, alreadyPresent: false };
+}
+
+function mergePostToolUseHook(
+  settings: SettingsJson,
+  matcher: string,
+  hookCommand: string,
+): MergeResult {
+  return mergeHookOnEvent(settings, "PostToolUse", matcher, hookCommand);
+}
+
+function mergePreToolUseHook(
+  settings: SettingsJson,
+  matcher: string,
+  hookCommand: string,
+): MergeResult {
+  return mergeHookOnEvent(settings, "PreToolUse", matcher, hookCommand);
 }
 
 /**
@@ -261,13 +288,14 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     );
   }
   const merge = mergeHook(settings!, HOOK_COMMAND);
+  const checkWriteMerge = mergePreToolUseHook(settings!, HOOK_MATCHER, CHECK_WRITE_HOOK_COMMAND);
   const bashMerge = mergePostToolUseHook(settings!, BASH_HOOK_MATCHER, BASH_HOOK_COMMAND);
   const firstTouchMerge: MergeResult | null = opts.firstTouch
     ? mergeFirstTouchHook(settings!, FIRST_TOUCH_HOOK_COMMAND)
     : null;
 
   // Write if any hook was added.
-  if (merge.added || bashMerge.added || (firstTouchMerge && firstTouchMerge.added)) {
+  if (merge.added || checkWriteMerge.added || bashMerge.added || (firstTouchMerge && firstTouchMerge.added)) {
     try {
       writeFileSync(settingsPath, JSON.stringify(settings!, null, 2) + "\n");
     } catch (err) {
@@ -293,6 +321,8 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
         claudeMdAlreadyPresent,
         settingsAdded: merge.added,
         settingsAlreadyPresent: merge.alreadyPresent,
+        checkWriteHookAdded: checkWriteMerge.added,
+        checkWriteHookAlreadyPresent: checkWriteMerge.alreadyPresent,
         bashHookAdded: bashMerge.added,
         bashHookAlreadyPresent: bashMerge.alreadyPresent,
         ...(firstTouchMerge && {
@@ -314,6 +344,11 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
       claudeMd: { path: claudeMdPath, appended: claudeMdAppended, alreadyPresent: claudeMdAlreadyPresent },
       hookCommand: HOOK_COMMAND,
       settings: { path: settingsPath, added: merge.added, alreadyPresent: merge.alreadyPresent },
+      checkWriteHook: {
+        hookCommand: CHECK_WRITE_HOOK_COMMAND,
+        added: checkWriteMerge.added,
+        alreadyPresent: checkWriteMerge.alreadyPresent,
+      },
       bashHook: {
         hookCommand: BASH_HOOK_COMMAND,
         added: bashMerge.added,
@@ -333,6 +368,9 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
 
   if (claudeMdAppended) emitText(`appended snippet to ${claudeMdPath}`);
   else emitText(`snippet already present in ${claudeMdPath}`);
+  if (checkWriteMerge.added) emitText(`registered PreToolUse(Write|Edit|MultiEdit) hook in ${settingsPath}`);
+  else emitText(`PreToolUse(Write|Edit|MultiEdit) hook already registered in ${settingsPath}`);
+  emitText(`  command: ${CHECK_WRITE_HOOK_COMMAND}`);
   if (merge.added) emitText(`registered PostToolUse(Write|Edit|MultiEdit) hook in ${settingsPath}`);
   else emitText(`PostToolUse(Write|Edit|MultiEdit) hook already registered in ${settingsPath}`);
   emitText(`  command: ${HOOK_COMMAND}`);
@@ -393,6 +431,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   // `settings` is a fresh object parsed inside this function and is
   // not persisted.
   const merge = mergeHook(settings, HOOK_COMMAND);
+  const checkWriteMerge = mergePreToolUseHook(settings, HOOK_MATCHER, CHECK_WRITE_HOOK_COMMAND);
   const bashMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, BASH_HOOK_COMMAND);
   const wouldBeSettings = JSON.stringify(settings, null, 2) + "\n";
 
@@ -420,6 +459,11 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
         alreadyPresent: merge.alreadyPresent,
         contents: wouldBeSettings,
       },
+      checkWriteHook: {
+        hookCommand: CHECK_WRITE_HOOK_COMMAND,
+        wouldAdd: checkWriteMerge.added,
+        alreadyPresent: checkWriteMerge.alreadyPresent,
+      },
       bashHook: {
         hookCommand: BASH_HOOK_COMMAND,
         wouldAdd: bashMerge.added,
@@ -442,12 +486,13 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   }
   emitText("");
   emitText(`# Hook commands (to be registered in settings.json):`);
-  emitText(`#   ${HOOK_COMMAND}`);
-  emitText(`#   ${BASH_HOOK_COMMAND}`);
+  emitText(`#   ${CHECK_WRITE_HOOK_COMMAND}    (PreToolUse: Write|Edit|MultiEdit)`);
+  emitText(`#   ${HOOK_COMMAND}  (PostToolUse: Write|Edit|MultiEdit)`);
+  emitText(`#   ${BASH_HOOK_COMMAND}  (PostToolUse: Bash)`);
   emitText("");
   emitText(`# Would-be settings.json at: ${settingsPath}`);
-  if (merge.alreadyPresent && bashMerge.alreadyPresent) {
-    emitText("# (PostToolUse hooks already registered; settings.json unchanged)");
+  if (merge.alreadyPresent && checkWriteMerge.alreadyPresent && bashMerge.alreadyPresent) {
+    emitText("# (Pre/PostToolUse hooks already registered; settings.json unchanged)");
   }
   emitText(wouldBeSettings);
   if (!strictModeOn) {
@@ -467,7 +512,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
  */
 function isRepoAegisHookCommand(
   command: string,
-  kind: "scan-after-write" | "first-touch" | "scan-bash-output",
+  kind: "scan-after-write" | "first-touch" | "scan-bash-output" | "check-write",
 ): boolean {
   return command.includes("repo-aegis") && command.includes(kind);
 }
@@ -477,6 +522,7 @@ interface SettingsCleanupResult {
   scanRemoved: number;
   firstTouchRemoved: number;
   bashScanRemoved: number;
+  checkWriteRemoved: number;
 }
 
 /**
@@ -496,12 +542,13 @@ function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
     scanRemoved: 0,
     firstTouchRemoved: 0,
     bashScanRemoved: 0,
+    checkWriteRemoved: 0,
   };
   if (!settings.hooks) return result;
 
   const filterEvent = (
-    eventName: "PostToolUse" | "SessionStart",
-    kind: "scan-after-write" | "first-touch" | "scan-bash-output",
+    eventName: "PreToolUse" | "PostToolUse" | "SessionStart",
+    kind: "scan-after-write" | "first-touch" | "scan-bash-output" | "check-write",
   ) => {
     const entries = settings.hooks?.[eventName];
     if (!entries) return;
@@ -516,6 +563,7 @@ function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
       if (kind === "scan-after-write") result.scanRemoved += removed;
       else if (kind === "first-touch") result.firstTouchRemoved += removed;
       else if (kind === "scan-bash-output") result.bashScanRemoved += removed;
+      else if (kind === "check-write") result.checkWriteRemoved += removed;
     }
     // Collapse any matcher entry whose hooks array is now empty.
     settings.hooks![eventName] = entries.filter(e => e.hooks && e.hooks.length > 0);
@@ -524,6 +572,7 @@ function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
     }
   };
 
+  filterEvent("PreToolUse", "check-write");
   filterEvent("PostToolUse", "scan-after-write");
   filterEvent("PostToolUse", "scan-bash-output");
   filterEvent("SessionStart", "first-touch");
@@ -572,6 +621,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
     scanRemoved: 0,
     firstTouchRemoved: 0,
     bashScanRemoved: 0,
+    checkWriteRemoved: 0,
   };
   let settingsAbsent = !existsSync(settingsPath);
   if (!settingsAbsent) {
@@ -607,6 +657,8 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         claudeMdAbsent,
         hookEntriesRemoved: settingsResult.removed,
         scanHookEntriesRemoved: settingsResult.scanRemoved,
+        checkWriteHookEntriesRemoved: settingsResult.checkWriteRemoved,
+        bashHookEntriesRemoved: settingsResult.bashScanRemoved,
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
         settingsAbsent,
       },
@@ -627,6 +679,8 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         absent: settingsAbsent,
         hookEntriesRemoved: settingsResult.removed,
         scanHookEntriesRemoved: settingsResult.scanRemoved,
+        checkWriteHookEntriesRemoved: settingsResult.checkWriteRemoved,
+        bashHookEntriesRemoved: settingsResult.bashScanRemoved,
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
       },
     });
@@ -644,7 +698,9 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
   } else {
     emitText(
       `removed ${settingsResult.removed} hook entr${settingsResult.removed === 1 ? "y" : "ies"} from ${settingsPath}` +
-        ` (PostToolUse: ${settingsResult.scanRemoved}, SessionStart: ${settingsResult.firstTouchRemoved})`,
+        ` (PreToolUse: ${settingsResult.checkWriteRemoved},` +
+        ` PostToolUse: ${settingsResult.scanRemoved + settingsResult.bashScanRemoved},` +
+        ` SessionStart: ${settingsResult.firstTouchRemoved})`,
     );
   }
 }
