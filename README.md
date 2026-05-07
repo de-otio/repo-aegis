@@ -56,10 +56,14 @@ repo-aegis classify --apply                      # set repo-aegis.class + repo-a
 repo-aegis status                                # confirm class and deny set
 ```
 
-For agents driving this from a coding session, jump to the
-[agent operator guide](doc/agent-guide.md). For the full command
-catalog with flags, exit codes, and JSON shapes, see the
-[CLI reference](doc/cli-reference.md).
+**If a developer told you (a coding agent) to "install and configure
+repo-aegis"**, follow [doc/agent-install.md](doc/agent-install.md)
+end-to-end — it covers the install, the interactive engagement
+configuration, and the hand-off to the operator guide. For ongoing
+operation after install, the [agent operator
+guide](doc/agent-guide.md) takes over. For the full command catalog
+with flags, exit codes, and JSON shapes, see the [CLI
+reference](doc/cli-reference.md).
 
 ## Why it matters
 
@@ -80,7 +84,8 @@ For the longer argument and the full set of design decisions, see
 
 | Doc | Audience |
 |---|---|
-| [doc/agent-guide.md](doc/agent-guide.md) | Coding agents driving repo-aegis (Claude Code, Cursor, …) |
+| [doc/agent-install.md](doc/agent-install.md) | Coding agents installing + configuring repo-aegis on the user's machine |
+| [doc/agent-guide.md](doc/agent-guide.md) | Coding agents driving repo-aegis (Claude Code, Cursor, …) post-install |
 | [doc/cli-reference.md](doc/cli-reference.md) | Per-subcommand flags, behaviour, exit codes, JSON shapes |
 | [doc/configuration.md](doc/configuration.md) | Per-line allowlist comments, `.repo-aegis.yml` override, env vars |
 | [doc/architecture.md](doc/architecture.md) | Workspace packages, how it composes, roadmap |
