@@ -46,6 +46,15 @@ marker list when working on customer-A's own code.
 
 ## Quick start
 
+Point your coding agent (Claude Code, Cursor, Aider, Cline, …) at
+this repo and ask it to **"install and configure repo-aegis"**. It
+will follow [doc/agent-install.md](doc/agent-install.md) end-to-end:
+install the package, scaffold the engagement registry, wire the
+hooks, and surface the compliance questions it can't decide on your
+behalf.
+
+Prefer a manual install? The minimum is:
+
 ```sh
 npm install -g @de-otio/repo-aegis
 repo-aegis init                                  # bootstrap registry, hooks, Claude Code wiring
@@ -56,10 +65,10 @@ repo-aegis classify --apply                      # set repo-aegis.class + repo-a
 repo-aegis status                                # confirm class and deny set
 ```
 
-For agents driving this from a coding session, jump to the
-[agent operator guide](doc/agent-guide.md). For the full command
-catalog with flags, exit codes, and JSON shapes, see the
-[CLI reference](doc/cli-reference.md).
+For ongoing operation, see the [agent operator
+guide](doc/agent-guide.md). For the full command catalog with flags,
+exit codes, and JSON shapes, see the [CLI
+reference](doc/cli-reference.md).
 
 ## Why it matters
 
