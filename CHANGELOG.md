@@ -68,6 +68,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   home doesn't contain `.gnupg` / `.config/git`; previously masked on
   developer macOS boxes where those paths happen to exist.
 
+- **Hook diagnostic JSON now reaches the agent on non-zero exit.**
+  `repo-aegis hook scan-after-write` (and any future hook subcommand
+  that uses `emitJsonAndExit`) wrote its structured payload to stdout
+  for every exit code. Claude Code's hook contract forwards stderr
+  and discards stdout when a hook exits non-zero, so on exit 1
+  (`EXIT_HIT`) and exit 2 (`CROSS_ORG_WRITE`, `REGISTRY_ERROR`,
+  `RegistryEncryptedError`, scan errors) the agent saw
+  `[hook]: No stderr output` with no diagnostic. Stream is now
+  selected by exit code: stdout for exit 0 (preserves consumers
+  piping the normal output), stderr for non-zero (makes the
+  structured payload reach the agent so it can surface the
+  refusal/hit and propose a remediation rather than silently retry).
+  The test helper `runCli` looks at both streams when extracting
+  JSON, so existing assertions on `r.json` across exit-1 and exit-2
+  paths continue to pass.
+
 ## [0.2.0] - 2026-05-07
 
 ### Added
