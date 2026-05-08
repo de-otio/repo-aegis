@@ -65,13 +65,22 @@ export function runCli(
       /* not JSON */
     }
   }
-  // The hook subcommand emits JSON without --json (it is implicit),
-  // so when stdout looks like JSON, attempt to parse and attach.
-  if (json === undefined && result.stdout.trim().startsWith("{")) {
-    try {
-      json = JSON.parse(result.stdout);
-    } catch {
-      /* not JSON */
+  // The hook subcommands emit JSON without --json (it is implicit). On
+  // exit 0 the JSON lands on stdout; on non-zero exit it lands on stderr
+  // (so Claude Code's stderr-only forwarding surfaces it to the agent).
+  // Try both streams so test assertions on `r.json` work regardless of
+  // which channel the hook chose for this exit code.
+  if (json === undefined) {
+    for (const stream of [result.stdout, result.stderr]) {
+      const trimmed = stream.trim();
+      if (trimmed.startsWith("{")) {
+        try {
+          json = JSON.parse(trimmed);
+          break;
+        } catch {
+          /* not JSON */
+        }
+      }
     }
   }
   return {

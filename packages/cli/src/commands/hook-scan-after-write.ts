@@ -72,7 +72,13 @@ function extractFilePath(json: string): string | undefined {
 }
 
 function emitJsonAndExit(value: unknown, exitCode: number): never {
-  process.stdout.write(JSON.stringify(value, null, 2) + "\n");
+  // Claude Code's hook contract forwards stderr (not stdout) to the agent
+  // when a hook exits non-zero. Emitting the JSON diagnostic on stderr in
+  // that case is the only way the agent learns *why* its tool call was
+  // blocked. Exit-0 emissions stay on stdout for backward compatibility
+  // with consumers that pipe the hook's normal output.
+  const stream = exitCode === 0 ? process.stdout : process.stderr;
+  stream.write(JSON.stringify(value, null, 2) + "\n");
   process.exit(exitCode);
 }
 
