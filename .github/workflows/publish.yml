@@ -86,12 +86,13 @@ jobs:
             echo "DRY RUN — no actual publish."
           fi
 
-          # Order matters: core must publish before cli/scan/mcp because
-          # they consume @de-otio/repo-aegis-core. Workspaces
+          # Order matters: core must publish before any package that
+          # consumes @de-otio/repo-aegis-core, and llm must publish
+          # before cli/scan (which import from it). Workspaces
           # cross-reference each other via npm semver, NOT workspace
           # protocol, so the dependency strings already point at the
-          # registry version (^0.1.0).
-          for pkg in core scan cli mcp; do
+          # registry version (^0.3.0).
+          for pkg in core llm scan cli mcp; do
             dir="packages/${pkg}"
             name=$(node -p "require('./${dir}/package.json').name")
             ver=$(node -p "require('./${dir}/package.json').version")
