@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-09
+
+### Fixed
+
+- **`@de-otio/repo-aegis-llm` is now included in the publish loop.**
+  The 0.3.0 release published `core`, `scan`, `cli`, and `mcp` but
+  silently skipped `llm`, so consumers resolving `^0.3.0` for the
+  llm package fell back to `0.2.0` from npm. The publish workflow
+  now iterates over `core llm scan cli mcp` so every workspace
+  package whose `version` matches the release tag is shipped.
+
 ## [0.3.0] - 2026-05-07
 
 ### Security
