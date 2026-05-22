@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-05-22
+
+### Fixed
+
+- **Linked git worktrees inherit the parent repo's trust boundary.**
+  `getRemoteOrg` looked for `<gitdir>/config`, but a worktree's
+  gitdir (`<parent>/.git/worktrees/<id>/`) does not carry a `config`
+  file — config is shared with the parent via the `commondir`
+  pointer. The result: every worktree computed as having an empty
+  trust boundary, which silently mis-classified `decideHookAction`.
+  When the destination tree had a non-empty boundary (any classified
+  repo with a remote), the policy refused with `CROSS_ORG_WRITE`
+  even though the worktree was literally backed by a repo in the
+  same org. Symptom in Claude Code: every Write/Edit from inside a
+  `isolation: "worktree"` subagent failed with
+  `PreToolUse:Write hook error: [repo-aegis hook check-write]: No
+  stderr output`. The fix follows the `commondir` pointer to locate
+  the shared config.
+
+### Changed
+
+- Refreshed the lockfile to pick up within-range dependency bumps
+  merged via dependabot since 0.3.1 (`re2` 1.24.0→1.24.1, `yaml`
+  2.8.3→2.9.0, `zod` 4.4.2→4.4.3, `hono` 4.12.16→4.12.18, plus
+  several dev-tooling group bumps and a GitHub Action bump).
+
 ## [0.3.1] - 2026-05-09
 
 ### Fixed

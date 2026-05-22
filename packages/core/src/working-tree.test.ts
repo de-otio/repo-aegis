@@ -190,4 +190,24 @@ describe("getRemoteOrg", () => {
     mkdirSync(dir);
     assert.equal(getRemoteOrg(dir), null);
   });
+
+  it("inherits the parent repo's origin from a linked worktree", () => {
+    // Regression: pre-fix, worktrees returned null because
+    // <wt-gitdir>/config does not exist — config lives in the
+    // common gitdir, reached via the `commondir` pointer. The
+    // hook's trust-boundary check then refused every cross-tree
+    // write from a worktree with CROSS_ORG_WRITE, since the
+    // worktree's boundary computed as empty even though the
+    // parent had a perfectly good remote.
+    const main = join(tmp, "remote-wt-main");
+    mkdirSync(main);
+    gitInit(main);
+    gitConfig(main, "remote.origin.url", "git@github.com:de-otio/parent.git");
+    commitNothing(main);
+    const wt = join(tmp, "remote-wt-linked");
+    execFileSync("git", ["-C", main, "worktree", "add", "-q", "-b", "feat", wt], {
+      stdio: "ignore",
+    });
+    assert.equal(getRemoteOrg(wt), "de-otio");
+  });
 });

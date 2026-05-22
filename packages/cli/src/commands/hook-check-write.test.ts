@@ -262,4 +262,59 @@ engagements: []
     // there's nothing to refuse against.
     assert.equal(r.code, 0);
   });
+
+  it("does not refuse when src is a linked worktree of dest's parent repo", () => {
+    // Regression for the worktree trust-boundary bug:
+    // a Claude Code subagent running with `isolation: "worktree"`
+    // has cwd inside a linked git worktree (its own `.git` is a
+    // file pointing at the parent's `.git/worktrees/<id>/`). The
+    // worktree's gitdir has no `config` file — config lives in
+    // `commondir`. Pre-fix, getRemoteOrg returned null for the
+    // worktree, srcBoundary computed as empty, and any write to a
+    // classified destination (with a remote) refused with
+    // CROSS_ORG_WRITE even though the worktree was literally
+    // backed by a repo in the same org.
+    const env = setupAegisHome("ck-worktree-src");
+    writeRegistry(
+      env.aegisHome,
+      `schemaVersion: 2
+engagements:
+  - id: alpha
+    name: Alpha
+    githubOrgs: [alpha-org]
+    markers: []
+`,
+    );
+    // Parent repo whose worktree the subagent runs in.
+    const parent = makeGitRepo(tmp, "ck-wt-parent", {
+      remote: "git@github.com:alpha-org/parent.git",
+    });
+    // Parent needs at least one commit before `git worktree add`.
+    execFileSync("git", ["-C", parent, "config", "user.email", "t@t.com"], {
+      stdio: "ignore",
+    });
+    execFileSync("git", ["-C", parent, "config", "user.name", "t"], {
+      stdio: "ignore",
+    });
+    writeFileSync(join(parent, "seed.txt"), "x");
+    execFileSync("git", ["-C", parent, "add", "seed.txt"], { stdio: "ignore" });
+    execFileSync("git", ["-C", parent, "commit", "-q", "-m", "seed"], {
+      stdio: "ignore",
+    });
+    const wt = join(tmp, "ck-wt-linked");
+    execFileSync("git", ["-C", parent, "worktree", "add", "-q", "-b", "feat", wt], {
+      stdio: "ignore",
+    });
+    // Destination repo in the SAME org as the worktree's parent.
+    // Pre-fix, this would refuse because the worktree side computed
+    // as empty; post-fix, both sides resolve to alpha-org and overlap.
+    const dest = makeGitRepo(tmp, "ck-wt-dest", {
+      remote: "git@github.com:alpha-org/dest.git",
+    });
+    const file = join(dest, "f.ts");
+    const r = runCli(env.aegisHome, wt, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 0, `expected exit 0; got code=${r.code} stdout=${r.stdout}`);
+  });
 });

@@ -112,8 +112,8 @@ export function resolveGitDir(workingTree: string): string | null {
 export function getRemoteOrg(workingTree: string): string | null {
   const gitDir = resolveGitDir(workingTree);
   if (gitDir === null) return null;
-  const configPath = join(gitDir, "config");
-  if (!existsSync(configPath)) return null;
+  const configPath = resolveConfigPath(gitDir);
+  if (configPath === null) return null;
   let url: string;
   try {
     url = execFileSync(
@@ -127,4 +127,37 @@ export function getRemoteOrg(workingTree: string): string | null {
   if (url.length === 0) return null;
   const parsed = parseRemoteUrl(url);
   return parsed?.org ?? null;
+}
+
+/**
+ * Locate the `config` file that applies to `gitDir`.
+ *
+ * For a regular repo, that's `<gitDir>/config`. For a linked git
+ * worktree, the worktree's own gitdir does NOT carry a `config` —
+ * config is shared with the main repo via the `commondir` pointer.
+ * Without this fallback, every worktree appeared to have no remote
+ * origin, which silently broke trust-boundary computation: the hook
+ * landed in the `DEST_UNCLASSIFIED` branch (and, when paired with a
+ * classified destination, refused every cross-tree write with
+ * `CROSS_ORG_WRITE`).
+ *
+ * Returns `null` if no config file can be located.
+ */
+function resolveConfigPath(gitDir: string): string | null {
+  const direct = join(gitDir, "config");
+  if (existsSync(direct)) return direct;
+  const commondirFile = join(gitDir, "commondir");
+  if (!existsSync(commondirFile)) return null;
+  let target: string;
+  try {
+    target = readFileSync(commondirFile, "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (target.length === 0) return null;
+  // `commondir` may be relative (typical: `../..`) or absolute.
+  // `resolve` handles both: an absolute second arg replaces the first.
+  const commonGitDir = resolve(gitDir, target);
+  const commonConfig = join(commonGitDir, "config");
+  return existsSync(commonConfig) ? commonConfig : null;
 }
