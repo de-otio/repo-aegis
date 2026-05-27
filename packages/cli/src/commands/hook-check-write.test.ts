@@ -263,6 +263,120 @@ engagements: []
     assert.equal(r.code, 0);
   });
 
+  it("emits the block diagnostic on STDERR, not stdout (Bug A regression)", () => {
+    // Claude Code forwards stderr (not stdout) to the model when a
+    // PreToolUse hook exits non-zero. The original hook wrote the
+    // CROSS_ORG_WRITE payload to stdout, so a blocked write reached the
+    // agent as the bare "No stderr output" wrapper. The reason MUST be
+    // on stderr. doc/bugs/repo-aegis-check-write-flake.md (Bug A).
+    const env = setupAegisHome("ck-stderr-channel");
+    writeRegistry(
+      env.aegisHome,
+      `schemaVersion: 2
+engagements:
+  - id: alpha
+    name: Alpha
+    githubOrgs: [alpha-org]
+    markers: []
+  - id: beta
+    name: Beta
+    githubOrgs: [beta-org]
+    markers: []
+`,
+    );
+    const src = makeGitRepo(tmp, "ck-stderr-src", {
+      remote: "git@github.com:alpha-org/src.git",
+      class: "customer-coupled",
+      engagements: ["alpha"],
+    });
+    const dest = makeGitRepo(tmp, "ck-stderr-dest", {
+      remote: "git@github.com:beta-org/dest.git",
+      class: "customer-coupled",
+      engagements: ["beta"],
+    });
+    const file = join(dest, "f.ts");
+    const r = runCli(env.aegisHome, src, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 2);
+    assert.equal(r.stdout, "", "block diagnostic must NOT go to stdout");
+    assert.match(
+      r.stderr,
+      /CROSS_ORG_WRITE/,
+      "block reason must be on stderr so the agent learns why",
+    );
+  });
+
+  it("reads the launcher cwd from the payload `cwd`, not process.cwd() (Bug B)", () => {
+    // The process is spawned with cwd INSIDE the destination tree, so a
+    // process.cwd()-based check would see a same-tree write and allow.
+    // The payload's `cwd` is a disjoint-org tree. The hook must honour
+    // the payload cwd and refuse — proving it no longer trusts the
+    // spawn cwd. doc/bugs/repo-aegis-check-write-flake.md (Bug B).
+    const env = setupAegisHome("ck-json-cwd");
+    writeRegistry(
+      env.aegisHome,
+      `schemaVersion: 2
+engagements:
+  - id: alpha
+    name: Alpha
+    githubOrgs: [alpha-org]
+    markers: []
+  - id: beta
+    name: Beta
+    githubOrgs: [beta-org]
+    markers: []
+`,
+    );
+    const otherOrg = makeGitRepo(tmp, "ck-jsoncwd-src", {
+      remote: "git@github.com:alpha-org/src.git",
+      class: "customer-coupled",
+      engagements: ["alpha"],
+    });
+    const dest = makeGitRepo(tmp, "ck-jsoncwd-dest", {
+      remote: "git@github.com:beta-org/dest.git",
+      class: "customer-coupled",
+      engagements: ["beta"],
+    });
+    const file = join(dest, "f.ts");
+    const r = runCli(env.aegisHome, dest /* spawn cwd = dest tree */, ["hook", "check-write"], {
+      input: JSON.stringify({ cwd: otherOrg, tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 2, `expected refuse from payload cwd; got ${r.code} ${r.stderr}`);
+    assert.match(r.stderr, /CROSS_ORG_WRITE/);
+  });
+
+  it("fails open when the launcher cwd is a non-git scratch dir (the /tmp, $HOME repro)", () => {
+    // Reproduces the field failure: the hook cwd is a scratch dir whose
+    // trust boundary is empty, and the edit targets the launcher's own
+    // (or any classified) repo. Pre-fix this refused with exit 2; an
+    // empty source boundary must fail open. doc/bugs/...flake.md (Bug B).
+    const env = setupAegisHome("ck-failopen");
+    writeRegistry(
+      env.aegisHome,
+      `schemaVersion: 2
+engagements:
+  - id: alpha
+    name: Alpha
+    githubOrgs: [alpha-org]
+    markers: []
+`,
+    );
+    const dest = makeGitRepo(tmp, "ck-failopen-dest", {
+      remote: "git@github.com:alpha-org/dest.git",
+      class: "customer-coupled",
+      engagements: ["alpha"],
+    });
+    const scratch = join(tmp, "ck-failopen-scratch");
+    mkdirSync(scratch); // plain dir, not a git tree
+    const file = join(dest, "f.ts");
+    const r = runCli(env.aegisHome, scratch, ["hook", "check-write"], {
+      input: JSON.stringify({ cwd: scratch, tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 0, `expected fail-open (exit 0); got ${r.code} ${r.stderr}`);
+    assert.equal(existsSync(file), false, "PreToolUse must not create the file");
+  });
+
   it("does not refuse when src is a linked worktree of dest's parent repo", () => {
     // Regression for the worktree trust-boundary bug:
     // a Claude Code subagent running with `isolation: "worktree"`

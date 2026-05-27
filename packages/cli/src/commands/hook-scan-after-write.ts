@@ -47,28 +47,46 @@ async function readStdin(): Promise<string> {
 }
 
 /**
- * Extract the path of the file the agent just wrote/edited from the
- * Claude Code PostToolUse JSON payload. The agent contract puts it under
- * `tool_input.file_path` for Write/Edit/MultiEdit; some older shapes use
- * `tool_input.path`. Anything else => no path.
+ * Parse the Claude Code PostToolUse JSON payload into the fields the
+ * hook needs:
+ *
+ *   - `filePath`: the file the agent just wrote/edited
+ *     (`tool_input.file_path`; older shapes use `tool_input.path`).
+ *   - `cwd`: the session's working directory, sent by Claude Code as a
+ *     top-level field — the launcher boundary the policy compares
+ *     against. Prefer it over `process.cwd()` (the hook's spawn cwd,
+ *     which can be an unrelated tree); see the cwd-source discussion in
+ *     doc/bugs/repo-aegis-check-write-flake.md.
+ *
+ * A missing/unparseable field => `undefined` for that field.
  */
-function extractFilePath(json: string): string | undefined {
+function parseHookInput(json: string): { filePath?: string; cwd?: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
   } catch {
-    return undefined;
+    return {};
   }
-  if (!parsed || typeof parsed !== "object") return undefined;
+  if (!parsed || typeof parsed !== "object") return {};
   const root = parsed as Record<string, unknown>;
+  const out: { filePath?: string; cwd?: string } = {};
+
   const ti = root["tool_input"];
-  if (!ti || typeof ti !== "object") return undefined;
-  const tiObj = ti as Record<string, unknown>;
-  for (const k of ["file_path", "path"]) {
-    const v = tiObj[k];
-    if (typeof v === "string" && v.length > 0) return v;
+  if (ti && typeof ti === "object") {
+    const tiObj = ti as Record<string, unknown>;
+    for (const k of ["file_path", "path"]) {
+      const v = tiObj[k];
+      if (typeof v === "string" && v.length > 0) {
+        out.filePath = v;
+        break;
+      }
+    }
   }
-  return undefined;
+
+  const cwd = root["cwd"];
+  if (typeof cwd === "string" && cwd.length > 0) out.cwd = cwd;
+
+  return out;
 }
 
 function emitJsonAndExit(value: unknown, exitCode: number): never {
@@ -116,7 +134,7 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
  */
 export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> {
   const stdinText = await readStdin();
-  const filePath = extractFilePath(stdinText);
+  const { filePath, cwd } = parseHookInput(stdinText);
 
   if (!filePath) process.exit(0);
   if (!existsSync(filePath)) process.exit(0);
@@ -154,7 +172,9 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
 
   const decision: HookDecision = decideHookAction({
     filePath,
-    launcherCwd: process.cwd(),
+    // Launcher boundary = session cwd from the payload, not the spawn
+    // cwd. Falls back to process.cwd() when Claude Code omits `cwd`.
+    launcherCwd: cwd ?? process.cwd(),
     registry,
   });
 

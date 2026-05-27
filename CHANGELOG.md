@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`check-write` PreToolUse hook no longer spuriously blocks clean
+  edits, and always explains a block.** Two defects, root-caused in
+  `doc/bugs/repo-aegis-check-write-flake.md`:
+  - The block diagnostic was written to **stdout**, but Claude Code
+    forwards **stderr** to the agent when a PreToolUse hook exits
+    non-zero. Every block — including a legitimate `CROSS_ORG_WRITE`
+    refusal — surfaced as the bare
+    `[repo-aegis hook check-write]: No stderr output` wrapper, with no
+    reason and no guidance. Non-zero exits now emit on stderr (matching
+    `scan-after-write`). This completes the "No stderr output" story
+    begun in 0.3.2, which fixed one *trigger* (linked worktrees) but
+    not the missing diagnostic.
+  - The launcher trust boundary was derived from the hook process's
+    `process.cwd()` — the directory Claude Code happened to spawn the
+    hook in, which in a multi-root session can be an unrelated tree
+    (`/tmp`, `$HOME`, a sibling repo). When that tree's org differed
+    from the edited file's repo, the policy refused a clean same-repo
+    edit; retrying when the spawn cwd happened to match succeeded,
+    producing an intermittent false positive. The launcher boundary is
+    now read from the payload's `cwd` field, and an **empty/unknowable
+    source boundary fails open** (scan) instead of refusing — a
+    guardrail must not block on its own inability to determine context.
+    `scan-after-write` reads the payload `cwd` too, for consistency.
+
+### Changed
+
+- `check-write` now distinguishes exit codes: `2` blocks the tool on a
+  `CROSS_ORG_WRITE` policy refusal, while an unrecoverable registry
+  error exits `1` (non-blocking) so an unreadable/encrypted registry
+  can no longer block every write behind the hook's own failure.
+  Diagnostics for both now land on stderr.
+
 ## [0.3.2] - 2026-05-22
 
 ### Fixed
