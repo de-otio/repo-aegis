@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/repo-aegis-mcp",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Model Context Protocol server wrapping repo-aegis as agent-readable tools",
   "license": "GPL-3.0-or-later",
   "author": "Richard Myers",
@@ -28,7 +28,7 @@
     "build": "tsc && chmod +x dist/index.js"
   },
   "dependencies": {
-    "@de-otio/repo-aegis-core": "^0.3.2",
+    "@de-otio/repo-aegis-core": "^0.3.3",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
   }
