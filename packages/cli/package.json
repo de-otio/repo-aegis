@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/repo-aegis",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Engagement-scoped leak prevention CLI for multi-customer git repos",
   "license": "GPL-3.0-or-later",
   "author": "Richard Myers",
@@ -22,9 +22,9 @@
     "build": "tsc && chmod +x dist/index.js"
   },
   "dependencies": {
-    "@de-otio/repo-aegis-core": "^0.3.2",
-    "@de-otio/repo-aegis-llm": "^0.3.2",
-    "@de-otio/repo-aegis-scan": "^0.3.2",
+    "@de-otio/repo-aegis-core": "^0.3.3",
+    "@de-otio/repo-aegis-llm": "^0.3.3",
+    "@de-otio/repo-aegis-scan": "^0.3.3",
     "commander": "^14.0.3",
     "zod": "^4.4.3"
   }

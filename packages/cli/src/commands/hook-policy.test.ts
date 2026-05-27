@@ -181,6 +181,50 @@ describe("decideHookAction", () => {
     }
   });
 
+  it("scan: fail open when the launcher's source boundary is empty (Bug B regression)", () => {
+    // Launcher in an unclassified tree with no remote => empty source
+    // boundary ("no signal about where this session belongs"). The
+    // destination IS classified with a remote. Pre-fix this refused
+    // with CROSS_ORG_WRITE, because an empty src never overlaps a
+    // non-empty dest — the spurious block in
+    // doc/bugs/repo-aegis-check-write-flake.md (Bug B). A guardrail must
+    // not block on missing launcher context, so it now scans.
+    const launcher = makeRepo("p-failopen-src"); // no remote, no class
+    const dest = makeRepo("p-failopen-dest", {
+      remote: "git@github.com:alpha-org/x.git",
+      class: "customer-coupled",
+      engagements: ["alpha"],
+    });
+    const file = join(dest, "f.ts");
+    writeFileSync(file, "x");
+    const d = decideHookAction({
+      filePath: file,
+      launcherCwd: launcher,
+      registry: reg(),
+    });
+    assert.equal(d.action, "scan");
+    if (d.action === "scan") assert.equal(d.workingTree, dest);
+  });
+
+  it("scan: fail open when the launcher is a non-git scratch dir (the /tmp, $HOME repro)", () => {
+    // The literal field repro: hook cwd resolved to a directory outside
+    // any git tree. srcTree falls back to that path, its boundary is
+    // empty, and pre-fix the write into a classified dest refused.
+    const dest = makeRepo("p-failopen-scratch-dest", {
+      remote: "git@github.com:alpha-org/x.git",
+      class: "customer-coupled",
+      engagements: ["alpha"],
+    });
+    const file = join(dest, "f.ts");
+    writeFileSync(file, "x");
+    const d = decideHookAction({
+      filePath: file,
+      launcherCwd: tmp, // the test's temp root is not a git repo
+      registry: reg(),
+    });
+    assert.equal(d.action, "scan");
+  });
+
   it("scan-with-warning: dest has no classification and no remote", () => {
     const src = makeRepo("p-warn-src", {
       remote: "git@github.com:alpha-org/x.git",

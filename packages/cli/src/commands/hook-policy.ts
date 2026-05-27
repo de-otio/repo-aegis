@@ -53,10 +53,12 @@ export interface HookScanWithWarningDecision {
 }
 
 /**
- * Refuse the operation entirely. The file is already on disk
- * (PostToolUse), so the hook signals the agent via a non-zero exit and
- * a structured error code. The agent's recovery is to surface the
- * issue to the user and propose reverting the file.
+ * Refuse the operation entirely. In the PreToolUse `check-write` hook a
+ * `refuse` exits 2, which blocks the tool *before* the write lands. In
+ * the PostToolUse `scan-after-write` hook (defence-in-depth for installs
+ * that predate the PreToolUse registration) the file is already on disk,
+ * so the same decision surfaces as detect-and-alert. Either way the hook
+ * signals the agent via a non-zero exit and a structured error code.
  */
 export interface HookRefuseDecision {
   action: "refuse";
@@ -86,9 +88,15 @@ export interface HookWarning {
  *      common case.
  *   3. Compute `destBoundary`. Empty boundary => `DEST_UNCLASSIFIED`
  *      warning, scan anyway.
- *   4. Compute `srcBoundary`. If they overlap (same engagement
+ *   4. Compute `srcBoundary`. If it is empty — the launcher's boundary
+ *      is unknowable (scratch dir, `$HOME`, an unclassified tree) —
+ *      fail open and scan. A guardrail must not block on its own
+ *      inability to determine context; we refuse only on a *positive*
+ *      source boundary that *positively* disjoints from the
+ *      destination. Mirrors the empty-`destBoundary` branch above.
+ *   5. If `srcBoundary` overlaps `destBoundary` (same engagement
  *      `githubOrgs`, both in `personalOrgs`, or shared remote): scan.
- *   5. Otherwise: refuse with `CROSS_ORG_WRITE`.
+ *   6. Otherwise: refuse with `CROSS_ORG_WRITE`.
  */
 export function decideHookAction(opts: {
   filePath: string;
@@ -139,6 +147,19 @@ export function decideHookAction(opts: {
   }
 
   const srcBoundary = computeTrustBoundary(srcTree, registry);
+
+  // Fail open when the launcher's boundary is unknowable. An empty
+  // source org-set means "no signal about which boundary this session
+  // belongs to" — the hook process cwd resolved to a scratch dir,
+  // `$HOME`, or an unclassified tree. Refusing here is the spurious
+  // `CROSS_ORG_WRITE` block documented in
+  // doc/bugs/repo-aegis-check-write-flake.md (Bug B): a guardrail must
+  // not block on missing context. Refuse only on a positive, disjoint
+  // source boundary, handled below.
+  if (srcBoundary.orgs.size === 0) {
+    return { action: "scan", workingTree: destTree, repo: destRepo };
+  }
+
   if (trustBoundariesOverlap(srcBoundary, destBoundary)) {
     return { action: "scan", workingTree: destTree, repo: destRepo };
   }
