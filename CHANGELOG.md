@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-20
+
+### Fixed
+
+- Bump the deny-set cache schema version (2 → 3) so the 0.4.0 engagement-
+  identifier auto-block is not masked by a warm pre-0.4 cache. The computed
+  pattern set changed without any marker-file mtime change, so a cache written
+  by 0.3.x/0.4.0-pre shares the same fingerprint and must be invalidated for the
+  new self-markers to take effect on upgrade.
+
 ## [0.4.0] - 2026-06-20
 
 ### Security

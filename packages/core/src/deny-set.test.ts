@@ -145,7 +145,7 @@ describe("computeDenySet", () => {
       patterns: string[];
       combinedRegex: string;
     };
-    assert.equal(cached.schemaVersion, 2);
+    assert.equal(cached.schemaVersion, 3);
     assert.equal(typeof cached.key, "string");
     assert.equal(cached.key.length, 64, "fingerprint is sha256 hex");
     assert.deepEqual(cached.patterns, ds.patterns);
@@ -250,6 +250,32 @@ describe("computeDenySet", () => {
       } finally {
         rmSync(join(markersDir, "qa.txt"));
       }
+    });
+
+    it("ignores a stale-schema cache so the auto-block takes effect on upgrade", () => {
+      // A pre-0.4 cache has the old schemaVersion and patterns WITHOUT the
+      // engagement identifiers (and the same fingerprint key, since no marker
+      // file changed). computeDenySet must ignore it and recompute, or the fix
+      // would be silently inert on machines with a warm cache.
+      const cachePath = join(tmp, "cache-stale-schema.json");
+      writeFileSync(
+        cachePath,
+        JSON.stringify({
+          schemaVersion: 2,
+          key: "stale-but-shaped-key",
+          files: [],
+          patterns: ["acme-corp"],
+          patternSources: ["customer-a"],
+          combinedRegex: "acme-corp",
+          warnings: [],
+        }),
+      );
+      const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath });
+      assert.ok(
+        ds.patterns.includes("customer-a"),
+        "stale-schema cache must be ignored; identifier auto-blocked after recompute",
+      );
+      rmSync(cachePath, { force: true });
     });
 
     it("customer-coupled: blocks OTHER engagement ids but not the repo's own", () => {

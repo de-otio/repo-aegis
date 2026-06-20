@@ -64,10 +64,12 @@ export interface DenySetOptions {
   cachePath?: string | null;
 }
 
-// Bumped to 2 when patternSources was added; v1 caches are invalidated
-// (the read path's schemaVersion check returns null, falling through to
+// Bumped to 2 when patternSources was added; bumped to 3 when engagement
+// identifiers became auto-blocked self-markers (the computed pattern set changed
+// without any marker-file mtime change, so older caches must be invalidated —
+// the read path's schemaVersion check returns null, falling through to
 // recompute).
-const DENY_SET_CACHE_VERSION = 2;
+const DENY_SET_CACHE_VERSION = 3;
 
 interface CacheEntry {
   schemaVersion: number;
