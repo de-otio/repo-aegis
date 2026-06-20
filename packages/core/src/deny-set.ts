@@ -18,6 +18,20 @@ import type { RepoConfig } from "./repo.js";
 
 export const ALWAYS_FILE_STEM = "_always";
 
+/**
+ * Minimum engagement-identifier length for the auto-block self-marker (see
+ * computeDenySet). Identifiers shorter than this are NOT auto-added as patterns,
+ * because a 2–3 character literal (e.g. `qa`, `ci`, `api`) matched
+ * case-insensitively as a substring would flood unrelated content with false
+ * positives. Such engagements should carry explicit markers instead.
+ */
+export const MIN_AUTO_BLOCK_IDENTIFIER_LENGTH = 4;
+
+/** Escape a string so it matches literally when used as a regex pattern. */
+function escapeRegexLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export interface DenySetFile {
   stem: string;
   path: string;
@@ -205,6 +219,32 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
       patternSources.push(f.stem);
     }
   }
+
+  // Auto-block each engagement's own identifier as an always-on self-marker.
+  //
+  // The patterns above come only from marker-file *contents*. An engagement
+  // whose marker file is empty therefore contributes nothing — yet the
+  // engagement id is itself operator-chosen and typically customer-derived. It
+  // is, in fact, the string most prone to leaking: it appears in this tool's
+  // own `status` output and registry, so it readily enters an author's context
+  // and gets emitted by reflex. Without this, a zero-marker engagement is
+  // "configured but inert" — registered, listed under `blocked:`, protecting
+  // nothing.
+  //
+  // The id is added as an escaped, case-insensitive literal (identical matching
+  // to every other marker). For customer-coupled / scratch classes the repo's
+  // OWN engagement files are already excluded from `files` (the filter above),
+  // so a repo may still mention its own engagement id; only OTHER engagements'
+  // ids are blocked. `_always` is a system stem, not an identifier.
+  for (const f of files) {
+    if (f.stem === ALWAYS_FILE_STEM) continue;
+    if (f.stem.length < MIN_AUTO_BLOCK_IDENTIFIER_LENGTH) continue;
+    const literal = escapeRegexLiteral(f.stem);
+    if (patterns.includes(literal)) continue; // already present as an explicit marker
+    patterns.push(literal);
+    patternSources.push(f.stem);
+  }
+
   const result: DenySet = {
     files,
     patterns,
