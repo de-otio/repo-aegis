@@ -192,7 +192,10 @@ describe("renderMarkers", () => {
       },
       { markersDir: dir },
     );
-    assert.deepEqual(ds.patterns, ["foo-marker"]);
+    // "foo-marker" is the file content; "customer-a" is the engagement
+    // identifier auto-blocked as a self-marker (see computeDenySet). The header
+    // comment lines must NOT appear.
+    assert.deepEqual(ds.patterns, ["foo-marker", "customer-a"]);
     // No pattern in the deny set should be a comment line.
     for (const p of ds.patterns) {
       assert.ok(!p.startsWith(";"), `pattern leaked from header: ${p}`);

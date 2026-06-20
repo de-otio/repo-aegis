@@ -5,7 +5,12 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { computeDenySet, ALWAYS_FILE_STEM } from "./deny-set.js";
+import {
+  computeDenySet,
+  ALWAYS_FILE_STEM,
+  MIN_AUTO_BLOCK_IDENTIFIER_LENGTH,
+} from "./deny-set.js";
+import { scanText } from "./scan.js";
 import type { RepoConfig, RepoClass } from "./repo.js";
 
 let tmp: string;
@@ -185,6 +190,76 @@ describe("computeDenySet", () => {
     if (acmeIdx >= 0) {
       assert.equal(ds.patternSources![acmeIdx], "customer-a");
     }
+  });
+
+  describe("auto-block engagement identifiers (self-marker)", () => {
+    it("blocks each engagement's own id, not just its marker-file contents", () => {
+      const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+      assert.ok(ds.patterns.includes("customer-a"), "engagement id is auto-blocked");
+      assert.ok(ds.patterns.includes("customer-b"), "engagement id is auto-blocked");
+      // The id pattern is attributed to its own engagement.
+      const idx = ds.patterns.indexOf("customer-a");
+      assert.equal(ds.patternSources?.[idx], "customer-a");
+    });
+
+    it("a ZERO-marker engagement still blocks its own identifier (the close-call fix)", () => {
+      // An engagement registered with no markers materialises an empty (header-
+      // only) marker file. Before the fix it contributed nothing — so the
+      // customer-derived id leaked freely. It must now block its own id.
+      writeFileSync(join(markersDir, "zero-marker-customer.txt"), "; no markers populated yet\n");
+      try {
+        const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+        assert.ok(
+          ds.patterns.includes("zero-marker-customer"),
+          "zero-marker engagement must still block its identifier",
+        );
+        // And it actually matches content (case-insensitively), end to end.
+        const hits = scanText("see ~/repos/Zero-Marker-Customer/notes.md", ds);
+        assert.equal(hits.length, 1, "identifier match fires case-insensitively");
+        assert.equal(hits[0]?.engagement, "zero-marker-customer");
+      } finally {
+        rmSync(join(markersDir, "zero-marker-customer.txt"));
+      }
+    });
+
+    it("does NOT auto-block the _always system stem", () => {
+      const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+      assert.ok(!ds.patterns.includes(ALWAYS_FILE_STEM), "_always is not an identifier");
+    });
+
+    it("escapes regex-special characters in the identifier", () => {
+      // A stem with regex metacharacters must be matched literally, not as a
+      // pattern (e.g. `a.b+c` must not also match `axbcc`).
+      writeFileSync(join(markersDir, "a.b+c.txt"), "; empty\n");
+      try {
+        const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+        assert.ok(ds.patterns.includes("a\\.b\\+c"), "special chars are escaped");
+        assert.equal(scanText("literal a.b+c here", ds).length, 1, "matches the literal");
+        assert.equal(scanText("regex axbcc here", ds).length, 0, "does not match as a regex");
+      } finally {
+        rmSync(join(markersDir, "a.b+c.txt"));
+      }
+    });
+
+    it("skips identifiers shorter than the guard (false-positive safety)", () => {
+      assert.ok(MIN_AUTO_BLOCK_IDENTIFIER_LENGTH >= 3);
+      writeFileSync(join(markersDir, "qa.txt"), "; empty\n");
+      try {
+        const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+        assert.ok(!ds.patterns.includes("qa"), "too-short id is not auto-blocked");
+      } finally {
+        rmSync(join(markersDir, "qa.txt"));
+      }
+    });
+
+    it("customer-coupled: blocks OTHER engagement ids but not the repo's own", () => {
+      const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
+        markersDir,
+        cachePath: null,
+      });
+      assert.ok(!ds.patterns.includes("customer-a"), "own id is not blocked (file excluded)");
+      assert.ok(ds.patterns.includes("customer-b"), "other engagement id is blocked");
+    });
   });
 
   it("preserves mid-line ; characters in marker patterns", () => {

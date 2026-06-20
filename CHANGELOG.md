@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Engagement identifiers are now auto-blocked, closing a "configured but
+  inert" gap.** The deny set was built solely from marker-file *contents*, so an
+  engagement with zero populated markers protected nothing — even though its
+  identifier is operator-chosen, typically customer-derived, and the single
+  string most prone to leaking (it appears in `status` output and the registry,
+  so it readily enters an author's context and is emitted by reflex). A real
+  near-miss: a customer-derived engagement id reached an untracked doc and was
+  caught only by a manual pre-push grep, not by repo-aegis. `computeDenySet` now
+  adds each non-`_always` engagement id as an escaped, case-insensitive literal
+  self-marker, so a zero-marker engagement still blocks its own identifier.
+  Class scoping is preserved (a `customer-coupled` repo still may mention its own
+  id; only *other* engagements' ids are blocked). Identifiers shorter than
+  `MIN_AUTO_BLOCK_IDENTIFIER_LENGTH` (4) are skipped to avoid false positives;
+  those engagements should carry explicit markers.
+
 ## [0.3.3] - 2026-05-27
 
 ### Fixed
