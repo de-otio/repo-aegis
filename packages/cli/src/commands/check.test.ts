@@ -233,6 +233,74 @@ describe("check — no-deny-set short-circuit", () => {
   });
 });
 
+describe("check — egress (private-registry in a public-facing repo)", () => {
+  const PRIVATE = "https://npm.private-registry.example.com/foo/-/foo-1.0.0.tgz";
+  const PUBLIC = "https://registry.npmjs.org/foo/-/foo-1.0.0.tgz";
+  const lockWith = (url: string): string =>
+    JSON.stringify({ packages: { "node_modules/foo": { resolved: url } } });
+  const stage = (repo: string, file: string, content: string): void => {
+    writeFileSync(join(repo, file), content);
+    execFileSync("git", ["add", file], { cwd: repo });
+  };
+  type EgressJson = { egress: { host: string; file: string; kind: string }[] };
+
+  it("blocks a staged private-registry lockfile in a public-eligible repo with NO deny set", () => {
+    const home = setupHome("egress-pub"); // empty markers → no deny set
+    const repo = makeRepo("egress-pub-repo", { class: "public-eligible" });
+    process.chdir(repo);
+    stage(repo, "package-lock.json", lockWith(PRIVATE));
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ staged: true, json: true })),
+    );
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as EgressJson;
+    assert.ok(
+      j.egress.some(e => e.host === "npm.private-registry.example.com" && e.file === "package-lock.json"),
+    );
+  });
+
+  it("reads the STAGED blob, not the working tree", () => {
+    const home = setupHome("egress-staged-blob");
+    const repo = makeRepo("egress-staged-blob-repo", { class: "public-eligible" });
+    process.chdir(repo);
+    stage(repo, "package-lock.json", lockWith(PRIVATE)); // staged = private
+    writeFileSync(join(repo, "package-lock.json"), lockWith(PUBLIC)); // working tree = clean, unstaged
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ staged: true, json: true })),
+    );
+    assert.equal(result.exitCode, 1); // the staged (private) blob is what's flagged
+    const j = JSON.parse(result.stdout) as EgressJson;
+    assert.ok(j.egress.some(e => e.host === "npm.private-registry.example.com"));
+  });
+
+  it("does NOT flag in a private-strict repo (private-registry URLs are intended there)", () => {
+    const home = setupHome("egress-private");
+    const repo = makeRepo("egress-private-repo", { class: "private-strict" });
+    process.chdir(repo);
+    stage(repo, "package-lock.json", lockWith(PRIVATE));
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ staged: true, json: true })),
+    );
+    assert.equal(result.exitCode, undefined);
+    const j = JSON.parse(result.stdout) as { status?: string; egress?: unknown[] };
+    // No deny set + no egress findings → the no-deny-set short-circuit.
+    assert.equal(j.status, "no-deny-set");
+  });
+
+  it("flags a staged .npmrc default registry in a public-eligible repo", () => {
+    const home = setupHome("egress-npmrc");
+    const repo = makeRepo("egress-npmrc-repo", { class: "public-eligible" });
+    process.chdir(repo);
+    stage(repo, ".npmrc", "registry=https://npm.private-registry.example.com/\n");
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ staged: true, json: true })),
+    );
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as EgressJson;
+    assert.ok(j.egress.some(e => e.file === ".npmrc" && e.kind === "npmrc"));
+  });
+});
+
 describe("check — redaction policy", () => {
   it("default mode: literal does NOT appear in stdout/stderr", () => {
     const home = setupHome("redact-default", { _always: ["leaked-secret-token"] });

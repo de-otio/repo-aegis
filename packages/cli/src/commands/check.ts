@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import {
   readRepoConfig,
   computeDenySet,
@@ -7,11 +10,16 @@ import {
   scanStagedDiff,
   scanRange,
   scanHistory,
+  scanRegistryEgress,
+  isEgressRelevant,
+  isPublicFacing,
   CustomerCoupledNoEngagementError,
   type ScanHit,
   type SkippedFile,
   type RepoJson,
   type HistoryHit,
+  type RegistryFinding,
+  type RepoConfig,
   EXIT_HIT,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, shouldRevealMatches } from "../format.js";
@@ -27,6 +35,79 @@ interface CheckOptions {
   ignoreAllowlistComments?: boolean;
   json?: boolean;
   verbose?: boolean;
+}
+
+function git(cwd: string, args: string[]): string | null {
+  try {
+    return execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** The "tip" ref of a diff range (`A..B` / `A...B` → `B`; bare ref → itself). */
+function rangeTip(range: string): string {
+  const parts = range.split(/\.{2,3}/);
+  const tip = parts[parts.length - 1]?.trim();
+  return tip && tip !== "" ? tip : range.trim();
+}
+
+/**
+ * Gather the egress-relevant files (lockfiles / .npmrc) in scope for this run,
+ * reading the bytes that will actually land:
+ *   --staged → the staged blob (`git show :path`), not the working tree;
+ *   --range  → the file at the range tip (`git show <tip>:path`);
+ *   --path   → the working-tree file, when it is itself egress-relevant.
+ * --history is out of scope (egress is a present-state policy).
+ */
+function gatherEgressInputs(
+  repo: RepoConfig,
+  opts: CheckOptions,
+): { path: string; text: string }[] {
+  const out: { path: string; text: string }[] = [];
+
+  if (opts.path) {
+    if (!isEgressRelevant(opts.path)) return out;
+    const abs = isAbsolute(opts.path) ? opts.path : join(repo.cwd, opts.path);
+    if (!existsSync(abs)) return out;
+    try {
+      out.push({ path: opts.path, text: readFileSync(abs, "utf8") });
+    } catch {
+      /* unreadable: nothing to scan */
+    }
+    return out;
+  }
+
+  if (!repo.isGitRepo) return out;
+
+  if (opts.staged) {
+    const names = git(repo.cwd, ["diff", "--cached", "--name-only", "--diff-filter=ACMR"]);
+    if (names === null) return out;
+    for (const p of names.split("\n").map(s => s.trim()).filter(Boolean)) {
+      if (!isEgressRelevant(p)) continue;
+      const text = git(repo.cwd, ["show", `:${p}`]);
+      if (text !== null) out.push({ path: p, text });
+    }
+    return out;
+  }
+
+  if (opts.range) {
+    const tip = rangeTip(opts.range);
+    const names = git(repo.cwd, ["diff", "--name-only", "--diff-filter=ACMR", opts.range]);
+    if (names === null) return out;
+    for (const p of names.split("\n").map(s => s.trim()).filter(Boolean)) {
+      if (!isEgressRelevant(p)) continue;
+      const text = git(repo.cwd, ["show", `${tip}:${p}`]);
+      if (text !== null) out.push({ path: p, text });
+    }
+    return out;
+  }
+
+  return out;
 }
 
 export function check(opts: CheckOptions): void {
@@ -58,58 +139,76 @@ export function check(opts: CheckOptions): void {
     respectAllowComments: !opts.ignoreAllowlistComments,
   };
 
-  if (denySet.combinedRegex === "") {
-    if (opts.json) emitJson({ hits: [], skipped: [], status: "no-deny-set", warnings: denySet.warnings });
-    else emitText("repo-aegis: no deny set (marker dir empty or all engagements allowed here)");
+  // Egress hygiene runs independently of the marker deny set: a private-registry
+  // URL in a lockfile / .npmrc is not a customer marker, and must be caught even
+  // when this repo has no deny set. It applies only to public-facing repos and
+  // not in --history mode (egress is a present-state policy).
+  const egress: RegistryFinding[] =
+    !opts.history && isPublicFacing(repo)
+      ? scanRegistryEgress(gatherEgressInputs(repo, opts))
+      : [];
+
+  const hasDenySet = denySet.combinedRegex !== "";
+  const mode: "staged" | "path" | "range" | "history" = opts.path
+    ? "path"
+    : opts.range
+      ? "range"
+      : opts.history
+        ? "history"
+        : "staged";
+
+  if (!hasDenySet && egress.length === 0) {
+    if (opts.json) {
+      emitJson({ hits: [], skipped: [], egress: [], status: "no-deny-set", warnings: denySet.warnings });
+    } else {
+      emitText("repo-aegis: no deny set (marker dir empty or all engagements allowed here)");
+    }
     return;
   }
 
   let hits: ScanHit[] = [];
   let skipped: SkippedFile[] = [];
   let historyHits: HistoryHit[] = [];
-  let mode: "staged" | "path" | "range" | "history" = "staged";
 
-  if (opts.staged) {
-    mode = "staged";
-    if (!repo.isGitRepo) {
-      emitError({ code: "NOT_GIT_REPO", error: "not a git repo; --staged requires a git repo" }, opts);
-    }
-    const r = scanStagedDiff(repo, denySet, scanOpts);
-    hits = r.hits;
-    skipped = r.skipped;
-  } else if (opts.path) {
-    mode = "path";
-    try {
-      const r = scanFile(opts.path, denySet, scanOpts, repo.isGitRepo ? repo.cwd : undefined);
+  if (hasDenySet) {
+    if (opts.staged) {
+      if (!repo.isGitRepo) {
+        emitError({ code: "NOT_GIT_REPO", error: "not a git repo; --staged requires a git repo" }, opts);
+      }
+      const r = scanStagedDiff(repo, denySet, scanOpts);
       hits = r.hits;
       skipped = r.skipped;
-    } catch (err) {
-      emitError({ error: (err as Error).message }, opts);
+    } else if (opts.path) {
+      try {
+        const r = scanFile(opts.path, denySet, scanOpts, repo.isGitRepo ? repo.cwd : undefined);
+        hits = r.hits;
+        skipped = r.skipped;
+      } catch (err) {
+        emitError({ error: (err as Error).message }, opts);
+      }
+    } else if (opts.range) {
+      if (!repo.isGitRepo) {
+        emitError({ code: "NOT_GIT_REPO", error: "not a git repo; --range requires a git repo" }, opts);
+      }
+      try {
+        const r = scanRange(repo, denySet, opts.range, scanOpts);
+        hits = r.hits;
+        skipped = r.skipped;
+      } catch (err) {
+        emitError(
+          { code: "GIT_ERROR", error: `git diff ${opts.range} failed: ${(err as Error).message}` },
+          opts,
+        );
+      }
+    } else if (opts.history) {
+      if (!repo.isGitRepo) {
+        emitError({ code: "NOT_GIT_REPO", error: "not a git repo; --history requires a git repo" }, opts);
+      }
+      historyHits = scanHistory(repo, denySet, {
+        ...scanOpts,
+        ...(opts.since !== undefined && { since: opts.since }),
+      });
     }
-  } else if (opts.range) {
-    mode = "range";
-    if (!repo.isGitRepo) {
-      emitError({ code: "NOT_GIT_REPO", error: "not a git repo; --range requires a git repo" }, opts);
-    }
-    try {
-      const r = scanRange(repo, denySet, opts.range, scanOpts);
-      hits = r.hits;
-      skipped = r.skipped;
-    } catch (err) {
-      emitError(
-        { code: "GIT_ERROR", error: `git diff ${opts.range} failed: ${(err as Error).message}` },
-        opts,
-      );
-    }
-  } else if (opts.history) {
-    mode = "history";
-    if (!repo.isGitRepo) {
-      emitError({ code: "NOT_GIT_REPO", error: "not a git repo; --history requires a git repo" }, opts);
-    }
-    historyHits = scanHistory(repo, denySet, {
-      ...scanOpts,
-      ...(opts.since !== undefined && { since: opts.since }),
-    });
   }
 
   const advisory = repo.class === "scratch";
@@ -127,6 +226,7 @@ export function check(opts: CheckOptions): void {
     hits,
     historyHits,
     skipped,
+    egress,
     repo: repoJson,
     denySet: { files: denySet.files.map(f => f.stem), patternCount: denySet.patterns.length },
     advisory,
@@ -137,7 +237,7 @@ export function check(opts: CheckOptions): void {
 
   if (opts.json) {
     emitJson(result);
-  } else if (totalHits === 0) {
+  } else if (totalHits === 0 && egress.length === 0) {
     emitText(`repo-aegis: clean (${denySet.patterns.length} patterns checked)`);
     if (skipped.length > 0) {
       emitText(`  skipped: ${skipped.length} file(s) (${skipped.map(s => s.reason).join(", ")})`);
@@ -156,11 +256,19 @@ export function check(opts: CheckOptions): void {
         emitText(`  ${h.commitSha}  ${h.pattern}  ${h.commitSummary}`);
       }
     }
+    if (egress.length > 0) {
+      emitText(
+        `repo-aegis: ${egress.length} private-registry reference${egress.length === 1 ? "" : "s"} in a public-facing repo`,
+      );
+      for (const e of egress) {
+        emitText(`  ${e.file}${e.line ? `:${e.line}` : ""}  ${e.host}${e.pkg ? `  (${e.pkg})` : ""}`);
+      }
+    }
     if (skipped.length > 0) {
       emitText(`  skipped: ${skipped.length} file(s)`);
     }
     for (const w of denySet.warnings) emitText(`  warning: ${w}`);
   }
 
-  if (totalHits > 0 && !advisory) process.exit(EXIT_HIT);
+  if ((totalHits > 0 || egress.length > 0) && !advisory) process.exit(EXIT_HIT);
 }
