@@ -6,11 +6,13 @@ import {
   computeDenySet,
   isActive,
   getRegexBackend,
+  isPublicFacing,
   RegistryNotFoundError,
   type RepoJson,
   type EngagementJson,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { resolveVisibility } from "../visibility.js";
 
 export function status(opts: OutputOptions): void {
   const repo = readRepoConfig();
@@ -51,6 +53,12 @@ export function status(opts: OutputOptions): void {
     .filter(e => e.active && e.markerCount === 0)
     .map(e => e.id);
 
+  // GitHub visibility drives the egress-hygiene gate. Refresh the cache
+  // best-effort (a `gh` probe; no-op when gh/remote absent) so audit's
+  // reconciliation check and the egress gate read a current value.
+  const visibility = repo.isGitRepo ? resolveVisibility(repo.cwd) : "unknown";
+  const publicFacing = isPublicFacing(repo, { visibility });
+
   const repoJson: RepoJson = {
     cwd: repo.cwd,
     isGitRepo: repo.isGitRepo,
@@ -61,6 +69,8 @@ export function status(opts: OutputOptions): void {
 
   const result = {
     repo: repoJson,
+    visibility,
+    publicFacing,
     allowedEngagements: allowed,
     denySet: {
       files: denying,
@@ -82,6 +92,10 @@ export function status(opts: OutputOptions): void {
   }
   emitText(`repo-aegis status: ${repo.cwd}`);
   emitText(`  class:    ${repo.class}${repo.classExplicit ? "" : " (default; not set)"}`);
+  emitText(
+    `  github:   ${visibility}${publicFacing ? " — egress-hygiene enforced" : ""}` +
+      `${visibility === "public" && repo.class !== "public-eligible" ? " (consider class=public-eligible)" : ""}`,
+  );
   emitText(
     `  allowed:  ${
       allowed.length === 0
