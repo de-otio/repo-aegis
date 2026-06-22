@@ -11,6 +11,10 @@ import {
   scanFile,
   scanText,
   isActive,
+  scanRegistryEgress,
+  isEgressRelevant,
+  isPublicFacing,
+  readCachedVisibility,
   type RepoConfig,
   type DenySet,
   type ScanHit,
@@ -292,66 +296,78 @@ function checkHistory(cwd: string, repo: RepoConfig, denySet: DenySet): CheckRes
   return { name: "history", ok: findings.length === 0, findings };
 }
 
-function checkLockfile(cwd: string, cache: FileCache): CheckResult {
-  const lockPath = join(cwd, "package-lock.json");
-  if (!existsSync(lockPath)) {
-    return { name: "lockfile", ok: true, findings: [], skipped: true, skipReason: "no package-lock.json" };
+// Egress hygiene: a private-registry URL (e.g. an account-scoped CodeArtifact
+// host) in a lockfile or .npmrc leaks the owner's account id and breaks
+// `npm ci` for external clones — but ONLY matters when the repo is, or can
+// become, public. In a private repo the same URL is correct and intended, so
+// this check is skipped unless the repo is public-facing. Detection lives in
+// core (`scanRegistryEgress`) and spans package-lock.json / yarn.lock /
+// pnpm-lock.yaml / .npmrc; we feed it every tracked file of those shapes.
+function checkRegistryEgress(
+  cwd: string,
+  repo: RepoConfig,
+  cache: FileCache,
+): CheckResult {
+  if (!repo.isGitRepo) {
+    return { name: "registry-egress", ok: true, findings: [], skipped: true, skipReason: "not a git repo" };
   }
-  const loaded = cache.load(lockPath, { mustBeUnderTree: false });
-  if (loaded.kind === "unreadable") {
+  if (!isPublicFacing(repo)) {
     return {
-      name: "lockfile",
-      ok: false,
-      findings: [{ message: "package-lock.json is not readable" }],
-    };
-  }
-  // A lockfile that's somehow binary or oversized is unusual but not a
-  // policy violation; surface as a skip rather than failure.
-  if (loaded.kind !== "ok" || loaded.text === undefined) {
-    return {
-      name: "lockfile",
+      name: "registry-egress",
       ok: true,
       findings: [],
       skipped: true,
-      skipReason: `package-lock.json ${loaded.kind}`,
+      skipReason: "repo is not public-facing (private-registry URLs are intended here)",
     };
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(loaded.text);
-  } catch {
-    return {
-      name: "lockfile",
-      ok: false,
-      findings: [{ message: "package-lock.json is not valid JSON" }],
-    };
+  const inputs: { path: string; text: string }[] = [];
+  for (const f of listTrackedFiles(cwd)) {
+    if (!isEgressRelevant(f)) continue;
+    const loaded = cache.load(join(cwd, f), { mustBeUnderTree: true });
+    if (loaded.kind !== "ok" || loaded.text === undefined) continue;
+    inputs.push({ path: f, text: loaded.text });
   }
+  const findings: Finding[] = scanRegistryEgress(inputs).map(rf => ({
+    message:
+      `${rf.file}${rf.line ? `:${rf.line}` : ""} references non-public registry ${rf.host}` +
+      `${rf.pkg ? ` (${rf.pkg})` : ""}`,
+    detail: { file: rf.file, host: rf.host, kind: rf.kind, pkg: rf.pkg, line: rf.line, value: rf.value },
+  }));
+  return { name: "registry-egress", ok: findings.length === 0, findings };
+}
 
-  const findings: Finding[] = [];
-  const root = parsed as { packages?: Record<string, { resolved?: string }> };
-  if (root.packages) {
-    for (const [pkgPath, info] of Object.entries(root.packages)) {
-      const resolved = info?.resolved;
-      if (!resolved) continue;
-      try {
-        const u = new URL(resolved);
-        if (
-          u.host !== "registry.npmjs.org" &&
-          u.host !== "registry.yarnpkg.com" &&
-          !u.host.endsWith(".github.com") &&
-          u.host !== "codeload.github.com"
-        ) {
-          findings.push({
-            message: `${pkgPath || "(root)"} resolved from non-public registry: ${u.host}`,
-            detail: { pkg: pkgPath, host: u.host, resolved },
-          });
-        }
-      } catch {
-        /* skip non-URL entries (e.g. file: paths) silently */
-      }
-    }
+// Reconcile the declared repo class against the cached GitHub visibility. A
+// repo left at the `private-strict` default but actually public on GitHub (or
+// a `public-eligible` repo that is in fact private) is a misconfiguration the
+// fleet should correct — and it's exactly what would let an egress leak slip
+// past a class-only gate. Offline: reads the cache `classify`/`status` write.
+function checkVisibility(repo: RepoConfig): CheckResult {
+  if (!repo.isGitRepo) {
+    return { name: "visibility", ok: true, findings: [], skipped: true, skipReason: "not a git repo" };
   }
-  return { name: "lockfile", ok: findings.length === 0, findings };
+  const vis = readCachedVisibility(repo.cwd);
+  if (vis === "unknown") {
+    return {
+      name: "visibility",
+      ok: true,
+      findings: [],
+      skipped: true,
+      skipReason: "GitHub visibility not cached (run `repo-aegis classify` or `status`)",
+    };
+  }
+  const findings: Finding[] = [];
+  if (vis === "public" && repo.class !== "public-eligible") {
+    findings.push({
+      message: `repo is GitHub-public but class=${repo.class}; set class=public-eligible`,
+      detail: { visibility: vis, class: repo.class },
+    });
+  } else if (vis === "private" && repo.class === "public-eligible") {
+    findings.push({
+      message: `repo is GitHub-private but class=public-eligible; reclassify`,
+      detail: { visibility: vis, class: repo.class },
+    });
+  }
+  return { name: "visibility", ok: findings.length === 0, findings };
 }
 
 const FIXTURE_DIR_NAMES = new Set([
@@ -862,7 +878,8 @@ export async function audit(opts: AuditOptions): Promise<void> {
   const results: CheckResult[] = [];
   if (runMarker) results.push(checkMarkerScan(cwd, repo, denySet, reveal, cache));
   if (runHistory) results.push(checkHistory(cwd, repo, denySet));
-  if (runLockfile) results.push(checkLockfile(cwd, cache));
+  if (runLockfile) results.push(checkRegistryEgress(cwd, repo, cache));
+  if (runRemote) results.push(checkVisibility(repo));
   if (runFixture) results.push(checkFixtures(cwd, repo, denySet, reveal, cache));
   if (runRemote) results.push(checkRemote(cwd, repo));
 

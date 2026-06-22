@@ -113,53 +113,49 @@ describe("audit — marker-scan", () => {
   });
 });
 
-describe("audit — lockfile", () => {
-  it("skips when no package-lock.json exists", async () => {
-    const home = setupHome("lockfile-none", {});
-    const repo = makeRepo("lockfile-none-repo", { class: "private-strict" });
-    commit(repo, { "README.md": "x" }, "init");
+describe("audit — registry-egress", () => {
+  const PRIVATE = "https://npm.private-registry.example.com/foo/-/foo-1.0.0.tgz";
+  const PUBLIC = "https://registry.npmjs.org/foo/-/foo-1.0.0.tgz";
+  const lockWith = (url: string): string =>
+    JSON.stringify({ packages: { "node_modules/foo": { resolved: url } } });
+
+  it("SKIPS on a non-public-facing repo (private-registry URLs are intended)", async () => {
+    const home = setupHome("egress-private-repo", {});
+    const repo = makeRepo("egress-private-repo", { class: "private-strict" });
+    commit(repo, { "package-lock.json": lockWith(PRIVATE) }, "init");
     const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
       captureOutputAsync(() => audit({ cwd: repo, json: true })),
     );
-    const j = JSON.parse(result.stdout) as {
-      checks: { name: string; skipped?: boolean }[];
-    };
-    const c = j.checks.find(c => c.name === "lockfile");
+    assert.equal(result.exitCode ?? 0, 0);
+    const j = JSON.parse(result.stdout) as { checks: { name: string; skipped?: boolean }[] };
+    const c = j.checks.find(c => c.name === "registry-egress");
     assert.equal(c!.skipped, true);
   });
 
-  it("passes when only public registries are referenced", async () => {
-    const home = setupHome("lockfile-public", {});
-    const repo = makeRepo("lockfile-public-repo", { class: "private-strict" });
-    const lock = {
-      packages: {
-        "node_modules/foo": {
-          resolved: "https://registry.npmjs.org/foo/-/foo-1.0.0.tgz",
-        },
-      },
-    };
-    commit(repo, { "package-lock.json": JSON.stringify(lock) }, "init");
+  it("passes when a public-eligible repo references only public registries", async () => {
+    const home = setupHome("egress-public-ok", {});
+    const repo = makeRepo("egress-public-ok-repo", { class: "public-eligible" });
+    commit(repo, { "package-lock.json": lockWith(PUBLIC) }, "init");
     const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
       captureOutputAsync(() => audit({ cwd: repo, json: true })),
     );
-    const j = JSON.parse(result.stdout) as {
-      checks: { name: string; ok: boolean }[];
-    };
-    const c = j.checks.find(c => c.name === "lockfile");
+    const j = JSON.parse(result.stdout) as { checks: { name: string; ok: boolean; skipped?: boolean }[] };
+    const c = j.checks.find(c => c.name === "registry-egress");
+    assert.equal(c!.skipped ?? false, false);
     assert.equal(c!.ok, true);
   });
 
-  it("fails when a non-public registry URL is found", async () => {
-    const home = setupHome("lockfile-private", {});
-    const repo = makeRepo("lockfile-private-repo", { class: "private-strict" });
-    const lock = {
-      packages: {
-        "node_modules/foo": {
-          resolved: "https://npm.private-registry.example.com/foo/-/foo-1.0.0.tgz",
-        },
+  it("fails when a public-eligible repo references a non-public registry (lock + .npmrc)", async () => {
+    const home = setupHome("egress-public-bad", {});
+    const repo = makeRepo("egress-public-bad-repo", { class: "public-eligible" });
+    commit(
+      repo,
+      {
+        "package-lock.json": lockWith(PRIVATE),
+        ".npmrc": "registry=https://npm.private-registry.example.com/\n",
       },
-    };
-    commit(repo, { "package-lock.json": JSON.stringify(lock) }, "init");
+      "init",
+    );
     const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
       captureOutputAsync(() => audit({ cwd: repo, json: true })),
     );
@@ -167,9 +163,56 @@ describe("audit — lockfile", () => {
     const j = JSON.parse(result.stdout) as {
       checks: { name: string; ok: boolean; findings: { message: string }[] }[];
     };
-    const c = j.checks.find(c => c.name === "lockfile");
+    const c = j.checks.find(c => c.name === "registry-egress");
     assert.equal(c!.ok, false);
     assert.ok(c!.findings.some(f => f.message.includes("npm.private-registry.example.com")));
+    // Both the lockfile and the .npmrc are flagged (broadened scope).
+    assert.ok(c!.findings.some(f => f.message.includes("package-lock.json")));
+    assert.ok(c!.findings.some(f => f.message.includes(".npmrc")));
+  });
+
+  it("enforces on a private-strict repo whose cached visibility is public (safety net)", async () => {
+    const home = setupHome("egress-misclassified", {});
+    const repo = makeRepo("egress-misclassified-repo", { class: "private-strict" });
+    execFileSync("git", ["config", "repo-aegis.visibility", "public"], { cwd: repo });
+    commit(repo, { "package-lock.json": lockWith(PRIVATE) }, "init");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true })),
+    );
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as { checks: { name: string; ok: boolean }[] };
+    const c = j.checks.find(c => c.name === "registry-egress");
+    assert.equal(c!.ok, false);
+  });
+});
+
+describe("audit — visibility reconciliation", () => {
+  it("skips when GitHub visibility is not cached", async () => {
+    const home = setupHome("vis-uncached", {});
+    const repo = makeRepo("vis-uncached-repo", { class: "private-strict" });
+    commit(repo, { "README.md": "x" }, "init");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true })),
+    );
+    const j = JSON.parse(result.stdout) as { checks: { name: string; skipped?: boolean }[] };
+    assert.equal(j.checks.find(c => c.name === "visibility")!.skipped, true);
+  });
+
+  it("flags a GitHub-public repo left at the private-strict default", async () => {
+    const home = setupHome("vis-mismatch", {});
+    const repo = makeRepo("vis-mismatch-repo", { class: "private-strict" });
+    execFileSync("git", ["config", "repo-aegis.visibility", "public"], { cwd: repo });
+    commit(repo, { "README.md": "x" }, "init");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true })),
+    );
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as {
+      checks: { name: string; ok: boolean; findings: { message: string }[] }[];
+    };
+    const c = j.checks.find(c => c.name === "visibility");
+    assert.equal(c!.ok, false);
+    assert.ok(c!.findings.some(f => f.message.includes("public-eligible")));
   });
 });
 
@@ -737,6 +780,6 @@ describe("audit — composite", () => {
     );
     assert.ok(result.stdout.includes("audit:"));
     assert.ok(result.stdout.includes("marker-scan"));
-    assert.ok(result.stdout.includes("lockfile"));
+    assert.ok(result.stdout.includes("registry-egress"));
   });
 });

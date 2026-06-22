@@ -193,7 +193,8 @@ describe("v0.2 full lifecycle", skipOpts, () => {
     assert.equal(j.action, "audit");
     const names = j.checks.map(c => c.name).sort();
     assert.ok(names.includes("marker-scan"));
-    assert.ok(names.includes("lockfile"));
+    assert.ok(names.includes("registry-egress"));
+    assert.ok(names.includes("visibility"));
     assert.ok(names.includes("fixtures"));
     assert.ok(names.includes("remote"));
   });
