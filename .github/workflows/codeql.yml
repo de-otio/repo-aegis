@@ -16,6 +16,11 @@ on:
   schedule:
     - cron: "0 6 * * 1" # Mondays at 06:00 UTC
 
+# Cancel superseded PR runs; let push/scheduled runs finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   security-events: write
@@ -55,6 +60,7 @@ jobs:
     if: always()
     needs: [analyze]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Verify analyze job succeeded
         run: |

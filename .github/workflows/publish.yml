@@ -31,6 +31,11 @@ on:
         type: boolean
         default: true
 
+# Serialize publishes; never cancel an in-flight publish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   id-token: write   # required for npm trusted publishing (OIDC)
@@ -38,6 +43,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
