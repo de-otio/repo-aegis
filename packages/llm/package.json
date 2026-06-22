@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/repo-aegis-llm",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "LLM-assisted helpers for repo-aegis: prose extraction, token suggestion, embedding profiles. Off the deterministic gate path.",
   "license": "GPL-3.0-or-later",
   "author": "Richard Myers",
@@ -27,7 +27,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@de-otio/repo-aegis-core": "^0.4.1",
+    "@de-otio/repo-aegis-core": "^0.5.0",
     "zod": "^4.4.3"
   }
 }

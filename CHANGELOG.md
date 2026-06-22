@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-22
+
+### Added
+
+- **Public-repo egress hygiene: private-registry URL leak prevention.** A new
+  `core` module (`scanRegistryEgress`) flags references to non-public package
+  registries — e.g. an account-scoped AWS CodeArtifact host — in
+  `package-lock.json` (v1/v3), `yarn.lock`, `pnpm-lock.yaml`, and `.npmrc`. This
+  guards against committing a private-registry URL — which leaks the owner's
+  account id and breaks `npm ci` for external clones — into a repo that is, or
+  can become, public.
+- Enforcement is **visibility-gated** (`isPublicFacing`): it applies to
+  `public-eligible` repos and to any repo whose cached GitHub visibility is
+  `public` (a safety net for a repo left at the `private-strict` default), and is
+  a no-op for private repos where such URLs are intended.
+- `check` runs the scan independently of the marker deny set, reading the staged
+  blob (`--staged`) / range tip (`--range`), so the existing pre-commit and
+  pre-push hooks block it automatically.
+- `audit` gains a `registry-egress` check (replacing the unconditional lockfile
+  check, now class-gated) and a `visibility` reconciliation check that flags a
+  GitHub-public repo left at the `private-strict` default.
+- `status` probes and caches GitHub visibility (`repo-aegis.visibility`) and
+  surfaces whether egress hygiene is enforced.
+
 ## [0.4.1] - 2026-06-20
 
 ### Fixed
