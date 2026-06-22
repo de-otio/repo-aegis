@@ -119,6 +119,24 @@ export type { ScanHit, SkippedFile, HistoryHit, ScanOptions } from "./scan.js";
 export { scanForSecrets, summariseHits } from "./secret-markers.js";
 export type { SecretMarkerKind, SecretMarkerHit } from "./secret-markers.js";
 
+// ---- public-repo egress hygiene (private-registry URL leak prevention) ---
+export {
+  scanRegistryEgress,
+  egressParserFor,
+  isEgressRelevant,
+  isHostAllowed,
+  defaultEgressPolicy,
+  DEFAULT_ALLOWED_REGISTRY_HOSTS,
+  readCachedVisibility,
+  isPublicFacing,
+} from "./egress.js";
+export type {
+  RegistryFinding,
+  EgressPolicy,
+  EgressInputFile,
+  RepoVisibility,
+} from "./egress.js";
+
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";
 export type { RenderOptions, RenderedFile, RenderResult } from "./render.js";
