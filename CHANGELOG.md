@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-22
+
 ### Added
 
 - **`repo-aegis scan-env`: turn this machine's toolchain config into markers.**
@@ -75,6 +77,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   suite that cannot run clean is a suite whose failures get skimmed, which is
   how a real account id and a NUL byte reached a public repo.
 - Registered `scan-env` in the CLI flag-name contract test.
+
+### Changed
+
+- **Published tarballs no longer contain test files** (`!**/*.test.*`). A
+  `.test.ts` fixture is what shipped a real account id to the registry in
+  0.5.0; `core`/`llm` still ship `src` so consumer "go to definition" keeps
+  working through the declaration maps, but the tests — and their fixtures —
+  stay out. Nothing is lost for consumers: `exports` only ever exposed `dist`,
+  so no published entry point could reach these files.
 
 ### Security
 

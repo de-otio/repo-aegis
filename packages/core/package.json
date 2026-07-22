@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/repo-aegis-core",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Core library for repo-aegis: engagement registry, deny-set computation, marker scanner",
   "license": "GPL-3.0-or-later",
   "author": "Richard Myers",
@@ -21,7 +21,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "!**/*.test.*"
   ],
   "scripts": {
     "build": "tsc"
