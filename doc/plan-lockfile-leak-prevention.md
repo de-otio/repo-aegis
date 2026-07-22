@@ -1,5 +1,12 @@
 # Implementation plan: lockfile + dotfile leak prevention
 
+> **Status: complete.** All four items below shipped — A/B/C in
+> `core: configurable registry allowlist + pip/cargo egress coverage`, D in
+> `cli: add scan-env`. Kept as the design record: the rationale for each
+> decision, and the alternatives rejected, are not reconstructable from the
+> diff. Where the plan and the code disagree, the code won — deviations are
+> noted inline below.
+
 Companion to [`handoff-lockfile-leak-prevention.md`](./handoff-lockfile-leak-prevention.md).
 That handoff proposed two features. **A follow-up read of `main` shows most of
 Feature 1 already shipped in v0.5.0** (the `core/egress` module — "public-repo
@@ -29,12 +36,12 @@ cover.
 
 ## Remaining work
 
-| # | Item | Handoff feature | Priority | Est. |
-|---|------|-----------------|----------|------|
-| A | Config-driven allowlist (`publicRegistries:`) | F1 | HIGH | S |
-| B | pip ecosystem parsers | F1 | HIGH | M |
-| C | cargo ecosystem parser | F1 | MED | S |
-| D | Dotfile auto-ingest (`scan-env`) | F2 | MED | L |
+| # | Item | Handoff feature | Priority | Status |
+|---|------|-----------------|----------|--------|
+| A | Config-driven allowlist (`publicRegistries:`) | F1 | HIGH | ✅ done |
+| B | pip ecosystem parsers | F1 | HIGH | ✅ done |
+| C | cargo ecosystem parser | F1 | MED | ✅ done |
+| D | Dotfile auto-ingest (`scan-env`) | F2 | MED | ✅ done |
 
 Do A first — it's small, unblocks legitimate mirrors, and every new parser
 (B, C) inherits the same allowlist plumbing. B/C are independent of each other.
@@ -217,12 +224,50 @@ current convention — `egress.test.ts` uses inline fixture strings):
 4. CHANGELOG entry per landed slice; bump the deny-set cache schema version if D
    changes `computeDenySet`.
 
-## Open decisions (resolve before coding)
+## Open decisions — how they resolved
 
-- **TOML parsing:** add `smol-toml` to `core`, or line-oriented `url =` /
-  `source =` extraction (zero-dep)? Affects B and C.
-- **`publicRegistries` home:** engagement registry (recommended) vs
-  `.repo-aegis.yml` per-repo override.
-- **`privateInfra` representation:** reserved `_private_infra` engagement id vs a
-  distinct top-level registry field + `computeDenySet` branch.
-- **`requirements*.txt` glob:** confirm the narrower match (not all `*.txt`).
+- **TOML parsing:** → **zero-dep, line-wise.** The fields needed (`source =`,
+  `url =`) are always single-line quoted strings; `yarn.lock` already set the
+  "no full parse" precedent; and a tool whose purpose is supply-chain
+  protection should not widen its own dependency surface to read two string
+  keys. Same reasoning later applied to `~/.m2/settings.xml` (regex, no XML
+  parser).
+- **`publicRegistries` home:** → **engagement registry.** A checked-in
+  per-repo `.repo-aegis.yml` could otherwise whitelist a private host into a
+  public repo, defeating the check.
+- **`privateInfra` representation:** → **top-level registry field rendered to
+  a reserved `_private_infra` stem**, gated in `computeDenySet` on
+  public-facing. Not an engagement id: it is not attributable to a customer,
+  and the reserved stem must be excluded from the identifier auto-block.
+- **`requirements*.txt` glob:** → **narrow**, plus any `*.txt` under a
+  `requirements/` directory (a common split-deps layout the original plan
+  missed — caught by a test).
+
+## What the work surfaced (not in the original plan)
+
+- **The gate had to enter the deny-set cache key.** Public-facing state can
+  flip with no marker file changing (`status` refreshing cached visibility),
+  so without it a repo made public would keep serving a stale, under-blocking
+  cached set. Cache version 3 → 4.
+- **Redaction was anchored wrong.** `redactUrlCredentials` used `^`, but is
+  applied to whole config *lines*; it would have echoed credentials from a
+  `--index-url` line. Caught by a test written specifically to try it.
+- **`--home` is a reserved global.** `scan-env` initially reused it and
+  silently repointed `REPO_AEGIS_HOME`; renamed to `--scan-home`.
+- **Two pre-existing hygiene defects in the module this plan extends:** a real
+  account id in a test fixture (published via npm, since the package ships
+  `src`), and a raw NUL byte that made git treat `egress.ts` as binary — so
+  every diff of the leak-detection module was unreviewable. Both fixed.
+
+## Follow-ups (out of scope here)
+
+- **The local test suite cannot run clean.** `install-hooks` and
+  `suggest-markers` fail in a sandboxed environment, and the globally
+  installed git hook blocks the temp-repo commits that `audit` tests create.
+  Verified pre-existing on `main`. This is what let a NUL byte and a real
+  account id sit undetected in a security tool; worth fixing before the next
+  feature.
+- **Fixture hygiene has no automated guard.** The egress check dispatches on
+  filename, so a `.ts` test fixture is structurally invisible to it — the tool
+  cannot catch its own leak. A repo-level check for account-id-shaped strings
+  in tracked source would close this.

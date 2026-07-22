@@ -1,5 +1,18 @@
 # Handoff: prevent private-registry leaks via lockfiles + dotfile auto-ingest
 
+> **Status: both features shipped. This document is historical.**
+>
+> - **Feature 1** — the npm-family half (`package-lock.json`, `yarn.lock`,
+>   `pnpm-lock.yaml`, `.npmrc`) had already shipped in **v0.5.0** as
+>   `core/egress.ts` *before this handoff was acted on*; the handoff was
+>   partly stale when written. The remaining pieces — the configurable
+>   allowlist and pip/cargo coverage — shipped afterwards.
+> - **Feature 2** — shipped as `repo-aegis scan-env`.
+>
+> See [`plan-lockfile-leak-prevention.md`](./plan-lockfile-leak-prevention.md)
+> for what was actually built, how each open decision resolved, and the
+> follow-ups this work surfaced.
+
 > Working handoff for a follow-up agent. Two proposed repo-aegis features, born
 > from a real incident. File each as a GitHub issue on `de-otio/repo-aegis` and
 > (ideally) implement. Nothing customer-specific appears here — the vector is
