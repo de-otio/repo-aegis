@@ -40,7 +40,26 @@ files under `dist/`.
 ```sh
 npm test           # all tests
 npm run test:cov   # with coverage thresholds
+npm run test:file -- packages/core/dist/egress.test.js   # one file
 ```
+
+**Always run tests through an npm script, not bare `node --test`.** The scripts
+set `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` to `/dev/null` so the ~34 test
+files that run `git init` are isolated from your machine's git config. Without
+that isolation, a developer who has repo-aegis installed (its global
+`core.hooksPath`) sees two confusing failure modes: `install-hooks` tests fail
+because the tool correctly detects a conflicting `core.hooksPath`, and `audit`
+tests fail because the real pre-commit hook blocks the temp repos' commits.
+Tests set their own local `user.email` / `user.name`, so nulling the global
+config is safe.
+
+Tests must never depend on the developer's environment. If you add a test that
+runs `git`, assume no global config exists.
+
+**Sandboxed environments:** a few `llm` tests bind a loopback TCP port to mock
+Ollama. If your shell forbids `listen()` (some agent sandboxes do), those tests
+fail with `EPERM` or hang. That is an environment limit, not a defect — they
+pass in CI and on a normal machine.
 
 ### Coverage targets
 

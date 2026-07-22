@@ -103,6 +103,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "markers",
       "registry",
       "render",
+      "scan-env",
       "status",
       "suggest-markers",
       "uninstall",
@@ -148,6 +149,11 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "classify",
     flags: ["--apply", "--rules"],
+    subcommands: [],
+  },
+  {
+    path: "scan-env",
+    flags: ["--accept", "--engagement", "--from", "--scan-home"],
     subcommands: [],
   },
   {

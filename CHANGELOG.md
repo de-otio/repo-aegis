@@ -65,6 +65,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tests no longer inherit the developer's global git config.** The ~34 test
+  files that run `git init` picked up the machine's real `core.hooksPath`, so
+  anyone with repo-aegis installed saw `install-hooks` tests fail (the tool
+  correctly detecting a conflicting hooks path) and `audit` tests fail (the real
+  pre-commit hook blocking the temp repos' commits). The npm test scripts now
+  null `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM`; a new `test:file` script runs
+  a single file with the same isolation. This mattered beyond convenience: a
+  suite that cannot run clean is a suite whose failures get skimmed, which is
+  how a real account id and a NUL byte reached a public repo.
+- Registered `scan-env` in the CLI flag-name contract test.
+
+### Security
+
+- **New self-hygiene guard (`core/self-hygiene.test.ts`).** Fails the build if
+  repo-aegis's own tracked source contains an account-id-shaped string, an
+  account-scoped CodeArtifact/ECR host, or a raw NUL byte. This closes a
+  structural blind spot: the egress check dispatches on *filename*, so a `.ts`
+  test fixture is invisible to it no matter what it contains — which is exactly
+  how a real CodeArtifact host lived in a fixture, shipped in the npm tarball,
+  and survived a release. Placeholders are recognised by shape (a repeated digit
+  or a counting run), not by an allowlist of literals. The guard asserts a
+  non-empty file list so it cannot pass vacuously, and its detector is tested
+  against a reconstructed sample so it is known to be able to fail.
+
 - `core/egress.ts` contained a raw NUL byte (a composite-key separator written
   as a literal rather than the `\u0000` escape), which made git classify the
   file as binary — so every diff of it rendered as `Bin … bytes` instead of

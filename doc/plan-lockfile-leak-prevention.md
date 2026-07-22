@@ -259,15 +259,34 @@ current convention — `egress.test.ts` uses inline fixture strings):
   `src`), and a raw NUL byte that made git treat `egress.ts` as binary — so
   every diff of the leak-detection module was unreviewable. Both fixed.
 
-## Follow-ups (out of scope here)
+## Follow-ups — both now fixed
 
-- **The local test suite cannot run clean.** `install-hooks` and
-  `suggest-markers` fail in a sandboxed environment, and the globally
-  installed git hook blocks the temp-repo commits that `audit` tests create.
-  Verified pre-existing on `main`. This is what let a NUL byte and a real
-  account id sit undetected in a security tool; worth fixing before the next
-  feature.
-- **Fixture hygiene has no automated guard.** The egress check dispatches on
-  filename, so a `.ts` test fixture is structurally invisible to it — the tool
-  cannot catch its own leak. A repo-level check for account-id-shaped strings
-  in tracked source would close this.
+- **The local test suite could not run clean.** ✅ Root cause was *not* the
+  sandbox, as first assumed: the ~34 test files that run `git init` inherited
+  the developer's global git config, so anyone with repo-aegis installed hit
+  its real `core.hooksPath`. `install-hooks` then failed because the tool
+  correctly detected a conflict, and `audit` failed because the real
+  pre-commit hook blocked the temp repos' commits. Fixed by nulling
+  `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` in the npm test scripts.
+
+  Running the suite once it was unblocked immediately caught a real regression
+  this work had introduced — `scan-env` missing from the CLI flag-name
+  contract — which vindicates the fix: the broken suite had been hiding it.
+  Full suite is now 1141 tests, 0 failures.
+
+  The remaining `llm` failures are genuinely environmental (those tests bind a
+  loopback TCP port, which some sandboxes forbid). Left as-is rather than
+  refactored to `fetch` stubs: that would touch the `[SEC H-1]`
+  endpoint-validation tests, and weakening a security test to satisfy a
+  sandbox is a bad trade. Documented in CONTRIBUTING instead.
+
+- **Fixture hygiene had no automated guard.** ✅ Added
+  `core/self-hygiene.test.ts` — fails on an account-id-shaped string, an
+  account-scoped CodeArtifact/ECR host, or a raw NUL byte anywhere in tracked
+  source. Verified by reintroducing the original leak and confirming both
+  checks fire. Placeholders are recognised by *shape* (repeated digit, or a
+  counting run like `123456789012`) rather than a literal allowlist, which
+  would grow silently and re-require the human review step that failed the
+  first time. The guard asserts a non-empty file list so it cannot rot into a
+  vacuous pass, and never echoes an offending value — reporting `file:line`
+  only, so the failure message is not itself the leak.
