@@ -50,6 +50,12 @@ export interface Registry {
    */
   publicRegistries?: string[];
   /**
+   * Private-infrastructure marker patterns, blocked only in public-facing
+   * repos. See the schema for why these are neither `alwaysBlock` nor
+   * engagement-scoped. Always populated by `loadRegistry` (`[]` when absent).
+   */
+  privateInfra?: string[];
+  /**
    * Schema version of the on-disk registry. Defaults to 1 when the YAML has
    * no `schemaVersion:` field (legacy). Readers refuse versions
    * greater than {@link MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION}. Optional in
@@ -156,6 +162,7 @@ export function loadRegistry(path: string = registryPath()): Registry {
     // Lower-cased at the boundary: `URL.host` is always lower-case, and
     // `isHostAllowed` compares by exact equality.
     publicRegistries: (validated.publicRegistries ?? []).map(h => h.toLowerCase()),
+    privateInfra: validated.privateInfra ?? [],
     schemaVersion,
   };
 }

@@ -173,6 +173,98 @@ export function addMarkerPatterns(
 }
 
 /**
+ * The top-level registry lists that `addTopLevelPatterns` can append to.
+ * `always_block` blocks everywhere; `privateInfra` blocks only in public-facing
+ * repos (see the schema and `PRIVATE_INFRA_FILE_STEM`).
+ */
+export type TopLevelPatternList = "always_block" | "privateInfra";
+
+/**
+ * Append validated patterns to a top-level registry list, creating the list if
+ * absent. Same lock/validate/render discipline as {@link addMarkerPatterns} —
+ * see [SEC M-3] — and likewise idempotent.
+ */
+export function addTopLevelPatterns(
+  field: TopLevelPatternList,
+  patterns: string[],
+  opts: AddMarkerPatternOptions = {},
+): AddMarkerPatternResult {
+  const path = opts.registryPath ?? defaultRegistryPath();
+  const source = opts.source ?? "manual";
+
+  const invalid: Array<{ pattern: string; reason: string }> = [];
+  for (const p of patterns) {
+    const v = validatePattern(p);
+    if (!v.ok) invalid.push({ pattern: p, reason: v.reason ?? "unknown" });
+  }
+  if (invalid.length > 0) {
+    throw new PatternValidationError(invalid.map(i => ({ ...i, engagementId: field })));
+  }
+
+  const result = withLockSync(() => {
+    if (!existsSync(path)) {
+      throw new Error(`registry not found at ${path}`);
+    }
+    const doc = parseDocument(readFileSync(path, "utf8"));
+
+    let seq = doc.get(field) as YAMLSeq | null;
+    if (!seq || !(seq instanceof YAMLSeq)) {
+      seq = new YAMLSeq();
+      doc.set(field, seq);
+    }
+
+    const existing = new Set<string>();
+    for (const item of seq.items ?? []) {
+      if (typeof item === "string") existing.add(item);
+      else if (item instanceof Scalar && typeof item.value === "string") {
+        existing.add(item.value);
+      }
+    }
+
+    const added: string[] = [];
+    const skipped: string[] = [];
+    for (const p of patterns) {
+      if (existing.has(p)) {
+        skipped.push(p);
+        continue;
+      }
+      seq.add(p);
+      existing.add(p);
+      added.push(p);
+    }
+
+    if (added.length > 0) {
+      writeFileSync(path, doc.toString(), { mode: 0o600 });
+      try {
+        chmodSync(path, 0o600);
+      } catch {
+        /* platform-restricted */
+      }
+    }
+
+    const render = renderMarkers(loadRegistry(path));
+    return {
+      added,
+      skipped,
+      rendered: { written: render.written.length, removed: render.removed.length },
+    };
+  });
+
+  try {
+    appendAuditRecord({
+      action: "registry-add-top-level-pattern",
+      engagement: field,
+      // Counts only — never the literal patterns (they are private hostnames).
+      details: { added: result.added.length, skipped: result.skipped.length, source },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
+  }
+
+  return result;
+}
+
+/**
  * Convenience wrapper: append a single pattern. Same semantics as
  * `addMarkerPatterns([pattern])`.
  */

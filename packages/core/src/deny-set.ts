@@ -15,8 +15,18 @@ import {
   markersDir as defaultMarkersDir,
 } from "./paths.js";
 import type { RepoConfig } from "./repo.js";
+import { isPublicFacing } from "./egress.js";
 
 export const ALWAYS_FILE_STEM = "_always";
+
+/**
+ * Reserved stem for the private-infrastructure marker file. Unlike every other
+ * marker file, this one is **class-gated**: it joins the deny set only when the
+ * repo is public-facing. Private-registry hosts and internal domains are
+ * legitimate — often required — in a private repo; blocking them there would
+ * make the tool unusable exactly where those hosts belong.
+ */
+export const PRIVATE_INFRA_FILE_STEM = "_private_infra";
 
 /**
  * Minimum engagement-identifier length for the auto-block self-marker (see
@@ -56,6 +66,12 @@ export interface DenySet {
 }
 
 export interface DenySetOptions {
+  /**
+   * Override the public-facing determination that gates `_private_infra`.
+   * Default: {@link isPublicFacing} for this repo. Tests pass it explicitly to
+   * avoid a `git config` read.
+   */
+  publicFacing?: boolean;
   markersDir?: string;
   /**
    * Path to the cache file. Default: `<home>/state/deny-set.cache.json`.
@@ -69,7 +85,11 @@ export interface DenySetOptions {
 // without any marker-file mtime change, so older caches must be invalidated —
 // the read path's schemaVersion check returns null, falling through to
 // recompute).
-const DENY_SET_CACHE_VERSION = 3;
+// Bumped to 4 when the class-gated `_private_infra` stem was introduced: the
+// computed pattern set changed shape without any marker-file mtime change, so
+// caches written by 0.5.x must be invalidated on upgrade (same reasoning as the
+// 2 -> 3 bump in 0.4.1).
+const DENY_SET_CACHE_VERSION = 4;
 
 interface CacheEntry {
   schemaVersion: number;
@@ -89,7 +109,7 @@ interface CacheEntry {
  *   - the marker dir's file list, mtimes, and sizes (any edit to a marker
  *     file or addition/removal invalidates the cache)
  */
-function computeFingerprint(repo: RepoConfig, dir: string): string {
+function computeFingerprint(repo: RepoConfig, dir: string, publicFacing: boolean): string {
   const fileSummaries: string[] = [];
   if (existsSync(dir)) {
     const files = readdirSync(dir).filter(f => f.endsWith(".txt")).sort();
@@ -99,7 +119,13 @@ function computeFingerprint(repo: RepoConfig, dir: string): string {
     }
   }
   const sortedEng = [...repo.engagements].sort().join(",");
-  const input = `v${DENY_SET_CACHE_VERSION}|${repo.class}|${sortedEng}|${fileSummaries.join(";")}`;
+  // `publicFacing` participates because it gates whether `_private_infra.txt`
+  // joins the set. It can flip without any marker-file or class change (the
+  // cached GitHub visibility being refreshed by `status`), so omitting it would
+  // serve a stale deny set from cache after a repo is made public.
+  const input =
+    `v${DENY_SET_CACHE_VERSION}|${repo.class}|${sortedEng}|` +
+    `pf=${publicFacing ? 1 : 0}|${fileSummaries.join(";")}`;
   return createHash("sha256").update(input).digest("hex");
 }
 
@@ -164,7 +190,8 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
   // current call rather than what the cache wrote at fingerprint time.
   const cachePath =
     opts.cachePath === null ? null : opts.cachePath ?? defaultDenySetCachePath();
-  const fingerprint = computeFingerprint(repo, dir);
+  const publicFacing = opts.publicFacing ?? isPublicFacing(repo);
+  const fingerprint = computeFingerprint(repo, dir, publicFacing);
 
   if (cachePath !== null) {
     const cached = readCache(cachePath);
@@ -203,6 +230,8 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
     .map(f => ({ stem: f.replace(/\.txt$/, ""), path: join(dir, f) }))
     .filter(({ stem }) => {
       if (stem === ALWAYS_FILE_STEM) return true;
+      // Private infra is blocked only where it would actually be a leak.
+      if (stem === PRIVATE_INFRA_FILE_STEM) return publicFacing;
       if (!useScoping) return true;
       return !own.has(stem);
     });
@@ -239,7 +268,9 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
   // so a repo may still mention its own engagement id; only OTHER engagements'
   // ids are blocked. `_always` is a system stem, not an identifier.
   for (const f of files) {
-    if (f.stem === ALWAYS_FILE_STEM) continue;
+    // Both reserved stems are system names, not engagement identifiers — they
+    // must never be auto-blocked as literals.
+    if (f.stem === ALWAYS_FILE_STEM || f.stem === PRIVATE_INFRA_FILE_STEM) continue;
     if (f.stem.length < MIN_AUTO_BLOCK_IDENTIFIER_LENGTH) continue;
     const literal = escapeRegexLiteral(f.stem);
     if (patterns.includes(literal)) continue; // already present as an explicit marker

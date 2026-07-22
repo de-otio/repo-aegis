@@ -80,11 +80,28 @@ export type {
 export {
   addMarkerPattern,
   addMarkerPatterns,
+  addTopLevelPatterns,
 } from "./registry-mutate.js";
 export type {
   AddMarkerPatternOptions,
   AddMarkerPatternResult,
+  TopLevelPatternList,
 } from "./registry-mutate.js";
+
+// ---- toolchain-dotfile scanning (private-infra discovery) ----------------
+export {
+  scanEnvText,
+  scanEnvSources,
+  defaultEnvSources,
+  hostToMarkerPattern,
+  MIN_ENV_HOST_LENGTH,
+} from "./env-scan.js";
+export type {
+  EnvSourceKind,
+  EnvHostFinding,
+  EnvSource,
+  ScanEnvResult,
+} from "./env-scan.js";
 
 // ---- repo (per-repo config + engagement membership mutators) -------------
 export {
@@ -101,7 +118,7 @@ export {
 export type { RepoClass, RepoConfig, RepoOverride } from "./repo.js";
 
 // ---- deny set ------------------------------------------------------------
-export { computeDenySet, ALWAYS_FILE_STEM } from "./deny-set.js";
+export { computeDenySet, ALWAYS_FILE_STEM, PRIVATE_INFRA_FILE_STEM } from "./deny-set.js";
 export type { DenySet, DenySetFile, DenySetOptions } from "./deny-set.js";
 
 // ---- scan primitives -----------------------------------------------------

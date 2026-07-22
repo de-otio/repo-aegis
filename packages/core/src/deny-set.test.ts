@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   computeDenySet,
   ALWAYS_FILE_STEM,
+  PRIVATE_INFRA_FILE_STEM,
   MIN_AUTO_BLOCK_IDENTIFIER_LENGTH,
 } from "./deny-set.js";
 import { scanText } from "./scan.js";
@@ -145,7 +146,9 @@ describe("computeDenySet", () => {
       patterns: string[];
       combinedRegex: string;
     };
-    assert.equal(cached.schemaVersion, 3);
+    // Bumped to 4 alongside the class-gated `_private_infra` stem; a stale
+    // 0.5.x cache must be rejected so the new gating takes effect on upgrade.
+    assert.equal(cached.schemaVersion, 4);
     assert.equal(typeof cached.key, "string");
     assert.equal(cached.key.length, 64, "fingerprint is sha256 hex");
     assert.deepEqual(cached.patterns, ds.patterns);
@@ -305,5 +308,76 @@ describe("computeDenySet", () => {
       "leading-whitespace ; lines are still comments",
     );
     rmSync(join(markersDir, "customer-d.txt"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `_private_infra`: the one class-gated marker file.
+// ---------------------------------------------------------------------------
+
+describe("computeDenySet — _private_infra gating", () => {
+  const INFRA = "npm\\.internal\\.example\\.com";
+
+  function withInfra(): void {
+    writeFileSync(join(markersDir, `${PRIVATE_INFRA_FILE_STEM}.txt`), `${INFRA}\n`);
+  }
+
+  it("includes private-infra patterns when the repo is public-facing", () => {
+    withInfra();
+    const ds = computeDenySet(makeRepo("public-eligible"), {
+      markersDir,
+      cachePath: null,
+      publicFacing: true,
+    });
+    assert.ok(ds.patterns.includes(INFRA), "private-infra pattern must be active");
+    assert.ok(ds.files.some(f => f.stem === PRIVATE_INFRA_FILE_STEM));
+  });
+
+  it("EXCLUDES them in a non-public repo, where such hosts are legitimate", () => {
+    withInfra();
+    const ds = computeDenySet(makeRepo("private-strict"), {
+      markersDir,
+      cachePath: null,
+      publicFacing: false,
+    });
+    assert.ok(!ds.patterns.includes(INFRA), "must not fire in a private repo");
+    assert.ok(!ds.files.some(f => f.stem === PRIVATE_INFRA_FILE_STEM));
+    // The rest of the deny set is unaffected by the gate.
+    assert.ok(ds.patterns.includes("PROJECT-CODENAME-ALPHA"));
+  });
+
+  it("keeps the gate out of a customer-coupled repo too", () => {
+    withInfra();
+    const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
+      markersDir,
+      cachePath: null,
+      publicFacing: false,
+    });
+    assert.ok(!ds.patterns.includes(INFRA));
+  });
+
+  it("never auto-blocks the reserved stem as a literal identifier", () => {
+    withInfra();
+    const ds = computeDenySet(makeRepo("public-eligible"), {
+      markersDir,
+      cachePath: null,
+      publicFacing: true,
+    });
+    // `_always` is likewise excluded; neither system stem is an engagement id.
+    assert.ok(!ds.patterns.includes(PRIVATE_INFRA_FILE_STEM));
+    assert.ok(!ds.patterns.includes(ALWAYS_FILE_STEM));
+  });
+
+  it("does not serve a stale cached set when public-facing flips", () => {
+    withInfra();
+    const cachePath = join(tmp, "gate-cache.json");
+    const repo = makeRepo("private-strict");
+    const priv = computeDenySet(repo, { markersDir, cachePath, publicFacing: false });
+    assert.ok(!priv.patterns.includes(INFRA));
+    // Same repo, same marker files — only the visibility changed. Were
+    // publicFacing absent from the fingerprint, this would hit the stale entry
+    // and silently under-block a now-public repo.
+    const pub = computeDenySet(repo, { markersDir, cachePath, publicFacing: true });
+    assert.ok(pub.patterns.includes(INFRA), "cache must not mask the flip to public");
   });
 });

@@ -216,6 +216,26 @@ export async function buildProgram(): Promise<Command> {
       await suggestMarkers(withGlobals(opts, cmd));
     });
 
+  program
+    .command("scan-env")
+    .description(
+      "discover private package-registry hosts from this machine's toolchain configs (~/.npmrc, pip.conf, ~/.docker/config.json, ~/.m2/settings.xml, ~/.cargo/config.toml, ~/.yarnrc.yml) and offer them as markers. Dry-run unless --accept is given; never reads auth tokens.",
+    )
+    .option(
+      "--accept <placement>",
+      "persist discovered hosts: private-infra (public-facing repos only) | always-block (everywhere) | engagement",
+    )
+    .option("--engagement <id>", "engagement id, required with --accept engagement")
+    .option("--from <path>", "also scan project-level configs under this dir (default: cwd)")
+    .option(
+      "--scan-home <dir>",
+      "override the home dir whose dotfiles are scanned (default: $HOME). Distinct from the global --home, which repoints the repo-aegis config dir.",
+    )
+    .action(async (opts, cmd) => {
+      const { scanEnv } = await import("./commands/scan-env.js");
+      scanEnv(withGlobals(opts, cmd));
+    });
+
   const ctx = program.command("context").description("toggle leak-context strict mode");
   ctx.command("on").description("enable strict mode").action((opts, cmd) => contextOn(withGlobals(opts, cmd)));
   ctx.command("off").description("disable strict mode").action((opts, cmd) => contextOff(withGlobals(opts, cmd)));

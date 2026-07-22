@@ -153,6 +153,25 @@ export const registryFileSchema = z
      * a public repo — exactly the leak this check exists to stop.
      */
     publicRegistries: z.array(registryHostSchema).optional(),
+    /**
+     * Patterns for the developer's own private infrastructure — private
+     * registry hosts, internal domains — that must not appear in a
+     * public-facing repo but are entirely legitimate in a private one.
+     *
+     * Distinct from `always_block` (blocked everywhere) and from an
+     * engagement's markers (scoped to one customer): this machine's private
+     * infra is usually not attributable to a single engagement, and blocking
+     * it everywhere would fire constantly in the private repos where those
+     * hosts belong. Rendered to the reserved `_private_infra` marker stem and
+     * included in the deny set only for public-facing repos.
+     *
+     * Populated by `scan-env`. Hosts only — never captured auth tokens.
+     */
+    privateInfra: z
+      .array(z.string({ message: "'privateInfra' entries must be strings" }), {
+        message: "'privateInfra' must be a list of patterns",
+      })
+      .optional(),
     engagements: z.array(engagementSchema, { message: "'engagements' must be a list" }),
   })
   .passthrough()

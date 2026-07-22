@@ -8,7 +8,7 @@ import {
   repoAegisHome,
 } from "./paths.js";
 import { isActive, type Registry, type Engagement } from "./registry.js";
-import { ALWAYS_FILE_STEM } from "./deny-set.js";
+import { ALWAYS_FILE_STEM, PRIVATE_INFRA_FILE_STEM } from "./deny-set.js";
 import { validatePatterns } from "./regex-safety.js";
 import { PatternValidationError } from "./exceptions.js";
 
@@ -89,6 +89,14 @@ export function renderMarkers(reg: Registry, opts: RenderOptions = {}): RenderRe
         reason: inv.reason,
       });
     }
+    const infraR = validatePatterns(reg.privateInfra ?? [], { strict: true });
+    for (const inv of infraR.invalid) {
+      invalidPatterns.push({
+        engagementId: PRIVATE_INFRA_FILE_STEM,
+        pattern: inv.pattern,
+        reason: inv.reason,
+      });
+    }
     if (invalidPatterns.length > 0) {
       throw new PatternValidationError(
         invalidPatterns.map(p => ({
@@ -120,6 +128,21 @@ export function renderMarkers(reg: Registry, opts: RenderOptions = {}): RenderRe
     engagementId: ALWAYS_FILE_STEM,
     patternCount: reg.alwaysBlock.length,
   });
+
+  // Private-infra file. Written only when non-empty: an always-present empty
+  // file would be harmless, but its absence is the signal that this machine has
+  // no scanned private infra, and `render` deletes stems not in the target set.
+  const infra = reg.privateInfra ?? [];
+  if (infra.length > 0) {
+    targetStems.add(PRIVATE_INFRA_FILE_STEM);
+    const infraPath = join(dir, `${PRIVATE_INFRA_FILE_STEM}.txt`);
+    if (!dryRun) writeMarkerFile(infraPath, PRIVATE_INFRA_FILE_STEM, infra);
+    written.push({
+      path: infraPath,
+      engagementId: PRIVATE_INFRA_FILE_STEM,
+      patternCount: infra.length,
+    });
+  }
 
   for (const e of reg.engagements) {
     if (!isActive(e, retentionMonths)) continue;
@@ -205,6 +228,10 @@ function buildFlatUnion(reg: Registry, retentionMonths: number): string {
     parts.push(...reg.alwaysBlock);
     parts.push("");
   }
+  // `privateInfra` is deliberately absent: this flat file is a back-compat
+  // union for consumers that have no notion of repo class, so including the
+  // class-gated patterns here would block private-infra hosts in the private
+  // repos where they legitimately belong.
   for (const e of reg.engagements as Engagement[]) {
     if (!isActive(e, retentionMonths)) continue;
     parts.push(`; ${e.id}${e.name ? ` (${e.name})` : ""}`);

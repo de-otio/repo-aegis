@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`repo-aegis scan-env`: turn this machine's toolchain config into markers.**
+  Parses `~/.npmrc`, `pip.conf`, `~/.docker/config.json`, `~/.m2/settings.xml`,
+  `~/.cargo/config.toml`, and `~/.yarnrc.yml` (plus project-level equivalents)
+  for private package-registry hosts and offers them as marker patterns. Where
+  the egress check catches a private host that already reached a lockfile, this
+  addresses the upstream cause — the config that puts it there — so the deny set
+  becomes self-maintaining with no per-customer enumeration.
+  - **Dry-run by default.** Nothing is written without an explicit
+    `--accept <placement>`.
+  - Three placements: `private-infra` (recommended), `always-block`, or
+    `engagement --engagement <id>`.
+  - **Hosts only, never secrets.** These files are full of auth tokens; every
+    parser extracts a hostname and nothing else, and no code path persists a
+    credential. Public registries (npmjs, PyPI, crates.io, …) are filtered out —
+    blocking them would break every project.
+  - Hosts become escaped, case-insensitive literals; hosts shorter than
+    `MIN_ENV_HOST_LENGTH` are skipped to avoid false positives.
+- **New `privateInfra:` registry list and the class-gated `_private_infra`
+  marker stem.** Unlike every other marker file, it joins the deny set only in
+  **public-facing** repos: a private-registry host is legitimate — often
+  required — in a private repo, so blocking it everywhere would make the tool
+  unusable exactly where those hosts belong. This is why it is neither
+  `always_block` (everywhere) nor engagement-scoped (a machine's infra usually
+  maps to no single customer). It is deliberately excluded from the flat
+  back-compat `markers.txt`, whose consumers have no notion of repo class.
+- The deny-set cache key now includes the public-facing determination, so a repo
+  becoming public cannot be served a stale, under-blocking cached set. Cache
+  schema version bumped 3 → 4 to invalidate 0.5.x caches on upgrade.
+
 - **Egress hygiene now covers the pip and cargo ecosystems.** `Cargo.lock`
   (`source = "registry+…"` / `"sparse+…"`, prefix-stripped before host
   extraction), `poetry.lock` (`[package.source] url`), `Pipfile.lock`

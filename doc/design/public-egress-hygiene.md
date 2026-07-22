@@ -246,3 +246,55 @@ Mirror existing patterns (`audit.test.ts`, `check.test.ts`, fixtures):
 - General SBOM / supply-chain scanning — this is narrowly "private-registry URL
   in a public-facing tree."
 - Blocking CodeArtifact URLs in private repos — that is the intended setup.
+
+---
+
+## Upstream half: `scan-env` (shipped)
+
+Everything above catches a private host **after** it reached a lockfile. The
+config that put it there is the upstream cause, and it is also the
+authoritative inventory of this machine's private infrastructure.
+
+`repo-aegis scan-env` parses `~/.npmrc`, `pip.conf`, `~/.docker/config.json`,
+`~/.m2/settings.xml`, `~/.cargo/config.toml`, `~/.yarnrc.yml` (plus
+project-level equivalents), extracts registry **hosts**, drops the public ones
+via the same allowlist used above, and offers the rest as markers.
+
+Design constraints, all security-motivated:
+
+- **Dry-run by default.** Discovery must never mutate the deny set as a side
+  effect; `--accept <placement>` is required to write.
+- **Hosts only, never secrets.** These files are full of auth tokens and
+  base64 credentials. Parsers read hostnames and nothing else — the npm
+  `_authToken` line contributes only its host prefix, and docker's `auths`
+  contributes only its keys. Credential shapes belong to the `always_block`
+  patterns, not here.
+- **Escaped literals.** A hostname's dots are regex wildcards, so hosts are
+  escaped before becoming patterns; very short hosts are skipped entirely.
+- **Public registries are filtered.** Turning `registry.npmjs.org` into a
+  marker would break every project on the machine.
+
+### Why `privateInfra` is its own thing
+
+Three placements are offered, and the default recommendation is a new
+`privateInfra:` registry list rendered to the reserved `_private_infra` stem:
+
+| Placement | Blocks in | Right when |
+|---|---|---|
+| `engagement` | every repo except that customer's | the host belongs to one customer |
+| `always-block` | everywhere | the string is never legitimate anywhere |
+| `private-infra` | **public-facing repos only** | this machine's own infra (the usual case) |
+
+A machine's registry host usually maps to no single engagement, and it is
+*correct* in private repos — so `always_block` would fire constantly in exactly
+the repos where the host belongs. Hence the class gate, the only one of its
+kind among marker files.
+
+Two consequences worth remembering:
+
+- The gate depends on public-facing state, which can flip without any marker
+  file changing (e.g. `status` refreshing the cached GitHub visibility). It is
+  therefore part of the deny-set cache key — otherwise a repo made public would
+  keep serving a stale, under-blocking cached set.
+- `_private_infra` is excluded from the flat `markers.txt`, because that file
+  exists for consumers with no notion of repo class.
