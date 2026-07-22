@@ -8,11 +8,16 @@ import {
   isEgressRelevant,
   isHostAllowed,
   defaultEgressPolicy,
+  egressPolicyFromRegistry,
   isPublicFacing,
   type EgressPolicy,
 } from "./egress.js";
 
-const CA = "dot-981025486549.d.codeartifact.eu-central-1.amazonaws.com";
+// A CodeArtifact-shaped host that is NOT on the public allowlist. The account
+// id MUST stay synthetic: this package publishes `src` to npm, so anything
+// written here is world-readable. Never paste a real host from a machine's
+// `~/.npmrc` — the value only has to be non-allowlisted, not real.
+const CA = "example-000000000000.d.codeartifact.eu-central-1.amazonaws.com";
 const policy = defaultEgressPolicy();
 
 describe("isHostAllowed", () => {
@@ -33,6 +38,49 @@ describe("isHostAllowed", () => {
     const p: EgressPolicy = { allowedHosts: ["mirror.example.org"] };
     assert.equal(isHostAllowed("mirror.example.org", p), true);
     assert.equal(isHostAllowed(CA, p), false);
+  });
+});
+
+describe("egressPolicyFromRegistry", () => {
+  const MIRROR = "registry.internal.example.com";
+
+  it("keeps the built-in defaults when publicRegistries is absent", () => {
+    const p = egressPolicyFromRegistry({});
+    assert.equal(isHostAllowed("registry.npmjs.org", p), true);
+    assert.equal(isHostAllowed(CA, p), false);
+  });
+
+  it("allows a configured mirror while still denying other private hosts", () => {
+    const p = egressPolicyFromRegistry({ publicRegistries: [MIRROR] });
+    assert.equal(isHostAllowed(MIRROR, p), true);
+    // The point of the allowlist is that it is narrow: one mirror does not
+    // open the door to every private host.
+    assert.equal(isHostAllowed(CA, p), false);
+    assert.equal(isHostAllowed("other.internal.example.com", p), false);
+  });
+
+  it("lower-cases entries so they match URL.host", () => {
+    const p = egressPolicyFromRegistry({ publicRegistries: ["Registry.Internal.EXAMPLE.com"] });
+    assert.equal(isHostAllowed(MIRROR, p), true);
+  });
+
+  it("a configured mirror suppresses what would otherwise be a lockfile finding", () => {
+    const lock = JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        "node_modules/a": { resolved: `https://${MIRROR}/a/-/a-1.0.0.tgz` },
+        "node_modules/b": { resolved: `https://${CA}/npm/npm/b/-/b-1.0.0.tgz` },
+      },
+    });
+    const inputs = [{ path: "package-lock.json", text: lock }];
+
+    // Default policy: both hosts are non-public → two findings.
+    assert.equal(scanRegistryEgress(inputs).length, 2);
+
+    // With the mirror allowed, only the genuinely private host remains.
+    const f = scanRegistryEgress(inputs, egressPolicyFromRegistry({ publicRegistries: [MIRROR] }));
+    assert.equal(f.length, 1);
+    assert.equal(f[0]?.host, CA);
   });
 });
 
@@ -137,6 +185,111 @@ describe("scanRegistryEgress — .npmrc", () => {
   });
 });
 
+describe("scanRegistryEgress — Cargo.lock", () => {
+  const PRIV = "cargo.internal.example.com";
+
+  it("flags a private registry+/sparse+ source, allows the crates.io index", () => {
+    const lock = [
+      "[[package]]",
+      'name = "public-dep"',
+      'version = "1.0.0"',
+      'source = "registry+https://github.com/rust-lang/crates.io-index"',
+      "",
+      "[[package]]",
+      'name = "private-dep"',
+      'version = "2.0.0"',
+      `source = "sparse+https://${PRIV}/index/"`,
+    ].join("\n");
+    const f = scanRegistryEgress([{ path: "Cargo.lock", text: lock }]);
+    assert.equal(f.length, 1);
+    assert.equal(f[0]?.host, PRIV);
+    assert.equal(f[0]?.pkg, "private-dep", "attributes the finding to the right package");
+    // The `sparse+` prefix must be stripped before host extraction, else the
+    // URL would not parse and the finding would be silently dropped.
+    assert.ok(!f[0]?.value.startsWith("sparse+"));
+  });
+
+  it("ignores vendored/path packages that carry no source", () => {
+    const lock = ['[[package]]', 'name = "local"', 'version = "0.1.0"'].join("\n");
+    assert.equal(scanRegistryEgress([{ path: "Cargo.lock", text: lock }]).length, 0);
+  });
+});
+
+describe("scanRegistryEgress — poetry.lock", () => {
+  const PRIV = "pypi.internal.example.com";
+
+  it("flags a [package.source] url from a private index", () => {
+    const lock = [
+      "[[package]]",
+      'name = "requests"',
+      'version = "2.31.0"',
+      "",
+      "[[package]]",
+      'name = "internal-lib"',
+      'version = "1.0.0"',
+      "",
+      "[package.source]",
+      `url = "https://${PRIV}/simple"`,
+      'reference = "internal"',
+    ].join("\n");
+    const f = scanRegistryEgress([{ path: "poetry.lock", text: lock }]);
+    assert.equal(f.length, 1);
+    assert.equal(f[0]?.host, PRIV);
+    assert.equal(f[0]?.pkg, "internal-lib");
+  });
+});
+
+describe("scanRegistryEgress — Pipfile.lock", () => {
+  it("flags a private _meta source, allows pypi.org", () => {
+    const lock = JSON.stringify({
+      _meta: {
+        sources: [
+          { name: "pypi", url: "https://pypi.org/simple", verify_ssl: true },
+          { name: "internal", url: "https://pypi.internal.example.com/simple" },
+        ],
+      },
+      default: {},
+    });
+    const f = scanRegistryEgress([{ path: "Pipfile.lock", text: lock }]);
+    assert.equal(f.length, 1);
+    assert.equal(f[0]?.host, "pypi.internal.example.com");
+    assert.equal(f[0]?.pkg, "internal");
+  });
+
+  it("fails soft on malformed JSON", () => {
+    assert.equal(scanRegistryEgress([{ path: "Pipfile.lock", text: "{nope" }]).length, 0);
+  });
+});
+
+describe("scanRegistryEgress — requirements.txt", () => {
+  it("flags private index flags, allows PyPI, ignores plain pins and comments", () => {
+    const reqs = [
+      "# internal deps",
+      "--index-url https://pypi.internal.example.com/simple",
+      "--extra-index-url https://pypi.org/simple",
+      "requests==2.31.0",
+      "-i https://other.internal.example.com/simple",
+    ].join("\n");
+    const f = scanRegistryEgress([{ path: "requirements.txt", text: reqs }]);
+    assert.equal(f.length, 2);
+    assert.deepEqual(
+      f.map(x => x.host).sort(),
+      ["other.internal.example.com", "pypi.internal.example.com"],
+    );
+    assert.ok(f.every(x => x.kind === "requirements"));
+    assert.equal(f[0]?.line, 2, "reports a 1-based line number");
+  });
+
+  it("redacts credentials embedded in an index URL", () => {
+    const reqs = "--index-url https://ci-user:s3cr3t-token@pypi.internal.example.com/simple";
+    const f = scanRegistryEgress([{ path: "requirements.txt", text: reqs }]);
+    assert.equal(f.length, 1);
+    assert.equal(f[0]?.host, "pypi.internal.example.com");
+    assert.ok(!f[0]?.value.includes("s3cr3t-token"), "credential must not be echoed");
+    assert.ok(!f[0]?.value.includes("ci-user"), "userinfo must not be echoed");
+  });
+});
+
 describe("parser dispatch", () => {
   it("selects parsers by basename and ignores irrelevant files", () => {
     assert.ok(egressParserFor("a/b/package-lock.json"));
@@ -145,6 +298,28 @@ describe("parser dispatch", () => {
     assert.equal(egressParserFor("README.md"), null);
     assert.equal(isEgressRelevant("npm-shrinkwrap.json"), true);
     assert.equal(isEgressRelevant("index.ts"), false);
+  });
+
+  it("selects the pip/cargo parsers, including nested paths", () => {
+    assert.ok(egressParserFor("Cargo.lock"));
+    assert.ok(egressParserFor("crates/inner/Cargo.lock"));
+    assert.ok(egressParserFor("poetry.lock"));
+    assert.ok(egressParserFor("Pipfile.lock"));
+    assert.ok(egressParserFor("requirements.txt"));
+    assert.ok(egressParserFor("requirements-dev.txt"));
+    assert.ok(egressParserFor("requirements/base.txt"));
+  });
+
+  it("does NOT treat every .txt as a requirements file", () => {
+    // A broad `*.txt` match would drag prose files through a URL scanner and
+    // produce noise on any doc that happens to mention a host.
+    assert.equal(egressParserFor("notes.txt"), null);
+    assert.equal(egressParserFor("LICENSE.txt"), null);
+    assert.equal(isEgressRelevant("doc/requirements-for-vendors.md"), false);
+  });
+
+  it("leaves go.sum alone (GOPROXY lives in the env, not the file)", () => {
+    assert.equal(egressParserFor("go.sum"), null);
   });
 });
 

@@ -67,6 +67,37 @@ const orgNameSchema = z
       "org name must be lowercase, start with [a-z0-9], and contain only [a-z0-9-]",
   });
 
+/**
+ * A bare package-registry host, as it would appear in `URL.host` — optionally
+ * with a port, never with a scheme, path, credentials, or wildcard.
+ *
+ * Matching in `isHostAllowed` is exact string equality against `URL.host`, so
+ * anything richer than a host silently never matches. Rejecting those shapes
+ * at parse time turns a silently-inert allowlist entry into a loud config
+ * error. Validation round-trips through the WHATWG URL parser so it agrees
+ * with the host extraction in `egress.ts` by construction; `*` is rejected
+ * separately because the URL parser accepts it as an ordinary host character.
+ */
+const registryHostSchema = z
+  .string()
+  .min(1, "registry host must be non-empty")
+  .refine(
+    v => {
+      if (/\s/.test(v) || v.includes("*")) return false;
+      try {
+        const u = new URL(`https://${v}`);
+        return u.host === v.toLowerCase() && u.username === "" && u.password === "";
+      } catch {
+        return false;
+      }
+    },
+    {
+      message:
+        "must be a bare host such as 'registry.example.com' (optionally ':port') — " +
+        "no scheme, path, credentials, or '*' wildcard",
+    },
+  );
+
 const engagementSchema = z
   .object({
     id: z
@@ -111,6 +142,17 @@ export const registryFileSchema = z
      * Disjoint from any engagement's `githubOrgs`.
      */
     personalOrgs: z.array(orgNameSchema).optional(),
+    /**
+     * Extra package-registry hosts treated as public by the egress-hygiene
+     * check, in ADDITION to the always-allowed defaults (npmjs, yarnpkg,
+     * `*.github.com`). For a team that runs a legitimate public mirror.
+     *
+     * Org-wide, so it lives here rather than in a per-repo
+     * `.repo-aegis.yml`: "our org runs this mirror" is a machine-level
+     * fact, and a per-repo file could otherwise allow a private host into
+     * a public repo — exactly the leak this check exists to stop.
+     */
+    publicRegistries: z.array(registryHostSchema).optional(),
     engagements: z.array(engagementSchema, { message: "'engagements' must be a list" }),
   })
   .passthrough()

@@ -215,6 +215,60 @@ engagements:
     assert.equal(MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, 2);
   });
 
+  // -- publicRegistries (egress-hygiene allowlist) --
+
+  it("defaults publicRegistries to [] when absent", () => {
+    const path = writeYaml(
+      "no-public-registries.yaml",
+      `engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+    );
+    assert.deepEqual(loadRegistry(path).publicRegistries, []);
+  });
+
+  it("loads publicRegistries and lower-cases them to match URL.host", () => {
+    const path = writeYaml(
+      "public-registries.yaml",
+      `publicRegistries:
+  - registry.internal.example.com
+  - Mirror.EXAMPLE.org:8443
+
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+    );
+    assert.deepEqual(loadRegistry(path).publicRegistries, [
+      "registry.internal.example.com",
+      "mirror.example.org:8443",
+    ]);
+  });
+
+  // A URL/path/wildcard entry would never match `URL.host`, so it must be a
+  // loud parse error rather than a silently-inert allowlist entry.
+  for (const [label, value] of [
+    ["a full URL", "https://registry.internal.example.com"],
+    ["a host with a path", "registry.internal.example.com/npm"],
+    ["a wildcard", "*.internal.example.com"],
+    ["embedded credentials", "user:pw@registry.internal.example.com"],
+    ["an empty string", '""'],
+  ] as const) {
+    it(`rejects ${label} in publicRegistries`, () => {
+      const path = writeYaml(
+        `bad-public-registry-${label.replace(/\s+/g, "-")}.yaml`,
+        `publicRegistries: [${value}]
+
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]`,
+      );
+      assert.throws(() => loadRegistry(path), RegistryParseError);
+    });
+  }
+
   // -- schemaVersion 2: personalOrgs + engagements[*].githubOrgs --
 
   it("v1 file (no schemaVersion, no personalOrgs/githubOrgs) loads with empty defaults", () => {

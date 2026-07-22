@@ -43,6 +43,13 @@ export interface Registry {
    */
   personalOrgs?: string[];
   /**
+   * Extra registry hosts the egress-hygiene check treats as public, on top of
+   * the built-in defaults. Lower-cased by `loadRegistry` so callers can
+   * compare directly against `URL.host`. Optional in the type so fixtures
+   * need not specify it; `loadRegistry` always populates it (`[]` when absent).
+   */
+  publicRegistries?: string[];
+  /**
    * Schema version of the on-disk registry. Defaults to 1 when the YAML has
    * no `schemaVersion:` field (legacy). Readers refuse versions
    * greater than {@link MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION}. Optional in
@@ -146,6 +153,9 @@ export function loadRegistry(path: string = registryPath()): Registry {
     engagements,
     alwaysBlock: validated.always_block ?? [],
     personalOrgs: validated.personalOrgs ?? [],
+    // Lower-cased at the boundary: `URL.host` is always lower-case, and
+    // `isHostAllowed` compares by exact equality.
+    publicRegistries: (validated.publicRegistries ?? []).map(h => h.toLowerCase()),
     schemaVersion,
   };
 }

@@ -14,6 +14,7 @@ import {
   scanRegistryEgress,
   isEgressRelevant,
   isPublicFacing,
+  loadEgressPolicy,
   readCachedVisibility,
   type RepoConfig,
   type DenySet,
@@ -327,7 +328,7 @@ function checkRegistryEgress(
     if (loaded.kind !== "ok" || loaded.text === undefined) continue;
     inputs.push({ path: f, text: loaded.text });
   }
-  const findings: Finding[] = scanRegistryEgress(inputs).map(rf => ({
+  const findings: Finding[] = scanRegistryEgress(inputs, loadEgressPolicy()).map(rf => ({
     message:
       `${rf.file}${rf.line ? `:${rf.line}` : ""} references non-public registry ${rf.host}` +
       `${rf.pkg ? ` (${rf.pkg})` : ""}`,

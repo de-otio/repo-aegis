@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Egress hygiene now covers the pip and cargo ecosystems.** `Cargo.lock`
+  (`source = "registry+…"` / `"sparse+…"`, prefix-stripped before host
+  extraction), `poetry.lock` (`[package.source] url`), `Pipfile.lock`
+  (`_meta.sources[].url`), and `requirements*.txt` (`--index-url` /
+  `--extra-index-url` / `-i` / `--find-links` — the pip analogue of a private
+  `.npmrc`). `pypi.org`, `files.pythonhosted.org`, `crates.io`, and
+  `static.crates.io` join the default public host set. Credentials embedded in
+  an index URL are redacted; only the host is reported. `requirements` is a new
+  `RegistryFinding.kind`. Lockfiles are parsed line-wise rather than with a new
+  TOML dependency — the fields needed are single-line quoted strings, and a tool
+  that exists to protect a supply chain should not widen its own. `go.sum` stays
+  out of scope by design: Go's proxy lives in `GOPROXY`, not the file.
+
+- **Configurable public-registry allowlist for the egress-hygiene check.** A new
+  optional top-level `publicRegistries:` list in the engagement registry extends
+  the built-in public set (npmjs, yarnpkg, `*.github.com`), so a team running a
+  legitimate mirror can allow it instead of disabling the check. Entries are bare
+  hosts (optionally `:port`), validated against the WHATWG URL parser — a scheme,
+  path, credentials, or `*` wildcard is a parse error rather than a silently
+  inert entry, since matching is exact equality against `URL.host`. The list is
+  org-wide (registry) rather than per-repo, so a checked-in `.repo-aegis.yml`
+  cannot whitelist a private host into a public repo. Loading is fail-soft: a
+  missing, encrypted, or malformed registry falls back to the defaults, which is
+  the *smallest* allowlist and therefore never weakens the check.
+
+### Fixed
+
+- `core/egress.ts` contained a raw NUL byte (a composite-key separator written
+  as a literal rather than the `\u0000` escape), which made git classify the
+  file as binary — so every diff of it rendered as `Bin … bytes` instead of
+  reviewable text. Replaced with the escape; the runtime string is unchanged.
+  Diffs of the leak-detection module are reviewable again.
+- Replaced the account-scoped CodeArtifact host used as a test fixture in
+  `core/egress.test.ts` with a synthetic one. This package ships `src` to npm,
+  so fixture values are world-readable; the fixture only needs to be
+  non-allowlisted, not real.
+
 ## [0.5.0] - 2026-06-22
 
 ### Added

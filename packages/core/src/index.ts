@@ -126,6 +126,8 @@ export {
   isEgressRelevant,
   isHostAllowed,
   defaultEgressPolicy,
+  egressPolicyFromRegistry,
+  loadEgressPolicy,
   DEFAULT_ALLOWED_REGISTRY_HOSTS,
   readCachedVisibility,
   isPublicFacing,

@@ -13,6 +13,7 @@ import {
   scanRegistryEgress,
   isEgressRelevant,
   isPublicFacing,
+  loadEgressPolicy,
   CustomerCoupledNoEngagementError,
   type ScanHit,
   type SkippedFile,
@@ -145,7 +146,7 @@ export function check(opts: CheckOptions): void {
   // not in --history mode (egress is a present-state policy).
   const egress: RegistryFinding[] =
     !opts.history && isPublicFacing(repo)
-      ? scanRegistryEgress(gatherEgressInputs(repo, opts))
+      ? scanRegistryEgress(gatherEgressInputs(repo, opts), loadEgressPolicy())
       : [];
 
   const hasDenySet = denySet.combinedRegex !== "";

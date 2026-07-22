@@ -78,9 +78,56 @@ Parsers:
   field; parse with the existing `yaml` dep.
 - **`.npmrc`** — `registry=` and `@scope:registry=` lines whose host is not
   allowed (the root cause; catches the misconfig before it ever rewrites a lock).
+- **`Cargo.lock`** — `source = "registry+https://…"` / `"sparse+https://…"`;
+  strip the scheme prefix before host extraction or the URL will not parse and
+  the finding is silently dropped.
+- **`poetry.lock`** — `[package.source] url = "…"`.
+- **`Pipfile.lock`** — `_meta.sources[].url` (JSON).
+- **`requirements*.txt`** — `--index-url` / `--extra-index-url` / `-i` /
+  `--find-links`. The pip analogue of `.npmrc`; ordinary pinned lines carry no
+  host. Matched by name, or any `*.txt` under a `requirements/` directory —
+  deliberately *not* every `*.txt`.
+- **`go.sum`** — out of scope: the proxy is configured via `GOPROXY` in the
+  environment and never recorded in the file, so there is no host to check.
+
+The two TOML-ish lockfiles are scanned line-wise rather than with a real TOML
+parser: the fields needed are always single-line quoted strings, `yarn.lock`
+already sets the "no full parse" precedent, and a tool whose purpose is
+supply-chain protection should not widen its own dependency surface to read two
+string keys.
+
+Any URL may carry credentials (`https://user:token@host/simple`); these are
+redacted before a finding is emitted, in both the value and any echoed line.
+The host is the signal — the secret is not ours to print.
 
 Default `allowedHosts`: the current public set. Make it the single source of
 truth (CLI audit imports it instead of hard-coding).
+
+**Extending the allowlist (shipped).** A team running a legitimate mirror adds
+it to the engagement registry:
+
+```yaml
+# ~/.config/repo-aegis/engagements.yaml
+publicRegistries:
+  - registry.internal.example.com
+  - mirror.example.org:8443      # optional :port
+```
+
+`loadEgressPolicy()` merges these over the built-in defaults. Notes:
+
+- **Org-wide, not per-repo.** It lives in the registry rather than
+  `.repo-aegis.yml` because "our org runs this mirror" is a machine-level fact
+  — and a checked-in per-repo file could otherwise whitelist a private host
+  into a public repo, defeating the check.
+- **Bare hosts only.** Entries are validated against the WHATWG URL parser and
+  must match `URL.host`; a scheme, path, credentials, or `*` wildcard is a
+  parse error. Matching is exact equality, so those shapes would otherwise be
+  silently inert.
+- **Fail-soft load.** A missing, encrypted, or malformed registry falls back to
+  the defaults rather than erroring — the check must keep working with zero
+  config on the pre-commit path. This cannot weaken the check: the fallback is
+  the *smallest* allowlist, so an unreadable registry yields more findings,
+  never fewer.
 
 ### 2. Visibility gate — the crux
 
