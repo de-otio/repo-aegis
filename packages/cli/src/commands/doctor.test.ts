@@ -247,8 +247,12 @@ describe("doctor", () => {
     assert.equal(exitCode, undefined);
   });
 
-  it("repo with its own executable .git/hooks/pre-commit while a foreign (correct) global hooksPath is set -> reported as shadowed", () => {
-    const fx = makeFixture("shadowed");
+  // A displaced pre-commit is CHAINED by the generated script, so it still
+  // runs. Reporting it as a failure would make `doctor` exit 1 forever on a
+  // healthy fleet — which is the "guard that fires when it shouldn't" failure
+  // this release exists to remove. Regression test for that over-report.
+  it("repo whose only repo-local hook is a pre-commit -> NOT reported (chaining runs it)", () => {
+    const fx = makeFixture("shadowed-chained");
     const hooksDir = expectedHooksDir(fx);
     writeCorrectHooks(hooksDir);
 
@@ -269,9 +273,37 @@ describe("doctor", () => {
       );
     });
 
+    assert.equal(exitCode, undefined, "a chained pre-commit must not fail the sweep");
+    assert.doesNotMatch(stdout, /shadow-repo/);
+  });
+
+  // The other half of the same rule: hook types repo-aegis does not install
+  // are genuinely lost to the redirect and must still be reported.
+  it("repo with a repo-local commit-msg hook -> reported (we do not chain that type)", () => {
+    const fx = makeFixture("shadowed-bypassed");
+    const hooksDir = expectedHooksDir(fx);
+    writeCorrectHooks(hooksDir);
+
+    const dir = join(fx.scanRoot, "bypassed-repo");
+    initRepo(dir, fx);
+    gitConfig(dir, fx, ["--global", "core.hooksPath", hooksDir]);
+
+    const realHooks = join(dir, ".git", "hooks");
+    mkdirSync(realHooks, { recursive: true });
+    const bypassed = join(realHooks, "commit-msg");
+    writeFileSync(bypassed, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    chmodSync(bypassed, 0o755);
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+      );
+    });
+
     assert.equal(exitCode, 1);
-    assert.match(stdout, /shadow-repo/);
-    assert.match(stdout, /shadowed \.git\/hooks scripts: pre-commit/);
+    assert.match(stdout, /bypassed-repo/);
+    assert.match(stdout, /repo-local hooks that never run: commit-msg/);
   });
 
   it("--json shape: action, dryRun, roots, results[], summary", () => {

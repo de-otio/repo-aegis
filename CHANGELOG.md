@@ -5,6 +5,37 @@ All notable changes to repo-aegis are documented here.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-07-27
+
+### Fixed
+
+- **`doctor` reported a healthy repo as failing, forever.** A repo-local
+  `pre-commit` or `pre-push` displaced by `core.hooksPath` was counted as
+  bypassed — but since 0.7.0 the generated scripts *chain* to exactly those
+  hooks, so they do still run. On a fleet whose only repo-local hook was a
+  `pre-commit`, `doctor` exited 1 on every sweep with nothing wrong. It now
+  distinguishes the two: `HookState.shadowedRepoHooks` remains the raw
+  observation (every displaced script), and the new
+  `HookState.bypassedRepoHooks` is the actionable subset — hook types
+  repo-aegis does not install and therefore cannot chain (`commit-msg`,
+  `post-merge`, …). `doctor` and `status` report and fail on the latter only.
+  A guard that fires when nothing is wrong is the failure mode 0.7.0 set out
+  to remove; this was an instance of it shipped in the same release.
+
+### Added
+
+- **Self-hygiene now checks for vendor-shaped credentials in this project's
+  own source.** 0.7.0's release push was rejected by GitHub secret scanning
+  over a Stripe-shaped literal in a test fixture — synthetic, but live-shaped,
+  and repo-aegis's own guards had no opinion about it: the deny set covers
+  customer markers, and `scanForSecrets` runs only over Bash tool output.
+  Neither polices this repo. `self-hygiene.test.ts` now scans tracked source
+  for Stripe / GitHub / AWS / Slack / Google / npm key shapes and PEM blocks
+  *with key material*, so the next one fails at commit time rather than at a
+  push that has already been attempted. Bare PEM headers and regex sources
+  describing these shapes are deliberately not flagged — both appear
+  legitimately in this repo, and a check that cries wolf gets disabled.
+
 ## [0.7.0] - 2026-07-27
 
 ### Fixed
@@ -705,7 +736,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/de-otio/repo-aegis/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/de-otio/repo-aegis/compare/v0.6.0...v0.7.0
 [0.1.0]: https://github.com/de-otio/repo-aegis/releases/tag/v0.1.0
 

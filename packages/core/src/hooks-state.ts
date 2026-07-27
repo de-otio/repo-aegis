@@ -58,9 +58,24 @@ export interface HookState {
   scripts: Record<HookName, HookScriptState>;
   /** Executable, non-`.sample` scripts sitting directly in this repo's
    * own `<git-common-dir>/hooks` that a non-default `core.hooksPath`
-   * bypasses. Empty whenever `effectivePath` already points at that
-   * same directory (nothing to shadow). */
+   * displaces. Empty whenever `effectivePath` already points at that
+   * same directory (nothing to shadow).
+   *
+   * NOTE: "displaced" is not the same as "never runs". The generated
+   * pre-commit / pre-push chain to their repo-local counterparts, so
+   * those still execute. Use {@link bypassedRepoHooks} for the subset
+   * that genuinely cannot fire. */
   shadowedRepoHooks: string[];
+  /** The subset of {@link shadowedRepoHooks} that repo-aegis does NOT
+   * chain, and which therefore genuinely never runs while
+   * `core.hooksPath` points elsewhere — `commit-msg`, `post-merge`,
+   * `prepare-commit-msg`, and so on.
+   *
+   * This is the actionable signal. `shadowedRepoHooks` over-reports by
+   * design (it is the raw observation); a caller that fails on it will
+   * flag a healthy repo whose only repo-local hook is a `pre-commit`
+   * that chaining already runs. */
+  bypassedRepoHooks: string[];
   ok: boolean;
   code: HookStateCode;
   /** One-line remediation for `code`. Empty string when `ok`. */
@@ -97,6 +112,7 @@ function notAGitRepoState(): HookState {
       "pre-push": { present: false, executable: false, current: false },
     },
     shadowedRepoHooks: [],
+    bypassedRepoHooks: [],
     // Not a failure of anything — there is no hooks concept to evaluate
     // outside a git repo. Callers gate on `isGitRepo` before reading
     // `code`; this placeholder value keeps the return type total.
@@ -222,6 +238,8 @@ export function resolveHookState(cwd: string): HookState {
       origin: "unset",
       expectedPath,
       scripts,
+      // Nothing is displaced when the effective dir IS the repo's own.
+      bypassedRepoHooks: [],
       shadowedRepoHooks: [],
       ok: false,
       code: "HOOKS_PATH_UNSET",
@@ -239,6 +257,12 @@ export function resolveHookState(cwd: string): HookState {
 
   const scripts = buildScripts(effectivePath);
   const shadowedRepoHooks = effectivePath === realHooksDir ? [] : listShadowedHooks(realHooksDir);
+  // The generated scripts chain to the repo's own hook of the same name, so a
+  // displaced pre-commit / pre-push still runs. Only the hook types we do not
+  // install — and therefore do not chain — are actually lost to the redirect.
+  const bypassedRepoHooks = shadowedRepoHooks.filter(
+    p => !(HOOK_NAMES as readonly string[]).includes(p.split("/").pop() ?? p),
+  );
 
   if (effectivePath !== expectedPath) {
     // The path itself is wrong, independent of what's sitting in it.
@@ -259,6 +283,7 @@ export function resolveHookState(cwd: string): HookState {
       expectedPath,
       scripts,
       shadowedRepoHooks,
+      bypassedRepoHooks,
       ok: false,
       code: localShadowsCorrectGlobal ? "HOOKS_PATH_LOCAL_OVERRIDE" : "HOOKS_PATH_FOREIGN",
       fix: "git config --unset core.hooksPath",
@@ -275,6 +300,7 @@ export function resolveHookState(cwd: string): HookState {
       expectedPath,
       scripts,
       shadowedRepoHooks,
+      bypassedRepoHooks,
       ok: false,
       code: "HOOKS_SCRIPT_MISSING",
       fix: "repo-aegis install hooks",
@@ -290,6 +316,7 @@ export function resolveHookState(cwd: string): HookState {
       expectedPath,
       scripts,
       shadowedRepoHooks,
+      bypassedRepoHooks,
       ok: false,
       code: "HOOKS_SCRIPT_NOT_EXECUTABLE",
       // No --force needed here: core.hooksPath already equals
@@ -309,6 +336,7 @@ export function resolveHookState(cwd: string): HookState {
       expectedPath,
       scripts,
       shadowedRepoHooks,
+      bypassedRepoHooks,
       ok: false,
       code: "HOOKS_SCRIPT_STALE",
       fix: "repo-aegis install hooks",
@@ -322,6 +350,7 @@ export function resolveHookState(cwd: string): HookState {
     expectedPath,
     scripts,
     shadowedRepoHooks,
+    bypassedRepoHooks,
     ok: true,
     code: "HOOKS_OK",
     fix: "",

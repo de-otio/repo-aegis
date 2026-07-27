@@ -42,10 +42,12 @@ function scriptNames(hooks: HookState, pred: (s: HookScriptState) => boolean): s
 function hooksStatusLines(hooks: HookState): string[] {
   if (hooks.code === "HOOKS_OK") {
     const lines = [`${HOOKS_LABEL}OK — pre-commit/pre-push active (${hooks.origin} core.hooksPath)`];
-    if (hooks.shadowedRepoHooks.length > 0) {
+    // Only the hooks we do not chain are actually lost; a displaced
+    // pre-commit/pre-push still runs via the chain in the generated script.
+    if (hooks.bypassedRepoHooks.length > 0) {
       lines.push(
-        `  warning:  ${hooks.shadowedRepoHooks.length} repo-local hook script(s) will never run ` +
-          `(shadowed by core.hooksPath): ${hooks.shadowedRepoHooks.join(", ")}`,
+        `  warning:  ${hooks.bypassedRepoHooks.length} repo-local hook script(s) will never run ` +
+          `(shadowed by core.hooksPath): ${hooks.bypassedRepoHooks.join(", ")}`,
       );
     }
     return lines;

@@ -177,3 +177,95 @@ describe("self-hygiene: repo-aegis's own tree", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Vendor secret shapes
+//
+// Motivation (again a real incident, not a hypothetical): a test in
+// `known-non-secrets.test.ts` needed "a plausible real secret" to assert it is
+// NOT suppressed, and wrote a complete Stripe-shaped `sk_live_…` literal. The
+// key was synthetic, but a live-shaped key in a public repo is a finding
+// whether or not the bytes are real, and it shipped as far as the push before
+// GitHub's secret scanning rejected it.
+//
+// The point worth recording: repo-aegis's own guards did not catch it. The
+// deny set covers customer markers and the operator's `_always` shapes, and
+// `scanForSecrets` runs only over Bash tool output — neither polices this
+// project's source. GitHub's scanner did our job for us. This check closes
+// that gap so the next one fails locally, at commit time, instead of at a
+// push that has already been attempted.
+//
+// Detection is literal-shaped on purpose. Regex SOURCES for these same
+// families live in `secret-markers.ts` (e.g. `gh[pousr]_[A-Za-z0-9]{36,255}`)
+// and must not trip this — a character class is not a credential. Each pattern
+// below therefore requires a concrete run of key characters, which a regex
+// source never contains.
+const VENDOR_SECRET_SHAPES: { name: string; re: RegExp }[] = [
+  { name: "Stripe key", re: /\bsk_(?:live|test)_[A-Za-z0-9]{16,}/g },
+  { name: "GitHub token", re: /\bgh[pousr]_[A-Za-z0-9]{36,}/g },
+  { name: "GitHub fine-grained PAT", re: /\bgithub_pat_[A-Za-z0-9_]{30,}/g },
+  { name: "AWS access key id", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  { name: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9]{8,}-[A-Za-z0-9-]{8,}/g },
+  { name: "Google API key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
+  { name: "npm token", re: /\bnpm_[A-Za-z0-9]{36}\b/g },
+  // Header PLUS key material. A bare `-----BEGIN … PRIVATE KEY-----` with no
+  // body is not a credential — it is the delimiter, and it legitimately
+  // appears in this repo's detector fixtures and docs. Flagging it would make
+  // this check cry wolf, and a check that cries wolf gets disabled.
+  {
+    name: "PEM private key block",
+    re: /-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY-----[\r\n\s]+[A-Za-z0-9+/=][A-Za-z0-9+/=\r\n\s]{39,}/g,
+  },
+];
+
+describe("self-hygiene: vendor secret shapes", () => {
+  const files = trackedSourceFiles();
+
+  it("the detector can fail (assembled at runtime, never a literal here)", () => {
+    // Built from fragments so this file does not itself contain a key-shaped
+    // literal — the same discipline the check enforces on everyone else.
+    const stripe = ["sk", "live", "A".repeat(20)].join("_");
+    const aws = "AKIA" + "ABCDEFGHIJKLMNOP";
+    // Header + a synthetic body: the body is what makes it a credential.
+    const pem = "-----BEGIN " + "RSA " + "PRIVATE KEY-----\n" + "b".repeat(48) + "\n";
+    const hits = VENDOR_SECRET_SHAPES.filter(p => {
+      p.re.lastIndex = 0;
+      return p.re.test(`${stripe} ${aws} ${pem}`);
+    }).map(p => p.name);
+    assert.deepEqual(hits.sort(), ["AWS access key id", "PEM private key block", "Stripe key"]);
+  });
+
+  it("does not flag a regex SOURCE describing the same shape", () => {
+    // `secret-markers.ts` legitimately contains these as patterns. If this
+    // assertion ever fails, the check has become unusable in this repo and
+    // would be disabled — which is how a guard rots into decoration.
+    const patternSource = "gh[pousr]_[A-Za-z0-9]{36,255}|AKIA[0-9A-Z]{16}|sk_(live|test)_[A-Za-z0-9]+";
+    for (const p of VENDOR_SECRET_SHAPES) {
+      p.re.lastIndex = 0;
+      assert.equal(p.re.test(patternSource), false, `${p.name} matched a regex source`);
+    }
+  });
+
+  it("repo-aegis's own tracked source contains no vendor-shaped credential", () => {
+    const offenders: string[] = [];
+    for (const f of files) {
+      const text = read(f);
+      for (const { name, re } of VENDOR_SECRET_SHAPES) {
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text)) !== null) {
+          const line = text.slice(0, m.index).split("\n").length;
+          // Never echo the match itself — reporting position + family is
+          // enough to act on, and printing it would put the credential in
+          // CI logs and agent transcripts.
+          offenders.push(`${f}:${line} (${name})`);
+        }
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      `vendor-shaped credential literal(s) in tracked source:\n  ${offenders.join("\n  ")}`,
+    );
+  });
+});

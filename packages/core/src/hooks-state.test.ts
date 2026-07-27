@@ -232,6 +232,28 @@ describe("resolveHookState", () => {
     assert.deepEqual(state.shadowedRepoHooks, ["pre-commit"]);
   });
 
+  // `shadowedRepoHooks` is the raw observation; `bypassedRepoHooks` is the
+  // actionable subset. The generated scripts chain to a repo-local
+  // pre-commit/pre-push, so those still run and must NOT be reported as lost.
+  it("separates chained hook types (pre-commit/pre-push) from genuinely bypassed ones", () => {
+    const fx = makeFixture("chained-vs-bypassed");
+    const hooksDir = expectedHooksDir(fx);
+    writeCorrectHooks(hooksDir);
+    gitConfig(fx, ["--global", "core.hooksPath", hooksDir]);
+
+    const realHooks = join(fx.repoDir, ".git", "hooks");
+    mkdirSync(realHooks, { recursive: true });
+    for (const name of ["pre-commit", "pre-push", "commit-msg", "post-merge"]) {
+      const p = join(realHooks, name);
+      writeFileSync(p, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      chmodSync(p, 0o755);
+    }
+
+    const state = fx.run(() => resolveHookState(fx.repoDir));
+    assert.deepEqual(state.shadowedRepoHooks, ["commit-msg", "post-merge", "pre-commit", "pre-push"]);
+    assert.deepEqual(state.bypassedRepoHooks, ["commit-msg", "post-merge"]);
+  });
+
   it("git init's own .sample hooks are never reported as shadowed", () => {
     // Regression guard for the check above: git ships .git/hooks full
     // of *executable* .sample files (verified on this platform), so

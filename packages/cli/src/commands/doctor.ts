@@ -46,6 +46,8 @@ export interface DoctorRepoResult {
   ok: boolean;
   effectivePath: string | null;
   shadowedRepoHooks: string[];
+  /** Subset of the above that repo-aegis does not chain, i.e. genuinely never runs. */
+  bypassedRepoHooks: string[];
   /** True only when this run actually unset a local override (requires
    * `--fix --yes`, never set during a dry run). */
   fixed: boolean;
@@ -105,7 +107,11 @@ function unsetLocalHooksPath(cwd: string): boolean {
 }
 
 function isFailing(state: HookState): boolean {
-  return !state.ok || state.shadowedRepoHooks.length > 0;
+  // Report on genuinely-bypassed hooks only. A displaced `pre-commit` /
+  // `pre-push` is chained by the generated scripts and still runs, so
+  // failing on it flags a healthy repo forever — the "guard that fires
+  // when it shouldn't" failure mode this tool exists to remove.
+  return !state.ok || state.bypassedRepoHooks.length > 0;
 }
 
 /** True when a repo-local `core.hooksPath` is set and differs from the
@@ -191,12 +197,13 @@ export function doctor(opts: DoctorOptions): void {
         ok: state.ok,
         effectivePath: state.effectivePath,
         shadowedRepoHooks: state.shadowedRepoHooks,
+        bypassedRepoHooks: state.bypassedRepoHooks,
         fixed,
       });
     }
   }
 
-  const failed = results.filter(r => !r.ok || r.shadowedRepoHooks.length > 0).length;
+  const failed = results.filter(r => !r.ok || r.bypassedRepoHooks.length > 0).length;
 
   if (opts.json) {
     emitJson({
@@ -214,8 +221,8 @@ export function doctor(opts: DoctorOptions): void {
       for (const r of results) {
         const tag = r.fixed ? " [fixed]" : showWouldFix ? " [would fix]" : "";
         emitText(`  FAIL ${r.workingTree}  code=${r.code}${tag}`);
-        if (r.shadowedRepoHooks.length > 0) {
-          emitText(`       shadowed .git/hooks scripts: ${r.shadowedRepoHooks.join(", ")}`);
+        if (r.bypassedRepoHooks.length > 0) {
+          emitText(`       repo-local hooks that never run: ${r.bypassedRepoHooks.join(", ")}`);
         }
       }
       emitText(
