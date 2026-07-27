@@ -40,14 +40,24 @@ const REGISTRY_STUB = `\
 #   - PROJECT-CODENAME-EXAMPLE
 always_block: []
 
-engagements:
-  - id: example-customer
-    name: Example Customer
-    started: 2026-01-01
-    markers: []
-    notes: |
-      Replace this with a real engagement entry. See the design doc for marker
-      pattern conventions.
+# engagements example: uncomment and replace with your own entry.
+#
+# Deliberately commented out, exactly like always_block above. An engagement
+# id is auto-blocked as a literal in every repo that does not declare it (see
+# computeDenySet's self-marker rule), so shipping an ACTIVE example entry
+# would add a generic placeholder string to every new user's deny set on the
+# day they run \`init\` — flagging any file that happens to contain it,
+# including this project's own fixtures. An inert example cannot do that.
+#
+# engagements:
+#   - id: acme-2026-q1
+#     name: Acme Corp
+#     started: 2026-01-01
+#     markers:
+#       - acme-?corp[^a-zA-Z0-9]
+#     notes: |
+#       See the design doc for marker pattern conventions.
+engagements: []
 `;
 
 interface InitOptions extends OutputOptions {
@@ -546,9 +556,13 @@ export async function init(opts: InitOptions): Promise<void> {
   // Side-loaded via dynamic import to avoid a cycle (install-hooks.ts
   // doesn't import init, but init keeps the import out of the module
   // top-level so test suites that don't exercise this path stay fast).
+  // `failed` distinguishes "you told me not to" from "I tried and couldn't".
+  // Both leave the repo unprotected, but only the second is a problem the
+  // operator needs to act on, and reporting them with the same word is the
+  // ambiguity this whole release is about removing.
   type HooksResult =
     | { ran: true; hooksDir: string }
-    | { ran: false; reason: string };
+    | { ran: false; reason: string; failed?: boolean };
   let hooksResult: HooksResult = { ran: false, reason: "--no-with-hooks" };
   if (opts.withHooks !== false) {
     try {
@@ -557,14 +571,22 @@ export async function init(opts: InitOptions): Promise<void> {
         ...(opts.cwd !== undefined && { cwd: opts.cwd }),
         force: opts.force,
         silent: true,
+        // Hook installation must not be able to abort an otherwise-successful
+        // init. Since the v0.7 default flip this writes GLOBAL git config,
+        // which can legitimately be unwritable; before `throwOnError` existed
+        // that exited 2 and reported total failure for a partial one, with the
+        // home dir already scaffolded. Degrading to "hooks not installed, here
+        // is why" is safe now that `status`/`audit`/`doctor` check hook
+        // liveness — an uninstalled hook is no longer a silent gap.
+        throwOnError: true,
       });
       hooksResult = { ran: true, hooksDir: `${home}/hooks` };
     } catch (err) {
-      // installHooks calls process.exit via emitError on hard failures
-      // (NOT_GIT_REPO, FS_ERROR, HOOKS_PATH_CONFLICT). Catching here is
-      // best-effort: in practice the throw aborts the process, so we
-      // only see this branch on truly unexpected exceptions.
-      hooksResult = { ran: false, reason: `install-hooks failed: ${(err as Error).message}` };
+      hooksResult = {
+        ran: false,
+        reason: `install-hooks failed: ${(err as Error).message}`,
+        failed: true,
+      };
     }
   }
 
@@ -592,7 +614,11 @@ export async function init(opts: InitOptions): Promise<void> {
 
   if (!opts.json) {
     if (hooksResult.ran) emitText(`hooks: installed at ${hooksResult.hooksDir}`);
-    else emitText(`hooks: skipped (${hooksResult.reason})`);
+    else if (hooksResult.failed) {
+      emitText(`hooks: NOT INSTALLED — ${hooksResult.reason}`);
+      emitText(`       this repo is unprotected; fix the cause and run \`repo-aegis install hooks\``);
+      emitText(`       (or \`repo-aegis install hooks --local\` for this repo only)`);
+    } else emitText(`hooks: skipped (${hooksResult.reason})`);
     if (claudeResult.ran) emitText(`claude-md: installed at ${claudeResult.claudeHome}`);
     else emitText(`claude-md: skipped (${claudeResult.reason})`);
   }

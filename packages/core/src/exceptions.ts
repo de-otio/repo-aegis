@@ -121,6 +121,32 @@ export class LockTimeoutError extends Error {
   }
 }
 
+/**
+ * Raised when a git invocation a scanner depends on fails.
+ *
+ * Why this exists: a scanner that swallows a git failure and returns an
+ * empty hit list reports **clean** — the single worst outcome for a
+ * leak-prevention tool, because the caller (a hook, CI, an agent) reads
+ * "no hits" as "safe to push". Failing closed turns an unreadable repo,
+ * a bad revspec, or a missing `git` binary into a loud error instead of
+ * a false all-clear.
+ *
+ * The message deliberately carries only the git *subcommand* and exit
+ * status. It must never embed stderr, diff text, paths, or matched
+ * content: this error is rendered to stderr, JSON output, and the audit
+ * log, all of which are places a marker literal must not reach.
+ */
+export class GitCommandError extends Error {
+  readonly code = "GIT_ERROR" as const;
+  constructor(public subcommand: string, public exitStatus: number | null) {
+    super(
+      `git ${subcommand} failed (exit ${exitStatus ?? "unknown"}); ` +
+        `scan aborted rather than reporting clean`,
+    );
+    this.name = "GitCommandError";
+  }
+}
+
 export class CustomerCoupledNoEngagementError extends Error {
   readonly code = "CUSTOMER_COUPLED_NO_ENGAGEMENT" as const;
   constructor() {

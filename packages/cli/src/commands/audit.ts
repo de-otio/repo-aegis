@@ -3,7 +3,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import {
   computeDenySet,
   loadRegistry,
@@ -16,6 +16,11 @@ import {
   isPublicFacing,
   loadEgressPolicy,
   readCachedVisibility,
+  resolveHookState,
+  appendAuditRecord,
+  compileGlobs,
+  matchesCompiled,
+  ALWAYS_FILE_STEM,
   type RepoConfig,
   type DenySet,
   type ScanHit,
@@ -30,6 +35,7 @@ interface AuditOptions extends OutputOptions {
   lockfileCheck?: boolean;
   fixtureCheck?: boolean;
   remoteCheck?: boolean;
+  hooksCheck?: boolean;
   org?: string;
   published?: string;
   token?: string;
@@ -45,6 +51,28 @@ const ORG_CROSS_BORDER_CONSENT_ENV = "REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER";
 interface Finding {
   message: string;
   detail?: unknown;
+  /**
+   * Reported but does not fail the check. Currently exactly one thing:
+   * an `_always` (secret-shape) hit inside a path the deny set exempts.
+   *
+   * Why report it at all. `check` and the hooks skip the `_always` class
+   * inside `test/`, `fixtures/`, `*.test.*` and friends — a keypair there is
+   * a throwaway by construction, and firing on it is how a tool teaches
+   * people to reach for `--no-verify`. But an exemption nobody can see is an
+   * exemption nobody reviews. `audit` therefore runs the FULL pattern set and
+   * shows these, without gating on them: visible somewhere beats invisible
+   * everywhere.
+   *
+   * Engagement markers and `_private_infra` are never informational, at any
+   * path. A customer name or an internal host in a test fixture is exactly as
+   * much of a leak as one in `src/`.
+   */
+  informational?: boolean;
+}
+
+/** Findings that gate the check's `ok` — i.e. everything not informational. */
+function blocking(findings: readonly Finding[]): Finding[] {
+  return findings.filter(f => f.informational !== true);
 }
 
 interface CheckResult {
@@ -227,13 +255,52 @@ function listTrackedFiles(cwd: string): string[] {
   return r.stdout.split("\n").filter(Boolean);
 }
 
+/**
+ * Scan a cached file with the FULL pattern set — path exemptions off.
+ *
+ * `audit` is the surface that has to stay honest about what the everyday gate
+ * skips, so it never lets the deny set narrow itself by path. The exempt-path
+ * hits it finds are demoted to informational by {@link ExemptPathClassifier}
+ * instead, which keeps them on the page while keeping `audit`'s exit status in
+ * agreement with `check`.
+ */
 function scanLoadedFile(
   loaded: LoadedFile,
   denySet: DenySet,
   reveal: boolean,
 ): ScanHit[] {
   if (loaded.kind !== "ok" || loaded.text === undefined) return [];
-  return scanText(loaded.text, denySet, loaded.realPath, { revealMatches: reveal });
+  return scanText(loaded.text, denySet, loaded.realPath, {
+    revealMatches: reveal,
+    ignorePathExemptions: true,
+  });
+}
+
+/**
+ * Decides whether a hit falls inside a deny-set path exemption, so `audit`
+ * can demote it to informational.
+ *
+ * Compiles the glob list once per run. A `GlobTooBroadError` cannot surface
+ * here: `computeDenySet` already validated the same list and would have
+ * thrown before `audit` got a DenySet at all.
+ */
+class ExemptPathClassifier {
+  private readonly compiled: readonly RegExp[];
+  constructor(denySet: DenySet) {
+    this.compiled = compileGlobs(denySet.exemptPaths ?? []);
+  }
+
+  /**
+   * True when `relPath` (repo-relative, POSIX) is exempt AND the hit came
+   * from the exemptible class. The class test is the load-bearing half: a
+   * hit with no attribution, or one attributed to an engagement or to
+   * `_private_infra`, is never demoted.
+   */
+  isInformational(hit: ScanHit, relPath: string): boolean {
+    if (hit.engagement !== ALWAYS_FILE_STEM) return false;
+    if (this.compiled.length === 0) return false;
+    return matchesCompiled(relPath.split(sep).join("/"), this.compiled);
+  }
 }
 
 function checkMarkerScan(
@@ -242,6 +309,7 @@ function checkMarkerScan(
   denySet: DenySet,
   reveal: boolean,
   cache: FileCache,
+  exempt: ExemptPathClassifier,
 ): CheckResult {
   if (!repo.isGitRepo) {
     return { name: "marker-scan", ok: true, findings: [], skipped: true, skipReason: "not a git repo" };
@@ -257,13 +325,26 @@ function checkMarkerScan(
     if (loaded.kind !== "ok") continue;
     const hits = scanLoadedFile(loaded, denySet, reveal);
     for (const h of hits) {
+      // `f` comes from `git ls-files`, so it is already repo-relative POSIX.
+      const informational = exempt.isInformational(h, f);
       findings.push({
         message: `${f}:${h.line}:${h.column}`,
-        detail: { path: f, line: h.line, column: h.column, matchPreview: h.matchPreview },
+        detail: {
+          path: f,
+          line: h.line,
+          column: h.column,
+          matchPreview: h.matchPreview,
+          ...(informational && { exemptPath: true }),
+        },
+        ...(informational && { informational: true }),
       });
     }
   }
-  return { name: "marker-scan", ok: findings.length === 0, findings };
+  // Same demotion rule as the fixture check below, and for the same reason:
+  // if `audit` hard-failed on a hit that `check` deliberately skips, the two
+  // gates would contradict each other and the exemption would be useless to
+  // anyone running `audit` in CI.
+  return { name: "marker-scan", ok: blocking(findings).length === 0, findings };
 }
 
 function checkHistory(cwd: string, repo: RepoConfig, denySet: DenySet): CheckResult {
@@ -410,12 +491,19 @@ function findFixtureDirs(cwd: string): string[] {
   return out;
 }
 
+// The fixture check exists to scan exactly the directories the deny set's
+// path exemptions cover, which makes it the one place an exemption is visible.
+// It therefore runs the full pattern set (see scanLoadedFile) and demotes only
+// the exemptible class: `_always` hits inside an exempt path are reported but
+// do not fail the check, while engagement and `_private_infra` hits in a
+// fixture stay hard failures.
 function checkFixtures(
   cwd: string,
   repo: RepoConfig,
   denySet: DenySet,
   reveal: boolean,
   cache: FileCache,
+  exempt: ExemptPathClassifier,
 ): CheckResult {
   if (denySet.combinedRegex === "") {
     return {
@@ -456,15 +544,23 @@ function checkFixtures(
       const hits = scanLoadedFile(loaded, denySet, reveal);
       for (const h of hits) {
         const rel = relative(cwd, full);
+        const informational = exempt.isInformational(h, rel);
         findings.push({
           message: `${rel}:${h.line}:${h.column}`,
-          detail: { path: rel, line: h.line, column: h.column, matchPreview: h.matchPreview },
+          detail: {
+            path: rel,
+            line: h.line,
+            column: h.column,
+            matchPreview: h.matchPreview,
+            ...(informational && { exemptPath: true }),
+          },
+          ...(informational && { informational: true }),
         });
       }
     }
   }
   for (const d of dirs) recurse(d);
-  return { name: "fixtures", ok: findings.length === 0, findings };
+  return { name: "fixtures", ok: blocking(findings).length === 0, findings };
 }
 
 // Extract literal "seeds" from a regex pattern that GitHub code-search
@@ -783,7 +879,16 @@ function checkPublished(
         // — it can't, but defence-in-depth).
         let r;
         try {
-          r = scanFile(full, denySet, { revealMatches: reveal }, extractDir);
+          // Full pattern set, no path exemptions and no demotion: a
+          // published tarball is the last artefact anyone can inspect, and
+          // "it was in a fixture directory" is not a reason to let a secret
+          // shape ship to a registry.
+          r = scanFile(
+            full,
+            denySet,
+            { revealMatches: reveal, ignorePathExemptions: true },
+            extractDir,
+          );
         } catch {
           // OutsideWorkingTreeError or similar: skip this entry; the
           // archive-escape check above is the authoritative gate.
@@ -857,6 +962,43 @@ function checkRemote(cwd: string, repo: RepoConfig): CheckResult {
   return { name: "remote", ok: true, findings: [] };
 }
 
+// H2: a repo-local core.hooksPath pointing at an empty (or foreign)
+// directory silently disables every hook, and a hook that never runs
+// cannot report itself (see hooks-state.ts). `audit` is the gate, so
+// unlike `status` (which just reports), this check's failure is what
+// makes `audit` exit non-zero. `resolveHookState` collapses to a
+// single active problem code at a time, so there is at most one
+// finding here — its `detail.code` is the stable machine-readable
+// signal; `message` is the human-readable summary.
+function checkHooks(cwd: string, repo: RepoConfig): CheckResult {
+  if (!repo.isGitRepo) {
+    return { name: "hooks", ok: true, findings: [], skipped: true, skipReason: "not a git repo" };
+  }
+  const state = resolveHookState(cwd);
+  if (state.code === "HOOKS_OK") {
+    return { name: "hooks", ok: true, findings: [] };
+  }
+  return {
+    name: "hooks",
+    ok: false,
+    findings: [
+      {
+        message:
+          `git hooks are not active (${state.code}): effective path ` +
+          `${state.effectivePath ?? "<git-dir>/hooks"} (expected ${state.expectedPath}); ` +
+          `fix: ${state.fix}`,
+        detail: {
+          code: state.code,
+          fix: state.fix,
+          origin: state.origin,
+          effectivePath: state.effectivePath,
+          expectedPath: state.expectedPath,
+        },
+      },
+    ],
+  };
+}
+
 export async function audit(opts: AuditOptions): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
   const repo = readRepoConfig(cwd);
@@ -867,6 +1009,7 @@ export async function audit(opts: AuditOptions): Promise<void> {
   const runLockfile = opts.lockfileCheck !== false;
   const runFixture = opts.fixtureCheck !== false;
   const runRemote = opts.remoteCheck !== false;
+  const runHooks = opts.hooksCheck !== false;
   const runHistory = !!opts.history;
 
   // Single shared cache: if marker-scan, lockfile, and fixture-check
@@ -875,14 +1018,36 @@ export async function audit(opts: AuditOptions): Promise<void> {
   // cached buffer. The cache also short-circuits binary / oversize
   // decisions across checks.
   const cache = new FileCache(cwd);
+  const exempt = new ExemptPathClassifier(denySet);
 
   const results: CheckResult[] = [];
-  if (runMarker) results.push(checkMarkerScan(cwd, repo, denySet, reveal, cache));
+  if (runMarker) results.push(checkMarkerScan(cwd, repo, denySet, reveal, cache, exempt));
   if (runHistory) results.push(checkHistory(cwd, repo, denySet));
   if (runLockfile) results.push(checkRegistryEgress(cwd, repo, cache));
   if (runRemote) results.push(checkVisibility(repo));
-  if (runFixture) results.push(checkFixtures(cwd, repo, denySet, reveal, cache));
+  if (runFixture) results.push(checkFixtures(cwd, repo, denySet, reveal, cache, exempt));
   if (runRemote) results.push(checkRemote(cwd, repo));
+  if (runHooks) results.push(checkHooks(cwd, repo));
+
+  // H6: best-effort audit-log record of the observed hook state, so a
+  // regression gets a timestamp (the forensic gap that motivated this
+  // check in the first place). Independent of `--no-hooks-check` — that
+  // flag only controls whether a bad state fails the `audit` gate, not
+  // whether it gets observed. Off by default (audit-log itself); never
+  // breaks a user-facing command.
+  if (repo.isGitRepo) {
+    try {
+      const hookState = resolveHookState(cwd);
+      appendAuditRecord({
+        action: "observe-hooks",
+        cwd,
+        repo: cwd,
+        details: { code: hookState.code, ok: hookState.ok },
+      });
+    } catch {
+      /* audit log must not break user-facing ops */
+    }
+  }
 
   if (opts.org) {
     // Compliance gate: --org sends literal seeds derived from registry
@@ -942,6 +1107,12 @@ export async function audit(opts: AuditOptions): Promise<void> {
 
   const failedChecks = results.filter(c => !c.ok);
   const totalFindings = results.reduce((sum, c) => sum + c.findings.length, 0);
+  // Counted separately so "3 findings, exit 0" is self-explaining rather than
+  // looking like a bug in the exit-status logic.
+  const informationalFindings = results.reduce(
+    (sum, c) => sum + c.findings.filter(f => f.informational === true).length,
+    0,
+  );
 
   if (opts.json) {
     emitJson({
@@ -954,11 +1125,16 @@ export async function audit(opts: AuditOptions): Promise<void> {
         run: results.length,
         failed: failedChecks.length,
         totalFindings,
+        informationalFindings,
       },
       warnings: denySet.warnings,
     });
   } else {
-    emitText(`audit: ${results.length} check(s) run, ${failedChecks.length} failed, ${totalFindings} finding(s)`);
+    emitText(
+      `audit: ${results.length} check(s) run, ${failedChecks.length} failed, ` +
+        `${totalFindings} finding(s)` +
+        (informationalFindings > 0 ? `, ${informationalFindings} informational` : ""),
+    );
     for (const c of results) {
       if (c.skipped) {
         emitText(`  ${c.name}: skipped (${c.skipReason})`);
@@ -967,7 +1143,10 @@ export async function audit(opts: AuditOptions): Promise<void> {
       const status = c.ok ? "ok" : "fail";
       emitText(`  ${c.name}: ${status} (${c.findings.length} finding(s))`);
       for (const f of c.findings) {
-        emitText(`    - ${f.message}`);
+        // Marked inline: an unlabelled finding under an "ok" check reads as
+        // an inconsistency, and the label is what makes the exemption
+        // reviewable rather than merely present.
+        emitText(`    - ${f.message}${f.informational ? " [informational: exempt path]" : ""}`);
       }
     }
     for (const w of denySet.warnings) emitText(`  warning: ${w}`);

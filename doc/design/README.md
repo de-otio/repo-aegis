@@ -52,7 +52,7 @@ semver-major change and requires a design-doc PR.
 | `_always` representation                    | Top-level `always_block: string[]` in the registry YAML; modelled as `Registry { engagements: Engagement[]; alwaysBlock: string[] }`. No special-case engagement. |
 | Multi-engagement `allow`                    | Variadic. `allow customer-a customer-b` adds both. Same for `deny`.                                                                                              |
 | Universal CLI flags                         | Global. `--cwd`, `--json`, `--registry-path`, `--home`, `--no-color` apply to every subcommand uniformly.                                                        |
-| `check` no-flag default                     | Errors with exit 2. Exactly one of `--staged`, `--path`, `--range`, `--history` must be specified.                                                               |
+| `check` no-flag default                     | Errors with exit 2. Exactly one of `--staged`, `--path`, `--range`, `--push-ref`, `--history` must be specified. Any underlying git failure (diff/rev-list/merge-base/log) throws rather than reporting clean — fail-closed. |
 | `check --range`                             | Scans added lines in a commit range. Used by pre-push hook.                                                                                                       |
 | Render retention vs offboarding             | `render` writes for `isActive(e, retentionMonths=12)`. Engagements ended >12 months get pruned at next render. `--retention-months` overrides.                    |
 | `customer-coupled` without engagement       | Hard error from `check` (exit 2). The Bash hook script never bypasses; the user (or the agent on their behalf) must run `repo-aegis allow <id>` to declare intent. |
@@ -74,6 +74,10 @@ semver-major change and requires a design-doc PR.
 | Regex backend (validation)                  | Dual-mode. `re2` is an optionalDependency; when installed, patterns that compile cleanly under re2 are provably safe (linear-time evaluator). When unavailable or rejected (e.g. lookahead), falls back to the in-process time-budget heuristic. Reported in status JSON as `regexBackend`. The scanner itself still uses native `RegExp` because marker patterns may legitimately use lookahead. |
 | Operator audit log                          | Default OFF. JSONL records of every state-changing action to `~/.config/repo-aegis/state/audit.log`. Toggle with `repo-aegis audit-log on/off`. NEVER logs literal marker patterns — only structural metadata. |
 | Encrypted registry policy                   | Optional age encryption. `repo-aegis registry encrypt/decrypt`. `loadRegistry` refuses an encrypted-state registry with `RegistryEncryptedError`; auto-decrypt is deliberately not implemented. |
+| `check --push-ref`                          | Diff base for a ref the remote hasn't seen is computed via `git rev-list --boundary <ref> --not --remotes=<remote>` and scanned with the ordinary tree-diff path (`scanRange`'s machinery) — never `git log -p` (misses evil-merge content) and never `--diff-merges=first-parent` (re-presents already-pushed content as new). Zero boundaries ⇒ no diff spawned at all (`nothing-new`); several boundaries widen via `merge-base --octopus`, over-scanning rather than under-scanning; no remote-tracking refs at all ⇒ today's full-history behaviour, unchanged. `REPO_AEGIS_NEW_REF_FULL_SCAN=1` forces full-history. Any underlying git failure throws, never reports clean. |
+| `_always`-only path exemption asymmetry     | `alwaysBlockExemptPaths` narrows enforcement for `_always`-class (secret-shape) patterns only. Engagement markers and `_private_infra` are never path-exempt, at either config level, under any glob — a customer name in a test fixture is still a leak. `audit --fixture-check` always runs the full pattern set regardless of this key and demotes an exempt-path `_always` hit to an informational finding rather than dropping it, so an exemption stays visible on audit even when `check` doesn't block on it. |
+| `_always`-only, blob-keyed waivers           | `repo-aegis waive` accepts only `_always`-stem pattern ids — never engagement or `_private_infra` ids — because (1) waivers must never become a lever for weakening the customer-marker deny set, and (2) a committed pattern digest is an offline oracle for guessing its source literal, which is harmless for a generic `_always` shape and not for a customer-derived pattern. Keyed on `(patternId, blob sha)`, not path/line, so a waiver survives history rewrites and covers exactly the reviewed bytes — a new key landing in a new blob is never silently covered. |
+| Hook install: global by default, with chaining | `install hooks` writes global `core.hooksPath` unless `--local` is passed (flipped from repo-local default in 0.7.0; `init` inherits it). Because git consults exactly one hooks directory, the generated `pre-commit`/`pre-push` scripts chain to a repo's own pre-existing `.git/hooks/<name>` after the repo-aegis check runs, so a global install cannot silently disable a hook another tool installed directly into a repo. `install hooks --uninstall` clears both global and local scope (previously cleared whichever git found first — the same silent-shadowing failure mode, now fixed on the uninstall path too). |
 
 ## Architecture
 
@@ -83,9 +87,9 @@ de-otio/repo-aegis/                                  (public, GPL-3.0)
     ├── core/                @de-otio/repo-aegis-core
     │   └── library; no CLI; consumed by cli + scan + future surfaces
     ├── cli/                 @de-otio/repo-aegis
-    │   └── developer CLI: allow / deny / status / check / render /
-    │       engagements / init / install / classify / audit /
-    │       context / markers / hook scan-after-write
+    │   └── developer CLI: allow / deny / status / check / waive /
+    │       render / engagements / init / install / classify / audit /
+    │       doctor / context / markers / hook scan-after-write
     └── scan/                @de-otio/repo-aegis-scan
         └── centralised sweep: run / validate-queries /
             encrypt-query / decrypt-query
@@ -143,6 +147,13 @@ output redaction.
 
 `.git/config` per repo holds `repo-aegis.class` and one or more
 `repo-aegis.engagement` keys.
+
+A checked-in `.repo-aegis.yml` at the repo root may also carry a
+`waivers:` key (blob-keyed, reviewed-benign `_always` waivers — see
+`repo-aegis waive`) and an `alwaysBlockExemptPaths:` key (path globs
+narrowing `_always` enforcement, additive on top of the registry's own
+`alwaysBlockExemptPaths:` — see [configuration.md](../configuration.md)).
+Both are optional and additive; neither bumps `schemaVersion`.
 
 `init` and `render` enforce chmod values; existing files with weaker
 permissions are tightened with a stderr note.
@@ -239,6 +250,8 @@ interface ScanHit {
   engagement?: string;  // marker-file stem the pattern came from (engagement id or "_always")
   matchPreview: string; // redacted by default: e.g. "ac***N=14" or "[redacted]"
                         // NEVER the literal matched string unless --verbose
+  patternId?: string;   // "<stem>/<12-hex>" — sha256(pattern).slice(0,12); the `repo-aegis waive` handle
+  blob?: string;        // post-image git blob sha (40 hex); diff-mode hits only
 }
 ```
 
@@ -266,8 +279,23 @@ Stable, contract-bearing surface:
 - Deny set: `computeDenySet`, `ALWAYS_FILE_STEM`, types
   `DenySet`/`DenySetFile`/`DenySetOptions`.
 - Scan: `scanText`, `scanFile`, `scanStagedDiff`, `scanRange`,
-  `scanHistory`, `ALLOW_COMMENT`, types `ScanHit`/`SkippedFile`/
-  `HistoryHit`/`ScanOptions`.
+  `scanHistory`, `resolveNewRefBase`, `scanNewRef`, `ALLOW_COMMENT`,
+  types `ScanHit`/`SkippedFile`/`HistoryHit`/`ScanOptions`/
+  `NewRefBase`/`NewRefTarget`/`NewRefScanResult`.
+- Remote reachability: `remoteReachableCommits` (the "already public"
+  downgrade's reachable-commit set, computed once per run).
+- Path globs: `compileGlob`, `compileGlobs`, `matchesCompiled`,
+  `matchesAnyGlob`, `GlobTooBroadError` — the `*`/`?`/`**` compiler
+  backing `alwaysBlockExemptPaths`.
+- Waivers: `WAIVABLE_STEM`, `patternId`, `assertWaivable`,
+  `parseWaivers`, `isWaived`, `expiredWaivers`,
+  `NotWaivableError`/`WaiverParseError`, type `Waiver`.
+- Known non-secrets: `isKnownNonSecret` — callers MUST scope this to
+  `_always` matches only.
+- Hook liveness: `resolveHookState`, `PRE_COMMIT_SCRIPT`,
+  `PRE_PUSH_SCRIPT`, `HOOK_SCRIPTS`, `hookScriptDigest`, types
+  `HookState`/`HookScriptState`/`HookStateOrigin`/`HookStateCode`/
+  `HookName`.
 - Render: `renderMarkers`, `MARKER_FORMAT_VERSION`, types
   `RenderOptions`/`RenderedFile`/`RenderResult`.
 - Redaction: `redactMatch`, `revealMatch`, type `RedactionMode`.
@@ -278,7 +306,10 @@ Stable, contract-bearing surface:
   `RegistryEncryptedError`, `NotAGitRepoError`, `AmbiguousQueryError`,
   `EngagementNotFoundError`, `PatternValidationError`,
   `OutsideWorkingTreeError`, `LockTimeoutError`,
-  `CustomerCoupledNoEngagementError`.
+  `CustomerCoupledNoEngagementError`, `GitCommandError` (thrown, never
+  swallowed, on any underlying git failure inside a scan — see the
+  `check` no-flag-default row's fail-closed language and the P0
+  changelog entry).
 - Exit codes: `EXIT_OK = 0`, `EXIT_HIT = 1`, `EXIT_USAGE = 2`.
 - Locking: `withLock`, `withLockSync`, type `LockOptions`.
 - Schema helper: `formatZodError`.
@@ -330,7 +361,8 @@ Stable across all subcommands. Never reused.
 | Cross-border data transfer (`audit --org`)          | Org seed substrings redact through GitHub Code Search. Required `--accept-cross-border` flag (or `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1`) before any seed leaves the box. Maximum query cap (default 30, `--max-queries`).               |
 | Zip-slip on `audit --published`                     | Post-extraction `realpathSync` check that every entry resolves under the temp dir; refuse otherwise.                                                                                                                                    |
 | Flag injection via PostToolUse `file_path`          | The hook subcommand `repo-aegis hook scan-after-write` parses stdin JSON in Node and calls `check({ path })` directly — there is no shell to inject through, and the file_path is never tokenised as a CLI argument.                     |
-| Compliance trail                                    | Audit log (when enabled) writes JSONL records of every state-changing action (`allow`, `deny`, `engagements add/end/remove`, `classify --apply`, `init`, `install hooks/claude-md/gitignore/ci`, `render`, `registry encrypt/decrypt`) to `~/.config/repo-aegis/state/audit.log` (chmod 600, append-only, rotates at 10 MiB). Records carry engagement ids and structural metadata only — never literal markers or matched substrings. Off by default; opt in via `repo-aegis audit-log on`. |
+| Compliance trail                                    | Audit log (when enabled) writes JSONL records of every state-changing action (`allow`, `deny`, `engagements add/end/remove`, `classify --apply`, `init`, `install hooks/claude-md/gitignore/ci`, `render`, `registry encrypt/decrypt`, `waive`, `doctor --fix`) to `~/.config/repo-aegis/state/audit.log` (chmod 600, append-only, rotates at 10 MiB). Records carry engagement ids and structural metadata only — never literal markers or matched substrings. Off by default; opt in via `repo-aegis audit-log on`. |
+| Waiver mechanism reconstructing `--no-verify`       | `.repo-aegis.yml` is a file inside the repo, so a blocked coding agent could otherwise write itself a waiver and retry — the cheapest possible unblock. Three independent controls, all required: (1) the PreToolUse `hook check-write` gate refuses an agent `Write`/`Edit`/`MultiEdit` to `.repo-aegis.yml` outright; (2) `repo-aegis waive` itself refuses to run when stdin is not a TTY, unless a human explicitly sets `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`; (3) `check` always reports `waived: N` (JSON: the full list), on every run, so an applied waiver is never silent. Only `_always`-stem patterns are waivable at all — see the locked-decisions row above for why. |
 
 ## Test strategy
 

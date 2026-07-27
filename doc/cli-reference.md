@@ -56,6 +56,8 @@ type ScanHitJson = {
   column: number;       // 1-indexed
   matchPreview: string; // redacted by default
   engagement?: string;  // marker-file stem the matched pattern came from
+  patternId?: string;   // "<stem>/<12-hex>" — sha256(pattern).slice(0,12); copy-paste into `waive`
+  blob?: string;        // post-image git blob sha (40 hex), diff modes only
 };
 ```
 
@@ -112,6 +114,19 @@ installed and active for pattern validation, or `"in-process"`
 otherwise. See the design doc's locked-decisions row "Regex backend
 (validation)" for what the field means.
 
+Text output also gains a `hooks:` line reporting whether the
+pre-commit/pre-push gate is actually wired up for this repo (JSON:
+a `hooks` object, the same shape `audit`'s hooks check and `doctor`
+use — see [`repo-aegis doctor`](#repo-aegis-doctor) for the full code
+list). `status` does not exit non-zero over a hooks problem — the line
+is the signal; `audit` (or `doctor`, fleet-wide) is the gate:
+
+```
+hooks:    FAIL — core.hooksPath is <repo>/.git/hooks (local override),
+          expected ~/.config/repo-aegis/hooks; no pre-commit found.
+          fix: git config --unset core.hooksPath
+```
+
 To inspect leak-context strict mode, run `repo-aegis context status --json`
 (it is not embedded in `status`).
 
@@ -126,24 +141,77 @@ calls it via `hook scan-after-write`.
 | `--staged` | — | scan the staged diff |
 | `--path <path>` | — | scan a single file (canonicalised; symlinks resolved; rejected if outside cwd) |
 | `--range <revspec>` | — | scan added lines in a commit range, e.g. `<remote>..<local>` |
+| `--push-ref <ref>` | — | scan a ref the remote does not have yet, relative to `refs/remotes/<remote>/*` (used by pre-push for new branches and tags) |
+| `--remote <name>` | `origin` | with `--push-ref`: remote whose tracking refs bound the scan |
 | `--history` | — | scan full git history with `git log -G <pattern>` per pattern |
 | `--since <revspec>` | — | with `--history`: lower-bound revspec |
 | `--max-file-bytes <n>` | 1048576 (1 MiB) | per-file size cap; larger files reported as `skipped: too-large` |
 | `--ignore-allowlist-comments` | off | do not respect `repo-aegis: allow` comments (audit-grade strict) |
+| `--ignore-waivers` | off | do not apply waivers from `.repo-aegis.yml`; report every `_always` finding even if a reviewed-benign waiver exists (audit-grade strict) |
 | `--verbose` | off | reveal literal matched markers (NEVER pass from hooks) |
 
 Behaviour:
-1. Validate exactly one of `--staged`/`--path`/`--range`/`--history`
-   is given. Else exit 2.
+1. Validate exactly one of `--staged`/`--path`/`--range`/`--push-ref`/
+   `--history` is given. Else exit 2.
 2. Read repo config; compute deny set.
 3. **Fail-closed**: if class = `customer-coupled` and engagements is
-   empty → exit 2 with the "must declare engagement" error.
+   empty → exit 2 with the "must declare engagement" error. Any
+   underlying `git` failure (diff, rev-list, merge-base, log) also
+   exits 2 rather than being swallowed as "clean" — a scan that
+   couldn't run is not the same thing as a clean scan.
 4. Empty deny set → exit 0 with `{ "hits": [], "status": "no-deny-set" }`.
 5. Scan per the chosen mode. Filter binary/oversize per
-   `SkippedFile` reason.
-6. Hits printed redacted (position + engagement; never literal).
-7. `scratch` class → exit 0 even with hits (advisory).
-8. Otherwise exit 1 if any hits.
+   `SkippedFile` reason. Renamed/copied files (`R`/`C` diff entries)
+   are scanned like any other changed file in `--staged`/`--range`/
+   `--push-ref` mode — a rename is not a way to skip the scanner.
+6. Waivers (see [`repo-aegis waive`](#repo-aegis-waive)) are applied
+   next: a hit matching an unexpired `(patternId, blob)` waiver in
+   `.repo-aegis.yml` is removed from `hits` and counted in `waived`
+   instead. `--ignore-waivers` skips this step entirely.
+7. Path exemptions (see [`alwaysBlockExemptPaths`](configuration.md))
+   narrow an exempt path's matching to non-`_always` patterns only —
+   never applied to `--ignore-allowlist-comments`-style audit modes,
+   which is what `audit --fixture-check` uses to keep exemptions
+   visible.
+8. Hits printed redacted (position + engagement; never literal).
+9. `scratch` class → exit 0 even with hits (advisory).
+10. Otherwise exit 1 if any (non-waived, non-downgraded) hits.
+
+### `check --push-ref` (new-ref / release-tag scanning)
+
+Resolves a diff base from commits the given `--remote`'s tracking refs
+don't already reach (`git rev-list --boundary <ref> --not
+--remotes=<remote>`), then scans that range with the same machinery as
+`--range`:
+
+| Situation | `rangeMode` in JSON | Scan |
+|---|---|---|
+| nothing in `<ref>` that `<remote>`'s tracking refs lack | `nothing-new` | none — the release-tag case |
+| exactly one boundary commit | `incremental` | diff from that boundary |
+| several boundaries (e.g. a merge of two already-pushed lines) | `incremental-widened` | diff from an octopus merge-base of all boundaries — a superset, so it can only over-scan |
+| no boundary, or no `refs/remotes/<remote>/*` at all | `full-history` | the old full-history behaviour, unchanged |
+
+Text output for the `nothing-new` case: `repo-aegis: nothing new to
+scan (ref already reachable from <remote>)`. JSON gains `mode:
+"push-ref"` and `rangeMode` (plus `base` when one was computed).
+
+**Escape hatch:** `REPO_AEGIS_NEW_REF_FULL_SCAN=1` forces `full-history`
+unconditionally, bypassing the boundary logic above.
+
+**Residual risk.** `--remotes=<remote>` reads *remote-tracking* refs,
+which a hook never refreshes (no network in a hook, by design).
+Stale-*behind* tracking refs cause over-scanning — safe. Stale-*ahead*
+tracking refs (possible after a server-side force-push or branch
+deletion) could under-scan; the env var above is the manual override,
+and server-side push protection is the only non-advisory backstop.
+
+### Waivers in `check` output
+
+`check` always prints `repo-aegis: waived: N` (text mode) and a
+`waived: ScanHitJson[]` array plus `expiredWaivers: []` (JSON), on
+every run, even when both are empty — a waiver must never disappear a
+finding silently. See [`repo-aegis waive`](#repo-aegis-waive) below for
+how a waiver is minted.
 
 JSON (clean):
 ```json
@@ -172,6 +240,65 @@ JSON (with hits):
   "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
   "advisory": false,
   "warnings": []
+}
+```
+
+### `repo-aegis waive`
+
+Mints, lists, or removes a reviewed-benign waiver for an `_always`
+finding — the narrow, auditable alternative to `--no-verify` when a
+`check` hit is a genuine false positive (e.g. a fixture private key
+that isn't covered by an `alwaysBlockExemptPaths` glob).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--pattern <id>` | — | pattern id to waive, e.g. `_always/9f2c1a4b7de0` (copy from a `check` finding's `patternId`) |
+| `--blob <sha>` | — | git blob sha (40 hex) the waiver covers — the post-image blob of the finding |
+| `--reason <text>` | — | why this finding is reviewed-benign (required to add a waiver) |
+| `--approver <name>` | — | who reviewed and approved this waiver (required to add a waiver) |
+| `--expires <date>` | none | optional `YYYY-MM-DD` after which the waiver no longer applies |
+| `--list` | off | list existing waivers instead of adding one |
+| `--remove` | off | remove a waiver instead of adding one (requires `--pattern` and `--blob`) |
+
+Behaviour:
+1. **Only `_always`-stem patterns are waivable.** `waive` on an
+   engagement or `_private_infra` pattern id is refused — waivers
+   exist to unblock a benign secret-*shape* match, never to weaken the
+   customer-marker deny set. A pattern id's digest is only safe to
+   commit to a public repo when it's derived from a generic `_always`
+   shape in the first place; an engagement-marker digest would be an
+   offline oracle for guessing the literal it came from.
+2. **Refuses to run when stdin is not a TTY**, unless
+   `REPO_AEGIS_WAIVE_NONINTERACTIVE=1` is set. A waiver is a human
+   decision; this stops a hook, script, or coding agent from minting
+   one on its own behalf — which would otherwise reconstruct
+   `git push --no-verify` with extra steps. Combined with two other
+   controls: `hook check-write` (the PreToolUse gate) refuses an agent
+   `Write`/`Edit`/`MultiEdit` to `.repo-aegis.yml` outright, and
+   `check` always reports `waived: N` so a waiver is never silent (see
+   above). All three are required; none alone is sufficient.
+3. Writes under `.repo-aegis.yml`'s `waivers:` key (see
+   [configuration.md](configuration.md)), preserving comments and key
+   order via a structured YAML edit — not a parse/re-stringify
+   round-trip. Appends an audit-log record.
+4. Re-running `waive` for the same `(pattern, blob)` upserts the entry
+   (new reason/approver/date/expiry) rather than erroring or
+   duplicating.
+5. An expired waiver (per `--expires`) no longer applies; `check`
+   reports it separately (`expiredWaivers`) and warns, rather than
+   treating it as absent silently.
+
+JSON (`waive --pattern ... --blob ...`):
+```json
+{
+  "action": "waive-add",
+  "pattern": "_always/9f2c1a4b7de0",
+  "blob": "3f7a1e2c9b8d0f4a6e5c7b1d2a3f4e5d6c7b8a9f",
+  "reason": "fixture keypair used only in scan.test.ts",
+  "approver": "jdoe",
+  "date": "2026-07-26",
+  "expires": null,
+  "updated": false
 }
 ```
 
@@ -278,18 +405,39 @@ Steps:
 
 ### `repo-aegis install hooks`
 
-Writes `pre-commit` and `pre-push` to
-`~/.config/repo-aegis/hooks/` and points `core.hooksPath` of the
-current repo at that directory.
+Writes `pre-commit` and `pre-push` to `~/.config/repo-aegis/hooks/`
+and points `core.hooksPath` at that directory.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--force` | off | overwrite a conflicting `core.hooksPath` |
-| `--uninstall` | off | unset `core.hooksPath` and remove pre-commit/pre-push |
+| `--global` | **on** (since 0.7) | write `core.hooksPath` in the global git config, covering every repo on the machine |
+| `--local` | off | write `core.hooksPath` in this repo's local git config only (the pre-0.7 default) |
+| `--unset-local` | off | clear a repo-local `core.hooksPath` that would shadow the global value just installed, in one step |
+| `--force` | off | overwrite a conflicting `core.hooksPath` in the scope being written |
+| `--uninstall` | off | unset `core.hooksPath` in **both** global and local scope, and remove pre-commit/pre-push from `<home>/hooks` |
 
-Conflict resolution: if `core.hooksPath` is already set to a
-*different* path, the install refuses without `--force` and prints
-the prior value verbatim so the user can save it before replacing.
+Conflict resolution: if the scope being written already has a
+*different* `core.hooksPath`, the install refuses without `--force`
+and prints the prior value verbatim so the user can save it before
+replacing.
+
+**Global by default, since 0.7.0.** Coverage used to be per-repo and
+opt-in at install time. Because git consults exactly one hooks
+directory, setting a *global* `core.hooksPath` would otherwise
+silently disable any `.git/hooks` script another tool installed
+directly into a given repo (an older husky setup, a hand-written
+hook, a `prepare` script). To avoid trading one silent-coverage bug
+for another, the generated `pre-commit`/`pre-push` scripts **chain**:
+after the repo-aegis check runs, they `exec` the repo's own
+`.git/hooks/<name>` if one exists and is executable (and isn't the
+file that was just run, guarding against a global path that happens
+to point at `.git/hooks` itself). A repo-aegis hit still blocks
+regardless of what the chained hook returns. `init` inherits the
+global default, so a fresh `init` now arms hook coverage
+machine-wide, not just for the repo it ran in.
+
+Use `repo-aegis doctor` (below) to sweep a machine's repos for hooks
+that are unset, foreign, stale, or shadowed by this mechanism.
 
 ### `repo-aegis install gitignore`
 
@@ -330,6 +478,58 @@ stdin JSON natively, so `jq` is no longer required.
 |---|---|---|
 | `--claude-home <dir>` | `~/.claude` | override default location |
 | `--dry-run` / `--print-only` | off | preview the would-be settings.json + CLAUDE.md additions |
+
+### `repo-aegis doctor`
+
+Fleet-wide sweep: verifies repo-aegis hooks are actually live across
+every repo under a set of scan roots, not just the one you happen to
+be sitting in. A single-repo `status`/`audit` run can't see a
+machine-wide regression — the same `core.hooksPath` mistake that's
+invisible in one repo (looks fine or looks broken, no comparison
+point) turns up immediately when four sibling repos are healthy and a
+fifth silently isn't.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--scan-root <path...>` | platform default roots | one or more directories to walk for git working trees (repeatable) |
+| `--fix` | off | report (dry-run) or, with `--yes`, unset a repo-local `core.hooksPath` override that's shadowing a healthy global value |
+| `--yes` | off | apply `--fix` changes; without it, `--fix` only reports what it would do |
+
+Behaviour:
+1. Walk every working tree under the scan roots; resolve each one's
+   hook state (same `resolveHookState` used by `status`/`audit`).
+2. Report every repo whose effective hooks path isn't repo-aegis's,
+   **and** every repo whose own `.git/hooks` scripts are being
+   shadowed by a `core.hooksPath` (global or local) — see
+   [`install hooks`](#repo-aegis-install-hooks)'s chaining note.
+3. `--fix` only ever unsets a repo-*local* override that differs from
+   the expected repo-aegis path; it never touches a global value.
+   Before mutating, it records the prior local value and the repo's
+   config file mtime to the audit log — forensics captured before the
+   repair, not after, so a regression stays datable.
+4. Exit 1 if any repo fails (post-fix, if `--fix --yes` ran).
+
+JSON:
+```json
+{
+  "action": "doctor",
+  "dryRun": true,
+  "roots": ["/Users/you/repos"],
+  "results": [
+    { "workingTree": "/Users/you/repos/some-repo", "code": "HOOKS_PATH_LOCAL_OVERRIDE",
+      "ok": false, "effectivePath": "/Users/you/repos/some-repo/.git/hooks",
+      "shadowedRepoHooks": [], "fixed": false }
+  ],
+  "summary": { "scanned": 12, "failed": 1, "fixed": 0 }
+}
+```
+
+This — not a per-repo GitHub Actions step — is the answer to "wire
+hook-liveness checking into CI": a GitHub-hosted runner never has
+repo-aegis hooks installed, so a per-repo `hooks` check would fail
+every run and get muted (`audit --no-hooks-check` is what the
+generated CI workflow sets instead). `doctor` is a developer-machine
+sweep, run on demand or on a schedule.
 
 ---
 
@@ -372,6 +572,7 @@ a tarball / VSIX.
 | `--no-lockfile-check` | — | skip package-lock.json non-public-registry check |
 | `--no-fixture-check` | — | skip fixture/__fixtures__/testdata directory scan |
 | `--no-remote-check` | — | skip the remote-vs-class consistency check |
+| `--no-hooks-check` | — | skip the git-hooks liveness check (`core.hooksPath` wiring); the generated CI workflow always sets this — hooks are never installed on a CI runner |
 | `--org <org>` | — | run a one-shot GitHub code-search sweep against this org (needs token) |
 | `--published <pkg-or-tarball>` | — | scan a packed npm tarball, VSIX bundle, or npm package name |
 | `--token <env-var>` | `GH_TOKEN` | env var holding the GitHub token for `--org` |
@@ -384,14 +585,26 @@ Each check returns:
 {
   name: string;
   ok: boolean;
-  findings: { message: string; detail?: unknown }[];
+  findings: { message: string; detail?: unknown; informational?: boolean }[];
   skipped?: boolean;
   skipReason?: string;
 }
 ```
 
 `audit` exit code: 1 if any check fails, 2 on usage error, 0 if
-clean.
+clean. A finding with `informational: true` is reported but never
+gates `ok` — see the fixture-check note immediately below and, for
+the hooks check, [`repo-aegis doctor`](#repo-aegis-doctor).
+
+**Fixture check keeps path exemptions honest.** `--no-fixture-check`
+skips the whole check; when it runs, it always scans with the **full**
+pattern set — `alwaysBlockExemptPaths` globs (see
+[configuration.md](configuration.md)) are never applied here. An
+`_always` hit that falls inside an exempt path is demoted to
+`informational: true` rather than dropped, so an exemption stays
+visible in `audit` output even though `check` doesn't block on it.
+Engagement and `_private_infra` hits are never informational, at any
+path.
 
 ### `audit --org` notes
 

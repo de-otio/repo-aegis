@@ -7,12 +7,14 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
+  readFileSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutputAsync, withEnvAsync } from "../_test-utils.js";
 import { audit, __testCreateFileCache } from "./audit.js";
+import { installHooks } from "./install-hooks.js";
 
 let tmp: string;
 
@@ -72,8 +74,12 @@ describe("audit — marker-scan", () => {
     const home = setupHome("marker-clean", { _always: ["zzznever-appears-zzz"] });
     const repo = makeRepo("marker-clean-repo", { class: "private-strict" });
     commit(repo, { "README.md": "hello" }, "init");
+    // hooksCheck: false — this fixture is a bare `git init`, never
+    // `install hooks`; the H2 hooks check is unrelated to what this
+    // test exercises and would otherwise fail every fresh fixture,
+    // exactly as it would on a CI runner (see install-ci.ts).
     const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
-      captureOutputAsync(() => audit({ cwd: repo, json: true })),
+      captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false })),
     );
     assert.equal(result.exitCode, undefined, "should not exit when clean");
     const j = JSON.parse(result.stdout) as {
@@ -123,8 +129,10 @@ describe("audit — registry-egress", () => {
     const home = setupHome("egress-private-repo", {});
     const repo = makeRepo("egress-private-repo", { class: "private-strict" });
     commit(repo, { "package-lock.json": lockWith(PRIVATE) }, "init");
+    // hooksCheck: false — unrelated to registry-egress; see comment on
+    // the marker-scan "passes when clean" test above.
     const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
-      captureOutputAsync(() => audit({ cwd: repo, json: true })),
+      captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false })),
     );
     assert.equal(result.exitCode ?? 0, 0);
     const j = JSON.parse(result.stdout) as { checks: { name: string; skipped?: boolean }[] };
@@ -216,22 +224,156 @@ describe("audit — visibility reconciliation", () => {
   });
 });
 
+interface AuditJson {
+  checks: {
+    name: string;
+    ok: boolean;
+    skipped?: boolean;
+    findings: { message: string; informational?: boolean }[];
+  }[];
+  summary: { informationalFindings?: number };
+}
+
 describe("audit — fixtures", () => {
-  it("finds marker hits in __fixtures__ directory", async () => {
+  it("reports an `_always` hit in __fixtures__ INFORMATIONALLY (seen, not fatal)", async () => {
+    // `__fixtures__` is one of the paths the deny set exempts for the
+    // `_always` class, so `check` and the hooks skip it. `audit` still runs
+    // the full pattern set and shows the hit — an exemption nobody can see
+    // is an exemption nobody reviews — but it does not flip `ok`, so `audit`
+    // and `check` agree on exit status.
     const home = setupHome("fixtures-hit", { _always: ["fixture-leak"] });
     const repo = makeRepo("fixtures-hit-repo", { class: "private-strict" });
     mkdirSync(join(repo, "__fixtures__"), { recursive: true });
     writeFileSync(join(repo, "__fixtures__", "data.txt"), "fixture-leak embedded here");
     const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
-      captureOutputAsync(() => audit({ cwd: repo, json: true })),
+      captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false })),
+    );
+    assert.equal(result.exitCode, undefined, "an exempt-path _always hit must not fail audit");
+    const j = JSON.parse(result.stdout) as AuditJson;
+    const c = j.checks.find(c => c.name === "fixtures");
+    assert.equal(c!.ok, true);
+    const f = c!.findings.find(f => f.message.includes("data.txt"));
+    assert.ok(f, "the hit is still reported");
+    assert.equal(f!.informational, true);
+    assert.equal(j.summary.informationalFindings, 1);
+  });
+
+  it("an ENGAGEMENT marker in __fixtures__ is still a hard failure", async () => {
+    // The load-bearing asymmetry: a secret shape in a fixture is a throwaway
+    // by construction, a customer name in a fixture is a leak either way.
+    const home = setupHome("fixtures-eng", {
+      _always: ["zzznever-appears-zzz"],
+      "customer-z": ["zetaquadrant"],
+    });
+    const repo = makeRepo("fixtures-eng-repo", { class: "private-strict" });
+    mkdirSync(join(repo, "__fixtures__"), { recursive: true });
+    writeFileSync(join(repo, "__fixtures__", "data.txt"), "owned by zetaquadrant");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false })),
     );
     assert.equal(result.exitCode, 1);
-    const j = JSON.parse(result.stdout) as {
-      checks: { name: string; ok: boolean; findings: { message: string }[] }[];
-    };
+    const j = JSON.parse(result.stdout) as AuditJson;
     const c = j.checks.find(c => c.name === "fixtures");
     assert.equal(c!.ok, false);
-    assert.ok(c!.findings.some(f => f.message.includes("data.txt")));
+    assert.ok(c!.findings.every(f => f.informational !== true));
+  });
+
+  it("a `_private_infra` host in a fixture of a public-facing repo is still a hard failure", async () => {
+    // A private registry host in a public repo's fixture is exactly the leak
+    // the private-infra class exists to stop; the fixture directory is not a
+    // safe home for it the way it is for a throwaway keypair.
+    const home = setupHome("fixtures-infra", {
+      _always: ["zzznever-appears-zzz"],
+      _private_infra: ["registry\\.internal\\.invalid"],
+    });
+    const repo = makeRepo("fixtures-infra-repo", { class: "public-eligible" });
+    mkdirSync(join(repo, "fixtures"), { recursive: true });
+    writeFileSync(
+      join(repo, "fixtures", "npmrc.sample"),
+      "registry=https://registry.internal.invalid/",
+    );
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        audit({ cwd: repo, json: true, hooksCheck: false, remoteCheck: false }),
+      ),
+    );
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as AuditJson;
+    const c = j.checks.find(c => c.name === "fixtures");
+    assert.equal(c!.ok, false);
+    assert.ok(c!.findings.every(f => f.informational !== true));
+  });
+
+  it("marker-scan applies the same demotion to a tracked *.test.* file", async () => {
+    // marker-scan sweeps every tracked file, including test sources that the
+    // deny set exempts for the `_always` class. Hard-failing there would make
+    // `audit` contradict `check` and render the exemption useless in CI.
+    const home = setupHome("markerscan-exempt", {
+      _always: ["fixture-leak"],
+      "customer-z": ["zetaquadrant"],
+    });
+    const repo = makeRepo("markerscan-exempt-repo", { class: "private-strict" });
+    commit(repo, { "thing.test.ts": "const k = 'fixture-leak';\n" }, "init");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false })),
+    );
+    assert.equal(result.exitCode, undefined);
+    const j = JSON.parse(result.stdout) as AuditJson;
+    const c = j.checks.find(c => c.name === "marker-scan");
+    assert.equal(c!.ok, true);
+    const f = c!.findings.find(f => f.message.includes("thing.test.ts"));
+    assert.ok(f, "still reported");
+    assert.equal(f!.informational, true);
+  });
+
+  it("marker-scan does NOT demote an engagement marker in a *.test.* file", async () => {
+    const home = setupHome("markerscan-eng", {
+      _always: ["zzznever-appears-zzz"],
+      "customer-z": ["zetaquadrant"],
+    });
+    const repo = makeRepo("markerscan-eng-repo", { class: "private-strict" });
+    commit(repo, { "thing.test.ts": "// owned by zetaquadrant\n" }, "init");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false })),
+    );
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as AuditJson;
+    const c = j.checks.find(c => c.name === "marker-scan");
+    assert.equal(c!.ok, false);
+  });
+
+  it("an `_always` hit OUTSIDE an exempt path stays a hard failure", async () => {
+    const home = setupHome("fixtures-src", { _always: ["fixture-leak"] });
+    const repo = makeRepo("fixtures-src-repo", { class: "private-strict" });
+    commit(repo, { "prod.ts": "const k = 'fixture-leak';\n" }, "init");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false })),
+    );
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as AuditJson;
+    const c = j.checks.find(c => c.name === "marker-scan");
+    assert.equal(c!.ok, false);
+    assert.ok(c!.findings.every(f => f.informational !== true));
+  });
+
+  it("no exemptions at all when the registry declares an empty list", async () => {
+    // `alwaysBlockExemptPaths: []` means "exempt nothing" — distinct from the
+    // key being absent, which selects the built-in default set.
+    const home = setupHome("fixtures-noexempt", { _always: ["fixture-leak"] });
+    writeFileSync(
+      join(home, "engagements.yaml"),
+      "schemaVersion: 2\nalwaysBlockExemptPaths: []\nengagements: []\n",
+    );
+    const repo = makeRepo("fixtures-noexempt-repo", { class: "private-strict" });
+    mkdirSync(join(repo, "__fixtures__"), { recursive: true });
+    writeFileSync(join(repo, "__fixtures__", "data.txt"), "fixture-leak embedded here");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false })),
+    );
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as AuditJson;
+    const c = j.checks.find(c => c.name === "fixtures");
+    assert.equal(c!.ok, false);
   });
 
   it("skips when no fixture dirs are found", async () => {
@@ -386,8 +528,13 @@ describe("audit — published", () => {
       ["-czf", tgz, "-C", stage, "package/ok.txt", "../escape.txt"],
     );
 
+    // hooksCheck: false — this test's branching relies on `exitCode`
+    // as a clean signal of "did the published-archive check fail";
+    // the H2 hooks check (which this fresh fixture never installs)
+    // would otherwise pollute that signal on every run regardless of
+    // tar's own zip-slip handling.
     const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
-      captureOutputAsync(() => audit({ cwd: repo, json: true, published: tgz })),
+      captureOutputAsync(() => audit({ cwd: repo, json: true, published: tgz, hooksCheck: false })),
     );
 
     if (result.exitCode !== 1) {
@@ -752,6 +899,128 @@ describe("audit — file-read deduplication", () => {
   });
 });
 
+// H2/H6: a repo-local core.hooksPath pointing at an empty (or foreign)
+// directory silently disables scanning, and a hook that never runs
+// cannot report itself — `audit` is the gate that must catch this.
+//
+// SAFETY: `resolveHookState` reads whichever core.hooksPath git
+// resolves to, including the *global* scope — and this machine's real
+// ~/.gitconfig has repo-aegis's own core.hooksPath set globally (this
+// repo is itself repo-aegis-managed). Every test below runs via
+// `withHooksIsolationAsync`, which redirects GIT_CONFIG_GLOBAL/SYSTEM
+// to /dev/null in addition to REPO_AEGIS_HOME, so results depend only
+// on this fixture's local git config — never the developer's real
+// global config. Same pattern as packages/core/src/hooks-state.test.ts.
+async function withHooksIsolationAsync<T>(home: string, fn: () => Promise<T> | T): Promise<T> {
+  const overrides: Record<string, string> = {
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    REPO_AEGIS_HOME: home,
+  };
+  const prev: Record<string, string | undefined> = {};
+  for (const k of Object.keys(overrides)) {
+    prev[k] = process.env[k];
+    process.env[k] = overrides[k]!;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const k of Object.keys(overrides)) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+}
+
+describe("audit — hooks (H2)", () => {
+  it("healthy hooks install -> hooks check passes, exit 0", async () => {
+    const home = setupHome("hooks-ok", {});
+    const repo = makeRepo("hooks-ok-repo", { class: "private-strict" });
+    await withHooksIsolationAsync(home, async () => {
+      // `local: true` is required: the default is now a GLOBAL write, and the
+      // isolation helper points GIT_CONFIG_GLOBAL at /dev/null, which git
+      // cannot lock. Local scope yields the same healthy effective state.
+      installHooks({ cwd: repo, silent: true, local: true });
+      const result = await captureOutputAsync(() => audit({ cwd: repo, json: true }));
+      assert.equal(result.exitCode, undefined);
+      const j = JSON.parse(result.stdout) as { checks: { name: string; ok: boolean }[] };
+      const c = j.checks.find(c => c.name === "hooks");
+      assert.ok(c, "expected a hooks check in the results");
+      assert.equal(c!.ok, true);
+    });
+  });
+
+  it("local core.hooksPath pointing at an empty foreign dir -> hooks check fails, exit 1", async () => {
+    const home = setupHome("hooks-foreign", {});
+    const repo = makeRepo("hooks-foreign-repo", { class: "private-strict" });
+    const foreignDir = join(tmp, "audit-hooks-foreign-empty");
+    mkdirSync(foreignDir, { recursive: true });
+    await withHooksIsolationAsync(home, async () => {
+      execFileSync("git", ["config", "core.hooksPath", foreignDir], { cwd: repo });
+      const result = await captureOutputAsync(() => audit({ cwd: repo, json: true }));
+      assert.equal(result.exitCode, 1);
+      const j = JSON.parse(result.stdout) as {
+        checks: { name: string; ok: boolean; findings: { detail?: { code?: string } }[] }[];
+      };
+      const c = j.checks.find(c => c.name === "hooks");
+      assert.ok(c, "expected a hooks check in the results");
+      assert.equal(c!.ok, false);
+      // No global core.hooksPath is visible in this isolated fixture
+      // (only a repo-local override to a bare dir), so there is no
+      // "correctly configured global" being shadowed —
+      // HOOKS_PATH_FOREIGN, not HOOKS_PATH_LOCAL_OVERRIDE. See
+      // hooks-state.ts for the distinction.
+      assert.ok(c!.findings.some(f => f.detail?.code === "HOOKS_PATH_FOREIGN"));
+    });
+  });
+
+  it("--no-hooks-check suppresses the hooks check entirely", async () => {
+    const home = setupHome("hooks-disabled", {});
+    const repo = makeRepo("hooks-disabled-repo", { class: "private-strict" });
+    const foreignDir = join(tmp, "audit-hooks-disabled-empty");
+    mkdirSync(foreignDir, { recursive: true });
+    await withHooksIsolationAsync(home, async () => {
+      execFileSync("git", ["config", "core.hooksPath", foreignDir], { cwd: repo });
+      const result = await captureOutputAsync(() =>
+        audit({ cwd: repo, json: true, hooksCheck: false }),
+      );
+      const j = JSON.parse(result.stdout) as { checks: { name: string }[] };
+      assert.ok(!j.checks.some(c => c.name === "hooks"));
+      // Nothing else in this fixture fails, so with hooks suppressed
+      // the run is clean — confirms the flag actually removes the
+      // check rather than just marking it ok.
+      assert.equal(result.exitCode, undefined);
+    });
+  });
+
+  it("[H6] appends an observe-hooks audit record when audit-log is enabled, independent of --no-hooks-check", async () => {
+    const home = setupHome("hooks-auditlog", {});
+    // Enable audit-log directly via its on-disk config shape
+    // (state/audit-log.json), mirroring what `repo-aegis audit-log on`
+    // writes, without depending on that command's implementation.
+    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    const repo = makeRepo("hooks-auditlog-repo", { class: "private-strict" });
+    await withHooksIsolationAsync(home, async () => {
+      // hooksCheck: false deliberately: H6's observation is independent
+      // of whether the check gates the run, so this also proves the
+      // record still gets written when the check itself is disabled.
+      await captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false }));
+
+      const logPath = join(home, "state", "audit.log");
+      const lines = readFileSync(logPath, "utf8").trim().split("\n");
+      const records = lines.map(
+        l => JSON.parse(l) as { action: string; details?: { code?: string; ok?: boolean } },
+      );
+      const rec = records.find(r => r.action === "observe-hooks");
+      assert.ok(rec, "expected an observe-hooks record in the audit log");
+      // Isolated fixture: core.hooksPath is unset in every visible scope.
+      assert.equal(rec!.details?.code, "HOOKS_PATH_UNSET");
+      assert.equal(rec!.details?.ok, false);
+    });
+  });
+});
+
 describe("audit — composite", () => {
   it("exits 0 when all enabled checks pass", async () => {
     const home = setupHome("all-clean", { _always: ["zzz-never-appears-zzz"] });
@@ -760,8 +1029,12 @@ describe("audit — composite", () => {
       remote: "git@github.com:test/repo.git",
     });
     commit(repo, { "README.md": "nothing-suspicious" }, "init");
+    // hooksCheck: false — this fixture is a bare `git init`, so H2's
+    // hooks-liveness check would fail here even though nothing this
+    // test cares about is wrong; see the H2 hooks describe block below
+    // for that check's own coverage.
     const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
-      captureOutputAsync(() => audit({ cwd: repo, json: true })),
+      captureOutputAsync(() => audit({ cwd: repo, json: true, hooksCheck: false })),
     );
     assert.equal(result.exitCode, undefined);
     const j = JSON.parse(result.stdout) as {

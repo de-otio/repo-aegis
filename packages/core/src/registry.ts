@@ -56,6 +56,18 @@ export interface Registry {
    */
   privateInfra?: string[];
   /**
+   * Path globs inside which the `_always` marker class is not enforced.
+   * Engagement markers and `_private_infra` are never exempted — see the
+   * schema comment for why that asymmetry is load-bearing.
+   *
+   * Unlike every other optional list on this interface, this one is NOT
+   * defaulted to `[]` by `loadRegistry`: absent means "use the built-in
+   * default list", `[]` means "exempt nothing", and collapsing the two would
+   * silently turn an explicit opt-out into the default set (or vice versa).
+   * {@link computeDenySet} resolves the distinction.
+   */
+  alwaysBlockExemptPaths?: string[];
+  /**
    * Schema version of the on-disk registry. Defaults to 1 when the YAML has
    * no `schemaVersion:` field (legacy). Readers refuse versions
    * greater than {@link MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION}. Optional in
@@ -163,6 +175,11 @@ export function loadRegistry(path: string = registryPath()): Registry {
     // `isHostAllowed` compares by exact equality.
     publicRegistries: (validated.publicRegistries ?? []).map(h => h.toLowerCase()),
     privateInfra: validated.privateInfra ?? [],
+    // Conditional spread, not `?? []`: the absent/empty distinction decides
+    // between "built-in default exemptions" and "no exemptions at all".
+    ...(validated.alwaysBlockExemptPaths !== undefined && {
+      alwaysBlockExemptPaths: validated.alwaysBlockExemptPaths,
+    }),
     schemaVersion,
   };
 }

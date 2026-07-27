@@ -27,11 +27,25 @@ export interface RepoConfig {
   classFromOverride?: boolean;
   /** True when engagements came from a checked-in `.repo-aegis.yml`. */
   engagementsFromOverride?: boolean;
+  /**
+   * Extra `_always`-only path exemptions declared by this repo's
+   * `.repo-aegis.yml`. **Additive** to the machine-level registry list, never
+   * subtractive, and never applicable to engagement or `_private_infra`
+   * patterns — see the schema comment for the asymmetry.
+   *
+   * Deliberately NOT mirrored into git config the way `class` and
+   * `engagements` are: a path exemption is a property of the source tree
+   * (where the fixtures live), not of one clone, so the checked-in file is the
+   * only sensible home for it and there is no per-clone override to reconcile.
+   */
+  alwaysBlockExemptPaths?: string[];
 }
 
 export interface RepoOverride {
   class?: RepoClass;
   engagements?: string[];
+  /** See {@link RepoConfig.alwaysBlockExemptPaths}. */
+  alwaysBlockExemptPaths?: string[];
 }
 
 export const OVERRIDE_FILENAME = ".repo-aegis.yml";
@@ -86,6 +100,9 @@ function loadOverride(cwd: string): { override: RepoOverride; path: string } | n
   const out: RepoOverride = {};
   if (validated.class !== undefined) out.class = validated.class;
   if (validated.engagements !== undefined) out.engagements = validated.engagements;
+  if (validated.alwaysBlockExemptPaths !== undefined) {
+    out.alwaysBlockExemptPaths = validated.alwaysBlockExemptPaths;
+  }
   return { override: out, path };
 }
 
@@ -129,6 +146,9 @@ export function readRepoConfig(cwd: string = process.cwd()): RepoConfig {
       engagements: override.engagements ?? [],
       ...(override.class !== undefined && { classFromOverride: true }),
       ...(override.engagements !== undefined && { engagementsFromOverride: true }),
+      ...(override.alwaysBlockExemptPaths !== undefined && {
+        alwaysBlockExemptPaths: override.alwaysBlockExemptPaths,
+      }),
     };
   }
 
@@ -174,6 +194,11 @@ export function readRepoConfig(cwd: string = process.cwd()): RepoConfig {
     engagements,
     ...(classFromOverride && { classFromOverride: true }),
     ...(engagementsFromOverride && { engagementsFromOverride: true }),
+    // No git-config counterpart to reconcile (see the interface comment): the
+    // checked-in file is the only source, so this is a straight pass-through.
+    ...(override.alwaysBlockExemptPaths !== undefined && {
+      alwaysBlockExemptPaths: override.alwaysBlockExemptPaths,
+    }),
   };
 }
 

@@ -6,7 +6,21 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanText, scanFile, scanStagedDiff, scanRange, scanHistory } from "./scan.js";
+import {
+  scanText,
+  scanTextDetailed,
+  scanFile,
+  scanStagedDiff,
+  scanRange,
+  scanHistory,
+  scanDiffText,
+  resolveNewRefBase,
+  scanNewRef,
+  EMPTY_TREE_SHA,
+} from "./scan.js";
+import { GitCommandError } from "./exceptions.js";
+import { GlobTooBroadError } from "./globs.js";
+import { patternId } from "./waivers.js";
 import type { DenySet } from "./deny-set.js";
 import type { RepoConfig } from "./repo.js";
 
@@ -536,6 +550,369 @@ describe("scanHistory", () => {
   });
 });
 
+/**
+ * Regression suite for the `--diff-filter=ACM` → `ACMR` fix.
+ *
+ * `ACM` dropped rename entries while git's rename detection stayed on by
+ * default, so moving a file and adding a marker in the same change made
+ * the marker invisible to both hooks. Every test in this block fails
+ * (0 hits instead of 1) if the filter loses its `R`.
+ */
+describe("diff filter covers renames", () => {
+  /**
+   * Rename detection is similarity-based: git only emits an `R` entry
+   * when the post-image is close enough to the pre-image. A two-line
+   * file that gains a line falls *under* the 50% threshold and is
+   * reported as add+delete — which the old `ACM` filter caught by
+   * accident. These tests therefore need a body substantial enough
+   * that git genuinely classifies the change as a rename, and each one
+   * asserts that premise before asserting the hit.
+   */
+  const renameableBody =
+    Array.from({ length: 40 }, (_, i) => `stable line ${i}`).join("\n") + "\n";
+
+  function assertGitSawARename(dir: string): void {
+    const nameStatus = execFileSync("git", ["diff", "--cached", "--name-status"], {
+      cwd: dir,
+      encoding: "utf8",
+    });
+    assert.match(
+      nameStatus,
+      /^R/m,
+      `test premise broken: git did not detect a rename\n${nameStatus}`,
+    );
+  }
+
+  it("flags a marker appended in the same staged change as a git mv", () => {
+    const dir = join(tmp, "filter-staged-rename-modify");
+    gitInit(dir);
+    commit(dir, { "a.txt": renameableBody }, "init");
+    execFileSync("git", ["mv", "a.txt", "b.txt"], { cwd: dir });
+    writeFileSync(join(dir, "b.txt"), renameableBody + "renamed-leak-marker\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    assertGitSawARename(dir);
+    const r = scanStagedDiff(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["renamed-leak-marker"]),
+    );
+    assert.equal(
+      r.hits.length,
+      1,
+      "rename+modify must be scanned; --diff-filter must include R",
+    );
+  });
+
+  it("flags a marker appended in the same committed change as a git mv", () => {
+    const dir = join(tmp, "filter-range-rename-modify");
+    gitInit(dir);
+    const a = commit(dir, { "a.txt": renameableBody }, "init");
+    execFileSync("git", ["mv", "a.txt", "b.txt"], { cwd: dir });
+    writeFileSync(join(dir, "b.txt"), renameableBody + "renamed-range-marker\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    assertGitSawARename(dir);
+    execFileSync("git", ["commit", "-q", "-m", "move and leak"], { cwd: dir });
+    const b = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).trim();
+    const r = scanRange(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["renamed-range-marker"]),
+      `${a}..${b}`,
+    );
+    assert.equal(r.hits.length, 1, "rename+modify in a range must be scanned");
+  });
+
+  it("scans a copied file (arrives as an addition without copy detection)", () => {
+    const dir = join(tmp, "filter-copy");
+    gitInit(dir);
+    commit(dir, { "orig.txt": "shared body\n" }, "init");
+    writeFileSync(join(dir, "copy.txt"), "shared body\ncopied-leak-marker\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    const r = scanStagedDiff(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["copied-leak-marker"]),
+    );
+    assert.equal(r.hits.length, 1);
+  });
+
+  it("does NOT flag a deleted file's content (D stays excluded)", () => {
+    const dir = join(tmp, "filter-delete");
+    gitInit(dir);
+    commit(dir, { "gone.txt": "deleted-only-marker\n" }, "init");
+    execFileSync("git", ["rm", "-q", "gone.txt"], { cwd: dir });
+    const r = scanStagedDiff(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["deleted-only-marker"]),
+    );
+    assert.equal(r.hits.length, 0, "removing content cannot leak it");
+  });
+});
+
+/**
+ * Fail-closed behaviour. A scanner that answers "clean" because git
+ * failed is worse than one that answers nothing, so every git failure
+ * must surface as a GitCommandError rather than an empty hit list.
+ */
+describe("git failures fail closed", () => {
+  it("scanHistory throws GitCommandError instead of reporting clean", () => {
+    const dir = join(tmp, "fail-history");
+    gitInit(dir);
+    commit(dir, { "f.txt": "boring\n" }, "init");
+    let thrown: unknown;
+    try {
+      scanHistory(makeRepoConfig(dir), denySetWithPatterns(["some-marker"]), {
+        since: "no-such-ref-at-all",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof GitCommandError, "must throw, not return []");
+    assert.equal(thrown.code, "GIT_ERROR");
+    assert.equal(thrown.subcommand, "log");
+  });
+
+  it("scanRange throws GitCommandError on an invalid range", () => {
+    const dir = join(tmp, "fail-range");
+    gitInit(dir);
+    commit(dir, { "f.txt": "boring\n" }, "init");
+    assert.throws(
+      () => scanRange(makeRepoConfig(dir), denySetWithPatterns(["m"]), "nope..alsonope"),
+      (err: unknown) =>
+        err instanceof GitCommandError && err.code === "GIT_ERROR" && err.subcommand === "diff",
+    );
+  });
+
+  it("the error message leaks neither pattern nor git stderr", () => {
+    const dir = join(tmp, "fail-noleak");
+    gitInit(dir);
+    commit(dir, { "f.txt": "boring\n" }, "init");
+    // A pattern distinctive enough that any echo of it is unmistakable.
+    const pattern = "zzq-distinctive-pattern";
+    let msg = "";
+    try {
+      scanHistory(makeRepoConfig(dir), denySetWithPatterns([pattern]), {
+        since: "no-such-ref-at-all",
+      });
+    } catch (err) {
+      msg = (err as Error).message;
+    }
+    assert.ok(msg.length > 0, "expected a thrown error");
+    assert.ok(!msg.includes("zzq-distinctive"), `message echoed the pattern: ${msg}`);
+    // git's own stderr for a bad revspec names the revspec; the message
+    // must be built from the subcommand and status only.
+    assert.ok(!msg.includes("no-such-ref-at-all"), `message embedded git stderr: ${msg}`);
+  });
+});
+
+/**
+ * Path and blob attribution on diff-mode hits. Before this, a hit from
+ * `--staged` or `--range` carried only line/column and the CLI printed
+ * `<staged>` for the location.
+ */
+describe("diff hits carry path and blob", () => {
+  it("attributes each hit in a multi-file staged diff to its own file", () => {
+    const dir = join(tmp, "path-multifile");
+    gitInit(dir);
+    commit(dir, { "one.txt": "x\n", "two.txt": "y\n" }, "init");
+    writeFileSync(join(dir, "one.txt"), "x\nmulti-marker-one\n");
+    writeFileSync(join(dir, "two.txt"), "y\nmulti-marker-two\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    const r = scanStagedDiff(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["multi-marker-one", "multi-marker-two"]),
+      { revealMatches: true },
+    );
+    assert.equal(r.hits.length, 2);
+    const byPath = new Map(r.hits.map(h => [h.path, h.matchPreview]));
+    assert.equal(byPath.get("one.txt"), "multi-marker-one");
+    assert.equal(byPath.get("two.txt"), "multi-marker-two");
+  });
+
+  it("reports the post-rename path for a rename+modify hit", () => {
+    const dir = join(tmp, "path-rename");
+    gitInit(dir);
+    // Body large enough for git to classify this as a rename rather
+    // than add+delete (see the diff-filter suite for why that matters).
+    const body = Array.from({ length: 40 }, (_, i) => `stable line ${i}`).join("\n") + "\n";
+    commit(dir, { "before.txt": body }, "init");
+    execFileSync("git", ["mv", "before.txt", "after.txt"], { cwd: dir });
+    writeFileSync(join(dir, "after.txt"), body + "post-rename-marker\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    const r = scanStagedDiff(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["post-rename-marker"]),
+    );
+    assert.equal(r.hits.length, 1);
+    assert.equal(r.hits[0]!.path, "after.txt", "path must be the post-image path");
+  });
+
+  it("blob equals the staged post-image object and is a full-length sha", () => {
+    const dir = join(tmp, "path-blob");
+    gitInit(dir);
+    commit(dir, { "f.txt": "x\n" }, "init");
+    writeFileSync(join(dir, "f.txt"), "x\nblob-check-marker\n");
+    execFileSync("git", ["add", "f.txt"], { cwd: dir });
+    const expected = execFileSync("git", ["rev-parse", ":f.txt"], {
+      cwd: dir,
+      encoding: "utf8",
+    }).trim();
+    const r = scanStagedDiff(makeRepoConfig(dir), denySetWithPatterns(["blob-check-marker"]));
+    assert.equal(r.hits.length, 1);
+    // Full length, not the 7-12 char abbreviation git prints by default
+    // — this is what `--full-index` buys.
+    assert.match(r.hits[0]!.blob ?? "", /^[0-9a-f]{40}$|^[0-9a-f]{64}$/);
+    assert.equal(r.hits[0]!.blob, expected);
+  });
+
+  it("reports a non-ASCII path unquoted and unescaped", () => {
+    const dir = join(tmp, "path-non-ascii");
+    gitInit(dir);
+    const name = "grüße-日本語.txt";
+    commit(dir, { "seed.txt": "x\n" }, "init");
+    writeFileSync(join(dir, name), "unicode-path-marker\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    const r = scanStagedDiff(makeRepoConfig(dir), denySetWithPatterns(["unicode-path-marker"]));
+    assert.equal(r.hits.length, 1);
+    const got = r.hits[0]!.path ?? "";
+    // The point of `-c core.quotePath=false`: no `"…\303\274…"` form.
+    assert.ok(!got.includes("\\"), `path was octal-escaped: ${got}`);
+    assert.ok(!got.startsWith('"'), `path was quoted: ${got}`);
+    // Compare NFC-normalised: some filesystems hand back decomposed
+    // forms, which is not what this test is about.
+    assert.equal(got.normalize("NFC"), name.normalize("NFC"));
+  });
+
+  it("produces no hits and no path for a binary file", () => {
+    const dir = join(tmp, "path-binary");
+    gitInit(dir);
+    commit(dir, { "seed.txt": "x\n" }, "init");
+    // NUL byte makes git treat it as binary; the marker bytes are
+    // present but git emits a "Binary files differ" stanza with no
+    // chunk, so the parser never enters content state.
+    writeFileSync(join(dir, "blob.bin"), Buffer.from("\0binary-marker\0", "binary"));
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    const r = scanStagedDiff(makeRepoConfig(dir), denySetWithPatterns(["binary-marker"]));
+    assert.equal(r.hits.length, 0);
+  });
+});
+
+/**
+ * Parser-level tests against hand-written diff text — the cases that are
+ * awkward or impossible to provoke through a real repo, including the
+ * malformed inputs the streaming parser must not mis-attribute.
+ */
+describe("scanDiffText parser edge cases", () => {
+  const ds = denySetWithPatterns(["parser-edge-marker"]);
+
+  it("ignores content lines that appear before any chunk header", () => {
+    const diff = [
+      "diff --git a/f.txt b/f.txt",
+      "index " + "0".repeat(40) + ".." + "1".repeat(40) + " 100644",
+      "--- a/f.txt",
+      "+++ b/f.txt",
+      "+parser-edge-marker", // malformed: no @@ preceding it
+      "",
+    ].join("\n");
+    assert.deepEqual(scanDiffText(diff, ds), []);
+  });
+
+  it("does not attribute a hit to a deleted post-image", () => {
+    const diff = [
+      "diff --git a/gone.txt b/gone.txt",
+      "deleted file mode 100644",
+      "index " + "1".repeat(40) + ".." + "0".repeat(40),
+      "--- a/gone.txt",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "+parser-edge-marker", // malformed for a deletion, but survivable
+      "",
+    ].join("\n");
+    assert.deepEqual(scanDiffText(diff, ds), []);
+  });
+
+  it("does not carry a previous stanza's path or blob into the next", () => {
+    const blobA = "a".repeat(40);
+    const diff = [
+      "diff --git a/first.txt b/first.txt",
+      `index ${"0".repeat(40)}..${blobA} 100644`,
+      "--- a/first.txt",
+      "+++ b/first.txt",
+      "@@ -0,0 +1 @@",
+      "+parser-edge-marker",
+      // Second stanza has no index line at all (mode-only change shape),
+      // so blob must go back to unset rather than reuse the first.
+      "diff --git a/second.txt b/second.txt",
+      "--- a/second.txt",
+      "+++ b/second.txt",
+      "@@ -0,0 +1 @@",
+      "+parser-edge-marker",
+      "",
+    ].join("\n");
+    const hits = scanDiffText(diff, ds);
+    assert.equal(hits.length, 2);
+    assert.deepEqual(
+      hits.map(h => [h.path, h.blob]),
+      [
+        ["first.txt", blobA],
+        ["second.txt", undefined],
+      ],
+    );
+  });
+
+  it("treats rename-stanza headers as headers, taking the path from +++", () => {
+    const diff = [
+      "diff --git a/old-name.txt b/new-name.txt",
+      "similarity index 87%",
+      "rename from old-name.txt",
+      "rename to new-name.txt",
+      `index ${"1".repeat(40)}..${"2".repeat(40)} 100644`,
+      "--- a/old-name.txt",
+      "+++ b/new-name.txt",
+      "@@ -1,0 +2 @@ context",
+      "+parser-edge-marker",
+      "",
+    ].join("\n");
+    const hits = scanDiffText(diff, ds);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.path, "new-name.txt");
+    assert.equal(hits[0]!.line, 1, "header lines must not consume virtual line numbers");
+  });
+
+  it("rejects an abbreviated index sha rather than reporting a partial blob", () => {
+    const diff = [
+      "diff --git a/f.txt b/f.txt",
+      "index 1234567..89abcde 100644", // no --full-index
+      "--- a/f.txt",
+      "+++ b/f.txt",
+      "@@ -0,0 +1 @@",
+      "+parser-edge-marker",
+      "",
+    ].join("\n");
+    const hits = scanDiffText(diff, ds);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.blob, undefined);
+  });
+
+  it("unquotes a C-quoted path", () => {
+    const diff = [
+      'diff --git "a/we\\"ird.txt" "b/we\\"ird.txt"',
+      "--- \"a/we\\\"ird.txt\"",
+      "+++ \"b/we\\\"ird.txt\"",
+      "@@ -0,0 +1 @@",
+      "+parser-edge-marker",
+      "",
+    ].join("\n");
+    const hits = scanDiffText(diff, ds);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.path, 'we"ird.txt');
+  });
+
+  it("returns nothing for an empty diff", () => {
+    assert.deepEqual(scanDiffText("", ds), []);
+  });
+});
+
 describe("scanRange streaming", () => {
   it("handles a multi-MB diff without OOM (streaming, not buffered whole)", () => {
     // Build a synthetic diff several MB in size by committing many
@@ -576,5 +953,609 @@ describe("scanRange streaming", () => {
       `${a}..${b}`,
     );
     assert.equal(r.hits.length, 1, "marker buried in MB of additions must still be found");
+  });
+});
+
+/**
+ * New-ref scanning (`resolveNewRefBase` / `scanNewRef`).
+ *
+ * Every repo here gets a **real local bare remote** and a real `git
+ * push`, so `refs/remotes/origin/*` genuinely exist. That is the whole
+ * point: the behaviour under test is "what do the remote-tracking refs
+ * already reach", and a fixture that fakes those refs would test the
+ * fake. Markers are obvious nonsense strings.
+ */
+function gitInitWithRemote(name: string): string {
+  const dir = join(tmp, name);
+  const remote = join(tmp, `${name}-remote.git`);
+  mkdirSync(remote, { recursive: true });
+  execFileSync("git", ["init", "--bare", "-q", remote]);
+  gitInit(dir);
+  execFileSync("git", ["remote", "add", "origin", remote], { cwd: dir });
+  return dir;
+}
+
+/** Push refs to the local bare remote, updating `refs/remotes/origin/*`. */
+function push(dir: string, ...refs: string[]): void {
+  execFileSync("git", ["push", "-q", "origin", ...refs], { cwd: dir });
+}
+
+function git(dir: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+}
+
+/** Run `fn` with an env var set, restoring the previous value after. */
+function withEnv<T>(name: string, value: string | undefined, fn: () => T): T {
+  const prev = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env[name];
+    else process.env[name] = prev;
+  }
+}
+
+const ORIGIN = { remote: "origin" } as const;
+
+describe("resolveNewRefBase", () => {
+  it("reports nothing-new for a tag on an already-pushed commit", () => {
+    // The live incident: a release tag adds no commits, so the old
+    // empty-tree fallback re-scanned all of history and blocked on a
+    // benign historical match.
+    const dir = gitInitWithRemote("newref-tag");
+    commit(dir, { "f.txt": "zzq-historic-marker\n" }, "init");
+    push(dir, "main");
+    git(dir, "tag", "v1");
+
+    const r = resolveNewRefBase(makeRepoConfig(dir), { ref: "refs/tags/v1", ...ORIGIN });
+    assert.equal(r.mode, "nothing-new");
+    // No base means no range, means `git diff` is never spawned at all.
+    assert.equal(r.base, undefined);
+  });
+
+  it("reports nothing-new for an ANNOTATED tag (a tag object, not a commit)", () => {
+    const dir = gitInitWithRemote("newref-annotated");
+    commit(dir, { "f.txt": "zzq-historic-marker\n" }, "init");
+    push(dir, "main");
+    git(dir, "tag", "-a", "v1", "-m", "release");
+
+    const r = resolveNewRefBase(makeRepoConfig(dir), { ref: "refs/tags/v1", ...ORIGIN });
+    assert.equal(r.mode, "nothing-new", "rev-list must peel the tag object to its commit");
+    assert.equal(r.base, undefined);
+  });
+
+  it("reports incremental with the pushed tip as base when one commit is new", () => {
+    const dir = gitInitWithRemote("newref-incremental");
+    commit(dir, { "f.txt": "seed\n" }, "init");
+    push(dir, "main");
+    const pushedTip = git(dir, "rev-parse", "HEAD");
+    commit(dir, { "f.txt": "seed\nmore\n" }, "second");
+
+    const r = resolveNewRefBase(makeRepoConfig(dir), { ref: "refs/heads/main", ...ORIGIN });
+    assert.equal(r.mode, "incremental");
+    assert.equal(r.base, pushedTip);
+  });
+
+  it("widens to the octopus merge-base when several boundaries exist", () => {
+    const dir = gitInitWithRemote("newref-widened");
+    commit(dir, { "f.txt": "seed\n" }, "init");
+    const forkPoint = git(dir, "rev-parse", "HEAD");
+    git(dir, "checkout", "-q", "-b", "line-a");
+    commit(dir, { "a.txt": "a\n" }, "a");
+    git(dir, "checkout", "-q", "main");
+    git(dir, "checkout", "-q", "-b", "line-b");
+    commit(dir, { "b.txt": "b\n" }, "b");
+    push(dir, "main", "line-a", "line-b");
+    // A new branch that merges two already-pushed lines: two boundary
+    // commits, neither an ancestor of the other.
+    git(dir, "checkout", "-q", "-b", "merged", "line-a");
+    git(dir, "merge", "-q", "--no-ff", "-m", "merge b", "line-b");
+
+    const r = resolveNewRefBase(makeRepoConfig(dir), { ref: "refs/heads/merged", ...ORIGIN });
+    assert.equal(r.mode, "incremental-widened");
+    // The widened base is a common ancestor of both boundaries, so the
+    // range is a strict superset of the new commits: over-scan, never
+    // under-scan.
+    assert.equal(r.base, forkPoint);
+  });
+
+  it("reports full-history when no remote-tracking refs exist at all", () => {
+    const dir = gitInitWithRemote("newref-no-remote-refs");
+    commit(dir, { "f.txt": "zzq-historic-marker\n" }, "init");
+    // Remote configured but never pushed to → refs/remotes/origin/* empty.
+    const r = resolveNewRefBase(makeRepoConfig(dir), { ref: "refs/heads/main", ...ORIGIN });
+    assert.equal(r.mode, "full-history");
+    assert.equal(r.base, EMPTY_TREE_SHA);
+  });
+
+  it("reports full-history for a disjoint (root) history", () => {
+    const dir = gitInitWithRemote("newref-orphan");
+    commit(dir, { "f.txt": "seed\n" }, "init");
+    push(dir, "main");
+    git(dir, "checkout", "-q", "--orphan", "detached-line");
+    execFileSync("git", ["rm", "-rq", "--cached", "."], { cwd: dir });
+    commit(dir, { "o.txt": "o\n" }, "orphan root");
+
+    const r = resolveNewRefBase(makeRepoConfig(dir), {
+      ref: "refs/heads/detached-line",
+      ...ORIGIN,
+    });
+    assert.equal(r.mode, "full-history", "nothing is shared, so nothing may be skipped");
+    assert.equal(r.base, EMPTY_TREE_SHA);
+  });
+
+  it("throws GitCommandError when rev-list fails, rather than reporting nothing-new", () => {
+    // The dangerous failure shape: an unresolvable ref producing an
+    // empty rev-list output would read as "nothing to scan".
+    const dir = gitInitWithRemote("newref-revlist-fail");
+    commit(dir, { "f.txt": "seed\n" }, "init");
+    push(dir, "main");
+
+    let thrown: unknown;
+    try {
+      resolveNewRefBase(makeRepoConfig(dir), { ref: "refs/heads/no-such-ref", ...ORIGIN });
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof GitCommandError, "must throw, not report nothing-new");
+    assert.equal(thrown.code, "GIT_ERROR");
+    assert.equal(thrown.subcommand, "rev-list");
+    assert.ok(
+      !thrown.message.includes("no-such-ref"),
+      "the message must not embed git stderr or the refname",
+    );
+  });
+
+  it("REPO_AEGIS_NEW_REF_FULL_SCAN=1 forces full-history on the tag case", () => {
+    const dir = gitInitWithRemote("newref-escape-hatch");
+    commit(dir, { "f.txt": "zzq-historic-marker\n" }, "init");
+    push(dir, "main");
+    git(dir, "tag", "v1");
+
+    const r = withEnv("REPO_AEGIS_NEW_REF_FULL_SCAN", "1", () =>
+      resolveNewRefBase(makeRepoConfig(dir), { ref: "refs/tags/v1", ...ORIGIN }),
+    );
+    assert.equal(r.mode, "full-history");
+    assert.equal(r.base, EMPTY_TREE_SHA);
+  });
+});
+
+describe("scanNewRef", () => {
+  it("scans nothing — and finds nothing — for a tag on an already-pushed commit", () => {
+    const dir = gitInitWithRemote("scan-newref-tag");
+    commit(dir, { "f.txt": "zzq-historic-marker\n" }, "init");
+    push(dir, "main");
+    git(dir, "tag", "v1");
+
+    const r = scanNewRef(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["zzq-historic-marker"]),
+      { ref: "refs/tags/v1", ...ORIGIN },
+    );
+    assert.equal(r.mode, "nothing-new");
+    assert.equal(r.base, undefined);
+    assert.equal(r.hits.length, 0, "a tag exposes nothing new; the history is already pushed");
+  });
+
+  it("flags a marker in the one never-pushed commit a tag carries", () => {
+    const dir = gitInitWithRemote("scan-newref-tag-hit");
+    commit(dir, { "f.txt": "seed\n" }, "init");
+    push(dir, "main");
+    commit(dir, { "leak.txt": "zzq-fresh-marker\n" }, "unpushed");
+    git(dir, "tag", "v1");
+
+    const r = scanNewRef(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["zzq-fresh-marker"]),
+      { ref: "refs/tags/v1", ...ORIGIN },
+    );
+    assert.equal(r.mode, "incremental");
+    assert.equal(r.hits.length, 1);
+    assert.equal(r.hits[0]!.path, "leak.txt");
+  });
+
+  it("scans ONLY the new commits of a brand-new branch", () => {
+    const dir = gitInitWithRemote("scan-newref-branch");
+    commit(dir, { "old.txt": "zzq-pushed-marker\n" }, "init");
+    push(dir, "main");
+    git(dir, "checkout", "-q", "-b", "feature");
+    commit(dir, { "new.txt": "zzq-fresh-marker\n" }, "feature work");
+
+    const r = scanNewRef(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["zzq-pushed-marker", "zzq-fresh-marker"]),
+      { ref: "refs/heads/feature", ...ORIGIN },
+    );
+    assert.equal(r.mode, "incremental");
+    assert.equal(r.hits.length, 1, "the already-pushed marker must not fire again");
+    assert.equal(r.hits[0]!.path, "new.txt");
+  });
+
+  it("flags a marker introduced by an EVIL MERGE, present in neither parent", () => {
+    // Regression test for the design constraint: `git log -p <ref> --not
+    // --remotes=<remote>` emits NO diff for a merge commit, so a marker
+    // living only in the merge's own tree would go unscanned. A tree diff
+    // from a resolved base compares end states and cannot miss it. Swap
+    // this implementation for `git log -p` and this test fails.
+    const dir = gitInitWithRemote("scan-newref-evil-merge");
+    commit(dir, { "seed.txt": "seed\n" }, "init");
+    git(dir, "checkout", "-q", "-b", "line-a");
+    commit(dir, { "a.txt": "a\n" }, "a");
+    git(dir, "checkout", "-q", "main");
+    git(dir, "checkout", "-q", "-b", "line-b");
+    commit(dir, { "b.txt": "b\n" }, "b");
+    push(dir, "main", "line-a", "line-b");
+
+    git(dir, "checkout", "-q", "-b", "evil", "line-a");
+    // Non-conflicting merge, held open so the merge commit's tree can be
+    // given content that exists in neither parent.
+    git(dir, "merge", "--no-ff", "--no-commit", "line-b");
+    writeFileSync(join(dir, "evil.txt"), "zzq-evil-merge-marker\n");
+    execFileSync("git", ["add", "evil.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "--no-edit"], { cwd: dir });
+
+    const r = scanNewRef(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["zzq-evil-merge-marker"]),
+      { ref: "refs/heads/evil", ...ORIGIN },
+    );
+    assert.equal(r.mode, "incremental-widened");
+    assert.equal(r.hits.length, 1, "content introduced by the merge itself must be scanned");
+    assert.equal(r.hits[0]!.path, "evil.txt");
+  });
+
+  it("flags a marker in the new commit of a branch with several boundaries", () => {
+    const dir = gitInitWithRemote("scan-newref-widened-hit");
+    commit(dir, { "seed.txt": "seed\n" }, "init");
+    git(dir, "checkout", "-q", "-b", "line-a");
+    commit(dir, { "a.txt": "a\n" }, "a");
+    git(dir, "checkout", "-q", "main");
+    git(dir, "checkout", "-q", "-b", "line-b");
+    commit(dir, { "b.txt": "b\n" }, "b");
+    push(dir, "main", "line-a", "line-b");
+
+    git(dir, "checkout", "-q", "-b", "combined", "line-a");
+    git(dir, "merge", "-q", "--no-ff", "-m", "merge b", "line-b");
+    commit(dir, { "leak.txt": "zzq-fresh-marker\n" }, "leak after merge");
+
+    const r = scanNewRef(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["zzq-fresh-marker"]),
+      { ref: "refs/heads/combined", ...ORIGIN },
+    );
+    assert.equal(r.mode, "incremental-widened");
+    assert.equal(r.hits.length, 1);
+    assert.equal(r.hits[0]!.path, "leak.txt");
+  });
+
+  it("falls back to the whole history when no remote-tracking refs exist", () => {
+    const dir = gitInitWithRemote("scan-newref-full");
+    commit(dir, { "f.txt": "zzq-historic-marker\n" }, "init");
+
+    const r = scanNewRef(
+      makeRepoConfig(dir),
+      denySetWithPatterns(["zzq-historic-marker"]),
+      { ref: "refs/heads/main", ...ORIGIN },
+    );
+    assert.equal(r.mode, "full-history");
+    assert.equal(r.base, EMPTY_TREE_SHA);
+    assert.equal(r.hits.length, 1, "with nothing known-shared, everything is scanned");
+  });
+
+  it("REPO_AEGIS_NEW_REF_FULL_SCAN=1 makes the tag case fire on a historical marker", () => {
+    const dir = gitInitWithRemote("scan-newref-escape-hatch");
+    commit(dir, { "f.txt": "zzq-historic-marker\n" }, "init");
+    push(dir, "main");
+    git(dir, "tag", "v1");
+
+    const r = withEnv("REPO_AEGIS_NEW_REF_FULL_SCAN", "1", () =>
+      scanNewRef(
+        makeRepoConfig(dir),
+        denySetWithPatterns(["zzq-historic-marker"]),
+        { ref: "refs/tags/v1", ...ORIGIN },
+      ),
+    );
+    assert.equal(r.mode, "full-history");
+    assert.equal(r.hits.length, 1);
+  });
+
+  it("propagates a git failure instead of returning an empty hit list", () => {
+    const dir = gitInitWithRemote("scan-newref-fail");
+    commit(dir, { "f.txt": "seed\n" }, "init");
+    push(dir, "main");
+    assert.throws(
+      () =>
+        scanNewRef(
+          makeRepoConfig(dir),
+          denySetWithPatterns(["zzq-fresh-marker"]),
+          { ref: "refs/heads/nope", ...ORIGIN },
+        ),
+      (err: unknown) => err instanceof GitCommandError && err.code === "GIT_ERROR",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path-scoped `_always` exemptions (plan item B) + built-in known-non-secrets
+// (plan item E).
+//
+// Every secret-shaped literal below is assembled at runtime from fragments.
+// This repo scans itself (`self-hygiene.test.ts`); a complete PEM header or a
+// complete AWS-key-shaped token committed here would trip its own deny set.
+// ---------------------------------------------------------------------------
+
+const DASHES = "-".repeat(5);
+/** `_always` pattern: a PEM header shape. */
+const PEM_PATTERN = `${DASHES}BEGIN [A-Z ]+PRIVATE KEY${DASHES}`;
+/** A line matching it, likewise assembled rather than written out. */
+const PEM_LINE = `${DASHES}BEGIN TESTONLY PRIVATE KEY${DASHES}`;
+
+const AWS_PREFIX = "AK" + "IA";
+/** `_always` pattern: the AWS access-key-id shape. */
+const AWS_PATTERN = `${AWS_PREFIX}[A-Z0-9]{16}`;
+/** AWS's published example key — a non-secret by construction. */
+const AWS_EXAMPLE = `${AWS_PREFIX}IOSFODNN7` + "EXAMPLE";
+/** Same shape, ordinary body: indistinguishable from a real credential. */
+const AWS_REAL_SHAPE = `${AWS_PREFIX}ZZ7QRSTUVWXY2345`;
+
+/** Engagement marker: obviously synthetic, no customer anywhere near it. */
+const ENG_MARKER = "zetaquadrant";
+/** Engagement marker that happens to contain the placeholder word. */
+const ENG_EXAMPLE_MARKER = "NOTACUSTOMER-EXAMPLE";
+/** `_private_infra` marker: an internal host, under a reserved TLD. */
+const INFRA_PATTERN = "registry\\.internal\\.invalid";
+const INFRA_LINE = "registry.internal.invalid";
+
+const CLASSED_PATTERNS = [
+  PEM_PATTERN,
+  AWS_PATTERN,
+  ENG_MARKER,
+  ENG_EXAMPLE_MARKER,
+  INFRA_PATTERN,
+] as const;
+const CLASSED_SOURCES = [
+  "_always",
+  "_always",
+  "customer-z",
+  "customer-z",
+  "_private_infra",
+] as const;
+
+function classedDenySet(exemptPaths: string[]): DenySet {
+  const patterns = [...CLASSED_PATTERNS];
+  const patternSources = [...CLASSED_SOURCES];
+  const pick = (want: boolean): string =>
+    patterns.filter((_, i) => (patternSources[i] === "_always") === want).join("|");
+  return {
+    files: [],
+    patterns,
+    patternSources,
+    combinedRegex: patterns.join("|"),
+    strictRegex: pick(false),
+    exemptibleRegex: pick(true),
+    exemptPaths,
+    warnings: [],
+  };
+}
+
+const EXEMPT = ["**/test/**", "**/fixtures/**", "**/*.test.*"];
+
+describe("scan — path-scoped `_always` exemptions", () => {
+  it("a private-key shape under test/ is NOT flagged", () => {
+    const ds = classedDenySet(EXEMPT);
+    assert.deepEqual(scanText(PEM_LINE, ds, "test/keys/sample.pem"), []);
+  });
+
+  it("the same shape in src/ IS flagged", () => {
+    const ds = classedDenySet(EXEMPT);
+    const hits = scanText(PEM_LINE, ds, "src/keys.ts");
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.engagement, "_always");
+  });
+
+  it("a customer-marker literal in a test fixture is STILL FLAGGED", () => {
+    // The load-bearing asymmetry. A secret shape in a fixture is a throwaway
+    // by construction; a customer name in a fixture is a leak either way.
+    const ds = classedDenySet(EXEMPT);
+    const hits = scanText(`const c = "${ENG_MARKER}";`, ds, "test/fixtures/data.ts");
+    assert.equal(hits.length, 1, "engagement markers are never path-exempt");
+    assert.equal(hits[0]!.engagement, "customer-z");
+  });
+
+  it("a `_private_infra` host in a test fixture is STILL FLAGGED", () => {
+    const ds = classedDenySet(EXEMPT);
+    const hits = scanText(`registry=https://${INFRA_LINE}/`, ds, "test/fixtures/.npmrc");
+    assert.equal(hits.length, 1, "_private_infra is not an exemptible class");
+    assert.equal(hits[0]!.engagement, "_private_infra");
+  });
+
+  it("a line carrying BOTH an `_always` shape and an engagement marker, in an exempt path, is still flagged", () => {
+    // Regression test for the two-regex split. Filtering AFTER a combined
+    // match would drop this: the PEM shape sits first on the line, would
+    // match, would be filtered as exempt, and the customer marker sitting
+    // right behind it would never be reported at all.
+    const ds = classedDenySet(EXEMPT);
+    const line = `${PEM_LINE} # owned by ${ENG_MARKER}`;
+    const hits = scanText(line, ds, "test/fixtures/mixed.txt");
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.engagement, "customer-z", "the engagement hit must survive");
+  });
+
+  it("exempts nothing when the deny set carries no exempt paths", () => {
+    const ds = classedDenySet([]);
+    assert.equal(scanText(PEM_LINE, ds, "test/keys/sample.pem").length, 1);
+  });
+
+  it("exempts nothing for a deny set with no strict/exemptible split (fail closed)", () => {
+    // An older or hand-built DenySet cannot distinguish the classes, so it
+    // must enforce everything rather than guess.
+    const ds = classedDenySet(EXEMPT);
+    delete ds.strictRegex;
+    assert.equal(scanText(PEM_LINE, ds, "test/keys/sample.pem").length, 1);
+  });
+
+  it("never exempts when the path is unknown (fail closed)", () => {
+    const ds = classedDenySet(EXEMPT);
+    assert.equal(scanText(PEM_LINE, ds).length, 1);
+  });
+
+  it("never exempts an absolute path with no working tree to relativise against", () => {
+    const ds = classedDenySet(EXEMPT);
+    const hits = scanText(PEM_LINE, ds, "/somewhere/repo/test/keys/sample.pem");
+    assert.equal(hits.length, 1, "an unrelativisable path is not exempt");
+  });
+
+  it("relativises an absolute path against the working tree when one is given", () => {
+    const ds = classedDenySet(EXEMPT);
+    const hits = scanText(PEM_LINE, ds, "/repo/test/x.pem", { workingTree: "/repo" });
+    assert.deepEqual(hits, []);
+  });
+
+  it("`**` reaching the scanner is a loud error, not a silent repo-wide exemption", () => {
+    // computeDenySet validates first, so this is defence in depth; the point
+    // is that no code path turns a too-broad glob into "exempt everything".
+    const ds = classedDenySet(["**"]);
+    assert.throws(() => scanText(PEM_LINE, ds, "src/keys.ts"), GlobTooBroadError);
+  });
+
+  it("`ignorePathExemptions` restores the full pattern set (what audit uses)", () => {
+    const ds = classedDenySet(EXEMPT);
+    const hits = scanText(PEM_LINE, ds, "test/keys/sample.pem", {
+      ignorePathExemptions: true,
+    });
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.engagement, "_always");
+  });
+
+  it("scanFile honours the exemption using its workingTree argument", () => {
+    const ds = classedDenySet(EXEMPT);
+    const root = mkdtempSync(join(tmp, "exempt-file-"));
+    mkdirSync(join(root, "test"), { recursive: true });
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "test", "k.pem"), `${PEM_LINE}\n`);
+    writeFileSync(join(root, "src", "k.pem"), `${PEM_LINE}\n`);
+    writeFileSync(join(root, "test", "cust.txt"), `${ENG_MARKER}\n`);
+
+    assert.deepEqual(scanFile(join(root, "test", "k.pem"), ds, {}, root).hits, []);
+    assert.equal(scanFile(join(root, "src", "k.pem"), ds, {}, root).hits.length, 1);
+    assert.equal(
+      scanFile(join(root, "test", "cust.txt"), ds, {}, root).hits.length,
+      1,
+      "customer marker in an exempt path is still flagged",
+    );
+    // Without a working tree the absolute path cannot be relativised.
+    assert.equal(scanFile(join(root, "test", "k.pem"), ds).hits.length, 1);
+  });
+
+  it("the diff scanner uses the post-image path from the stanza", () => {
+    const ds = classedDenySet(EXEMPT);
+    const mk = (path: string, added: string): string =>
+      [
+        `diff --git a/${path} b/${path}`,
+        "index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644",
+        `--- a/${path}`,
+        `+++ b/${path}`,
+        "@@ -0,0 +1 @@",
+        `+${added}`,
+        "",
+      ].join("\n");
+
+    assert.deepEqual(scanDiffText(mk("test/fixtures/k.pem", PEM_LINE), ds), []);
+    assert.equal(scanDiffText(mk("src/k.pem", PEM_LINE), ds).length, 1);
+    assert.equal(
+      scanDiffText(mk("test/fixtures/c.txt", ENG_MARKER), ds).length,
+      1,
+      "engagement marker in an exempt path still blocks a commit",
+    );
+  });
+});
+
+describe("scan — built-in known-non-secret suppression", () => {
+  it("suppresses a documented AWS example key and counts the suppression", () => {
+    const ds = classedDenySet([]);
+    const r = scanTextDetailed(`aws_access_key_id = ${AWS_EXAMPLE}`, ds, "src/config.ini");
+    assert.deepEqual(r.hits, []);
+    assert.equal(r.suppressedKnownNonSecrets, 1, "a silent suppression is unobservable");
+  });
+
+  it("flags the same shape with an ordinary body", () => {
+    const ds = classedDenySet([]);
+    const r = scanTextDetailed(`aws_access_key_id = ${AWS_REAL_SHAPE}`, ds, "src/config.ini");
+    assert.equal(r.hits.length, 1);
+    assert.equal(r.suppressedKnownNonSecrets, 0);
+  });
+
+  it("an engagement marker containing EXAMPLE is STILL FLAGGED", () => {
+    // Suppression is scoped to `_always`. A customer marker that happens to
+    // carry the word EXAMPLE is still a customer marker.
+    const ds = classedDenySet([]);
+    const r = scanTextDetailed(`ref: ${ENG_EXAMPLE_MARKER}`, ds, "src/notes.md");
+    assert.equal(r.hits.length, 1);
+    assert.equal(r.hits[0]!.engagement, "customer-z");
+    assert.equal(r.suppressedKnownNonSecrets, 0);
+  });
+
+  it("a suppressed match does not hide a real marker later on the same line", () => {
+    const ds = classedDenySet([]);
+    const r = scanTextDetailed(`${AWS_EXAMPLE} used by ${ENG_MARKER}`, ds, "src/notes.md");
+    assert.equal(r.hits.length, 1, "the search resumes past a suppressed match");
+    assert.equal(r.hits[0]!.engagement, "customer-z");
+    assert.equal(r.suppressedKnownNonSecrets, 1);
+  });
+
+  it("suppresses nothing when the deny set carries no attribution (fail closed)", () => {
+    // Without patternSources the stem is unknown, so the `_always`-only
+    // scoping cannot be established and nothing may be suppressed.
+    const ds = classedDenySet([]);
+    delete ds.patternSources;
+    const r = scanTextDetailed(`key = ${AWS_EXAMPLE}`, ds, "src/config.ini");
+    assert.equal(r.hits.length, 1);
+    assert.equal(r.suppressedKnownNonSecrets, 0);
+  });
+
+  it("the count rides out on scanFile's result", () => {
+    const ds = classedDenySet([]);
+    const root = mkdtempSync(join(tmp, "known-nonsecret-"));
+    writeFileSync(join(root, "config.ini"), `k = ${AWS_EXAMPLE}\n`);
+    const r = scanFile(join(root, "config.ini"), ds, {}, root);
+    assert.deepEqual(r.hits, []);
+    assert.equal(r.suppressedKnownNonSecrets, 1);
+  });
+});
+
+describe("scan — ScanHit.patternId (waiver key)", () => {
+  it("is populated wherever attribution is, and keys on stem + pattern", () => {
+    const ds = classedDenySet([]);
+    const hits = scanText(`ref ${ENG_MARKER}`, ds, "src/a.ts");
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.patternId, patternId("customer-z", ENG_MARKER));
+  });
+
+  it("is absent when the deny set carries no attribution", () => {
+    const ds = classedDenySet([]);
+    delete ds.patternSources;
+    const hits = scanText(`ref ${ENG_MARKER}`, ds, "src/a.ts");
+    assert.equal(hits[0]!.patternId, undefined);
+    assert.equal(hits[0]!.engagement, undefined);
+  });
+
+  it("rides out of the diff scanner alongside the blob, so a waiver can key on both", () => {
+    const ds = classedDenySet([]);
+    const blob = "2".repeat(40);
+    const diff = [
+      "diff --git a/src/a.ts b/src/a.ts",
+      `index ${"1".repeat(40)}..${blob} 100644`,
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -0,0 +1 @@",
+      `+const c = "${PEM_LINE}";`,
+      "",
+    ].join("\n");
+    const hits = scanDiffText(diff, ds);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.blob, blob);
+    assert.equal(hits[0]!.patternId, patternId("_always", PEM_PATTERN));
   });
 });

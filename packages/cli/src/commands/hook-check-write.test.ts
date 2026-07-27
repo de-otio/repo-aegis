@@ -432,3 +432,81 @@ engagements:
     assert.equal(r.code, 0, `expected exit 0; got code=${r.code} stdout=${r.stdout}`);
   });
 });
+
+describe("hook check-write: CONTROL 1 — refuses writes to .repo-aegis.yml", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  // The threat this exists to close: a coding agent blocked by a `check`
+  // finding writes a waiver into .repo-aegis.yml and retries, which is
+  // `--no-verify` with extra steps. This refusal must apply regardless of
+  // trust boundary — even a same-org, same-tree write to this one file is
+  // refused, because the file itself (not org membership) is the thing
+  // being protected.
+
+  it("refuses a same-tree write to .repo-aegis.yml with WAIVER_FILE_WRITE_REFUSED", () => {
+    const env = setupAegisHome("ck-waiver-file-same-tree");
+    writeRegistry(env.aegisHome, `schemaVersion: 2\nengagements: []\n`);
+    const repo = makeGitRepo(tmp, "ck-waiver-file-repo", { class: "public-eligible" });
+    const file = join(repo, ".repo-aegis.yml");
+    const r = runCli(env.aegisHome, repo, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 2, `expected refuse; got ${r.code} ${r.stderr}`);
+    const json = r.json as { code: string };
+    assert.equal(json.code, "WAIVER_FILE_WRITE_REFUSED");
+    assert.match(r.stderr, /WAIVER_FILE_WRITE_REFUSED/);
+    assert.match(r.stderr, /repo-aegis waive/);
+    assert.equal(existsSync(file), false, "PreToolUse must not create the file");
+  });
+
+  it("refuses even when src and dest share an engagement org (not a cross-org-only rule)", () => {
+    const env = setupAegisHome("ck-waiver-file-same-org");
+    writeRegistry(
+      env.aegisHome,
+      `schemaVersion: 2
+engagements:
+  - id: alpha
+    name: Alpha
+    githubOrgs: [alpha-org]
+    markers: []
+`,
+    );
+    const src = makeGitRepo(tmp, "ck-waiver-file-src", {
+      remote: "git@github.com:alpha-org/src.git",
+      class: "customer-coupled",
+      engagements: ["alpha"],
+    });
+    const dest = makeGitRepo(tmp, "ck-waiver-file-dest", {
+      remote: "git@github.com:alpha-org/dest.git",
+      class: "customer-coupled",
+      engagements: ["alpha"],
+    });
+    const file = join(dest, ".repo-aegis.yml");
+    const r = runCli(env.aegisHome, src, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 2, `expected refuse regardless of org overlap; got ${r.code} ${r.stderr}`);
+    const json = r.json as { code: string };
+    assert.equal(json.code, "WAIVER_FILE_WRITE_REFUSED");
+  });
+
+  it("does not refuse a write to an unrelated file with a similar name", () => {
+    const env = setupAegisHome("ck-waiver-file-similar-name");
+    writeRegistry(env.aegisHome, `schemaVersion: 2\nengagements: []\n`);
+    const repo = makeGitRepo(tmp, "ck-waiver-file-similar-repo", { class: "public-eligible" });
+    const file = join(repo, "notes", "not-dot-repo-aegis.yml.txt");
+    const r = runCli(env.aegisHome, repo, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 0, `expected allow; got ${r.code} ${r.stderr}`);
+  });
+
+  it("still refuses when the path is nested (matches on basename, not just repo root)", () => {
+    const env = setupAegisHome("ck-waiver-file-nested");
+    writeRegistry(env.aegisHome, `schemaVersion: 2\nengagements: []\n`);
+    const repo = makeGitRepo(tmp, "ck-waiver-file-nested-repo", { class: "public-eligible" });
+    const file = join(repo, "sub", "dir", ".repo-aegis.yml");
+    const r = runCli(env.aegisHome, repo, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 2, `expected refuse; got ${r.code} ${r.stderr}`);
+  });
+});

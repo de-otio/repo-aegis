@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { patternId } from "@de-otio/repo-aegis-core";
 import { captureOutput, withEnv } from "../_test-utils.js";
 import { markersList, markersTest } from "./markers.js";
 
@@ -112,6 +113,30 @@ describe("markers list — populated", () => {
     assert.equal(j.verbose, true);
     const customerA = j.files.find(f => f.stem === "customer-a")!;
     assert.equal(customerA.patterns[0]!.pattern, "alpha-marker");
+  });
+
+  // The waive workflow is: read the id off a `check` finding, or look it up
+  // here. If the two ever disagree the id becomes useless — a waiver minted
+  // from one would silently fail to match findings carrying the other. So
+  // pin the format AND pin agreement with core's own derivation.
+  it("surfaces the same patternId that a check finding carries", () => {
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => markersList({ json: true, verbose: true })),
+    );
+    const j = JSON.parse(result.stdout) as {
+      files: { stem: string; patterns: { patternId?: string; pattern?: string }[] }[];
+    };
+    const customerA = j.files.find(f => f.stem === "customer-a")!;
+    const entry = customerA.patterns[0]!;
+    assert.equal(entry.patternId, patternId("customer-a", entry.pattern!));
+    assert.match(entry.patternId!, /^customer-a\/[0-9a-f]{12}$/);
+  });
+
+  it("prints the patternId in text mode alongside the redacted preview", () => {
+    const result = withEnv("REPO_AEGIS_HOME", home, () => captureOutput(() => markersList({})));
+    // The `_always/` prefix is itself the waivability signal — `waive` accepts
+    // that stem and no other — so no extra annotation is needed here.
+    assert.match(result.stdout, /_always\/[0-9a-f]{12}/);
   });
 });
 

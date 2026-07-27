@@ -85,10 +85,13 @@ export async function buildProgram(): Promise<Command> {
     .option("--staged", "scan the staged diff (used by pre-commit hook)")
     .option("--path <path>", "scan a single file")
     .option("--range <revspec>", "scan additions in a git range, e.g. <remote>..<local> (used by pre-push hook)")
+    .option("--push-ref <ref>", "scan a ref the remote does not have yet, relative to refs/remotes/<remote>/* (used by pre-push hook for new branches and tags)")
+    .option("--remote <name>", "with --push-ref: remote whose tracking refs bound the scan (default: origin)")
     .option("--history", "scan full git history with `git log -G` per pattern (slow)")
     .option("--since <revspec>", "with --history: lower-bound revspec (only commits reachable forward of this point)")
     .option("--max-file-bytes <n>", "skip files larger than this (default 1 MiB)", v => parseInt(v, 10))
     .option("--ignore-allowlist-comments", "do not respect `repo-aegis: allow` comments (audit-grade strict)")
+    .option("--ignore-waivers", "do not apply waivers from .repo-aegis.yml; report every _always finding even if a reviewed-benign waiver exists (audit-grade strict)")
     .option("--verbose", "reveal literal matched markers (NEVER pass from hooks)")
     .action((opts, cmd) => check(withGlobals(opts, cmd)));
 
@@ -128,6 +131,8 @@ export async function buildProgram(): Promise<Command> {
   );
   const { uninstall } = await import("./commands/uninstall.js");
   const { uninstallSweepRepos } = await import("./commands/uninstall-sweep-repos.js");
+  const { doctor } = await import("./commands/doctor.js");
+  const { waive } = await import("./commands/waive.js");
 
   engagements
     .command("add [id]")
@@ -247,7 +252,10 @@ export async function buildProgram(): Promise<Command> {
     .command("hooks")
     .description("write pre-commit/pre-push to ~/.config/repo-aegis/hooks and set core.hooksPath")
     .option("--force", "overwrite a conflicting core.hooksPath")
-    .option("--uninstall", "unset core.hooksPath and remove pre-commit/pre-push from <home>/hooks")
+    .option("--global", "write core.hooksPath in the global git config (default)")
+    .option("--local", "write core.hooksPath in this repo's local git config only (pre-0.7 default)")
+    .option("--unset-local", "clear a repo-local core.hooksPath that would shadow the global value just installed")
+    .option("--uninstall", "unset core.hooksPath in both global and local scope and remove pre-commit/pre-push from <home>/hooks")
     .action((opts, cmd) => installHooks(withGlobals(opts, cmd)));
 
   install
@@ -312,6 +320,7 @@ export async function buildProgram(): Promise<Command> {
     .option("--no-marker-scan", "skip the marker scan over tracked files")
     .option("--no-lockfile-check", "skip package-lock.json non-public-registry check")
     .option("--no-fixture-check", "skip scan of fixture/__fixtures__/testdata directories")
+    .option("--no-hooks-check", "skip the git-hooks liveness check (core.hooksPath wiring); the generated CI workflow always sets this — hooks are never installed on a CI runner")
     .option("--no-remote-check", "skip the remote-vs-class consistency check")
     .option("--org <org>", "also run a one-shot GitHub code-search sweep against this org (needs GH_TOKEN)")
     .option("--published <pkg-or-tarball>", "also scan a packed npm tarball, VSIX bundle, or npm package name")
@@ -460,6 +469,35 @@ export async function buildProgram(): Promise<Command> {
       "directories to walk (default: ~/repos, ~/code, ~/src, ~/projects)",
     )
     .action((opts, cmd) => uninstallSweepRepos(withGlobals(opts, cmd)));
+
+  // The auditable alternative to `--no-verify`: dismiss ONE reviewed-benign
+  // `_always` finding, keyed on the blob it was found in, instead of disabling
+  // the whole hook. TTY-gated so an agent cannot mint one to unblock itself.
+  program
+    .command("waive")
+    .description("mint, list, or remove a reviewed-benign waiver for an `_always` finding in .repo-aegis.yml")
+    .option("--pattern <id>", "pattern id to waive, e.g. _always/9f2c1a4b7de0 (from a `check` finding)")
+    .option("--blob <sha>", "git blob sha (40 hex) the waiver covers")
+    .option("--reason <text>", "why this finding is reviewed-benign (required to add a waiver)")
+    .option("--approver <name>", "who reviewed and approved this waiver (required to add a waiver)")
+    .option("--expires <date>", "optional YYYY-MM-DD after which the waiver no longer applies")
+    .option("--list", "list existing waivers instead of adding one")
+    .option("--remove", "remove a waiver instead of adding one (requires --pattern and --blob)")
+    .action((opts, cmd) => waive(withGlobals(opts, cmd)));
+
+  // A client-side gate that is installed but disconnected looks exactly like
+  // one that is clean — both are silent. `doctor` is the fleet-wide sweep that
+  // makes that state findable on purpose rather than by luck.
+  program
+    .command("doctor")
+    .description("fleet-wide sweep: verify repo-aegis hooks are live across every repo under --scan-root")
+    .option(
+      "--scan-root <path...>",
+      "directories to walk (default: ~/repos, ~/code, ~/src, ~/projects)",
+    )
+    .option("--fix", "report (or, with --yes, unset) repo-local core.hooksPath overrides")
+    .option("--yes", "apply --fix changes (default: dry-run report only)")
+    .action((opts, cmd) => doctor(withGlobals(opts, cmd)));
 
   return program;
 }

@@ -118,19 +118,93 @@ export {
 export type { RepoClass, RepoConfig, RepoOverride } from "./repo.js";
 
 // ---- deny set ------------------------------------------------------------
-export { computeDenySet, ALWAYS_FILE_STEM, PRIVATE_INFRA_FILE_STEM } from "./deny-set.js";
+export {
+  computeDenySet,
+  loadExemptPaths,
+  ALWAYS_FILE_STEM,
+  PRIVATE_INFRA_FILE_STEM,
+  BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS,
+} from "./deny-set.js";
 export type { DenySet, DenySetFile, DenySetOptions } from "./deny-set.js";
 
 // ---- scan primitives -----------------------------------------------------
 export {
   scanText,
+  scanTextDetailed,
   scanFile,
+  scanDiffText,
+  scanDiffTextDetailed,
   scanStagedDiff,
   scanRange,
+  scanNewRef,
+  resolveNewRefBase,
   scanHistory,
   ALLOW_COMMENT,
+  EMPTY_TREE_SHA,
 } from "./scan.js";
-export type { ScanHit, SkippedFile, HistoryHit, ScanOptions } from "./scan.js";
+export type {
+  ScanHit,
+  SkippedFile,
+  HistoryHit,
+  ScanOptions,
+  ScanResult,
+  TextScanResult,
+  NewRefMode,
+  NewRefTarget,
+  NewRefBase,
+  NewRefScanResult,
+} from "./scan.js";
+
+// ---- remote reachability (already-public downgrade) ----------------------
+export { remoteReachableCommits } from "./remote-reach.js";
+
+// ---- path globs (deny-set path exemptions) -------------------------------
+export {
+  compileGlob,
+  compileGlobs,
+  matchesCompiled,
+  matchesAnyGlob,
+  GlobTooBroadError,
+} from "./globs.js";
+
+// ---- reviewed-benign waivers --------------------------------------------
+// Blob-scoped dismissal of a reviewed `_always` finding. The auditable
+// alternative to `--no-verify`, which disables the whole hook.
+export {
+  WAIVABLE_STEM,
+  NotWaivableError,
+  WaiverParseError,
+  patternId,
+  assertWaivable,
+  parseWaivers,
+  isWaived,
+  expiredWaivers,
+} from "./waivers.js";
+export type { Waiver } from "./waivers.js";
+
+// ---- known non-secrets ---------------------------------------------------
+// Documented example / placeholder credentials. Callers MUST scope this to
+// `_always` matches only — see the module header.
+export { isKnownNonSecret } from "./known-non-secrets.js";
+
+// ---- hook scripts + liveness --------------------------------------------
+// A client-side gate that is installed but disconnected is indistinguishable
+// from one that is clean: both print nothing. `resolveHookState` is the
+// liveness check that tells them apart.
+export {
+  PRE_COMMIT_SCRIPT,
+  PRE_PUSH_SCRIPT,
+  HOOK_SCRIPTS,
+  hookScriptDigest,
+} from "./hook-scripts.js";
+export type { HookName } from "./hook-scripts.js";
+export { resolveHookState } from "./hooks-state.js";
+export type {
+  HookState,
+  HookScriptState,
+  HookStateOrigin,
+  HookStateCode,
+} from "./hooks-state.js";
 
 // ---- secret-shaped markers (universal, not engagement-scoped) -----------
 export { scanForSecrets, summariseHits } from "./secret-markers.js";
@@ -194,6 +268,7 @@ export {
   OutsideWorkingTreeError,
   LockTimeoutError,
   CustomerCoupledNoEngagementError,
+  GitCommandError,
 } from "./exceptions.js";
 
 // ---- exit codes ----------------------------------------------------------

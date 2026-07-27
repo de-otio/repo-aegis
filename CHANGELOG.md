@@ -5,7 +5,166 @@ All notable changes to repo-aegis are documented here.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-07-27
+
+### Fixed
+
+- **Renamed files bypassed the scanner — read this if you maintain a repo
+  older than this release.** `check --staged` and `check --range` passed
+  `--diff-filter=ACM` to git, which excludes rename (`R`) diff entries. Git
+  turns on rename detection by default, so `git mv` a file and add a marker
+  to it in the same commit or push, and the pre-commit/pre-push hook reported
+  "clean" — the content change was real but the diff filter never handed it
+  to the scanner. Filter is now `ACMR`. **This means any history committed
+  before this release may contain a rename-carried marker that was never
+  scanned**, regardless of how clean prior `check`/`audit` runs looked.
+  Remediate with a one-off full sweep: `repo-aegis audit --history`.
+- **`scanHistory` and the `check` git helpers now fail closed.**
+  `scanHistory` previously caught any git failure and returned `[]` — i.e.
+  reported "clean" — which is a scanner failure disguised as a clean scan,
+  the worst possible failure mode for a tool whose entire job is catching a
+  leak before it lands. It now throws the new `GitCommandError`, which
+  `check` surfaces as exit 2 rather than exit 0. The same fail-closed
+  treatment now applies to the `--staged`/`--range` git helpers and to
+  `check.ts`'s egress-scan git plumbing: a failed `git show` can no longer
+  silently drop a file from the scan.
+
+### Added
+
+- **`check --push-ref <ref> --remote <name>`.** New scan mode for a ref the
+  remote has never seen — the pre-push hook's zero-remote-sha case, which
+  covers release tags and new branches. Previously this degraded to a
+  full-history scan, which blocked releases on historical, already-pushed,
+  benign matches (the tag-push false-positive). It now derives a diff base
+  from the remote-tracking refs: nothing new to scan → no scan at all and no
+  diff spawned (`repo-aegis: nothing new to scan (ref already reachable from
+  <remote>)`); exactly one new boundary → an incremental diff from that
+  point; several boundaries (e.g. a merge of two already-pushed lines) →
+  widened via an octopus merge-base, which over-scans rather than
+  under-scans; no remote-tracking refs at all → the old full-history
+  behaviour, unchanged. Escape hatch: `REPO_AEGIS_NEW_REF_FULL_SCAN=1` forces
+  full-history unconditionally. The generated pre-push hook now uses this
+  mode automatically. **Residual risk, stated plainly:** the base is derived
+  from remote-tracking refs, which a hook never refreshes (no network in a
+  hook, by design). A stale-*behind* tracking ref causes over-scanning
+  (safe); a stale-*ahead* tracking ref — possible after a server-side
+  force-push or branch deletion — could under-scan. Server-side push
+  protection remains the only non-advisory backstop for that case.
+- **Path-scoped exemptions for `_always`-class findings, and `_always`
+  only.** A secret *shape* (an `_always` pattern) can have a genuinely benign
+  home — a test fixture, a fixture directory — and firing there is pure
+  noise that trains people to reach for `--no-verify`. New optional
+  `alwaysBlockExemptPaths: string[]` key, settable in the registry
+  (`engagements.yaml`, machine-wide) and additively in a repo's
+  `.repo-aegis.yml`. Built-in default when the registry omits the key:
+  `**/test/**`, `**/tests/**`, `**/__tests__/**`, `**/__fixtures__/**`,
+  `**/fixtures/**`, `**/testdata/**`, `**/*.test.*`, `**/*.spec.*`,
+  `**/*.fixture.*`. A glob that matches everything (`*`, `**`, `**/*`) is
+  rejected at load as a config error. **Engagement markers and
+  `_private_infra` are never path-exempt, under any configuration** — a
+  customer name typed into a test fixture is still a leak; only generic
+  secret shapes are ever exemptible. `audit --fixture-check` still runs the
+  full, unexempted pattern set and demotes an exempt-path `_always` hit to
+  an informational finding rather than dropping it, so an exemption stays
+  visible on audit even though `check` doesn't block on it.
+- **`repo-aegis waive`.** A reviewed-benign escape hatch for a genuine
+  `_always` false positive, scoped far more narrowly than `--no-verify`:
+  `waive --pattern <id> --blob <sha> --reason <text> --approver <name>
+  [--expires YYYY-MM-DD]`, plus `waive --list` and `waive --remove --pattern
+  <id> --blob <sha>`. Waivers live under a new `waivers:` key in
+  `.repo-aegis.yml` — committed, reviewable, diffable. A waiver is keyed on
+  `(pattern id, blob sha)`, not path or line: it survives history rewrites
+  and covers exactly the bytes that were reviewed, so a new key landing in a
+  new blob is not silently covered by an old approval. Pattern ids
+  (`<stem>/<12-hex>`, a truncated sha256 of the pattern) are shown in every
+  `check` finding, so a waiver command is copy-pasteable straight out of a
+  failure. Only `_always` patterns are waivable — `waive` on any other
+  pattern is refused — for two reasons: it must never become a way to
+  weaken the customer-marker deny set, and a pattern's digest, once
+  committed to a public repo, is an offline oracle for guessing the literal
+  it was derived from; a generic secret-shape digest gives an attacker
+  nothing, an engagement-marker digest would give them a starting point.
+  Because `.repo-aegis.yml` is a file inside the repo, an agent blocked by a
+  real finding could otherwise write itself a waiver and retry —
+  reconstructing `--no-verify` with extra steps. Three independent controls
+  close that off, and all three are required: the existing PreToolUse
+  `hook check-write` gate now refuses an agent `Write`/`Edit`/`MultiEdit` to
+  `.repo-aegis.yml` outright; `waive` itself refuses to run when stdin is
+  not a TTY unless `REPO_AEGIS_WAIVE_NONINTERACTIVE=1` is set; and `check`
+  always reports `waived: N` (JSON: the full list), on every run, so a
+  waiver can never disappear a finding silently. `check --ignore-waivers`
+  re-enables audit-grade strictness for a run that must not honour any
+  waiver.
+- **Built-in recognition of documented example/placeholder credentials.**
+  An `_always`-class match is no longer treated as a finding when it's
+  shaped like a documented example — an AWS-access-key-shaped token whose
+  body ends in `EXAMPLE`, or a value ending in `REDACTED`/`CHANGEME`/
+  `XXXXXXXX`, or matching the `YOUR-…-HERE` scaffolding placeholder shape.
+  Scoped to `_always` only — never to engagement or `_private_infra`
+  markers, and never to a match that merely *contains* one of these words
+  mid-string. Suppressions are counted and reported, never silent. Scope
+  limit, stated deliberately: the scanner is line-oriented, so multi-line
+  PEM-body recognition (e.g. the RFC example keys) is out of scope for now
+  and would need block-aware matching this release doesn't add.
+- **Hook liveness checking (`status`, `audit`, `doctor`).** Nothing
+  previously verified that an installed hook was actually wired up — a
+  stale or shadowed `core.hooksPath` fails exactly like a clean repo: no
+  hook fires, no error, no signal. `status` gains a `hooks:` line (and a
+  `hooks` object in `--json`); `audit` gains a `hooks` check, skippable with
+  `--no-hooks-check` (the generated CI workflow now always sets this, since
+  a GitHub-hosted runner never has hooks installed and the check would fail
+  and get muted on every run). Stable codes for scripting: `HOOKS_OK`,
+  `HOOKS_PATH_UNSET`, `HOOKS_PATH_FOREIGN`, `HOOKS_PATH_LOCAL_OVERRIDE`,
+  `HOOKS_SCRIPT_MISSING`, `HOOKS_SCRIPT_NOT_EXECUTABLE`,
+  `HOOKS_SCRIPT_STALE`. Motivation stated plainly: a tool whose entire value
+  proposition is a pre-commit gate had never verified that the gate was
+  connected, and an absent guard looks identical to a clean run.
+- **`repo-aegis doctor [--scan-root <dir>...] [--fix] [--yes]`.**
+  Fleet-wide hook-liveness sweep: walks every repo under the given roots
+  (or the default scan roots) and reports every one whose effective hooks
+  path isn't repo-aegis's, plus every repo whose own `.git/hooks` scripts
+  are being shadowed by a `core.hooksPath`. Exits 1 if any repo fails.
+  `--fix` is dry-run by default, matching `uninstall sweep-repos`'s
+  convention; `--yes` applies it. Before mutating anything, `doctor` records
+  the prior `core.hooksPath` value and the config file's mtime to the audit
+  log, because a repair that runs before the forensics are captured erases
+  the only evidence of when the drift happened.
+- **"Already public" findings on a full-history scan of a public-facing
+  repo now warn instead of block.** A history hit is marked `alreadyPublic`
+  when its commit is already reachable from a remote-tracking ref, and is
+  downgraded from a blocking hit to a surfaced, logged warning (exit 0)
+  — but *only* for a genuine full-history scan (`--history`, or
+  `--push-ref`'s full-history fallback) on a public-facing repo. A
+  first-time addition of the same shape via `--staged` or `--range` still
+  blocks, unconditionally; this downgrade never applies there. Mostly
+  subsumed by the new `--push-ref` incremental scanning above — once a new
+  ref scans incrementally, "I already pushed this to `main`, now I'm
+  tagging it" never reaches a full-history scan in the first place.
+- `status`, `audit`, and `doctor` now append an `observe-hooks` record
+  (state + code, no paths beyond the hooks directory) to the operator audit
+  log on every run, when the log is enabled. Cheap, and it's what gives a
+  future hook-state regression a timestamp — the audit log is off by
+  default, so `repo-aegis audit-log on` is what actually buys the timeline.
+
+### Changed
+
+- **`install hooks` now writes the GLOBAL `core.hooksPath` by default**
+  (was: repo-local). Coverage used to be per-repo and opt-in at install
+  time, with a stale local value silently beating a correct global one and
+  no way to tell. `--local` restores the previous per-repo-only behaviour.
+  New `--unset-local` clears a repo-local value that would otherwise shadow
+  the global one just installed, in one step. `install hooks --uninstall`
+  now clears **both** scopes and reports each — it previously cleared
+  whichever scope git found first, which is the same silent-shadowing
+  failure mode this release closes elsewhere. `init` inherits the new
+  default, so a fresh `init` now enables hook coverage machine-wide, not
+  just for the repo it ran in. **Because git consults exactly one hooks
+  directory**, the generated `pre-commit`/`pre-push` scripts now chain to a
+  repo's own pre-existing `.git/hooks/<name>` after the repo-aegis check
+  runs (if one exists and is executable) — otherwise a global
+  `core.hooksPath` would silently disable any hook another tool installed
+  directly into a repo's `.git/hooks`. A repo-aegis hit still blocks
+  regardless of what the chained hook returns.
 
 ## [0.6.0] - 2026-07-22
 
@@ -546,7 +705,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/de-otio/repo-aegis/compare/v0.6.0...v0.7.0
 [0.1.0]: https://github.com/de-otio/repo-aegis/releases/tag/v0.1.0
 
 See the full release history at

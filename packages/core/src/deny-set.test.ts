@@ -7,15 +7,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   computeDenySet,
+  loadExemptPaths,
+  BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS,
   ALWAYS_FILE_STEM,
   PRIVATE_INFRA_FILE_STEM,
   MIN_AUTO_BLOCK_IDENTIFIER_LENGTH,
 } from "./deny-set.js";
+import { GlobTooBroadError } from "./globs.js";
 import { scanText } from "./scan.js";
 import type { RepoConfig, RepoClass } from "./repo.js";
 
 let tmp: string;
 let markersDir: string;
+let priorHome: string | undefined;
 
 function setupMarkers() {
   rmSync(markersDir, { recursive: true, force: true });
@@ -38,10 +42,18 @@ function makeRepo(cls: RepoClass, engagements: string[] = []): RepoConfig {
 before(() => {
   tmp = mkdtempSync(join(tmpdir(), "repo-aegis-denyset-"));
   markersDir = join(tmp, "markers");
+  // computeDenySet now consults the registry (for `alwaysBlockExemptPaths`)
+  // and, for calls that don't pass `cachePath`, the default cache location.
+  // Point REPO_AEGIS_HOME at the temp dir so neither ever reaches the
+  // developer's real `~/.config/repo-aegis`.
+  priorHome = process.env["REPO_AEGIS_HOME"];
+  process.env["REPO_AEGIS_HOME"] = tmp;
   setupMarkers();
 });
 
 after(() => {
+  if (priorHome === undefined) delete process.env["REPO_AEGIS_HOME"];
+  else process.env["REPO_AEGIS_HOME"] = priorHome;
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -146,9 +158,10 @@ describe("computeDenySet", () => {
       patterns: string[];
       combinedRegex: string;
     };
-    // Bumped to 4 alongside the class-gated `_private_infra` stem; a stale
-    // 0.5.x cache must be rejected so the new gating takes effect on upgrade.
-    assert.equal(cached.schemaVersion, 4);
+    // Bumped to 5 alongside the strict/exemptible regex split; a stale 0.6.x
+    // cache must be rejected or the split would be missing from every warm
+    // machine and path exemptions would silently never engage.
+    assert.equal(cached.schemaVersion, 5);
     assert.equal(typeof cached.key, "string");
     assert.equal(cached.key.length, 64, "fingerprint is sha256 hex");
     assert.deepEqual(cached.patterns, ds.patterns);
@@ -379,5 +392,263 @@ describe("computeDenySet — _private_infra gating", () => {
     // and silently under-block a now-public repo.
     const pub = computeDenySet(repo, { markersDir, cachePath, publicFacing: true });
     assert.ok(pub.patterns.includes(INFRA), "cache must not mask the flip to public");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path-scoped exemptions, `_always` class only (plan item B).
+//
+// The asymmetry under test: `_always` patterns are secret *shapes* with a
+// well-known benign home (a throwaway keypair under `test/`), so they may be
+// skipped there. Customer-marker literals and `_private_infra` hosts have no
+// benign home — one in a test fixture is still a leak — so they never are.
+// ---------------------------------------------------------------------------
+
+describe("computeDenySet — `_always`-only path exemptions", () => {
+  // Never a literal secret in this repo's own source: the tree scans itself.
+  const DASHES = "-".repeat(5);
+  const PEM_PATTERN = `${DASHES}BEGIN [A-Z ]+PRIVATE KEY${DASHES}`;
+  const INFRA_PATTERN = "registry\\.internal\\.invalid";
+
+  function markersWithClasses(dir: string): void {
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${ALWAYS_FILE_STEM}.txt`), `${PEM_PATTERN}\n`);
+    writeFileSync(join(dir, `${PRIVATE_INFRA_FILE_STEM}.txt`), `${INFRA_PATTERN}\n`);
+    writeFileSync(join(dir, "customer-z.txt"), "zetaquadrant\n");
+  }
+
+  /** Minimal valid registry, optionally declaring the exempt-path key. */
+  function writeRegistry(home: string, exempt?: string[]): void {
+    mkdirSync(home, { recursive: true });
+    const lines = ["schemaVersion: 2", "engagements: []"];
+    if (exempt !== undefined) {
+      // Flow style for the empty case: a bare `key:` with no items parses as
+      // null, not as an empty list, and would be a schema error rather than
+      // the "exempt nothing" the test means.
+      if (exempt.length === 0) lines.push("alwaysBlockExemptPaths: []");
+      else {
+        lines.push("alwaysBlockExemptPaths:");
+        for (const g of exempt) lines.push(`  - ${JSON.stringify(g)}`);
+      }
+    }
+    writeFileSync(join(home, "engagements.yaml"), lines.join("\n") + "\n");
+  }
+
+  let classDir: string;
+  let home: string;
+
+  before(() => {
+    classDir = join(tmp, "class-markers");
+    markersWithClasses(classDir);
+    home = join(tmp, "exempt-home");
+    mkdirSync(home, { recursive: true });
+  });
+
+  it("splits the deny set by class without disturbing combinedRegex", () => {
+    const ds = computeDenySet(makeRepo("public-eligible"), {
+      markersDir: classDir,
+      cachePath: null,
+      publicFacing: true,
+      exemptPaths: ["**/test/**"],
+    });
+
+    assert.ok(ds.exemptibleRegex!.includes("PRIVATE KEY"), "_always joins exemptibleRegex");
+    assert.ok(
+      !ds.strictRegex!.includes("PRIVATE KEY"),
+      "_always must NOT be in strictRegex",
+    );
+    assert.ok(ds.strictRegex!.includes("zetaquadrant"), "engagement marker is strict");
+    assert.ok(
+      ds.strictRegex!.includes("registry"),
+      "_private_infra is strict, NOT exemptible — a private host in a fixture is still a leak",
+    );
+    assert.ok(!ds.exemptibleRegex!.includes("registry"));
+
+    // combinedRegex is the untouched union: other callers depend on it.
+    for (const p of ds.patterns) {
+      assert.ok(ds.combinedRegex.includes(p), `combinedRegex still carries ${p}`);
+    }
+  });
+
+  it("uses the built-in default list when the registry declares no key", () => {
+    writeRegistry(home); // no alwaysBlockExemptPaths
+    const ds = computeDenySet(makeRepo("private-strict"), {
+      markersDir: classDir,
+      cachePath: null,
+      publicFacing: false,
+      registryPath: join(home, "engagements.yaml"),
+    });
+    assert.deepEqual(ds.exemptPaths, [...BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS]);
+  });
+
+  it("an explicit empty registry list means NO exemptions (not the default)", () => {
+    writeRegistry(home, []);
+    const ds = computeDenySet(makeRepo("private-strict"), {
+      markersDir: classDir,
+      cachePath: null,
+      publicFacing: false,
+      registryPath: join(home, "engagements.yaml"),
+    });
+    assert.deepEqual(ds.exemptPaths, [], "absent and empty must not be conflated");
+  });
+
+  it("a registry list replaces the built-in default", () => {
+    writeRegistry(home, ["**/vendor-fixtures/**"]);
+    const ds = computeDenySet(makeRepo("private-strict"), {
+      markersDir: classDir,
+      cachePath: null,
+      publicFacing: false,
+      registryPath: join(home, "engagements.yaml"),
+    });
+    assert.deepEqual(ds.exemptPaths, ["**/vendor-fixtures/**"]);
+  });
+
+  it("the per-repo list is ADDITIVE to the registry list, never subtractive", () => {
+    writeRegistry(home, ["**/vendor-fixtures/**"]);
+    const repo = { ...makeRepo("private-strict"), alwaysBlockExemptPaths: ["**/golden/**"] };
+    const ds = computeDenySet(repo, {
+      markersDir: classDir,
+      cachePath: null,
+      publicFacing: false,
+      registryPath: join(home, "engagements.yaml"),
+    });
+    assert.deepEqual(ds.exemptPaths, ["**/vendor-fixtures/**", "**/golden/**"]);
+  });
+
+  it("per-repo entries are added on top of the built-in default too", () => {
+    writeRegistry(home);
+    const repo = { ...makeRepo("private-strict"), alwaysBlockExemptPaths: ["**/golden/**"] };
+    const ds = computeDenySet(repo, {
+      markersDir: classDir,
+      cachePath: null,
+      publicFacing: false,
+      registryPath: join(home, "engagements.yaml"),
+    });
+    assert.deepEqual(ds.exemptPaths, [...BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS, "**/golden/**"]);
+  });
+
+  it("a duplicate per-repo entry does not appear twice", () => {
+    writeRegistry(home, ["**/golden/**"]);
+    const repo = { ...makeRepo("private-strict"), alwaysBlockExemptPaths: ["**/golden/**"] };
+    const ds = computeDenySet(repo, {
+      markersDir: classDir,
+      cachePath: null,
+      publicFacing: false,
+      registryPath: join(home, "engagements.yaml"),
+    });
+    assert.deepEqual(ds.exemptPaths, ["**/golden/**"]);
+  });
+
+  it("falls back to the built-in default when there is no registry at all", () => {
+    const paths = loadExemptPaths(makeRepo("private-strict"), {
+      registryPath: join(tmp, "definitely-absent", "engagements.yaml"),
+    });
+    assert.deepEqual(paths, [...BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS]);
+  });
+
+  describe("a repo-wide glob is a config error, not a preference", () => {
+    for (const bad of ["**", "**/*", "*", ""]) {
+      it(`rejects ${JSON.stringify(bad)} in the registry`, () => {
+        writeRegistry(home, [bad]);
+        assert.throws(
+          () =>
+            computeDenySet(makeRepo("private-strict"), {
+              markersDir: classDir,
+              cachePath: null,
+              publicFacing: false,
+              registryPath: join(home, "engagements.yaml"),
+            }),
+          GlobTooBroadError,
+        );
+      });
+
+      it(`rejects ${JSON.stringify(bad)} in the per-repo file`, () => {
+        writeRegistry(home);
+        const repo = { ...makeRepo("private-strict"), alwaysBlockExemptPaths: [bad] };
+        assert.throws(
+          () =>
+            computeDenySet(repo, {
+              markersDir: classDir,
+              cachePath: null,
+              publicFacing: false,
+              registryPath: join(home, "engagements.yaml"),
+            }),
+          GlobTooBroadError,
+        );
+      });
+    }
+  });
+
+  it("changing the exempt paths invalidates the cached deny set", () => {
+    // The marker files are untouched between the two calls, so a fingerprint
+    // that omitted the resolved exempt-path list would serve the first
+    // (stale) entry and a registry edit would appear to do nothing.
+    const cachePath = join(tmp, "exempt-cache.json");
+    rmSync(cachePath, { force: true });
+    const repo = makeRepo("private-strict");
+
+    const first = computeDenySet(repo, {
+      markersDir: classDir,
+      cachePath,
+      publicFacing: false,
+      exemptPaths: ["**/test/**"],
+    });
+    assert.deepEqual(first.exemptPaths, ["**/test/**"]);
+
+    const second = computeDenySet(repo, {
+      markersDir: classDir,
+      cachePath,
+      publicFacing: false,
+      exemptPaths: ["**/golden/**"],
+    });
+    assert.deepEqual(
+      second.exemptPaths,
+      ["**/golden/**"],
+      "cache must not mask a change to the exempt-path list",
+    );
+  });
+
+  it("a cache hit still carries the split and the exempt paths", () => {
+    const cachePath = join(tmp, "exempt-cache-hit.json");
+    rmSync(cachePath, { force: true });
+    const repo = makeRepo("private-strict");
+    const opts = {
+      markersDir: classDir,
+      cachePath,
+      publicFacing: false,
+      exemptPaths: ["**/test/**"],
+    };
+    const cold = computeDenySet(repo, opts);
+    const warm = computeDenySet(repo, opts);
+    assert.equal(warm.strictRegex, cold.strictRegex);
+    assert.equal(warm.exemptibleRegex, cold.exemptibleRegex);
+    assert.deepEqual(warm.exemptPaths, cold.exemptPaths);
+    assert.notEqual(warm.strictRegex, undefined);
+  });
+
+  it("a v4-schema cache is rejected so the split takes effect on upgrade", () => {
+    const cachePath = join(tmp, "v4-cache.json");
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        schemaVersion: 4,
+        key: "shaped-but-stale",
+        files: [],
+        patterns: ["zetaquadrant"],
+        patternSources: ["customer-z"],
+        combinedRegex: "zetaquadrant",
+        warnings: [],
+      }),
+    );
+    const ds = computeDenySet(makeRepo("private-strict"), {
+      markersDir: classDir,
+      cachePath,
+      publicFacing: false,
+      exemptPaths: ["**/test/**"],
+    });
+    assert.equal(typeof ds.strictRegex, "string", "recomputed, not served from v4");
+    assert.deepEqual(ds.exemptPaths, ["**/test/**"]);
+    rmSync(cachePath, { force: true });
   });
 });

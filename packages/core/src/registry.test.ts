@@ -512,3 +512,77 @@ describe("resolveEngagement", () => {
     assert.equal(r.match?.id, "customer-c");
   });
 });
+
+describe("loadRegistry — alwaysBlockExemptPaths", () => {
+  it("surfaces the key when present", () => {
+    const path = writeYaml(
+      "exempt-present.yaml",
+      `
+schemaVersion: 2
+alwaysBlockExemptPaths:
+  - "**/testdata/**"
+  - "**/*.golden.*"
+engagements: []
+`,
+    );
+    const reg = loadRegistry(path);
+    assert.deepEqual(reg.alwaysBlockExemptPaths, ["**/testdata/**", "**/*.golden.*"]);
+  });
+
+  it("leaves the key UNDEFINED when absent, distinct from an empty list", () => {
+    // Absent selects the built-in default exemptions; `[]` means "exempt
+    // nothing". Defaulting to `[]` here — as every other optional list on
+    // Registry does — would silently turn the first into the second.
+    const path = writeYaml(
+      "exempt-absent.yaml",
+      `
+schemaVersion: 2
+engagements: []
+`,
+    );
+    assert.equal(loadRegistry(path).alwaysBlockExemptPaths, undefined);
+  });
+
+  it("preserves an explicitly empty list", () => {
+    const path = writeYaml(
+      "exempt-empty.yaml",
+      `
+schemaVersion: 2
+alwaysBlockExemptPaths: []
+engagements: []
+`,
+    );
+    assert.deepEqual(loadRegistry(path).alwaysBlockExemptPaths, []);
+  });
+
+  it("rejects a non-string entry", () => {
+    const path = writeYaml(
+      "exempt-bad.yaml",
+      `
+schemaVersion: 2
+alwaysBlockExemptPaths:
+  - 42
+engagements: []
+`,
+    );
+    assert.throws(() => loadRegistry(path), RegistryParseError);
+  });
+
+  it("does not require a schemaVersion bump: a v1 registry may carry it", () => {
+    // The key is optional and additive, so an older reader dropping it via
+    // passthrough() enforces `_always` everywhere — stricter, never laxer.
+    // Version gating exists to stop a stale reader from mis-enforcing; a
+    // fail-closed direction needs no gate.
+    const path = writeYaml(
+      "exempt-v1.yaml",
+      `
+alwaysBlockExemptPaths:
+  - "**/testdata/**"
+engagements: []
+`,
+    );
+    const reg = loadRegistry(path);
+    assert.equal(reg.schemaVersion, 1);
+    assert.deepEqual(reg.alwaysBlockExemptPaths, ["**/testdata/**"]);
+  });
+});

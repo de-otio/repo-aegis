@@ -46,6 +46,44 @@ function makeClaudeHome(name: string): string {
   return dir;
 }
 
+// SAFETY: any `uninstall({ yes: true, ... })` call whose `cwd` resolves
+// to a git repo runs the `install-hooks --uninstall` step, which (as
+// of the v0.7 default flip) unsets core.hooksPath in BOTH the global
+// AND local scope. Every such test below therefore (a) points `cwd` at
+// a throwaway repo it creates itself — never relies on
+// `process.cwd()` — and (b) wraps the call in `withHooksIsolation`,
+// which redirects GIT_CONFIG_GLOBAL/SYSTEM to per-test temp files so
+// the global unset can only ever touch that temp file, never the
+// developer's real ~/.gitconfig. Same pattern as
+// packages/core/src/hooks-state.test.ts and
+// packages/cli/src/commands/status.test.ts's withHooksIsolation.
+function withHooksIsolation<T>(base: string, fn: () => T): T {
+  const overrides: Record<string, string> = {
+    GIT_CONFIG_GLOBAL: join(base, "gitconfig-global"),
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  const prev: Record<string, string | undefined> = {};
+  for (const k of Object.keys(overrides)) {
+    prev[k] = process.env[k];
+    process.env[k] = overrides[k]!;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const k of Object.keys(overrides)) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+}
+
+function makeGitRepo(dir: string): string {
+  mkdirSync(dir, { recursive: true });
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir });
+  return dir;
+}
+
 describe("repo-aegis uninstall — dry run", () => {
   it("default is dry-run; no destructive actions", () => {
     const aegisHome = makeAegisHome("dryrun");
@@ -77,39 +115,52 @@ describe("repo-aegis uninstall — dry run", () => {
     });
   });
 
-  it("--yes applies all 'always-on' steps", () => {
+  it("--yes applies all 'always-on' steps, including unsetting hooks in an isolated throwaway repo", () => {
     const aegisHome = makeAegisHome("apply");
     const claudeHome = makeClaudeHome("apply");
     const gitignore = join(tmp, "apply-gitignore");
     writeFileSync(gitignore, "");
+    const base = join(tmp, "apply-git-isolation");
+    mkdirSync(base, { recursive: true });
+    const repo = makeGitRepo(join(base, "repo"));
 
-    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome, silent: true }));
-      captureOutput(() =>
-        installGitignore({ gitignorePath: gitignore, silent: true }),
-      );
+    withHooksIsolation(base, () => {
+      withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+        captureOutput(() => installClaudeMd({ claudeHome, silent: true }));
+        captureOutput(() =>
+          installGitignore({ gitignorePath: gitignore, silent: true }),
+        );
 
-      captureOutput(() =>
-        uninstall({
-          claudeHome,
-          yes: true,
-          json: true,
-          // Don't purge home or repos in this test.
-        }),
-      );
+        const r = captureOutput(() =>
+          uninstall({
+            claudeHome,
+            cwd: repo,
+            yes: true,
+            json: true,
+            // Don't purge home or repos in this test.
+          }),
+        );
 
-      // CLAUDE.md block stripped, settings.json hooks removed.
-      const settingsBody = JSON.parse(
-        readFileSync(join(claudeHome, "settings.json"), "utf8"),
-      ) as { hooks?: unknown };
-      assert.ok(!settingsBody.hooks || Object.keys(settingsBody.hooks).length === 0);
+        const j = JSON.parse(r.stdout) as {
+          steps: Array<{ step: string; ok: boolean }>;
+        };
+        const hooksStep = j.steps.find(s => s.step === "install-hooks --uninstall");
+        assert.ok(hooksStep);
+        assert.equal(hooksStep!.ok, true);
 
-      // gitignore block stripped.
-      const gitignoreBody = readFileSync(gitignore, "utf8");
-      assert.ok(!gitignoreBody.includes("repo-aegis: managed block"));
+        // CLAUDE.md block stripped, settings.json hooks removed.
+        const settingsBody = JSON.parse(
+          readFileSync(join(claudeHome, "settings.json"), "utf8"),
+        ) as { hooks?: unknown };
+        assert.ok(!settingsBody.hooks || Object.keys(settingsBody.hooks).length === 0);
 
-      // Aegis home survives because we didn't pass --purge-home.
-      assert.ok(existsSync(aegisHome));
+        // gitignore block stripped.
+        const gitignoreBody = readFileSync(gitignore, "utf8");
+        assert.ok(!gitignoreBody.includes("repo-aegis: managed block"));
+
+        // Aegis home survives because we didn't pass --purge-home.
+        assert.ok(existsSync(aegisHome));
+      });
     });
   });
 });
@@ -118,17 +169,23 @@ describe("repo-aegis uninstall — --purge-home", () => {
   it("--yes --purge-home deletes ~/.config/repo-aegis", () => {
     const aegisHome = makeAegisHome("purge-home");
     const claudeHome = makeClaudeHome("purge-home");
+    const base = join(tmp, "purge-home-git-isolation");
+    mkdirSync(base, { recursive: true });
+    const repo = makeGitRepo(join(base, "repo"));
 
     assert.ok(existsSync(aegisHome));
-    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() =>
-        uninstall({
-          claudeHome,
-          yes: true,
-          purgeHome: true,
-          json: true,
-        }),
-      );
+    withHooksIsolation(base, () => {
+      withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+        captureOutput(() =>
+          uninstall({
+            claudeHome,
+            cwd: repo,
+            yes: true,
+            purgeHome: true,
+            json: true,
+          }),
+        );
+      });
     });
     assert.equal(existsSync(aegisHome), false);
   });
@@ -137,18 +194,24 @@ describe("repo-aegis uninstall — --purge-home", () => {
     const weirdHome = join(tmp, "not-repo-aegis-shaped");
     mkdirSync(weirdHome, { recursive: true });
     const claudeHome = makeClaudeHome("weird");
+    const base = join(tmp, "weird-git-isolation");
+    mkdirSync(base, { recursive: true });
+    const repo = makeGitRepo(join(base, "repo"));
 
-    withEnv("REPO_AEGIS_HOME", weirdHome, () => {
-      const r = captureOutput(() =>
-        uninstall({
-          claudeHome,
-          yes: true,
-          purgeHome: true,
-          json: true,
-        }),
-      );
-      assert.equal(r.exitCode, 2);
-      assert.ok(r.stderr.includes("home path does not end in 'repo-aegis'"));
+    withHooksIsolation(base, () => {
+      withEnv("REPO_AEGIS_HOME", weirdHome, () => {
+        const r = captureOutput(() =>
+          uninstall({
+            claudeHome,
+            cwd: repo,
+            yes: true,
+            purgeHome: true,
+            json: true,
+          }),
+        );
+        assert.equal(r.exitCode, 2);
+        assert.ok(r.stderr.includes("home path does not end in 'repo-aegis'"));
+      });
     });
     // Path still exists.
     assert.ok(existsSync(weirdHome));
@@ -192,17 +255,23 @@ describe("repo-aegis uninstall — --purge-repos", () => {
     execFileSync("git", ["-C", repo, "config", "repo-aegis.class", "scratch"], {
       stdio: "ignore",
     });
+    const base = join(tmp, "sweep-git-isolation");
+    mkdirSync(base, { recursive: true });
+    const cwdRepo = makeGitRepo(join(base, "cwd-repo"));
 
-    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() =>
-        uninstall({
-          claudeHome,
-          yes: true,
-          purgeRepos: true,
-          scanRoot: [root],
-          json: true,
-        }),
-      );
+    withHooksIsolation(base, () => {
+      withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+        captureOutput(() =>
+          uninstall({
+            claudeHome,
+            cwd: cwdRepo,
+            yes: true,
+            purgeRepos: true,
+            scanRoot: [root],
+            json: true,
+          }),
+        );
+      });
     });
 
     // The git config should be cleared.
@@ -225,24 +294,27 @@ describe("repo-aegis uninstall — outside a git repo", () => {
     const claudeHome = makeClaudeHome("nogit");
     const noGit = join(tmp, "nogit-cwd");
     mkdirSync(noGit, { recursive: true });
+    const base = join(tmp, "nogit-git-isolation");
+    mkdirSync(base, { recursive: true });
 
-    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      const r = captureOutput(() =>
-        uninstall({
-          claudeHome,
-          cwd: noGit,
-          yes: true,
-          json: true,
-        }),
-      );
-      const j = JSON.parse(r.stdout) as {
-        steps: Array<{ step: string; ok: boolean; details?: { skipped?: boolean } }>;
-      };
-      const hooksStep = j.steps.find(s => s.step === "install-hooks --uninstall");
-      assert.ok(hooksStep);
-      assert.equal(hooksStep!.ok, true);
-      assert.equal(hooksStep!.details?.skipped, true);
+    withHooksIsolation(base, () => {
+      withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+        const r = captureOutput(() =>
+          uninstall({
+            claudeHome,
+            cwd: noGit,
+            yes: true,
+            json: true,
+          }),
+        );
+        const j = JSON.parse(r.stdout) as {
+          steps: Array<{ step: string; ok: boolean; details?: { skipped?: boolean } }>;
+        };
+        const hooksStep = j.steps.find(s => s.step === "install-hooks --uninstall");
+        assert.ok(hooksStep);
+        assert.equal(hooksStep!.ok, true);
+        assert.equal(hooksStep!.details?.skipped, true);
+      });
     });
   });
 });
-

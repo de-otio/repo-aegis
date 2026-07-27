@@ -96,6 +96,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "classify",
       "context",
       "deny",
+      "doctor",
       "engagements",
       "hook",
       "init",
@@ -107,6 +108,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "status",
       "suggest-markers",
       "uninstall",
+      "waive",
     ],
   },
 
@@ -119,13 +121,22 @@ const EXPECTED_SHAPE: CommandShape[] = [
     flags: [
       "--history",
       "--ignore-allowlist-comments",
+      "--ignore-waivers",
       "--max-file-bytes",
       "--path",
+      "--push-ref",
       "--range",
+      "--remote",
       "--since",
       "--staged",
       "--verbose",
     ],
+    subcommands: [],
+  },
+  { path: "doctor", flags: ["--fix", "--scan-root", "--yes"], subcommands: [] },
+  {
+    path: "waive",
+    flags: ["--approver", "--blob", "--expires", "--list", "--pattern", "--reason", "--remove"],
     subcommands: [],
   },
   {
@@ -177,6 +188,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "--history",
       "--max-queries",
       "--no-fixture-check",
+      "--no-hooks-check",
       "--no-lockfile-check",
       "--no-marker-scan",
       "--no-remote-check",
@@ -228,7 +240,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   },
   {
     path: "install hooks",
-    flags: ["--force", "--uninstall"],
+    flags: ["--force", "--global", "--local", "--uninstall", "--unset-local"],
     subcommands: [],
   },
   {

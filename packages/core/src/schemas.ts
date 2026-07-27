@@ -172,6 +172,42 @@ export const registryFileSchema = z
         message: "'privateInfra' must be a list of patterns",
       })
       .optional(),
+    /**
+     * Path globs (see `globs.ts` for the `*`/`?`/`**` semantics) inside which
+     * the `_always` marker class — and ONLY that class — is not enforced.
+     *
+     * The asymmetry is the point. `_always` patterns are secret *shapes* (PEM
+     * headers, token prefixes) with a well-known benign home: a keypair under
+     * `test/fixtures/` is a throwaway by construction. A customer-marker
+     * literal has no benign home — a customer name in a test fixture is still
+     * a leak — and neither does `_private_infra`, since a private registry
+     * host in a public repo's fixture is exactly the thing that check exists
+     * to stop. So engagement and `_private_infra` patterns are never exempted,
+     * at any path, by any config.
+     *
+     * camelCase deliberately: `always_block` above is legacy snake_case, but
+     * every key added since (`personalOrgs`, `publicRegistries`,
+     * `privateInfra`) is camel, and consistency for new keys beats symmetry
+     * with the one legacy name.
+     *
+     * Absent (undefined) and empty (`[]`) mean different things and the
+     * distinction is load-bearing: absent selects the built-in default list
+     * (see `BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS` in deny-set.ts), while `[]`
+     * means "exempt nothing". Readers must not collapse the two with `?? []`.
+     *
+     * **No `schemaVersion` bump.** The key is optional and additive, so an
+     * older repo-aegis reading a registry that declares it drops the key via
+     * `.passthrough()` and enforces `_always` *everywhere* — i.e. the old
+     * reader is strictly STRICTER, never laxer. Version gating exists to stop
+     * a stale reader from mis-enforcing; a fail-closed direction needs no
+     * gate. The same argument covers `alwaysBlockExemptPaths` in
+     * `repoOverrideSchema` below.
+     */
+    alwaysBlockExemptPaths: z
+      .array(z.string({ message: "'alwaysBlockExemptPaths' entries must be strings" }), {
+        message: "'alwaysBlockExemptPaths' must be a list of path globs",
+      })
+      .optional(),
     engagements: z.array(engagementSchema, { message: "'engagements' must be a list" }),
   })
   .passthrough()
@@ -255,6 +291,18 @@ export const repoOverrideSchema = z
     class: z.enum(REPO_CLASSES).optional(),
     engagements: z
       .array(z.string().min(1, "'engagements' entries must be non-empty strings"))
+      .optional(),
+    /**
+     * Additional `_always`-only path exemptions for this repo, **added to**
+     * whatever the machine-level registry resolves to. Additive only — this
+     * file is checked in and therefore writable by anyone with commit access,
+     * so allowing it to *remove* a machine-level exemption would be fine but
+     * allowing it to remove enforcement is not; the only widening it can do is
+     * within the `_always` class, which the registry already permits by kind.
+     * It can never touch engagement or `_private_infra` patterns.
+     */
+    alwaysBlockExemptPaths: z
+      .array(z.string().min(1, "'alwaysBlockExemptPaths' entries must be non-empty strings"))
       .optional(),
   })
   .passthrough();

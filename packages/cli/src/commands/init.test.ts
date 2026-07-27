@@ -35,6 +35,33 @@ after(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
+// SAFETY: `init`'s `--with-hooks` (default on) now calls `installHooks`
+// with its v0.7 default scope, GLOBAL. Without isolation that would
+// write to the developer's real ~/.gitconfig. Every test that lets
+// `withHooks` run therefore redirects GIT_CONFIG_GLOBAL/SYSTEM to a
+// per-test temp file first. Same pattern as
+// packages/core/src/hooks-state.test.ts.
+async function withHooksIsolationAsync<T>(base: string, fn: () => Promise<T>): Promise<T> {
+  const overrides: Record<string, string> = {
+    GIT_CONFIG_GLOBAL: join(base, "gitconfig-global"),
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  const prev: Record<string, string | undefined> = {};
+  for (const k of Object.keys(overrides)) {
+    prev[k] = process.env[k];
+    process.env[k] = overrides[k]!;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const k of Object.keys(overrides)) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
+}
+
 describe("init command — fresh init in empty home", () => {
   let home: string;
 
@@ -75,7 +102,11 @@ describe("init command — fresh init in empty home", () => {
     const body = readFileSync(join(home, "engagements.yaml"), "utf8");
     assert.ok(body.includes("always_block"));
     assert.ok(body.includes("engagements"));
-    assert.ok(body.includes("example-customer"));
+    // The scaffolded registry must contain NO active engagement: an
+    // engagement id is auto-blocked as a literal everywhere, so a shipped
+    // example would seed every new user's deny set with a placeholder.
+    assert.match(body, /^engagements: \[\]$/m);
+    assert.match(body, /^# engagements example: uncomment/m);
   });
 
   it("prints 'scaffolded engagements.yaml' to stdout", async () => {
@@ -151,7 +182,7 @@ describe("init command — --force flag", () => {
       captureOutputAsync(() => init({ force: true, withHooks: false, withClaude: false })),
     );
     const after = readFileSync(regPath, "utf8");
-    assert.ok(after.includes("example-customer"));
+    assert.match(after, /^engagements: \[\]$/m);
     assert.ok(!after.includes("extra comment to detect overwrite"));
   });
 });
@@ -199,26 +230,49 @@ describe("init command — --json output", () => {
 });
 
 describe("init command — --with-hooks wires installHooks", () => {
-  it("sets core.hooksPath when --with-hooks is on (default) and cwd is a git repo", async () => {
+  it("sets GLOBAL core.hooksPath (v0.7 default) when --with-hooks is on (default) and cwd is a git repo", async () => {
     const home = join(tmp, "with-hooks-home");
     mkdirSync(home, { recursive: true });
-    const repo = join(tmp, "with-hooks-repo");
+    const base = join(tmp, "with-hooks-git-isolation");
+    mkdirSync(base, { recursive: true });
+    const repo = join(base, "repo");
     mkdirSync(repo, { recursive: true });
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
     execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
     execFileSync("git", ["config", "user.name", "test"], { cwd: repo });
 
-    await withEnvAsync("REPO_AEGIS_HOME", home, () =>
-      captureOutputAsync(() => init({ cwd: repo, withClaude: false })),
+    await withHooksIsolationAsync(base, () =>
+      withEnvAsync("REPO_AEGIS_HOME", home, () =>
+        captureOutputAsync(() => init({ cwd: repo, withClaude: false })),
+      ),
     );
 
-    const out = execFileSync("git", ["config", "--get", "core.hooksPath"], {
-      cwd: repo,
-      encoding: "utf8",
-    }).trim();
+    const out = await withHooksIsolationAsync(base, () =>
+      Promise.resolve(
+        execFileSync("git", ["config", "--global", "--get", "core.hooksPath"], {
+          cwd: repo,
+          encoding: "utf8",
+        }).trim(),
+      ),
+    );
     assert.equal(out, join(home, "hooks"));
     assert.ok(existsSync(join(home, "hooks", "pre-commit")));
     assert.ok(existsSync(join(home, "hooks", "pre-push")));
+
+    // The whole point of the default flip: the repo-LOCAL scope must
+    // stay untouched, since coverage no longer depends on a per-repo
+    // opt-in.
+    let localVal = "";
+    try {
+      localVal = execFileSync("git", ["config", "--local", "--get", "core.hooksPath"], {
+        cwd: repo,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      /* unset, expected */
+    }
+    assert.equal(localVal, "");
   });
 });
 
@@ -329,14 +383,24 @@ describe("init --migrate-classify", () => {
 
   it("migrates a customer-coupled rule into the matching engagement's githubOrgs", async () => {
     const home = await setupHome("customer-coupled");
-    // The bootstrap stub creates an `example-customer` engagement; we'll
-    // target it.
+    // The bootstrap stub no longer ships an active engagement (it would seed
+    // every user's deny set with a placeholder literal), so this test now
+    // supplies the engagement it migrates into.
+    writeFileSync(
+      join(home, "engagements.yaml"),
+      `always_block: []
+engagements:
+  - id: zzq-fixture-engagement
+    name: Fixture Engagement
+    markers: []
+`,
+    );
     writeFileSync(
       join(home, "classify.yml"),
       `rules:
-  - match: "github\\\\.com[:/]example-customer/"
+  - match: "github\\\\.com[:/]zzq-fixture-engagement/"
     class: customer-coupled
-    engagement: example-customer
+    engagement: zzq-fixture-engagement
 `,
     );
     await withEnvAsync("REPO_AEGIS_HOME", home, () =>
@@ -350,7 +414,7 @@ describe("init --migrate-classify", () => {
     );
     const reg = readFileSync(join(home, "engagements.yaml"), "utf8");
     assert.ok(/githubOrgs:/.test(reg));
-    assert.ok(/example-customer/.test(reg));
+    assert.ok(/zzq-fixture-engagement/.test(reg));
   });
 
   it("idempotent — second invocation is a no-op", async () => {

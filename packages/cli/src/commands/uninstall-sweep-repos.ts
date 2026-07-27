@@ -12,48 +12,9 @@
 // explicit confirmation.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { appendAuditRecord } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, type OutputOptions } from "../format.js";
-
-/**
- * Default roots scanned when the user passes no `--scan-root`. Only
- * directories that exist are walked; missing entries are silent.
- *
- * Keep this list short and conservative. Aggressive defaults (e.g.
- * scanning the entire home directory) risk traversing into places the
- * user doesn't expect — backup mounts, vendored deps under
- * `node_modules`, etc. Users with repos elsewhere pass `--scan-root`.
- */
-function defaultScanRoots(): string[] {
-  const home = homedir();
-  return ["repos", "code", "src", "projects"].map(d => join(home, d));
-}
-
-/**
- * Directory names we never recurse into. `.git` is included so we
- * don't try to walk its internals (worktrees folders we care about
- * live under `.git/worktrees/<name>` but git already enumerates them
- * via the parent's `.git/config`; the per-worktree config is read
- * separately when we discover the worktree's `.git` link file).
- */
-const SKIP_DIRS = new Set([
-  "node_modules",
-  ".git",
-  ".cache",
-  ".svn",
-  ".hg",
-  "vendor",
-  "target",
-  "dist",
-  "build",
-  "Library",
-  ".npm",
-  ".cargo",
-  ".rustup",
-]);
+import { findWorkingTrees, defaultScanRoots } from "../repo-walk.js";
 
 const REPO_AEGIS_CONFIG_KEYS = ["repo-aegis.class", "repo-aegis.engagement"];
 
@@ -75,50 +36,6 @@ interface SweepReposOptions extends OutputOptions {
    * failure. Used by the top-level `repo-aegis uninstall`.
    */
   silent?: boolean;
-}
-
-/**
- * Find every git working tree (regular repo or linked worktree) under
- * `root`. A working tree is any directory containing a `.git` entry
- * (file or directory). Skips traversal once a working tree is found
- * (we don't recurse into a repo looking for nested repos — that would
- * needlessly include vendored submodules and `git worktree add`'d
- * trees that share the parent's config anyway).
- */
-function* findWorkingTrees(root: string, depthBudget = 6): Generator<string> {
-  if (!existsSync(root)) return;
-  let stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
-  while (stack.length > 0) {
-    const { dir, depth } = stack.pop()!;
-    if (depth > depthBudget) continue;
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      continue;
-    }
-    if (entries.includes(".git")) {
-      yield dir;
-      continue;
-    }
-    for (const e of entries) {
-      if (SKIP_DIRS.has(e) || e.startsWith(".") && e !== "." && e !== "..") {
-        // Skip dotfile dirs by default — they tend to be cache/state
-        // dirs (`.cache`, `.npm`, `.config`). The ones we explicitly
-        // want to walk (none today) would need an opt-in.
-        continue;
-      }
-      const sub = join(dir, e);
-      let st;
-      try {
-        st = statSync(sub);
-      } catch {
-        continue;
-      }
-      if (!st.isDirectory()) continue;
-      stack.push({ dir: sub, depth: depth + 1 });
-    }
-  }
 }
 
 /** Return current values for each repo-aegis.* key, or empty if unset. */

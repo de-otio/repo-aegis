@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
+import { basename } from "node:path";
 import {
   loadRegistry,
   RegistryEncryptedError,
   RegistryNotFoundError,
+  OVERRIDE_FILENAME,
   type Registry,
 } from "@de-otio/repo-aegis-core";
 import { decideHookAction, type HookDecision } from "./hook-policy.js";
@@ -115,7 +117,8 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
  *
  * Exit semantics:
  *   - 0 if no file_path / decision is `scan` or `scan-with-warning`,
- *   - 2 (`EXIT_BLOCK`) on `CROSS_ORG_WRITE` — blocks the tool,
+ *   - 2 (`EXIT_BLOCK`) on `CROSS_ORG_WRITE` or `WAIVER_FILE_WRITE_REFUSED`
+ *     — blocks the tool,
  *   - 1 (`EXIT_INTERNAL_ERROR`) on a registry error we cannot recover
  *     from. This FAILS OPEN: Claude Code lets the tool proceed, so an
  *     unreadable/encrypted registry never blocks every write behind the
@@ -124,12 +127,45 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
  *
  * The hook NEVER reveals literal markers — but `check-write` doesn't
  * scan content at all, so this is structural rather than enforced.
+ *
+ * CONTROL 1 of "D. Reviewed-benign waivers"
+ * (doc/plan-tag-push-and-hook-liveness.md): `.repo-aegis.yml` carries
+ * waivers and repo classification, and is committed/agent-writable like
+ * any other file in the tree. Without this refusal, an agent blocked by
+ * a `check` finding could simply write four lines of YAML and retry —
+ * reconstructing `git push --no-verify` with extra steps, which is
+ * exactly the escape hatch waivers exist to replace. The refusal runs
+ * unconditionally (ahead of, and independent of, the registry-backed
+ * cross-org logic below) — even a same-org agent must not mint its own
+ * waiver. `repo-aegis waive` remains available, but only as a
+ * human-run, TTY-gated command (packages/cli/src/commands/waive.ts,
+ * CONTROL 2) — this hook is what keeps that gate from being bypassable
+ * by an agent writing the file directly.
  */
 export async function hookCheckWrite(): Promise<void> {
   const stdinText = await readStdin();
   const { filePath, cwd } = parseHookInput(stdinText);
 
   if (!filePath) process.exit(0);
+
+  if (basename(filePath) === OVERRIDE_FILENAME) {
+    emitJsonAndExit(
+      {
+        code: "WAIVER_FILE_WRITE_REFUSED",
+        error:
+          `agent write to ${OVERRIDE_FILENAME} refused: this file controls waivers and ` +
+          `repo classification. A coding agent must never mint or edit a waiver for its ` +
+          `own blocked findings — that reconstructs \`git push --no-verify\` with extra ` +
+          `steps (see "D. Reviewed-benign waivers" in doc/plan-tag-push-and-hook-liveness.md). ` +
+          `Surface the finding to the human operator instead. \`repo-aegis waive\` exists ` +
+          `for exactly this case, but it is a human-run, TTY-gated command: it refuses to ` +
+          `run non-interactively unless a human has explicitly set ` +
+          `REPO_AEGIS_WAIVE_NONINTERACTIVE=1.`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
+  }
 
   let registry: Registry;
   try {

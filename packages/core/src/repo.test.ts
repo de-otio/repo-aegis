@@ -14,6 +14,7 @@ import {
   setClass,
   unsetClass,
   REPO_CLASSES,
+  RepoOverrideError,
 } from "./repo.js";
 import { NotAGitRepoError } from "./exceptions.js";
 
@@ -271,5 +272,63 @@ describe(".repo-aegis.yml overrides", () => {
     assert.equal(cfg.isGitRepo, false);
     assert.equal(cfg.class, "scratch");
     assert.equal(cfg.classFromOverride, true);
+  });
+});
+
+describe(".repo-aegis.yml — alwaysBlockExemptPaths", () => {
+  let tmp: string;
+  let repoDir: string;
+  const yamlPath = (dir: string): string => join(dir, ".repo-aegis.yml");
+
+  before(() => {
+    tmp = mkdtempSync(join(tmpdir(), "repo-aegis-repo-exempt-"));
+    repoDir = mkGitDir(tmp, "exempt-repo");
+  });
+
+  after(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("surfaces the list on RepoConfig", () => {
+    writeFileSync(
+      yamlPath(repoDir),
+      "alwaysBlockExemptPaths:\n  - \"**/golden/**\"\n  - \"**/*.snap.*\"\n",
+    );
+    const cfg = readRepoConfig(repoDir);
+    assert.deepEqual(cfg.alwaysBlockExemptPaths, ["**/golden/**", "**/*.snap.*"]);
+    rmSync(yamlPath(repoDir));
+  });
+
+  it("is undefined when the file omits the key", () => {
+    writeFileSync(yamlPath(repoDir), "class: private-strict\n");
+    const cfg = readRepoConfig(repoDir);
+    assert.equal(cfg.alwaysBlockExemptPaths, undefined);
+    rmSync(yamlPath(repoDir));
+    unsetClass(repoDir);
+  });
+
+  it("has no git-config counterpart, so the file is always the source", () => {
+    // Unlike class/engagements there is nothing to reconcile: a path
+    // exemption describes the source tree, not one clone. Setting an
+    // unrelated git config must not disturb it.
+    execFileSync("git", ["config", "repo-aegis.class", "public-eligible"], { cwd: repoDir });
+    writeFileSync(yamlPath(repoDir), "alwaysBlockExemptPaths:\n  - \"**/golden/**\"\n");
+    const cfg = readRepoConfig(repoDir);
+    assert.equal(cfg.class, "public-eligible");
+    assert.deepEqual(cfg.alwaysBlockExemptPaths, ["**/golden/**"]);
+    rmSync(yamlPath(repoDir));
+    unsetClass(repoDir);
+  });
+
+  it("rejects a non-string entry as a parse error", () => {
+    writeFileSync(yamlPath(repoDir), "alwaysBlockExemptPaths:\n  - 7\n");
+    assert.throws(() => readRepoConfig(repoDir), RepoOverrideError);
+    rmSync(yamlPath(repoDir));
+  });
+
+  it("rejects an empty-string entry (an unusable glob is a config error)", () => {
+    writeFileSync(yamlPath(repoDir), "alwaysBlockExemptPaths:\n  - \"\"\n");
+    assert.throws(() => readRepoConfig(repoDir), RepoOverrideError);
+    rmSync(yamlPath(repoDir));
   });
 });

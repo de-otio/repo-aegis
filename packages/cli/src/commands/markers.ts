@@ -7,6 +7,7 @@ import {
   computeDenySet,
   readRepoConfig,
   redactMatch,
+  patternId,
   ALWAYS_FILE_STEM,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, shouldRevealMatches, type OutputOptions } from "../format.js";
@@ -61,8 +62,14 @@ export function markersList(opts: MarkersListOptions): void {
         stem: f.stem,
         path: f.path,
         patternCount: f.patterns.length,
+        // `patternId` is the stable handle `repo-aegis waive` takes. It is a
+        // truncated digest, not the pattern, so it is safe to print even when
+        // the literal is withheld — and listing it here is the only way to
+        // find the id of a pattern you have NOT just tripped.
         patterns: f.patterns.map((p, i) =>
-          reveal ? { index: i, pattern: p } : { index: i, preview: redactMatch(p) },
+          reveal
+            ? { index: i, patternId: patternId(f.stem, p), pattern: p }
+            : { index: i, patternId: patternId(f.stem, p), preview: redactMatch(p) },
         ),
       })),
       verbose: reveal,
@@ -80,11 +87,8 @@ export function markersList(opts: MarkersListOptions): void {
     emitText(`${f.stem}${tag} — ${f.patterns.length} pattern(s)`);
     for (let i = 0; i < f.patterns.length; i++) {
       const p = f.patterns[i]!;
-      if (reveal) {
-        emitText(`  [${i}] ${p}`);
-      } else {
-        emitText(`  [${i}] ${redactMatch(p)}`);
-      }
+      const body = reveal ? p : redactMatch(p);
+      emitText(`  [${i}] ${patternId(f.stem, p)}  ${body}`);
     }
   }
 }
