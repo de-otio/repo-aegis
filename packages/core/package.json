@@ -33,7 +33,7 @@
     "zod": "^4.4.3"
   },
   "optionalDependencies": {
-    "re2": "^1.25.0"
+    "re2": "^1.26.0"
   },
   "devDependencies": {
     "@types/proper-lockfile": "^4.1.4"
