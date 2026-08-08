@@ -2,16 +2,14 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  closeSync,
   existsSync,
-  fstatSync,
   mkdtempSync,
-  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   statSync,
+  type Dirent,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
@@ -893,25 +891,31 @@ function checkPublished(
     }
 
     function recurse(dir: string): void {
-      let entries: string[];
+      // `withFileTypes` takes the entry kind from the directory read itself.
+      // The alternative — `readdirSync` then `statSync(full)` per entry — is a
+      // check-then-use on a path we then open and read (CodeQL
+      // `js/file-system-race`), and costs an extra syscall per entry for the
+      // privilege. Here the kind comes back with the entry and no separate
+      // check on the path is ever made.
+      let entries: Dirent[];
       try {
-        entries = readdirSync(dir);
+        entries = readdirSync(dir, { withFileTypes: true });
       } catch {
         return;
       }
-      for (const name of entries) {
-        const full = join(dir, name);
-        let st;
-        try {
-          st = statSync(full);
-        } catch {
-          continue;
-        }
-        if (st.isDirectory()) {
+      for (const entry of entries) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
           recurse(full);
           continue;
         }
-        if (!st.isFile()) continue;
+        // Symlinks are skipped rather than followed. `findArchiveEscape`
+        // above has already rejected the whole archive if any entry — symlink
+        // targets included — resolves outside the extraction root, so a
+        // symlink that reaches this point necessarily points INSIDE, where
+        // the walk visits its target on its own. Following it would only
+        // scan the same bytes twice under a second name.
+        if (!entry.isFile()) continue;
         // Pass extractDir as the workingTree so scanFile rejects any
         // symlink whose realpath points outside the archive (e.g. a
         // symlink to /etc/passwd that survived the escape check above
@@ -953,32 +957,14 @@ function checkPublished(
         // bytes, so these findings are safe to print in a public job log
         // without the attribution-redaction machinery.
         if (secretScan) {
-          // Read through a file DESCRIPTOR, not the path a second time.
-          // `statSync` above already resolved this path; re-resolving it for
-          // the read is a TOCTOU (CodeQL `js/file-system-race`) — between the
-          // two calls the entry can be replaced, including by a symlink out
-          // of the extraction root that the escape check already cleared.
-          // Opening once and reading from the fd removes the window rather
-          // than narrowing it, and `fstatSync` re-checks the regular-file
-          // property against the SAME object we will read.
+          // No stat/exists check precedes this read — the entry kind came
+          // from the directory read itself — so there is no check-then-use
+          // window to race. A read that fails simply skips the entry.
           let text: string;
-          let fd: number;
           try {
-            fd = openSync(full, "r");
+            text = readFileSync(full, "utf8");
           } catch {
             continue;
-          }
-          try {
-            if (!fstatSync(fd).isFile()) continue;
-            text = readFileSync(fd, "utf8");
-          } catch {
-            continue;
-          } finally {
-            try {
-              closeSync(fd);
-            } catch {
-              /* best-effort close */
-            }
           }
           const secretHits = scanForSecrets(text);
           if (secretHits.length > 0) {
