@@ -186,7 +186,6 @@ ${installStep("      ")}
         run: |
           repo-aegis audit --json \\
             --require-deny-set \\
-            --no-history \\
             --no-fixture-check \\
             --no-remote-check \\
             --no-hooks-check
@@ -273,12 +272,15 @@ ${installStep("      ")}
         # Reports what the proposed configuration would hide. Exit 1 here means
         # the change suppresses a real finding — which may be entirely correct,
         # and is exactly the decision a human reviewer should be making.
+        #
+        # There is no --ignore-waivers here because \`audit\` never applies
+        # waivers at all (unlike \`check\`), so it is already strict in that
+        # dimension. \`repo-aegis: allow\` comments it DOES respect, which is
+        # what --ignore-allowlist-comments turns off.
         run: |
           repo-aegis audit --json \\
             --require-deny-set \\
-            --ignore-waivers \\
             --ignore-allowlist-comments \\
-            --no-history \\
             --no-hooks-check
 `;
 
@@ -336,15 +338,16 @@ jobs:
 ${installStep("      ")}
       - name: Strict audit
         id: audit
-        # --ignore-waivers + --ignore-allowlist-comments: report everything the
-        # day-to-day gate suppresses. --history sweeps the full git log.
+        # --ignore-allowlist-comments: report what \`repo-aegis: allow\` comments
+        # are currently hiding from the day-to-day gate. --history sweeps the
+        # full git log. There is no --ignore-waivers because \`audit\` never
+        # applies waivers at all (unlike \`check\`) — it is already strict there.
         # Written to a file rather than a step output so no scanner-derived
         # text is ever interpolated into a later shell or expression.
         run: |
           set -o pipefail
           repo-aegis audit --json \\
             --require-deny-set \\
-            --ignore-waivers \\
             --ignore-allowlist-comments \\
             --history \\
             --no-hooks-check \\
@@ -372,7 +375,7 @@ ${installStep("      ")}
             const body = [
               '## repo-aegis strict audit',
               '',
-              'Ran with \`--ignore-waivers --ignore-allowlist-comments --history\`:',
+              'Ran with \`--ignore-allowlist-comments --history\`:',
               'this is what the day-to-day gate is currently suppressing.',
               '',
               'Exit code: \`' + process.env.AUDIT_EXIT + '\`',
@@ -424,10 +427,64 @@ interface WorkflowSpec {
   readonly content: string;
 }
 
-function workflowSpecs(): readonly WorkflowSpec[] {
+/**
+ * The header paragraph explaining the deny-set flag, in the `pr` template.
+ * Swapped wholesale rather than patched, so the generated file never explains
+ * a flag it does not contain.
+ */
+const REQUIRE_DENY_SET_DOC = `#   --require-deny-set  Fail if the computed deny set is empty. Without it, a
+#                     registry that failed to load (a fork PR cannot read
+#                     secrets; a renamed secret; a bad path) produces a scan
+#                     that matches nothing and a green check indistinguishable
+#                     from a real pass. A gate that silently no-ops is worse
+#                     than no gate.`;
+
+const MIN_PATTERNS_ZERO_DOC = `#   --min-patterns 0  This repo is configured to scan with NO deny set, so an
+#                     empty one is not an error here. That is correct only when
+#                     the repo genuinely has no engagement markers reachable
+#                     from CI — a public OSS repo, or one whose registry is
+#                     machine-local and deliberately not shipped to a runner.
+#                     Note what it costs: the marker scan reports
+#                     \`skipped: empty deny set\` and only the deny-set-
+#                     INDEPENDENT checks (lockfile/private-registry egress,
+#                     visibility) actually do work. Once a registry is
+#                     reachable from CI, regenerate without
+#                     --no-require-deny-set to get the real gate back.`;
+
+/**
+ * Apply the deny-set policy to a template body.
+ *
+ * Default (`requireDenySet: true`) leaves the body alone: failing closed on an
+ * empty deny set is right whenever the registry is supposed to be reachable.
+ *
+ * The opt-out exists because for some repos an empty deny set on CI is not a
+ * fault to fail on but a permanent fact. repo-aegis's own repo is the worked
+ * example: it is public-eligible, so EVERY engagement is blocked and the deny
+ * set is the full customer-marker set — precisely the thing that must never
+ * reach a public runner. `--require-deny-set` there does not catch a
+ * misconfiguration, it just fails every run. Without this switch the generated
+ * workflow is unusable for that whole class of repo, which is how the project
+ * ended up shipping a gate it did not run on itself.
+ */
+function applyDenySetPolicy(body: string, requireDenySet: boolean): string {
+  if (requireDenySet) return body;
+  return body
+    .replace(REQUIRE_DENY_SET_DOC, MIN_PATTERNS_ZERO_DOC)
+    .replaceAll("--require-deny-set", "--min-patterns 0");
+}
+
+function workflowSpecs(requireDenySet = true): readonly WorkflowSpec[] {
   return [
-    { profile: "pr", path: PR_WORKFLOW_PATH, content: PR_WORKFLOW_CONTENT },
-    { profile: "strict", path: STRICT_WORKFLOW_PATH, content: STRICT_WORKFLOW_CONTENT },
+    {
+      profile: "pr",
+      path: PR_WORKFLOW_PATH,
+      content: applyDenySetPolicy(PR_WORKFLOW_CONTENT, requireDenySet),
+    },
+    {
+      profile: "strict",
+      path: STRICT_WORKFLOW_PATH,
+      content: applyDenySetPolicy(STRICT_WORKFLOW_CONTENT, requireDenySet),
+    },
   ];
 }
 
@@ -453,9 +510,17 @@ const KNOWN_WORKFLOW_HASHES: Record<string, readonly string[]> = {
     // Superseded by the 0.8.0 hardening (SHA pins, Node 24, fail-closed deny
     // set, attribution redaction, tag + config-guard jobs).
     "98b6999da2a64241763ac731bcc29df52f36a7015f1b564269219d8bf1a6ab26",
-    hashContent(PR_WORKFLOW_CONTENT),
+    // Both deny-set policies are files WE emit, so both must be recognised.
+    // Enumerated rather than normalised away in `canonicaliseForHash`: the
+    // deny-set flag is the gate's strength, and normalising it would mean a
+    // hand-weakened workflow still read as pristine.
+    hashContent(applyDenySetPolicy(PR_WORKFLOW_CONTENT, true)),
+    hashContent(applyDenySetPolicy(PR_WORKFLOW_CONTENT, false)),
   ],
-  [STRICT_WORKFLOW_PATH]: [hashContent(STRICT_WORKFLOW_CONTENT)],
+  [STRICT_WORKFLOW_PATH]: [
+    hashContent(applyDenySetPolicy(STRICT_WORKFLOW_CONTENT, true)),
+    hashContent(applyDenySetPolicy(STRICT_WORKFLOW_CONTENT, false)),
+  ],
 };
 
 /**
@@ -528,10 +593,18 @@ interface InstallCiOptions extends OutputOptions {
    * polluting its own output.
    */
   silent?: boolean;
+  /**
+   * Emit a workflow that fails closed on an empty deny set (the default).
+   * Set false — `--no-require-deny-set` — for a repo where an empty deny set
+   * on CI is a permanent fact rather than a fault; see `applyDenySetPolicy`.
+   *
+   * Ignored for `--uninstall`, which matches against every emitted variant.
+   */
+  requireDenySet?: boolean;
 }
 
 function selectedSpecs(opts: InstallCiOptions): readonly WorkflowSpec[] {
-  const all = workflowSpecs();
+  const all = workflowSpecs(opts.requireDenySet !== false);
   const requested = opts.profile ?? (opts.uninstall ? "all" : "pr");
   if (requested === "all") return all;
   const found = all.filter(s => s.profile === requested);

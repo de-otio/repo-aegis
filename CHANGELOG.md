@@ -5,6 +5,69 @@ All notable changes to repo-aegis are documented here.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Found by finally installing the generated workflow into this repo and running
+it. The project had been shipping a CI gate it did not run on itself, and three
+of the four generated jobs had never worked.
+
+### Fixed
+
+- **The generated `pr` workflow passed `--no-history`, which the CLI does not
+  declare.** `audit` has `--history` (off by default); Commander only
+  auto-generates a `--no-x` negation for options declared with one, so it
+  exited 1 with `unknown option` before scanning anything. Both `pr`-profile
+  audit jobs were affected, and had been since at least 0.7.x. The flag was
+  only ever expressing a default, so it is simply gone.
+
+- **The generated `strict` and `config-guard` jobs passed `--ignore-waivers`
+  and `--ignore-allowlist-comments` to `audit`, which declared neither.** Same
+  `unknown option` exit. The `strict` profile — whose entire purpose is showing
+  what the day-to-day gate suppresses — had therefore never run at all.
+
+- **New: `--ignore-allowlist-comments` on `audit`.** `audit` respects
+  `repo-aegis: allow` comments by default, so the strict profile needed this
+  implemented rather than deleted. There is deliberately **no**
+  `--ignore-waivers` counterpart: `audit` never applies waivers in the first
+  place (unlike `check`), so it is already strict there, and a flag to disable
+  something never applied would be a lie in `--help`.
+
+- **A test that the generated workflows are commands the CLI would accept.**
+  Nothing caught the above because the templates are strings: the flag-name
+  contract test pins what the CLI *accepts*, and the workflow-hygiene script
+  lints YAML shape, but neither checked that what we *generate* parses. The new
+  test extracts every `repo-aegis` invocation from every generated template and
+  validates each flag against `buildProgram()`. Verified by reintroducing
+  `--no-history` and watching it fail.
+
+### Added
+
+- **`install ci --no-require-deny-set`**, emitting `--min-patterns 0` instead
+  of `--require-deny-set`. The default is right whenever the registry is meant
+  to be reachable from CI. But a `public-eligible` repo blocks *every*
+  engagement, so its deny set is the full customer-marker set — exactly what
+  must never reach a public runner. There the fail-closed flag does not catch a
+  misconfiguration, it fails every run, which is why the generated workflow was
+  unusable for that whole class of repo (this one included). With the opt-out
+  the marker scan reports `skipped: empty deny set` and the deny-set-independent
+  checks still do real work.
+
+### Note for anyone changing a template
+
+**A generated template may only use flags present in the version it pins.**
+`install ci` embeds the generating CLI's own version in the install step, which
+is what stops a compromised publish from reaching every consumer's gate. For a
+consumer that is always self-consistent: they generate with a released CLI, and
+the template uses that release's flags.
+
+It is *not* self-consistent when generating from an unreleased working tree —
+i.e. in this repo. Installing the workflows in the same change that added
+`--ignore-allowlist-comments` produced a file pinning the last release and
+calling a flag that release does not have, and `config-guard` failed with
+`unknown option`. The order therefore has to be: land the CLI change, release
+it, then regenerate. That is why the self-hosted workflows are not in this
+entry — they follow once these flags exist in a published version.
+
 ## [0.8.1] - 2026-08-08
 
 Follow-up to 0.8.0, from watching its own publish run. The tarball gate

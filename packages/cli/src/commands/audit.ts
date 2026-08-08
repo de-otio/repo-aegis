@@ -56,6 +56,12 @@ interface AuditOptions extends OutputOptions, DenySetFloorOptions {
   published?: string;
   /** Scan `--published` archive contents for universal secret shapes. */
   secretScan?: boolean;
+  /**
+   * Report findings that a `repo-aegis: allow` comment currently suppresses.
+   * There is deliberately no `--ignore-waivers` counterpart: `audit` never
+   * applies waivers in the first place, so it is already strict there.
+   */
+  ignoreAllowlistComments?: boolean;
   token?: string;
   verbose?: boolean;
   maxQueries?: number;
@@ -286,11 +292,21 @@ function scanLoadedFile(
   loaded: LoadedFile,
   denySet: DenySet,
   reveal: boolean,
+  ignoreAllowlistComments = false,
 ): ScanHit[] {
   if (loaded.kind !== "ok" || loaded.text === undefined) return [];
   return scanText(loaded.text, denySet, loaded.realPath, {
     revealMatches: reveal,
     ignorePathExemptions: true,
+    // `scanText` respects `repo-aegis: allow` comments by default, and so
+    // does `audit` — the day-to-day gate has to, or people reach for
+    // `--no-verify`. `--ignore-allowlist-comments` is what the scheduled
+    // strict profile passes to see what those comments are currently hiding.
+    //
+    // Note the asymmetry with waivers: `audit` never applies waivers at all
+    // (unlike `check`), so it is already strict in that dimension and there
+    // is nothing to turn off.
+    ...(ignoreAllowlistComments && { respectAllowComments: false }),
   });
 }
 
@@ -328,6 +344,7 @@ function checkMarkerScan(
   reveal: boolean,
   cache: FileCache,
   exempt: ExemptPathClassifier,
+  ignoreAllowlistComments = false,
 ): CheckResult {
   if (!repo.isGitRepo) {
     return { name: "marker-scan", ok: true, findings: [], skipped: true, skipReason: "not a git repo" };
@@ -341,7 +358,7 @@ function checkMarkerScan(
     const abs = join(cwd, f);
     const loaded = cache.load(abs, { mustBeUnderTree: true });
     if (loaded.kind !== "ok") continue;
-    const hits = scanLoadedFile(loaded, denySet, reveal);
+    const hits = scanLoadedFile(loaded, denySet, reveal, ignoreAllowlistComments);
     for (const h of hits) {
       // `f` comes from `git ls-files`, so it is already repo-relative POSIX.
       const informational = exempt.isInformational(h, f);
@@ -522,6 +539,7 @@ function checkFixtures(
   reveal: boolean,
   cache: FileCache,
   exempt: ExemptPathClassifier,
+  ignoreAllowlistComments = false,
 ): CheckResult {
   if (denySet.combinedRegex === "") {
     return {
@@ -559,7 +577,7 @@ function checkFixtures(
       if (!st.isFile()) continue;
       const loaded = cache.load(full, { mustBeUnderTree: repo.isGitRepo });
       if (loaded.kind !== "ok") continue;
-      const hits = scanLoadedFile(loaded, denySet, reveal);
+      const hits = scanLoadedFile(loaded, denySet, reveal, ignoreAllowlistComments);
       for (const h of hits) {
         const rel = relative(cwd, full);
         const informational = exempt.isInformational(h, rel);
@@ -1125,6 +1143,7 @@ export async function audit(opts: AuditOptions): Promise<void> {
   const redactAttribution = shouldRedactAttribution(opts.redactAttribution);
   const reveal = shouldRevealMatches(opts);
 
+  const ignoreAllowlistComments = opts.ignoreAllowlistComments === true;
   const runMarker = opts.markerScan !== false;
   const runLockfile = opts.lockfileCheck !== false;
   const runFixture = opts.fixtureCheck !== false;
@@ -1141,11 +1160,17 @@ export async function audit(opts: AuditOptions): Promise<void> {
   const exempt = new ExemptPathClassifier(denySet);
 
   const results: CheckResult[] = [];
-  if (runMarker) results.push(checkMarkerScan(cwd, repo, denySet, reveal, cache, exempt));
+  if (runMarker)
+    results.push(
+      checkMarkerScan(cwd, repo, denySet, reveal, cache, exempt, ignoreAllowlistComments),
+    );
   if (runHistory) results.push(checkHistory(cwd, repo, denySet));
   if (runLockfile) results.push(checkRegistryEgress(cwd, repo, cache));
   if (runRemote) results.push(checkVisibility(repo));
-  if (runFixture) results.push(checkFixtures(cwd, repo, denySet, reveal, cache, exempt));
+  if (runFixture)
+    results.push(
+      checkFixtures(cwd, repo, denySet, reveal, cache, exempt, ignoreAllowlistComments),
+    );
   if (runRemote) results.push(checkRemote(cwd, repo));
   if (runHooks) results.push(checkHooks(cwd, repo));
 

@@ -148,7 +148,22 @@ a string is identified as a leak by the same logic at every layer.
     hashing, making the historical-hash list grow only on *structural*
     change.
 
+- **Generated workflows validated against the real command tree.** Installing
+  the generated workflow into this repo and running it surfaced that three of
+  the four generated jobs had never worked: two passed `--no-history` and two
+  passed `--ignore-waivers`, none of which `audit` declares. The templates are
+  strings, so neither the flag-name contract test nor the YAML hygiene script
+  had any reason to notice. A test now extracts every `repo-aegis` invocation
+  from every generated template and validates each flag against
+  `buildProgram()`.
+
 ### Designed but not yet implemented
+
+- **Self-hosted gate.** The generated workflows are not yet checked in here.
+  They pin the generating CLI's version, so installing them in the same change
+  that adds a flag yields a file calling a flag its pinned release lacks; the
+  install has to follow the release. See the CHANGELOG note on template
+  evolution.
 
 - **Network-isolated mode** for `audit --published` (mirror registry).
 - **Auto-decrypt-on-demand** for `repo-aegis registry decrypt` so

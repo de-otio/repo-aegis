@@ -189,6 +189,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
     flags: [
       "--accept-cross-border",
       "--history",
+      "--ignore-allowlist-comments",
       "--max-queries",
       "--min-patterns",
       "--no-fixture-check",
@@ -257,7 +258,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   },
   {
     path: "install ci",
-    flags: ["--force", "--profile", "--uninstall", "--write"],
+    flags: ["--force", "--no-require-deny-set", "--profile", "--uninstall", "--write"],
     subcommands: [],
   },
   {

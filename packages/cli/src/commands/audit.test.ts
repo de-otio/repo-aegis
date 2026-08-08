@@ -753,6 +753,69 @@ describe("audit — org", () => {
 // publish workflow scanning its own tarball never has engagement patterns.
 // Every test here therefore uses a home with NO markers, so a passing
 // assertion cannot be coming from the deny set.
+// `--ignore-allowlist-comments` on `audit`.
+//
+// Added because the generated `strict` CI profile passed it (and
+// `--ignore-waivers`) to `audit`, which declared neither — so Commander exited
+// 1 with "unknown option" and the whole strict profile had never run. The
+// profile's entire purpose is showing what the day-to-day gate suppresses, so
+// the flag needed implementing, not deleting.
+//
+// There is deliberately no `--ignore-waivers` counterpart: `audit` never
+// applies waivers at all (unlike `check`), so it is already strict there and a
+// flag to "turn off" something never applied would be a lie in --help.
+describe("audit --ignore-allowlist-comments", () => {
+  const MARKER = "zqx-allowcomment-marker";
+
+  function repoWithSuppressedHit(name: string): { home: string; repo: string } {
+    const home = setupHome(`${name}-home`, { _always: [MARKER] });
+    const repo = makeRepo(name, { class: "private-strict" });
+    // The marker plus an allow comment on the same line — the suppression
+    // `scanText` honours by default.
+    commit(repo, { "notes.txt": `token = ${MARKER}  # repo-aegis: allow — reviewed\n` }, "add");
+    return { home, repo };
+  }
+
+  it("is suppressed by default: audit passes", async () => {
+    const { home, repo } = repoWithSuppressedHit("allowcomment-default");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        audit({ cwd: repo, json: true, remoteCheck: false, hooksCheck: false }),
+      ),
+    );
+    assert.equal(result.exitCode, undefined, result.stdout);
+    const j = JSON.parse(result.stdout) as { checks: { name: string; ok: boolean }[] };
+    assert.equal(j.checks.find(c => c.name === "marker-scan")!.ok, true);
+  });
+
+  it("with the flag, the suppressed hit is reported and audit fails", async () => {
+    const { home, repo } = repoWithSuppressedHit("allowcomment-strict");
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        audit({
+          cwd: repo,
+          json: true,
+          remoteCheck: false,
+          hooksCheck: false,
+          ignoreAllowlistComments: true,
+        }),
+      ),
+    );
+    assert.equal(result.exitCode, 1, result.stdout);
+    const j = JSON.parse(result.stdout) as {
+      checks: { name: string; ok: boolean; findings: { message: string }[] }[];
+    };
+    const marker = j.checks.find(c => c.name === "marker-scan")!;
+    assert.equal(marker.ok, false);
+    assert.ok(
+      marker.findings.some(f => f.message.includes("notes.txt")),
+      `expected a notes.txt finding, got ${JSON.stringify(marker.findings)}`,
+    );
+    // The literal marker must not be echoed — no --verbose was passed.
+    assert.ok(!result.stdout.includes(MARKER), "audit must not echo the matched marker");
+  });
+});
+
 describe("audit --published — universal secret-shape scan", () => {
   // Assembled from fragments so this tracked source file contains no
   // contiguous secret-shaped literal of its own — same convention as

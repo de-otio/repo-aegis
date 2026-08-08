@@ -522,6 +522,7 @@ Emits (or `--write`s) the generated leak-scan workflow(s), and prints a
 | `--profile <name>` | `pr` for install, `all` for `--uninstall` | which workflow(s): `pr`, `strict`, or `all` |
 | `--write` | off | write to disk instead of printing |
 | `--force` | off | overwrite an existing workflow file |
+| `--no-require-deny-set` | off | emit `--min-patterns 0` instead of `--require-deny-set` |
 
 **Profiles.**
 
@@ -530,20 +531,34 @@ Emits (or `--write`s) the generated leak-scan workflow(s), and prints a
   `leak-scan` (one `audit` per run, not one per file), `new-ref-scan`
   (`check --push-ref` on tags, where remote refs are authoritative rather than
   possibly-stale as they are in a local hook), and `config-guard` (re-runs with
-  `--ignore-waivers` when a PR modifies `.repo-aegis.yml` or the workflow
-  itself).
+  `--ignore-allowlist-comments` when a PR modifies `.repo-aegis.yml` or the
+  workflow itself).
 - **`strict`** → `.github/workflows/leak-scan-strict.yml`. Weekly, with
-  `--ignore-waivers --ignore-allowlist-comments --history` and every optional
-  check enabled, filing findings as a single tracked issue. The PR gate must
-  honour suppressions to be usable, which makes the set of suppressions
-  invisible in the only place anyone looks; this is where it becomes visible.
-  Separate file, not another job, because it holds `issues: write` — a
-  permission a PR-triggered job must never be able to reach.
+  `--ignore-allowlist-comments --history` and every optional check enabled,
+  filing findings as a single tracked issue. The PR gate must honour
+  suppressions to be usable, which makes the set of suppressions invisible in
+  the only place anyone looks; this is where it becomes visible. Separate file,
+  not another job, because it holds `issues: write` — a permission a
+  PR-triggered job must never be able to reach.
+
+Note there is no `--ignore-waivers` in either: `audit` never applies waivers at
+all (unlike `check`), so it is already strict in that dimension.
+
+**When to pass `--no-require-deny-set`.** The default fails closed on an empty
+deny set, which is right whenever the registry is *supposed* to be reachable
+from CI — an empty one then means it failed to load. For some repos an empty
+deny set on CI is instead a permanent fact: a `public-eligible` repo blocks
+*every* engagement, so its deny set is the full customer-marker set, which is
+exactly what must never reach a public runner. There `--require-deny-set` does
+not catch a misconfiguration, it fails every run. The opt-out emits
+`--min-patterns 0`; the marker scan then reports `skipped: empty deny set` and
+the deny-set-*independent* checks (lockfile/private-registry egress,
+visibility, remote consistency) still do real work. repo-aegis's own repo is
+the worked example of this class.
 
 Generated workflows are SHA-pinned, Node 24, timeout-bounded, install the CLI
 from outside the checkout with `--ignore-scripts`, and set
-`--require-deny-set` + `REPO_AEGIS_REDACT_ATTRIBUTION=1`. See
-[github-action.md](github-action.md).
+`REPO_AEGIS_REDACT_ATTRIBUTION=1`. See [github-action.md](github-action.md).
 
 `config-guard` cannot protect itself — a PR can delete the job. Register it as a
 **required status check by name** in the ruleset so a missing job blocks the
@@ -664,6 +679,7 @@ a tarball / VSIX.
 | `--org <org>` | — | run a one-shot GitHub code-search sweep against this org (needs token) |
 | `--published <pkg-or-tarball>` | — | scan a packed npm tarball, VSIX bundle, or npm package name |
 | `--no-secret-scan` | — | with `--published`: skip the universal secret-shape scan over archive contents |
+| `--ignore-allowlist-comments` | off | report findings a `repo-aegis: allow` comment suppresses (audit-grade strict) |
 | `--token <env-var>` | `GH_TOKEN` | env var holding the GitHub token for `--org` |
 | `--max-queries <n>` | 30 | cap on `--org` seed-derived queries per run |
 | `--accept-cross-border` | off | consent to sending `--org` seed substrings to GitHub |
