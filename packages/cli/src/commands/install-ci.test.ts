@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { captureOutput } from "../_test-utils.js";
 import { installCi } from "./install-ci.js";
+import { buildProgram } from "../program.js";
 
 let tmp: string;
 
@@ -33,6 +34,35 @@ function auditInvocations(body: string): string[] {
       cmd = cmd.slice(0, -1).trim() + " " + lines[++i]!.trim();
     }
     out.push(cmd);
+  }
+  return out;
+}
+
+/**
+ * Every `repo-aegis <subcommand> …` invocation in a workflow body, re-joined
+ * across backslash continuations, as `{ subcommand, flags }`.
+ *
+ * Deliberately matches ANY subcommand rather than `audit` alone: the whole
+ * point of the caller below is to catch a flag on a command nobody thought to
+ * check, which is exactly how `--no-history` survived.
+ */
+function cliInvocations(body: string): { subcommand: string; flags: string[] }[] {
+  const lines = body.split("\n");
+  const out: { subcommand: string; flags: string[] }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    // Anchored to a command POSITION: start of the line inside a `run: |`
+    // block, or immediately after an inline `run:`. Without the anchor this
+    // also matches prose — the strict profile's issue body literally contains
+    // the words "repo-aegis strict audit" — and the test then fails on text
+    // rather than on a command.
+    const m = /^\s*(?:run:\s*)?repo-aegis\s+([a-z][a-z-]*)/.exec(lines[i]!);
+    if (!m) continue;
+    let cmd = lines[i]!.trim();
+    while (cmd.endsWith("\\") && i + 1 < lines.length) {
+      cmd = cmd.slice(0, -1).trim() + " " + lines[++i]!.trim();
+    }
+    const flags = [...cmd.matchAll(/(?:^|\s)(--[a-z][a-z0-9-]*)/g)].map(x => x[1]!);
+    out.push({ subcommand: m[1]!, flags });
   }
   return out;
 }
@@ -66,6 +96,56 @@ describe("install-ci — print mode (default)", () => {
           invocation.includes("--no-hooks-check"),
           `profile ${profile}: audit invocation without --no-hooks-check:\n${invocation}`,
         );
+      }
+    }
+  });
+
+  // The defect this exists to prevent, found by installing the generated
+  // workflow into this repo and running it: both `pr`-profile audit jobs
+  // passed `--no-history`, which the CLI does not declare — `audit` has
+  // `--history`, and Commander only auto-generates a `--no-x` negation for
+  // options declared with a default. Commander exits 1 with "unknown option",
+  // so the gate FAILED on every run rather than scanning anything, and it had
+  // been that way since at least 0.7.x.
+  //
+  // Nothing caught it because the templates are strings. The flag-name
+  // contract test (program.test.ts) pins what the CLI *accepts*; the workflow
+  // hygiene script lints YAML shape. Neither checks that the commands we
+  // generate are commands the CLI would accept. This does.
+  it("every flag in every generated invocation is one the CLI declares", async () => {
+    const program = await buildProgram();
+    // Root options (--json, --cwd, …) are global: `withGlobals` merges them
+    // into every subcommand's opts, so they are legal wherever they appear.
+    const globals = program.options.map(o => o.long).filter((l): l is string => Boolean(l));
+    const declared = new Map<string, Set<string>>();
+    for (const cmd of program.commands) {
+      declared.set(
+        cmd.name(),
+        new Set([
+          ...globals,
+          ...cmd.options.map(o => o.long).filter((l): l is string => Boolean(l)),
+        ]),
+      );
+    }
+
+    for (const profile of ["pr", "strict"] as const) {
+      const cwd = mkdtempSync(join(tmp, `flagcheck-${profile}-`));
+      const result = captureOutput(() => installCi({ cwd, profile }));
+      const invocations = cliInvocations(result.stdout);
+      assert.ok(
+        invocations.length > 0,
+        `profile ${profile}: parsed no invocations — the parser, not the template, is broken`,
+      );
+      for (const { subcommand, flags } of invocations) {
+        const valid = declared.get(subcommand);
+        assert.ok(valid, `profile ${profile}: generated an unknown subcommand \`${subcommand}\``);
+        for (const flag of flags) {
+          assert.ok(
+            valid!.has(flag),
+            `profile ${profile}: \`repo-aegis ${subcommand}\` is generated with ${flag}, ` +
+              `which the CLI does not declare. Valid: ${[...valid!].sort().join(" ")}`,
+          );
+        }
       }
     }
   });
@@ -266,6 +346,43 @@ describe("install-ci — uninstall", () => {
       `expected WORKFLOW_MODIFIED, got stdout=${r.stdout} stderr=${r.stderr}`,
     );
     assert.equal(existsSync(target), true, "a modified file must not be deleted");
+  });
+
+  it("recognises a workflow generated with --no-require-deny-set", () => {
+    // Both deny-set policies produce files WE emit, so both must round-trip
+    // through --uninstall. Miss this and the opt-out variant is a file the
+    // tool writes and then refuses to remove.
+    for (const profile of ["pr", "strict"] as const) {
+      const gen = captureOutput(() =>
+        installCi({
+          cwd: mkdtempSync(join(tmp, `lenient-gen-${profile}-`)),
+          profile,
+          requireDenySet: false,
+          json: true,
+        }),
+      );
+      const body = Object.values(
+        (JSON.parse(gen.stdout) as { templates: Record<string, string> }).templates,
+      )[0]!;
+      assert.ok(body.includes("--min-patterns 0"), `${profile}: expected the lenient flag`);
+      assert.ok(
+        !body.includes("--require-deny-set"),
+        `${profile}: the fail-closed flag must be fully replaced, including in the header`,
+      );
+
+      const cwd = mkdtempSync(join(tmp, `lenient-uninstall-${profile}-`));
+      const target = join(
+        cwd,
+        profile === "pr"
+          ? ".github/workflows/leak-scan.yml"
+          : ".github/workflows/leak-scan-strict.yml",
+      );
+      mkdirSync(join(cwd, ".github/workflows"), { recursive: true });
+      writeFileSync(target, body);
+      const r = captureOutput(() => installCi({ cwd, profile, uninstall: true, json: true }));
+      assert.equal((JSON.parse(r.stdout) as { removed: boolean }).removed, true, r.stderr);
+      assert.equal(existsSync(target), false);
+    }
   });
 
   it("removes every profile by default, so no generated file is orphaned", () => {
