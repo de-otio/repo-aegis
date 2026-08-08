@@ -673,14 +673,26 @@ worth knowing about.
 - The 0.7.x template hash added to `KNOWN_WORKFLOW_HASHES` is verified by a test
   that embeds the verbatim 0.7.1 body, not by trusting a hand-computed digest.
 
+### Verified after implementation
+
+- **`npm publish <tarball> --provenance` works.** Settled from npm's source
+  rather than a trial publish, which turned out to be the stronger check:
+  `libnpmpublish` rebuilds the spec from the tarball's own manifest
+  (`npa.resolve(manifest.name, manifest.version)`) before building the
+  attestation subject, so the purl is a registry spec however the package was
+  specified on the command line. Publishing by path — which is what makes the
+  scan meaningful, since it ships the exact bytes that were scanned — does not
+  weaken provenance.
+
+  The one genuine behavioural difference of a by-path publish is that npm runs
+  `prepublishOnly` / `prepack` only for `spec.type === 'directory'`. None of
+  these packages define those scripts (`build` is invoked explicitly in the
+  workflow), so nothing is skipped. If a package ever gains one, this gate has
+  to be revisited.
+
 ### Not verified — needs a real run
 
-- **`npm publish <tarball> --provenance`.** The publish gate packs once, scans
-  that archive, and publishes it by path. Whether provenance attestation works
-  when publishing from a tarball path rather than a package directory could not
-  be exercised locally. `publish.yml` carries a note at the point of use; run
-  `workflow_dispatch` with `dry-run: true` and confirm before the next release.
-  If it does not work, restructure the gate — do not drop the by-path publish,
-  which is what makes the scan meaningful.
 - **The `public:` trigger** and the `config-guard` base-ref diff need a real PR
-  and a real visibility flip to exercise end to end.
+  and a real visibility flip to exercise end to end. Installing the generated
+  workflow into this repo (it currently ships a gate it does not run on
+  itself) is the cheapest way to get both.

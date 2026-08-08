@@ -162,12 +162,21 @@ jobs:
           # cross-reference each other via npm semver, NOT workspace
           # protocol, so the dependency strings already point at the
           # registry version (^0.3.0).
-          # NOTE for the first run after this change: verify in a
-          # `workflow_dispatch` dry run that `npm publish <tarball>
-          # --provenance` produces a valid attestation. Publishing by path is
-          # what makes the scan meaningful; if provenance turns out to require
-          # publishing from the package directory, the gate has to be
-          # restructured rather than the by-path publish dropped.
+          # Publishing by PATH (not from the package directory) is what makes
+          # the scan above meaningful — same bytes scanned, same bytes shipped.
+          # Two things about that were checked against npm's source rather than
+          # assumed:
+          #
+          #   provenance still works. libnpmpublish rebuilds the spec from the
+          #   tarball's OWN manifest (`npa.resolve(manifest.name,
+          #   manifest.version)`) before generating the attestation subject, so
+          #   the purl is a registry spec regardless of how the package was
+          #   specified on the command line.
+          #
+          #   no lifecycle scripts are lost. npm runs prepublishOnly/prepack
+          #   only for `spec.type === 'directory'`; none of these packages
+          #   define them (build is invoked explicitly above), so there is
+          #   nothing to skip.
           while IFS=$'\t' read -r pkg tgz; do
             dir="packages/${pkg}"
             name=$(node -p "require('./${dir}/package.json').name")
