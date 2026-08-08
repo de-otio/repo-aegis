@@ -148,6 +148,13 @@ a string is identified as a leak by the same logic at every layer.
     hashing, making the historical-hash list grow only on *structural*
     change.
 
+- **Self-hosted gate.** repo-aegis runs its own generated workflows
+  (`.github/workflows/leak-scan.yml`, `leak-scan-strict.yml`). Installing them
+  is what surfaced that three of the four generated jobs had never run: two
+  passed `--no-history` and two passed `--ignore-waivers`, none of which
+  `audit` declares. A test now validates every flag in every generated template
+  against the real command tree.
+
 ### Designed but not yet implemented
 
 - **Network-isolated mode** for `audit --published` (mirror registry).
