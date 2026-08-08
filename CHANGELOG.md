@@ -52,9 +52,21 @@ of the four generated jobs had never worked.
   the marker scan reports `skipped: empty deny set` and the deny-set-independent
   checks still do real work.
 
-- **repo-aegis now runs its own generated gate**
-  (`.github/workflows/leak-scan.yml`, `leak-scan-strict.yml`), installed with
-  `--no-require-deny-set`.
+### Note for anyone changing a template
+
+**A generated template may only use flags present in the version it pins.**
+`install ci` embeds the generating CLI's own version in the install step, which
+is what stops a compromised publish from reaching every consumer's gate. For a
+consumer that is always self-consistent: they generate with a released CLI, and
+the template uses that release's flags.
+
+It is *not* self-consistent when generating from an unreleased working tree —
+i.e. in this repo. Installing the workflows in the same change that added
+`--ignore-allowlist-comments` produced a file pinning the last release and
+calling a flag that release does not have, and `config-guard` failed with
+`unknown option`. The order therefore has to be: land the CLI change, release
+it, then regenerate. That is why the self-hosted workflows are not in this
+entry — they follow once these flags exist in a published version.
 
 ## [0.8.1] - 2026-08-08
 

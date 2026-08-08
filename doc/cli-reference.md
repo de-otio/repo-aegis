@@ -554,7 +554,7 @@ not catch a misconfiguration, it fails every run. The opt-out emits
 `--min-patterns 0`; the marker scan then reports `skipped: empty deny set` and
 the deny-set-*independent* checks (lockfile/private-registry egress,
 visibility, remote consistency) still do real work. repo-aegis's own repo is
-installed this way — see [`.github/workflows/leak-scan.yml`](../.github/workflows/leak-scan.yml).
+the worked example of this class.
 
 Generated workflows are SHA-pinned, Node 24, timeout-bounded, install the CLI
 from outside the checkout with `--ignore-scripts`, and set
