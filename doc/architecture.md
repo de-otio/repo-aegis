@@ -157,13 +157,14 @@ a string is identified as a leak by the same logic at every layer.
   from every generated template and validates each flag against
   `buildProgram()`.
 
-### Designed but not yet implemented
+- **Self-hosted gate.** repo-aegis runs its own generated workflows
+  (`.github/workflows/leak-scan.yml`, `leak-scan-strict.yml`), installed
+  byte-for-byte with `--no-require-deny-set` and pinned to the first release
+  declaring every flag they use. Because the templates pin the *generating*
+  CLI's version, the install must follow the release that contains the flags —
+  see the CHANGELOG note on template evolution.
 
-- **Self-hosted gate.** The generated workflows are not yet checked in here.
-  They pin the generating CLI's version, so installing them in the same change
-  that adds a flag yields a file calling a flag its pinned release lacks; the
-  install has to follow the release. See the CHANGELOG note on template
-  evolution.
+### Designed but not yet implemented
 
 - **Network-isolated mode** for `audit --published` (mirror registry).
 - **Auto-decrypt-on-demand** for `repo-aegis registry decrypt` so

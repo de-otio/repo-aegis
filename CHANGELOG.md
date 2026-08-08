@@ -5,6 +5,23 @@ All notable changes to repo-aegis are documented here.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **repo-aegis runs its own generated gate.** `.github/workflows/leak-scan.yml`
+  and `leak-scan-strict.yml`, installed byte-for-byte from
+  `install ci --profile all --no-require-deny-set` and pinned to 0.8.2 — the
+  first release whose CLI declares every flag the templates use. Installing
+  them against 0.8.1 is what surfaced the ordering constraint recorded below.
+
+  `--no-require-deny-set` is the only correct setting here, not a weakening:
+  this repo is `public-eligible`, so *every* engagement is blocked and its deny
+  set is the full customer-marker set — the one thing that must never reach a
+  public runner. The marker scan therefore reports `skipped: empty deny set`,
+  and what does real work is the deny-set-independent half (private-registry
+  egress over the lockfile, visibility, remote-vs-class consistency).
+
 ## [0.8.2] - 2026-08-08
 
 Found by finally installing the generated workflow into this repo and running
