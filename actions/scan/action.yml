@@ -50,7 +50,7 @@ inputs:
       Version of @de-otio/repo-aegis-scan to install. Defaults to the version
       this action shipped with, not `latest`.
     required: false
-    default: '0.8.0'
+    default: '0.8.1'
 outputs:
   exit-code:
     description: >-

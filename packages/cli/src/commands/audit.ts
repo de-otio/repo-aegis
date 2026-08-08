@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  type Dirent,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -23,6 +32,8 @@ import {
   ALWAYS_FILE_STEM,
   shouldRedactAttribution,
   redactStems,
+  scanForSecrets,
+  summariseHits,
   type RepoConfig,
   type DenySet,
   type ScanHit,
@@ -43,6 +54,8 @@ interface AuditOptions extends OutputOptions, DenySetFloorOptions {
   hooksCheck?: boolean;
   org?: string;
   published?: string;
+  /** Scan `--published` archive contents for universal secret shapes. */
+  secretScan?: boolean;
   token?: string;
   verbose?: boolean;
   maxQueries?: number;
@@ -754,8 +767,27 @@ function checkPublished(
   cwd: string,
   denySet: DenySet,
   reveal: boolean,
+  secretScan: boolean,
 ): CheckResult {
   const findings: Finding[] = [];
+
+  // An empty deny set is LEGITIMATE here and must not fail the check: the
+  // engagement registry is machine-local by design (it holds customer
+  // markers, which is precisely what must never reach a public CI runner),
+  // so a publish workflow scanning its own tarball will always have zero
+  // engagement patterns. But "scanned against nothing" and "scanned clean"
+  // must not render identically — that is the exact confusion the
+  // deny-set floor exists to prevent, and a gate that reports `ok: true`
+  // after matching no patterns is the shape of a green check nobody can
+  // trust. Report it, visibly, without gating on it.
+  if (denySet.patterns.length === 0) {
+    findings.push({
+      message:
+        "marker scan was inert: the deny set has 0 patterns, so archive contents were not matched against any engagement marker",
+      detail: { code: "PUBLISHED_EMPTY_DENY_SET", patternCount: 0, secretScan },
+      informational: true,
+    });
+  }
   const tmp = mkdtempSync(join(tmpdir(), "repo-aegis-published-"));
   let extractDir = tmp;
 
@@ -859,25 +891,31 @@ function checkPublished(
     }
 
     function recurse(dir: string): void {
-      let entries: string[];
+      // `withFileTypes` takes the entry kind from the directory read itself.
+      // The alternative — `readdirSync` then `statSync(full)` per entry — is a
+      // check-then-use on a path we then open and read (CodeQL
+      // `js/file-system-race`), and costs an extra syscall per entry for the
+      // privilege. Here the kind comes back with the entry and no separate
+      // check on the path is ever made.
+      let entries: Dirent[];
       try {
-        entries = readdirSync(dir);
+        entries = readdirSync(dir, { withFileTypes: true });
       } catch {
         return;
       }
-      for (const name of entries) {
-        const full = join(dir, name);
-        let st;
-        try {
-          st = statSync(full);
-        } catch {
-          continue;
-        }
-        if (st.isDirectory()) {
+      for (const entry of entries) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
           recurse(full);
           continue;
         }
-        if (!st.isFile()) continue;
+        // Symlinks are skipped rather than followed. `findArchiveEscape`
+        // above has already rejected the whole archive if any entry — symlink
+        // targets included — resolves outside the extraction root, so a
+        // symlink that reaches this point necessarily points INSIDE, where
+        // the walk visits its target on its own. Following it would only
+        // scan the same bytes twice under a second name.
+        if (!entry.isFile()) continue;
         // Pass extractDir as the workingTree so scanFile rejects any
         // symlink whose realpath points outside the archive (e.g. a
         // symlink to /etc/passwd that survived the escape check above
@@ -906,6 +944,43 @@ function checkPublished(
             detail: { path: rel, line: h.line, column: h.column, matchPreview: h.matchPreview },
           });
         }
+
+        // Universal secret shapes, independent of the deny set. This is the
+        // only part of the published check that still works when the deny
+        // set is empty — which, per the note at the top of this function, is
+        // the normal case in CI. It covers the threat that actually applies
+        // to a registry tarball: a private key, JWT, or forge token that
+        // reached the archive via build output or `files` drift rather than
+        // via a tracked source file the hooks already cover.
+        //
+        // `scanForSecrets` returns kind/offset/length and never the matched
+        // bytes, so these findings are safe to print in a public job log
+        // without the attribution-redaction machinery.
+        if (secretScan) {
+          // No stat/exists check precedes this read — the entry kind came
+          // from the directory read itself — so there is no check-then-use
+          // window to race. A read that fails simply skips the entry.
+          let text: string;
+          try {
+            text = readFileSync(full, "utf8");
+          } catch {
+            continue;
+          }
+          const secretHits = scanForSecrets(text);
+          if (secretHits.length > 0) {
+            const rel = relative(extractDir, full);
+            const summary = summariseHits(secretHits);
+            findings.push({
+              message: `${rel}: ${summary.count} secret-shaped match(es) [${summary.kinds.join(", ")}]`,
+              detail: {
+                code: "PUBLISHED_SECRET_SHAPE",
+                path: rel,
+                kinds: summary.kinds,
+                count: summary.count,
+              },
+            });
+          }
+        }
       }
     }
 
@@ -919,7 +994,7 @@ function checkPublished(
     }
   }
 
-  return { name: "published", ok: findings.length === 0, findings };
+  return { name: "published", ok: blocking(findings).length === 0, findings };
 }
 
 function checkRemote(cwd: string, repo: RepoConfig): CheckResult {
@@ -1147,7 +1222,7 @@ export async function audit(opts: AuditOptions): Promise<void> {
   }
 
   if (opts.published) {
-    results.push(checkPublished(opts.published, cwd, denySet, reveal));
+    results.push(checkPublished(opts.published, cwd, denySet, reveal, opts.secretScan !== false));
   }
 
   const failedChecks = results.filter(c => !c.ok);

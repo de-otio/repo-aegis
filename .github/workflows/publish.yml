@@ -106,6 +106,20 @@ jobs:
       #   2. Scan with the JUST-BUILT CLI (packages/cli/dist), not the
       #      published one. A released regression must not be able to bless its
       #      own tarball.
+      #
+      # What this actually catches HERE, which is narrower than it looks. The
+      # engagement deny set is machine-local by design — it holds customer
+      # markers, which is exactly what must never reach a public runner — so on
+      # CI it has ZERO patterns and the marker pass matches nothing. That is
+      # legitimate, and `audit --published` now says so out loud with an
+      # informational PUBLISHED_EMPTY_DENY_SET finding rather than reporting a
+      # vacuous scan as a clean one (0.8.1; 0.8.0 did not, which is how this
+      # was found — by reading this job's own log).
+      #
+      # The pass that does real work here is the universal secret-shape scan
+      # (PEM keys, JWTs, forge tokens), which needs no registry. Do NOT add
+      # --min-patterns to this step expecting it to help: it would fail every
+      # publish, because an empty deny set is the correct state on CI.
       - name: Pack and scan every package before publishing
         id: pack
         env:

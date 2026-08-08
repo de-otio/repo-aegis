@@ -5,6 +5,54 @@ All notable changes to repo-aegis are documented here.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-08-08
+
+Follow-up to 0.8.0, from watching its own publish run. The tarball gate
+0.8.0 added reported `ok: true` after matching **zero** patterns — the exact
+failure mode that release set out to remove, in the release's own new gate.
+
+### Fixed
+
+- **`audit --published` reported a vacuous scan as a clean one.** The check
+  matches archive contents against the engagement deny set, and the engagement
+  registry is machine-local by design — it holds customer markers, which is
+  precisely what must never reach a public CI runner. A publish workflow
+  scanning its own tarball therefore has **zero** deny-set patterns, and the
+  marker pass matched nothing while the check still reported `ok: true` with no
+  findings. `--min-patterns` is the wrong instrument here (raising the floor
+  would fail every publish, since an empty deny set is legitimate in CI), so
+  the check now emits an **informational** `PUBLISHED_EMPTY_DENY_SET` finding.
+  It does not fail the check; it makes "matched against nothing" and "matched
+  clean" render differently, which is the same principle the deny-set floor
+  enforces elsewhere.
+
+- **The secret-shape detector matched its own documentation.** A comment in
+  `secret-markers.ts` spelled out the hex encoding of a PEM header as one
+  contiguous literal, which its own `PEM_AS_HEX` pattern then matched — so
+  `repo-aegis-core`'s tarball flagged itself under the new scan below. The
+  byte values are now written spaced. Caught by scanning the real 0.8.0
+  tarballs before wiring the check in, not after.
+
+### Added
+
+- **A universal secret-shape pass over `--published` archive contents**
+  (PEM private-key headers, the hex-encoded form, JWTs, forge tokens), on by
+  default, opt out with `--no-secret-scan`. This needs no registry, so unlike
+  the marker pass it still does real work in CI — it covers the threat that
+  actually applies to a registry tarball: a key or token that reached the
+  archive through build output or `files`/`.npmignore` drift rather than
+  through a tracked source file the hooks already cover.
+
+  **This may newly fail a publish** for packages that legitimately ship
+  secret-shaped example strings (a documented JWT in a README, a sample PEM in
+  a fixture that is not excluded from the tarball). Pass `--no-secret-scan` to
+  opt out, or exclude the file from the package.
+
+  Findings report kind, path and count and **never the matched bytes** —
+  `scanForSecrets` returns only kind/offset/length by construction — so they
+  are safe to print in a public job log. Asserted by a test that greps the
+  whole serialised payload rather than selected fields.
+
 ## [0.8.0] - 2026-08-08
 
 CI hardening. The client-side gate is advisory by construction — `--no-verify`

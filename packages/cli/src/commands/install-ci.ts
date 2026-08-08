@@ -458,8 +458,30 @@ const KNOWN_WORKFLOW_HASHES: Record<string, readonly string[]> = {
   [STRICT_WORKFLOW_PATH]: [hashContent(STRICT_WORKFLOW_CONTENT)],
 };
 
+/**
+ * Normalise the pinned CLI version out of a workflow body before hashing.
+ *
+ * `installStep` embeds the generating CLI's own version, so the literal
+ * template body changes on EVERY release even when nothing structural does.
+ * Hashing it raw made recognition version-dependent: each release orphaned the
+ * previous release's installed workflows from `--uninstall` unless a human
+ * remembered to prepend the superseded hash, forever, once per release. That
+ * is a manual step with a silent failure mode, which is the worst kind.
+ *
+ * Canonicalising instead means one hash covers every version of a
+ * structurally identical template, and the historical-hash list only has to
+ * grow when the template's SHAPE changes — which is the thing worth reviewing.
+ *
+ * Applied to both sides of the comparison (the on-disk body and the current
+ * template), so the two are always normalised the same way. It is a no-op on
+ * the pre-0.8.0 hashes below: those templates had no version pin at all.
+ */
+function canonicaliseForHash(body: string): string {
+  return body.replace(/^(\s*REPO_AEGIS_VERSION:\s*).*$/gm, "$1'<version>'");
+}
+
 function hashContent(s: string): string {
-  return createHash("sha256").update(s, "utf8").digest("hex");
+  return createHash("sha256").update(canonicaliseForHash(s), "utf8").digest("hex");
 }
 
 /**

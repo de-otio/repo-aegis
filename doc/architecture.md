@@ -131,6 +131,22 @@ a string is identified as a leak by the same logic at every layer.
     the exact archive that was scanned.
   See [plan-ci-hardening.md](plan-ci-hardening.md) for the design record,
   including the security review that reshaped it.
+- **Publish-gate follow-up (0.8.1).** Found by reading 0.8.0's own publish
+  log: the tarball gate reported `ok: true` after matching zero patterns.
+  The engagement deny set is machine-local by design, so on CI it is
+  *always* empty and the marker pass is inert — legitimate, but it must not
+  render identically to a clean scan.
+  - **Inert scans are visible** — an informational `PUBLISHED_EMPTY_DENY_SET`
+    finding. Not a failure: raising `--min-patterns` here would fail every
+    publish, because empty is the correct state on CI.
+  - **A registry-independent pass** — universal secret shapes (PEM, JWT,
+    forge tokens) over archive contents, so the gate does real work where
+    the deny set cannot reach. Opt out with `--no-secret-scan`.
+  - **Version-independent template recognition** — the generated workflow
+    embeds the CLI version, so hashing it raw orphaned every prior release's
+    installs from `--uninstall`. The version pin is now normalised before
+    hashing, making the historical-hash list grow only on *structural*
+    change.
 
 ### Designed but not yet implemented
 

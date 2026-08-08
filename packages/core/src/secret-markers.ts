@@ -60,8 +60,15 @@ const PATTERNS: CompiledPattern[] = [
   // PEM-as-ASCII-hex. The macOS keychain returns
   // `security find-generic-password -w` as hex when the value contains
   // newlines, so any PEM round-trips as a long hex string. Match the
-  // hex of `-----BEGIN ` (the prefix common to every PEM header):
-  // `-----BEGIN ` => `2D2D2D2D2D424547494E20` (case-insensitive on hex).
+  // hex of `-----BEGIN ` (the prefix common to every PEM header), i.e.
+  // five `2D` bytes followed by `42 45 47 49 4E 20` (case-insensitive).
+  //
+  // The byte values are spelled out spaced rather than as one contiguous
+  // literal on purpose: written contiguously, this comment IS a match for
+  // the very pattern defined below, so `audit --published` flags this
+  // file in its own tarball. A detector whose documentation trips the
+  // detector teaches operators to add exemptions, which is how the
+  // exemption habit starts.
   {
     kind: "PEM_AS_HEX",
     re: /(?:2D){5}424547494E20/gi,

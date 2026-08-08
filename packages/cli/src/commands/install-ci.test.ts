@@ -210,6 +210,64 @@ describe("install-ci — uninstall", () => {
     assert.equal(existsSync(target), false);
   });
 
+  it("[0.8.1] recognises a workflow pinned to an OLDER CLI version", () => {
+    // The template embeds the generating CLI's own version, so its literal
+    // body changes on every release even when nothing structural does. Hashed
+    // raw, that made recognition version-dependent: 0.8.1 would refuse to
+    // uninstall a workflow 0.8.0 wrote, and every future release would repeat
+    // the failure unless a human remembered to prepend a hash each time.
+    //
+    // Generate the CURRENT template, then rewrite only the version pin to an
+    // older value — exactly what an on-disk file from a previous release looks
+    // like. It must still be recognised as ours.
+    const gen = captureOutput(() =>
+      installCi({ cwd: mkdtempSync(join(tmp, "vgen-")), profile: "pr", json: true }),
+    );
+    const templates = (JSON.parse(gen.stdout) as { templates: Record<string, string> })
+      .templates;
+    const current = Object.values(templates)[0]!;
+    assert.ok(
+      /REPO_AEGIS_VERSION: '[^']+'/.test(current),
+      "premise: the template must pin a version for this test to mean anything",
+    );
+    const olderPin = current.replace(/REPO_AEGIS_VERSION: '[^']+'/, "REPO_AEGIS_VERSION: '0.8.0'");
+    assert.notEqual(olderPin, current, "premise: the rewrite must actually change the body");
+
+    const cwd = mkdtempSync(join(tmp, "uninstall-oldver-"));
+    const target = join(cwd, ".github/workflows/leak-scan.yml");
+    mkdirSync(join(cwd, ".github/workflows"), { recursive: true });
+    writeFileSync(target, olderPin);
+    const r = captureOutput(() => installCi({ cwd, uninstall: true, json: true }));
+    const j = JSON.parse(r.stdout) as { removed: boolean };
+    assert.equal(j.removed, true, r.stderr);
+    assert.equal(existsSync(target), false);
+  });
+
+  it("still refuses a genuinely modified workflow", () => {
+    // The canonicalisation above must normalise the version pin and nothing
+    // else — otherwise it becomes a hole that lets edited files be deleted.
+    const gen = captureOutput(() =>
+      installCi({ cwd: mkdtempSync(join(tmp, "vgen2-")), profile: "pr", json: true }),
+    );
+    const templates = (JSON.parse(gen.stdout) as { templates: Record<string, string> })
+      .templates;
+    const tampered = Object.values(templates)[0]!.replace(
+      "--ignore-scripts",
+      "--ignore-scripts --force",
+    );
+
+    const cwd = mkdtempSync(join(tmp, "uninstall-tampered-"));
+    const target = join(cwd, ".github/workflows/leak-scan.yml");
+    mkdirSync(join(cwd, ".github/workflows"), { recursive: true });
+    writeFileSync(target, tampered);
+    const r = captureOutput(() => installCi({ cwd, uninstall: true, json: true }));
+    assert.ok(
+      r.stderr.includes("WORKFLOW_MODIFIED") || r.stdout.includes("WORKFLOW_MODIFIED"),
+      `expected WORKFLOW_MODIFIED, got stdout=${r.stdout} stderr=${r.stderr}`,
+    );
+    assert.equal(existsSync(target), true, "a modified file must not be deleted");
+  });
+
   it("removes every profile by default, so no generated file is orphaned", () => {
     // The standing rule: every install path needs its opposite. `uninstall`
     // is called without a profile by the top-level `repo-aegis uninstall`, so
