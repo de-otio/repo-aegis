@@ -33,12 +33,12 @@ const STRICT_WORKFLOW_PATH = ".github/workflows/leak-scan-strict.yml";
 // `dependabotFragment` at the bottom of this file) so a consumer can have the
 // pins maintained for them; the alternative — floating majors — trades a
 // maintenance task for a supply-chain hole.
-const PIN_CHECKOUT = "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3";
+const PIN_CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
 // The trailing zizmor directive: its cache-poisoning audit fires on
 // setup-node because that action CAN enable dependency caching — the
 // generated workflows never pass `cache:`, so there is no cache to poison.
 const PIN_SETUP_NODE =
-  "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0  # zizmor: ignore[cache-poisoning]";
+  "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0  # zizmor: ignore[cache-poisoning]";
 const PIN_GITHUB_SCRIPT = "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0";
 
 /** Version of this CLI, embedded into the generated workflow's install step. */
