@@ -46,9 +46,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Set up Node 24 (npm >= 11.5.1 required for trusted publishing)
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0  # zizmor: ignore[cache-poisoning]
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
@@ -76,18 +78,80 @@ jobs:
 
       - name: Compute provenance flag
         id: provenance
+        env:
+          # Via env, not spliced into the script. GitHub expands `${{ }}` before
+          # the shell parses the line, so a step output belongs in an
+          # environment variable even when — as here — its value is known-safe.
+          # The rule has to hold unconditionally or it stops being checkable.
+          IS_PUBLIC: ${{ steps.visibility.outputs.is-public }}
         run: |
-          if [ "${{ steps.visibility.outputs.is-public }}" = "true" ]; then
+          if [ "$IS_PUBLIC" = "true" ]; then
             echo "flag=--provenance" >> "$GITHUB_OUTPUT"
           else
             echo "flag=" >> "$GITHUB_OUTPUT"
           fi
 
+      # Last-mile gate. A tracked-file scan does NOT cover a tarball: `files` /
+      # `.npmignore` drift, build output, and stray fixtures land in the
+      # archive without necessarily being visible to `git ls-files`. The
+      # tarball is the last artefact anyone can inspect before it is
+      # world-readable and effectively unrecallable — npm's unpublish window is
+      # narrow and downstream caches are not covered by it.
+      #
+      # Two properties this step must preserve:
+      #
+      #   1. Pack ONCE. Scan the artifact, then publish THAT artifact. Packing
+      #      again at publish time would mean the bytes that were scanned and
+      #      the bytes that ship are two different archives.
+      #   2. Scan with the JUST-BUILT CLI (packages/cli/dist), not the
+      #      published one. A released regression must not be able to bless its
+      #      own tarball.
+      - name: Pack and scan every package before publishing
+        id: pack
+        env:
+          PACK_DIR: ${{ runner.temp }}/packed
+        run: |
+          set -euo pipefail
+          mkdir -p "$PACK_DIR"
+          # A manifest, not a filename convention: npm mangles scoped names
+          # (@de-otio/repo-aegis-core -> de-otio-repo-aegis-core-<ver>.tgz) and
+          # reconstructing that in shell is a bug waiting to happen. Record what
+          # npm actually produced and have the publish step read it back, so the
+          # archive that ships is provably the archive that was scanned.
+          : > "$PACK_DIR/manifest.txt"
+          for pkg in core llm scan cli mcp; do
+            dir="packages/${pkg}"
+            name=$(node -p "require('./${dir}/package.json').name")
+            echo "==> Packing ${name} from ${dir}"
+            tgz=$(cd "$dir" && npm pack --silent --pack-destination "$PACK_DIR")
+            echo "==> Scanning ${PACK_DIR}/${tgz}"
+            node packages/cli/dist/index.js audit \
+              --published "${PACK_DIR}/${tgz}" \
+              --no-marker-scan \
+              --no-lockfile-check \
+              --no-fixture-check \
+              --no-remote-check \
+              --no-hooks-check \
+              --json
+            printf '%s\t%s\n' "$pkg" "${PACK_DIR}/${tgz}" >> "$PACK_DIR/manifest.txt"
+          done
+          echo "Packed and scanned:"
+          cat "$PACK_DIR/manifest.txt"
+
       - name: Publish each workspace package
+        env:
+          # Intentionally NOT setting NODE_AUTH_TOKEN — trusted publishing
+          # uses OIDC. Setting it (even empty) defeats trusted publishing.
+          NPM_CONFIG_PROVENANCE: "" # belt-and-suspenders; we pass --provenance explicitly
+          # Via env, never interpolated into the script: a `${{ }}` inside a
+          # run: block is spliced in before the shell sees it.
+          PROVENANCE_FLAG: ${{ steps.provenance.outputs.flag }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          PACK_DIR: ${{ runner.temp }}/packed
         run: |
           set -e
           DRY_RUN_FLAG=""
-          if [ "${{ inputs.dry-run }}" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"
             echo "DRY RUN — no actual publish."
           fi
@@ -98,15 +162,17 @@ jobs:
           # cross-reference each other via npm semver, NOT workspace
           # protocol, so the dependency strings already point at the
           # registry version (^0.3.0).
-          for pkg in core llm scan cli mcp; do
+          # NOTE for the first run after this change: verify in a
+          # `workflow_dispatch` dry run that `npm publish <tarball>
+          # --provenance` produces a valid attestation. Publishing by path is
+          # what makes the scan meaningful; if provenance turns out to require
+          # publishing from the package directory, the gate has to be
+          # restructured rather than the by-path publish dropped.
+          while IFS=$'\t' read -r pkg tgz; do
             dir="packages/${pkg}"
             name=$(node -p "require('./${dir}/package.json').name")
             ver=$(node -p "require('./${dir}/package.json').version")
             echo
-            echo "==> Publishing ${name}@${ver} from ${dir}"
-            (cd "$dir" && npm publish --access public ${{ steps.provenance.outputs.flag }} $DRY_RUN_FLAG)
-          done
-        env:
-          # Intentionally NOT setting NODE_AUTH_TOKEN — trusted publishing
-          # uses OIDC. Setting it (even empty) defeats trusted publishing.
-          NPM_CONFIG_PROVENANCE: "" # belt-and-suspenders; we pass --provenance explicitly
+            echo "==> Publishing ${name}@${ver} from ${tgz}"
+            npm publish "$tgz" --access public $PROVENANCE_FLAG $DRY_RUN_FLAG
+          done < "$PACK_DIR/manifest.txt"
