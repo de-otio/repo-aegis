@@ -5,7 +5,7 @@ All notable changes to repo-aegis are documented here.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.2] - 2026-08-08
 
 Found by finally installing the generated workflow into this repo and running
 it. The project had been shipping a CI gate it did not run on itself, and three
