@@ -1,0 +1,105 @@
+# Layer-2 sweep: find engagement markers ALREADY published on GitHub.
+#
+# The client-side gate stops a leak leaving your machine. This finds the ones
+# that already left — via an old commit, a colleague's clone, a fork, a
+# copy-pasted snippet. It runs GitHub code-search queries derived from your
+# markers and files anything new it has not seen before.
+#
+# ---------------------------------------------------------------------------
+# RUN THIS FROM A PRIVATE REPO.
+# ---------------------------------------------------------------------------
+# That is a security property, not an unfinished chore. Three things here are
+# marker-derived or broadly privileged:
+#
+#   * the queries file — its query strings ARE your customer markers. Encrypt
+#     it with `repo-aegis-scan encrypt-query` even in a private repo, so a
+#     future visibility flip is not immediately a disclosure.
+#   * the state file (seen-hits.json) — records where matches were found.
+#   * the search token — code search spans every org you can read, so this is a
+#     broad credential. Use a fine-grained PAT or a GitHub App installation
+#     token scoped to search, never a classic `repo` PAT.
+#
+# The issue-filing target must also be private: a filed hit names the repo and
+# path where your marker turned up.
+#
+# Secrets required:
+#   REPO_AEGIS_AGE_KEY        the age private key for the queries file
+#   REPO_AEGIS_SEARCH_TOKEN   the GitHub token used for code search
+#
+# The `uses: de-otio/repo-aegis@v1` reference below is a floating major, which
+# is right for an example you are meant to read. In your own repo, pin it to a
+# full commit SHA (`de-otio/repo-aegis@<sha> # v1.2.3`) and let Dependabot move
+# it: a leak gate that an upstream tag-move can rewrite is not a gate.
+name: repo-aegis-sweep
+
+on:
+  schedule:
+    # Tuesdays 04:23 UTC — off the hour, because scheduled workflows queue
+    # against everyone else's :00 cron.
+    - cron: '23 4 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-aegis-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # The state file is what makes this quiet: without it every run re-files
+      # every historical hit and the issue becomes noise nobody reads.
+      #
+      # A cache is the cheap option, not the durable one — entries are evicted
+      # after ~7 days of no use and after a 10 GB repo-wide limit. Losing it is
+      # not a security failure, only a re-notification storm. If that matters,
+      # commit the state file to this private repo instead and drop these two
+      # steps.
+      - name: Restore seen-hits state
+        id: state
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/seen-hits.json
+          key: repo-aegis-seen-hits-${{ github.run_id }}
+          restore-keys: |
+            repo-aegis-seen-hits-
+
+      - name: Sweep
+        id: sweep
+        # Deliberately a floating major, not a SHA: this is an example meant
+        # to be read and copied. A SHA here would silently pin every reader
+        # to whatever commit was current when the doc was written. Pin it in
+        # YOUR repo — see this file's header.
+        uses: de-otio/repo-aegis/actions/scan@v1 # zizmor: ignore[unpinned-uses]
+        env:
+          GH_TOKEN: ${{ secrets.REPO_AEGIS_SEARCH_TOKEN }}
+        with:
+          queries: queries.yaml.age
+          age-identity: ${{ secrets.REPO_AEGIS_AGE_KEY }}
+          state: ${{ runner.temp }}/seen-hits.json
+          output-format: issue
+          # MUST be private — see the header.
+          report-issue-repo: your-org/your-private-ops-repo
+          # Your own orgs: a marker in your own repos is not a leak.
+          exclude-org: your-org
+          extra-args: --prune-state-older-than 180
+
+      - name: Save seen-hits state
+        # Always: a run that filed issues and then failed to save state would
+        # re-file all of them next week.
+        if: always()
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/seen-hits.json
+          key: repo-aegis-seen-hits-${{ github.run_id }}

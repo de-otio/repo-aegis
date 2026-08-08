@@ -23,30 +23,83 @@ inputs:
     description: Whether the action fails the workflow on any hits (default true)
     required: false
     default: 'true'
-  version:
-    description: Version of @de-otio/repo-aegis to install (default latest)
+  require-deny-set:
+    description: >-
+      Fail (exit 2) when the computed deny set is empty. Default true. A
+      registry that failed to load — a fork PR cannot read secrets, a renamed
+      secret, a bad path — otherwise produces a scan that matches nothing and
+      a green check indistinguishable from a real pass. Set to 'false' only if
+      you intend this repo to be scanned with no deny set (e.g. a scratch
+      repo).
     required: false
-    default: latest
+    default: 'true'
+  min-patterns:
+    description: >-
+      Stronger form of require-deny-set: fail unless the deny set has at least
+      this many patterns. Catches a registry that loaded but silently lost an
+      engagement. Overrides require-deny-set when set above 0.
+    required: false
+    default: '0'
+  redact-attribution:
+    description: >-
+      Strip engagement ids and engagement-derived pattern ids from the output.
+      Default true. Anything this action prints can reach a job log, a PR
+      comment, or a step output, all of which are world-readable on a public
+      repo — and an engagement id is usually the customer's name. Findings keep
+      file, line, column and counts.
+    required: false
+    default: 'true'
+  version:
+    description: >-
+      Version of @de-otio/repo-aegis to install. Defaults to the version this
+      action shipped with, NOT `latest`: a compromised publish would otherwise
+      reach every consumer's gate on their next run. Pass `latest` explicitly
+      to opt into floating.
+    required: false
+    default: '0.8.0'
 outputs:
   exit-code:
     description: Exit code of the repo-aegis invocation
     value: ${{ steps.run.outputs.exit-code }}
+  results-file:
+    description: >-
+      Path to a file under RUNNER_TEMP containing the run's JSON output. Prefer
+      this over hits-json — read it with `fs.readFileSync` in actions/github-script,
+      or `cat` it in a run block. Never interpolate scanner output into a `run:`
+      block; repo-derived paths in it can close your shell quoting.
+    value: ${{ steps.run.outputs.results-file }}
   hits-json:
-    description: JSON output of the run (always emitted; --json is implied)
+    description: >-
+      DEPRECATED (removal in 0.9.0) — use results-file. The run's JSON output as
+      a string. Retained for one minor version for existing consumers.
     value: ${{ steps.run.outputs.hits-json }}
 runs:
   using: composite
   steps:
     - name: Set up Node.js 24
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0  # zizmor: ignore[cache-poisoning]
       with:
         node-version: '24'
     - name: Install repo-aegis CLI
       shell: bash
+      working-directory: ${{ runner.temp }}
       env:
         REPO_AEGIS_VERSION: ${{ inputs.version }}
-      run: |
-        npm install -g "@de-otio/repo-aegis@${REPO_AEGIS_VERSION}"
+      # Three deliberate choices, all of them load-bearing:
+      #
+      #   working-directory  npm reads ./.npmrc from the current directory. Run
+      #                      from the consumer's checkout, a PR-supplied .npmrc
+      #                      can repoint the registry and substitute this
+      #                      package — whose install scripts would then execute
+      #                      in a job that may hold a registry secret. Running
+      #                      from RUNNER_TEMP removes the file from npm's search
+      #                      path.
+      #   --ignore-scripts   Nothing in this package needs them, and a job that
+      #                      may hold secrets should not run install hooks.
+      #   --registry=...     Explicit, so no discovered config can redirect it.
+      run: | # zizmor: ignore[adhoc-packages]
+        npm install -g --ignore-scripts --registry=https://registry.npmjs.org \
+          "@de-otio/repo-aegis@${REPO_AEGIS_VERSION}"
     - name: Run repo-aegis
       id: run
       shell: bash
@@ -55,23 +108,57 @@ runs:
         REPO_AEGIS_ARGS: ${{ inputs.args }}
         REPO_AEGIS_REGISTRY_INPUT: ${{ inputs.registry }}
         REPO_AEGIS_FAIL_ON_HITS: ${{ inputs.fail-on-hits }}
+        REPO_AEGIS_REQUIRE_DENY_SET: ${{ inputs.require-deny-set }}
+        REPO_AEGIS_MIN_PATTERNS_INPUT: ${{ inputs.min-patterns }}
+        REPO_AEGIS_REDACT_INPUT: ${{ inputs.redact-attribution }}
       run: |
         set +e
         # Forward registry path via env so the CLI picks it up.
         if [ -n "${REPO_AEGIS_REGISTRY_INPUT}" ]; then
           export REPO_AEGIS_REGISTRY="${REPO_AEGIS_REGISTRY_INPUT}"
         fi
-        # Always emit JSON so the hits-json output is populated.
+
+        # Fail closed. The CLI enforces the floor where the number is computed,
+        # so the check applies identically to every subcommand and does not
+        # depend on parsing JSON in bash. min-patterns wins when both are set,
+        # so a workflow can raise the floor without editing the boolean the
+        # template shipped with.
+        if [ "${REPO_AEGIS_MIN_PATTERNS_INPUT}" -gt 0 ] 2>/dev/null; then
+          export REPO_AEGIS_MIN_PATTERNS="${REPO_AEGIS_MIN_PATTERNS_INPUT}"
+        elif [ "${REPO_AEGIS_REQUIRE_DENY_SET}" = "true" ]; then
+          export REPO_AEGIS_MIN_PATTERNS=1
+        fi
+
+        # Redact engagement attribution unless explicitly disabled. Everything
+        # this step emits is reachable from a job log and a step output.
+        if [ "${REPO_AEGIS_REDACT_INPUT}" != "false" ]; then
+          export REPO_AEGIS_REDACT_ATTRIBUTION=1
+        fi
+
+        # Always emit JSON so the outputs are populated.
+        results_file="${RUNNER_TEMP}/repo-aegis-results.json"
         # shellcheck disable=SC2086
-        out=$(repo-aegis ${REPO_AEGIS_COMMAND} --json ${REPO_AEGIS_ARGS})
+        repo-aegis ${REPO_AEGIS_COMMAND} --json ${REPO_AEGIS_ARGS} > "${results_file}"
         rc=$?
+
+        # A random heredoc delimiter, not a fixed one. The payload contains
+        # repo-derived strings (file paths); with a fixed, publicly known
+        # delimiter, content that reproduced it at column 0 could inject
+        # arbitrary step outputs. Today's pretty-printed JSON indents every
+        # value so it cannot happen — but that is a property of the formatter,
+        # not a guarantee, and this costs one line.
+        delim="REPO_AEGIS_EOF_$(openssl rand -hex 16)"
         {
           echo "exit-code=${rc}"
-          echo "hits-json<<__REPO_AEGIS_EOF__"
-          printf '%s\n' "${out}"
-          echo "__REPO_AEGIS_EOF__"
+          echo "results-file=${results_file}"
+          echo "hits-json<<${delim}"
+          cat "${results_file}"
+          echo ""
+          echo "${delim}"
         } >> "${GITHUB_OUTPUT}"
-        printf '%s\n' "${out}"
+
+        cat "${results_file}"
+
         if [ "${REPO_AEGIS_FAIL_ON_HITS}" = "true" ] && [ "${rc}" != "0" ]; then
           exit "${rc}"
         fi
