@@ -56,7 +56,7 @@ inputs:
       reach every consumer's gate on their next run. Pass `latest` explicitly
       to opt into floating.
     required: false
-    default: '0.8.0'
+    default: '0.8.1'
 outputs:
   exit-code:
     description: Exit code of the repo-aegis invocation

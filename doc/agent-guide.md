@@ -742,6 +742,22 @@ the audit command's own exit code reflects the aggregate). Watch for:
 - `PUBLISHED_ARCHIVE_ESCAPE` — `audit --published` extracted a
   zip-slip-suspect archive (an entry resolves outside the temp dir);
   the audit refuses to scan it. Do NOT bypass.
+- `PUBLISHED_SECRET_SHAPE` — `audit --published` found a universal
+  secret shape (PEM private-key header, its hex form, a JWT, a forge
+  token) in the archive. Reports kind, path and count, never the
+  matched bytes. Treat as a stop-the-publish finding: the credential is
+  about to become world-readable and effectively unrecallable. Fix by
+  removing the file from the package (`files` / `.npmignore`) or
+  rotating the credential — `--no-secret-scan` suppresses the check and
+  is only right when the string is genuinely an example.
+- `PUBLISHED_EMPTY_DENY_SET` — **informational**, does not fail the
+  check. `audit --published` ran with a zero-pattern deny set, so
+  archive contents were not matched against any engagement marker. This
+  is normal on CI (the registry is machine-local by design) and is
+  reported so a vacuous scan cannot be mistaken for a clean one. Do NOT
+  "fix" it with `--min-patterns`: an empty deny set is correct there,
+  and a floor would fail every publish. It is only worth investigating
+  if you see it on a developer machine, where a registry is expected.
 - `DENY_SET_BELOW_FLOOR` — `check`/`audit` ran with a `--min-patterns`
   floor (or `--require-deny-set`, or `REPO_AEGIS_MIN_PATTERNS`) and the
   computed deny set was smaller. Exit 2. This is **not** a clean scan and

@@ -663,6 +663,7 @@ a tarball / VSIX.
 | `--no-hooks-check` | — | skip the git-hooks liveness check (`core.hooksPath` wiring); the generated CI workflow always sets this — hooks are never installed on a CI runner |
 | `--org <org>` | — | run a one-shot GitHub code-search sweep against this org (needs token) |
 | `--published <pkg-or-tarball>` | — | scan a packed npm tarball, VSIX bundle, or npm package name |
+| `--no-secret-scan` | — | with `--published`: skip the universal secret-shape scan over archive contents |
 | `--token <env-var>` | `GH_TOKEN` | env var holding the GitHub token for `--org` |
 | `--max-queries <n>` | 30 | cap on `--org` seed-derived queries per run |
 | `--accept-cross-border` | off | consent to sending `--org` seed substrings to GitHub |
@@ -739,6 +740,34 @@ Accepts:
 Extracts to a temp dir; runs the marker scan against every extracted
 file. Post-extraction `realpathSync` defends against zip-slip
 (refuses entries that resolve outside the temp dir).
+
+**Two passes, not one.** The marker scan matches archive contents
+against the engagement deny set. A second, deny-set-independent pass
+matches the universal secret shapes (PEM private-key headers, the
+hex-encoded form, JWTs, forge tokens) and is what `--no-secret-scan`
+turns off. Both gate the check.
+
+**Why the second pass exists.** The engagement registry is
+machine-local by design — it holds customer markers, which is exactly
+what must never reach a public CI runner. So a publish workflow
+scanning its own tarball has **zero** deny-set patterns, and the
+marker pass matches nothing. That is legitimate, not a
+misconfiguration, and it is why `--min-patterns` is the wrong tool
+here: raising the floor would just fail every publish. The secret-shape
+pass needs no registry, and covers the threat that actually applies to
+a registry tarball — a key or token that reached the archive through
+build output or `files`/`.npmignore` drift rather than through a
+tracked source file the hooks already cover.
+
+**An inert marker pass is reported, not hidden.** When the deny set is
+empty, the check emits an **informational** finding
+(`PUBLISHED_EMPTY_DENY_SET`). It does not fail the check — an empty
+deny set is the normal CI case — but "matched against nothing" and
+"matched clean" must not render identically, which is the same
+principle `--min-patterns` enforces elsewhere.
+
+Secret-shape findings report kind, path and count, never the matched
+bytes, so they are safe to print in a public job log.
 
 ---
 
