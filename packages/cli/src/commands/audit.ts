@@ -21,16 +21,21 @@ import {
   compileGlobs,
   matchesCompiled,
   ALWAYS_FILE_STEM,
+  shouldRedactAttribution,
+  redactStems,
   type RepoConfig,
   type DenySet,
   type ScanHit,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, shouldRevealMatches, type OutputOptions } from "../format.js";
+import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
 import { runScan, makeOctokitClient } from "@de-otio/repo-aegis-scan";
 
-interface AuditOptions extends OutputOptions {
+interface AuditOptions extends OutputOptions, DenySetFloorOptions {
   cwd?: string;
   history?: boolean;
+  /** Strip engagement attribution from output bound for a publication channel. */
+  redactAttribution?: boolean;
   markerScan?: boolean;
   lockfileCheck?: boolean;
   fixtureCheck?: boolean;
@@ -999,10 +1004,50 @@ function checkHooks(cwd: string, repo: RepoConfig): CheckResult {
   };
 }
 
+/**
+ * Strip engagement attribution from one check's findings.
+ *
+ * Marker-scan, fixture, and published findings never carried attribution —
+ * their details are path/line/column/preview. The one that does is the remote
+ * consistency check, which embeds `repo.engagements` to explain *which* ids it
+ * looked for in the remote URL. That detail is the customer list in plaintext,
+ * and it appears on a check that FAILS (so it lands in exactly the report a
+ * workflow is most likely to publish).
+ *
+ * Written as a targeted rewrite rather than a recursive key sweep on purpose:
+ * a sweep silently covers a key it has never seen, which reads as safety but
+ * means a new attribution-bearing field ships unnoticed. This version breaks
+ * loudly in review instead — and the oracle test in `ci-output.test.ts` scans
+ * the whole serialised payload for real engagement ids, which is what actually
+ * guarantees coverage.
+ */
+function redactCheckResult(check: CheckResult): CheckResult {
+  return {
+    ...check,
+    findings: check.findings.map(f => {
+      const d = f.detail;
+      if (d === null || typeof d !== "object" || !("engagements" in d)) return f;
+      const { engagements, ...restDetail } = d as Record<string, unknown>;
+      return {
+        ...f,
+        detail: {
+          ...restDetail,
+          engagementCount: Array.isArray(engagements) ? engagements.length : 0,
+        },
+      };
+    }),
+  };
+}
+
 export async function audit(opts: AuditOptions): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
   const repo = readRepoConfig(cwd);
   const denySet = computeDenySet(repo);
+  // Fail-closed floor. `audit` is the verb the generated CI workflow runs, so
+  // this is the surface where a registry that never arrived would otherwise
+  // produce a green check over an empty deny set.
+  enforceDenySetFloor(denySet.patterns.length, denySet.files.map(f => f.stem), opts);
+  const redactAttribution = shouldRedactAttribution(opts.redactAttribution);
   const reveal = shouldRevealMatches(opts);
 
   const runMarker = opts.markerScan !== false;
@@ -1119,8 +1164,22 @@ export async function audit(opts: AuditOptions): Promise<void> {
       action: "audit",
       cwd,
       class: repo.class,
-      engagements: repo.engagements,
-      checks: results,
+      // Emitted on every run, hits or not — so a CLEAN audit published as a PR
+      // comment would still disclose the full engagement list. That is why
+      // redaction here is unconditional rather than keyed on findings.
+      engagements: redactAttribution ? [] : repo.engagements,
+      checks: redactAttribution ? results.map(redactCheckResult) : results,
+      // New in 0.8.0: the number the fail-closed floor is enforced against.
+      // Without it, a consumer could not tell "audit passed" from "audit had
+      // nothing to scan" by reading the output — which is the whole failure
+      // mode `--min-patterns` exists to remove.
+      denySet: {
+        files: redactAttribution
+          ? redactStems(denySet.files.map(f => f.stem))
+          : denySet.files.map(f => f.stem),
+        patternCount: denySet.patterns.length,
+      },
+      ...(redactAttribution && { attributionRedacted: true as const }),
       summary: {
         run: results.length,
         failed: failedChecks.length,

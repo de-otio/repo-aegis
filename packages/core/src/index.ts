@@ -238,6 +238,19 @@ export type { RenderOptions, RenderedFile, RenderResult } from "./render.js";
 export { redactMatch, revealMatch } from "./redaction.js";
 export type { RedactionMode } from "./redaction.js";
 
+// ---- attribution redaction for published (CI) output ---------------------
+export {
+  isPublishableStem,
+  isPublishablePatternId,
+  redactHitAttribution,
+  redactHits,
+  redactStems,
+  distinctEngagementCount,
+  shouldRedactAttribution,
+  REDACTED_STEM,
+} from "./ci-output.js";
+export type { AttributedHit } from "./ci-output.js";
+
 // ---- regex safety --------------------------------------------------------
 // `validatePattern` (the single-pattern, in-process variant) is tagged
 // `@internal` in its source. Callers should prefer `validatePatterns`

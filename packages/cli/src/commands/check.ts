@@ -27,6 +27,11 @@ import {
   // in core/src/index.ts is outside this lane's edit scope (index.ts is
   // owned by the integrator). See the task report for the exact line to add.
   remoteReachableCommits,
+  redactHits,
+  redactStems,
+  distinctEngagementCount,
+  shouldRedactAttribution,
+  isPublishablePatternId,
   type ScanHit,
   type SkippedFile,
   type RepoJson,
@@ -38,8 +43,9 @@ import {
   EXIT_HIT,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, shouldRevealMatches } from "../format.js";
+import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
 
-interface CheckOptions {
+interface CheckOptions extends DenySetFloorOptions {
   /**
    * Evaluate from this directory instead of `process.cwd()`. The global
    * `--cwd` flag is documented as applying to every subcommand uniformly
@@ -71,6 +77,13 @@ interface CheckOptions {
    * error regardless of this flag — see {@link loadWaiversOrExit}.
    */
   ignoreWaivers?: boolean;
+  /**
+   * Strip engagement attribution from the output — see `core/ci-output.ts`.
+   * Set by the composite Action and by every generated CI workflow, because
+   * a PR comment, an issue body, and a public job log are publication
+   * channels and an engagement id is usually the customer's name.
+   */
+  redactAttribution?: boolean;
   json?: boolean;
   verbose?: boolean;
 }
@@ -241,6 +254,11 @@ export function check(opts: CheckOptions): void {
   }
 
   const denySet = computeDenySet(repo);
+  // Fail-closed floor, before anything can report "clean" — including the
+  // `no-deny-set` early return further down, which is exactly the outcome this
+  // guards against being mistaken for a passing scan.
+  enforceDenySetFloor(denySet.patterns.length, denySet.files.map(f => f.stem), opts);
+  const redactAttribution = shouldRedactAttribution(opts.redactAttribution);
   const reveal = shouldRevealMatches(opts);
   const scanOpts = {
     revealMatches: reveal,
@@ -452,8 +470,14 @@ export function check(opts: CheckOptions): void {
     isGitRepo: repo.isGitRepo,
     class: repo.class,
     classExplicit: repo.classExplicit,
-    engagements: repo.engagements,
+    // A clean run leaks too: this array is emitted whether or not anything
+    // matched, so redaction cannot be conditional on there being hits.
+    engagements: redactAttribution ? [] : repo.engagements,
   };
+
+  // Count before redacting — the aggregate is the one attribution signal that
+  // survives, and it has to be computed from the un-redacted hits.
+  const engagementsAffected = distinctEngagementCount([...hits, ...waivedHits]);
 
   const result = {
     mode,
@@ -463,17 +487,38 @@ export function check(opts: CheckOptions): void {
       rangeMode: newRef.mode,
       ...(newRef.base !== undefined && { base: newRef.base }),
     }),
-    hits,
+    hits: redactAttribution ? redactHits(hits) : hits,
+    // Not redacted: a HistoryHit carries no attribution. Its `pattern` field
+    // is already run through the same `formatMatch` redaction as
+    // `matchPreview`, and it has no engagement or patternId to strip.
     historyHits: historyHitsJson,
     skipped,
     egress,
     repo: repoJson,
-    denySet: { files: denySet.files.map(f => f.stem), patternCount: denySet.patterns.length },
+    denySet: {
+      // `files` is a list of marker-file stems, i.e. engagement ids — the same
+      // disclosure as `engagements` above, one level down and easy to miss.
+      files: redactAttribution
+        ? redactStems(denySet.files.map(f => f.stem))
+        : denySet.files.map(f => f.stem),
+      patternCount: denySet.patterns.length,
+    },
+    // Only present when redacting: the aggregate that replaces per-hit
+    // attribution. Omitted otherwise so un-redacted output keeps its shape.
+    ...(redactAttribution && { engagementsAffected, attributionRedacted: true as const }),
     advisory,
     warnings: denySet.warnings,
     // CONTROL 3: always present, even when empty — never a silent filter.
-    waived: waivedHits,
-    expiredWaivers: expired.map(w => ({ pattern: w.pattern, blob: w.blob, expires: w.expires })),
+    waived: redactAttribution ? redactHits(waivedHits) : waivedHits,
+    // A waiver's `pattern` is a `<stem>/<digest>` id. `waive` only ever mints
+    // `_always` waivers, so these are publishable by construction — but a
+    // hand-edited `.repo-aegis.yml` could carry another stem, and this is
+    // output, not input validation. Redact defensively.
+    expiredWaivers: expired.map(w => ({
+      ...(!redactAttribution || isPublishablePatternId(w.pattern) ? { pattern: w.pattern } : {}),
+      blob: w.blob,
+      expires: w.expires,
+    })),
   };
 
   // Only blocking (non-downgraded) history hits count toward the exit
@@ -510,8 +555,14 @@ export function check(opts: CheckOptions): void {
       if (hits.length > 0) {
         emitText(`repo-aegis: ${hits.length} marker hit${hits.length === 1 ? "" : "s"}${advisory ? " (advisory)" : ""}`);
         for (const h of hits) {
-          const eng = h.engagement ? ` [${h.engagement}]` : "";
+          // Text output goes to a terminal locally and to a job log in CI, and
+          // a job log on a public repo is world-readable — so the same
+          // redaction applies here, not just to --json.
+          const eng = h.engagement && !redactAttribution ? ` [${h.engagement}]` : "";
           emitText(`  ${h.path ?? "<staged>"}:${h.line}:${h.column}  ${h.matchPreview}${eng}`);
+        }
+        if (redactAttribution && engagementsAffected > 0) {
+          emitText(`  (attribution redacted; ${engagementsAffected} engagement(s) affected)`);
         }
       }
       if (blockingHistoryHits.length > 0) {
