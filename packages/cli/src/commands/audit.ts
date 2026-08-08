@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
@@ -942,11 +953,32 @@ function checkPublished(
         // bytes, so these findings are safe to print in a public job log
         // without the attribution-redaction machinery.
         if (secretScan) {
+          // Read through a file DESCRIPTOR, not the path a second time.
+          // `statSync` above already resolved this path; re-resolving it for
+          // the read is a TOCTOU (CodeQL `js/file-system-race`) — between the
+          // two calls the entry can be replaced, including by a symlink out
+          // of the extraction root that the escape check already cleared.
+          // Opening once and reading from the fd removes the window rather
+          // than narrowing it, and `fstatSync` re-checks the regular-file
+          // property against the SAME object we will read.
           let text: string;
+          let fd: number;
           try {
-            text = readFileSync(full, "utf8");
+            fd = openSync(full, "r");
           } catch {
             continue;
+          }
+          try {
+            if (!fstatSync(fd).isFile()) continue;
+            text = readFileSync(fd, "utf8");
+          } catch {
+            continue;
+          } finally {
+            try {
+              closeSync(fd);
+            } catch {
+              /* best-effort close */
+            }
           }
           const secretHits = scanForSecrets(text);
           if (secretHits.length > 0) {
