@@ -742,6 +742,13 @@ the audit command's own exit code reflects the aggregate). Watch for:
 - `PUBLISHED_ARCHIVE_ESCAPE` — `audit --published` extracted a
   zip-slip-suspect archive (an entry resolves outside the temp dir);
   the audit refuses to scan it. Do NOT bypass.
+- `DENY_SET_BELOW_FLOOR` — `check`/`audit` ran with a `--min-patterns`
+  floor (or `--require-deny-set`, or `REPO_AEGIS_MIN_PATTERNS`) and the
+  computed deny set was smaller. Exit 2. This is **not** a clean scan and
+  must never be reported as one: it almost always means the engagement
+  registry was not available, so nothing was scanned. Diagnose the
+  registry — `repo-aegis status --json` shows `denySet.patternCount` —
+  and do NOT "fix" it by lowering or removing the floor.
 
 Generic codes you should ignore in favour of recovery:
 - `error` (no `code` field) — fatal but not categorised; surface to the user.

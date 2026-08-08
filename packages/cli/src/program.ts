@@ -92,6 +92,9 @@ export async function buildProgram(): Promise<Command> {
     .option("--max-file-bytes <n>", "skip files larger than this (default 1 MiB)", v => parseInt(v, 10))
     .option("--ignore-allowlist-comments", "do not respect `repo-aegis: allow` comments (audit-grade strict)")
     .option("--ignore-waivers", "do not apply waivers from .repo-aegis.yml; report every _always finding even if a reviewed-benign waiver exists (audit-grade strict)")
+    .option("--min-patterns <n>", "exit 2 if the computed deny set has fewer than <n> patterns (fail closed on a missing registry)", v => parseInt(v, 10))
+    .option("--require-deny-set", "sugar for --min-patterns 1")
+    .option("--redact-attribution", "strip engagement ids and engagement-derived pattern ids from output (set this for anything published: PR comments, issues, public job logs)")
     .option("--verbose", "reveal literal matched markers (NEVER pass from hooks)")
     .action((opts, cmd) => check(withGlobals(opts, cmd)));
 
@@ -267,12 +270,16 @@ export async function buildProgram(): Promise<Command> {
 
   install
     .command("ci")
-    .description("emit (or --write) .github/workflows/leak-scan.yml")
+    .description("emit (or --write) the generated leak-scan workflow(s)")
+    .option(
+      "--profile <name>",
+      "which workflow to emit: pr (blocking gate, default), strict (weekly suppression-ignoring audit), or all",
+    )
     .option("--write", "write to disk instead of printing to stdout")
     .option("--force", "overwrite an existing workflow file")
     .option(
       "--uninstall",
-      "remove the workflow file (refuses if user-edited; idempotent on missing file)",
+      "remove the workflow file(s) (refuses if user-edited; idempotent on missing file; defaults to every profile)",
     )
     .action((opts, cmd) => installCi(withGlobals(opts, cmd)));
 
@@ -327,6 +334,9 @@ export async function buildProgram(): Promise<Command> {
     .option("--token <env-var>", "env var holding the GitHub token for --org (default GH_TOKEN)")
     .option("--max-queries <n>", "cap on --org seed-derived queries per run (default 30)", v => parseInt(v, 10))
     .option("--accept-cross-border", "consent to sending --org seed substrings to GitHub (or set REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1)")
+    .option("--min-patterns <n>", "exit 2 if the computed deny set has fewer than <n> patterns (fail closed on a missing registry)", v => parseInt(v, 10))
+    .option("--require-deny-set", "sugar for --min-patterns 1")
+    .option("--redact-attribution", "strip engagement ids and engagement-derived pattern ids from output (set this for anything published: PR comments, issues, public job logs)")
     .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
     .action((opts, cmd) => audit(withGlobals(opts, cmd)));
 

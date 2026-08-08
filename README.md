@@ -38,6 +38,16 @@ marker list when working on customer-A's own code.
   `check`, `classify`, `audit`, `engagements add | end | show`,
   `markers test`, `suggest-markers`, `uninstall`. Stable JSON
   shapes everywhere.
+- **Server-side CI enforcement.** The client-side gate is advisory
+  by construction — `--no-verify` bypasses it and a fresh clone has
+  no hooks. `repo-aegis install ci --profile all` generates hardened
+  workflows (SHA-pinned, timeout-bounded, tag and config-tamper
+  guards), and two composite Actions wrap the CLI and the Layer-2
+  sweep. CI output **fails closed** on an empty deny set — a
+  registry that never loaded must not read as a clean scan — and
+  **redacts engagement attribution**, because a PR comment or a
+  public job log is a publication channel and an engagement id is
+  usually the customer's name.
 - **Off-gate-path LLM helpers.** `suggest-markers` proposes regex
   candidates from a local Ollama model; `repo-aegis-scan
 --semantic` runs an embedding-based audit sweep off-machine. The
@@ -94,7 +104,7 @@ For the longer argument and the full set of design decisions, see
 | [doc/configuration.md](doc/configuration.md) | Per-line allowlist comments, `.repo-aegis.yml` override, env vars |
 | [doc/architecture.md](doc/architecture.md)   | Workspace packages, how it composes, roadmap                      |
 | [doc/why-ai-coding.md](doc/why-ai-coding.md) | Why the deterministic gate is shaped the way it is                |
-| [doc/github-action.md](doc/github-action.md) | The composite GitHub Action wrapper                               |
+| [doc/github-action.md](doc/github-action.md) | The composite GitHub Actions, generated workflows, CI hardening    |
 | [doc/design/](doc/design/)                   | As-built design + threat model + zero-config onboarding spec      |
 
 Per-package READMEs:

@@ -20,7 +20,13 @@
 
 name: Dependabot auto-merge
 
-on: pull_request_target
+# zizmor flags pull_request_target as fundamentally insecure, and it is right
+# in general: the trigger grants secrets and a write-scoped token to a job
+# whose PR is untrusted. It is safe HERE, and only here, because this job
+# never obtains the PR's code — there is no actions/checkout step at all, and
+# every step operates on PR metadata through the API. Adding a checkout to
+# this file would turn it into a pwn-request; don't.
+on: pull_request_target # zizmor: ignore[dangerous-triggers]
 
 # Serialize per-PR; never cancel a run that may be enabling auto-merge.
 concurrency:

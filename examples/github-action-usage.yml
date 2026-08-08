@@ -1,12 +1,29 @@
 # Reference workflow for the de-otio/repo-aegis GitHub Action.
 #
-# Copy this file to `.github/workflows/leak-scan.yml` in the consuming
-# repository. It runs `repo-aegis audit` on every PR and on direct
-# pushes to main, and posts a PR comment summarising any findings.
+# Copy to `.github/workflows/leak-scan.yml` in the consuming repository — or,
+# better, run `repo-aegis install ci --write`, which generates a more complete
+# version of this (tag scanning, a config-tamper guard, and a strict scheduled
+# profile) with the action pins kept current.
 #
-# Assumes the consuming repo has either a `.repo-aegis.yml` at the
-# repo root (declaring class + allowed engagements) or sets the
-# `registry` input on the action step.
+# Assumes the consuming repo has either a `.repo-aegis.yml` at the repo root
+# (declaring class + allowed engagements) or sets the `registry` input on the
+# action step.
+#
+# Two rules this file demonstrates, both of which matter more than they look:
+#
+#   1. NEVER interpolate scanner output into a `run:` block. GitHub splices
+#      `${{ }}` into the script before the shell parses it, and the JSON
+#      contains repo-derived file paths — a quote in a filename ends the
+#      quoting and the rest is shell. Read the results FILE instead; that is
+#      what the `results-file` output exists for.
+#   2. NEVER publish un-redacted findings. A PR comment on a public repo is
+#      world-readable, and an engagement id is usually the customer's name.
+#      The action redacts attribution by default; leave it that way.
+#
+# The `uses: de-otio/repo-aegis@v1` reference below is a floating major, which
+# is right for an example you are meant to read. In your own repo, pin it to a
+# full commit SHA (`de-otio/repo-aegis@<sha> # v1.2.3`) and let Dependabot move
+# it: a leak gate that an upstream tag-move can rewrite is not a gate.
 name: leak-scan
 
 on:
@@ -14,57 +31,79 @@ on:
   push:
     branches: [main]
 
-# Default to read-only. The optional PR-comment step below requires
-# `pull-requests: write`; keep that scoped to that job only.
 permissions:
   contents: read
+
+concurrency:
+  group: leak-scan-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   leak-scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
-      # Required only by the "Comment on PR" step. Remove if you drop
-      # that step.
+      # Required only by the "Comment on PR" step. Remove if you drop it.
       pull-requests: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # `repo-aegis audit` includes a history sweep; full history
-          # is needed for that to be meaningful.
+          # `repo-aegis audit` can include a history sweep; full history is
+          # needed for that to be meaningful.
           fetch-depth: 0
+          # The scan never pushes.
+          persist-credentials: false
 
       - name: repo-aegis audit
         id: scan
-        uses: de-otio/repo-aegis@v1
+        # Deliberately a floating major, not a SHA: this is an example meant
+        # to be read and copied. A SHA here would silently pin every reader
+        # to whatever commit was current when the doc was written. Pin it in
+        # YOUR repo — see this file's header.
+        uses: de-otio/repo-aegis@v1 # zizmor: ignore[unpinned-uses]
         with:
           command: audit
-          # Don't fail the job here — we want to post the comment
-          # first, then fail explicitly below.
+          # Don't fail the job here — we want to post the comment first, then
+          # fail explicitly below.
           fail-on-hits: 'false'
+          # Both default to 'true'; stated explicitly because they are the two
+          # settings you should think about before changing.
+          require-deny-set: 'true'
+          redact-attribution: 'true'
 
       - name: Comment on PR with findings
         if: >-
           github.event_name == 'pull_request'
           && steps.scan.outputs.exit-code != '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          HITS_JSON: ${{ steps.scan.outputs.hits-json }}
+          RESULTS_FILE: ${{ steps.scan.outputs.results-file }}
           EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
         with:
           script: |
-            const exitCode = process.env.EXIT_CODE;
-            const hitsJson = process.env.HITS_JSON || '';
-            // Truncate to keep the comment under GitHub's 65 KiB cap.
+            const fs = require('fs');
+            // Read from disk. The payload is never interpolated into a shell
+            // or an expression — see rule 1 in this file's header.
+            let raw = '';
+            try {
+              raw = fs.readFileSync(process.env.RESULTS_FILE, 'utf8');
+            } catch (e) {
+              raw = `(could not read results file: ${e.message})`;
+            }
+            // Keep the comment under GitHub's 65 KiB cap.
             const MAX = 60000;
-            const trimmed = hitsJson.length > MAX
-              ? hitsJson.slice(0, MAX) + '\n... (truncated)'
-              : hitsJson;
+            const trimmed = raw.length > MAX ? raw.slice(0, MAX) + '\n... (truncated)' : raw;
             const body = [
               '### repo-aegis audit findings',
               '',
-              `Exit code: \`${exitCode}\` (non-zero = hit or error).`,
+              `Exit code: \`${process.env.EXIT_CODE}\` ` +
+                '(1 = marker hit, 2 = the scan could not run — e.g. an empty deny set).',
+              '',
+              'Attribution is redacted: engagement ids are never published here.',
+              'Re-run locally without `--redact-attribution` to see which',
+              'engagement each finding belongs to.',
               '',
               '<details><summary>JSON output</summary>',
               '',
@@ -85,6 +124,8 @@ jobs:
 
       - name: Fail the job on hits
         if: steps.scan.outputs.exit-code != '0'
+        env:
+          EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
         run: |
-          echo "repo-aegis audit exited ${{ steps.scan.outputs.exit-code }}"
+          echo "repo-aegis audit exited ${EXIT_CODE}"
           exit 1

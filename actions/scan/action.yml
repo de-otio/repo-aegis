@@ -1,0 +1,149 @@
+name: repo-aegis scan
+description: Scheduled GitHub code-search sweep for engagement markers already published
+author: De Otio
+branding:
+  icon: search
+  color: red
+inputs:
+  queries:
+    description: >-
+      Path to the queries YAML. When `age-identity` is set this is the
+      age-ENCRYPTED file and will be decrypted to RUNNER_TEMP first.
+    required: true
+  age-identity:
+    description: >-
+      An age private key (the secret's value, not a path) used to decrypt the
+      queries file. Omit only if the queries file is plaintext — which is
+      appropriate only in a private repo, since query strings are
+      marker-derived.
+    required: false
+    default: ''
+  state:
+    description: >-
+      Path to the seen-hits state file. Restored and saved by the caller (see
+      the example workflow); this action only reads and writes it.
+    required: true
+  output-format:
+    description: "issue | json | markdown (default issue)"
+    required: false
+    default: issue
+  report-issue-repo:
+    description: >-
+      owner/repo to file findings into. REQUIRED for output-format=issue, and
+      it MUST be a private repo — a hit's context names the marker that matched.
+    required: false
+    default: ''
+  token-env:
+    description: Name of the env var holding the GitHub token (default GH_TOKEN)
+    required: false
+    default: GH_TOKEN
+  exclude-org:
+    description: Space-separated orgs to exclude from results (your own, typically)
+    required: false
+    default: ''
+  extra-args:
+    description: Additional `repo-aegis-scan run` args, space-separated
+    required: false
+    default: ''
+  version:
+    description: >-
+      Version of @de-otio/repo-aegis-scan to install. Defaults to the version
+      this action shipped with, not `latest`.
+    required: false
+    default: '0.8.0'
+outputs:
+  exit-code:
+    description: >-
+      Exit code from `repo-aegis-scan run`. NOTE the mode dependence: in `json`
+      mode 1 means "new hits found" and the caller must react; in `issue` mode a
+      successful filing exits 0 and the issue IS the reaction. 2 is always an
+      error.
+    value: ${{ steps.run.outputs.exit-code }}
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js 24
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0  # zizmor: ignore[cache-poisoning]
+      with:
+        node-version: '24'
+
+    - name: Install repo-aegis-scan
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      env:
+        REPO_AEGIS_SCAN_VERSION: ${{ inputs.version }}
+      run: | # zizmor: ignore[adhoc-packages]
+        npm install -g --ignore-scripts --registry=https://registry.npmjs.org \
+          "@de-otio/repo-aegis-scan@${REPO_AEGIS_SCAN_VERSION}"
+
+    - name: Decrypt queries
+      id: queries
+      shell: bash
+      env:
+        QUERIES_INPUT: ${{ inputs.queries }}
+        AGE_IDENTITY: ${{ inputs.age-identity }}
+      # Decrypted into RUNNER_TEMP, never the workspace: a file in the
+      # checkout can be picked up by an artifact upload, a later `git add`, or
+      # a build step that globs. Query strings are marker-derived, so a
+      # plaintext copy inside the repo is the leak this whole tool prevents.
+      run: |
+        set -euo pipefail
+        if [ -z "$AGE_IDENTITY" ]; then
+          echo "path=${QUERIES_INPUT}" >> "$GITHUB_OUTPUT"
+          echo "Queries used as-is (no age-identity supplied)."
+          exit 0
+        fi
+        identity_file="${RUNNER_TEMP}/repo-aegis-age.key"
+        out_file="${RUNNER_TEMP}/repo-aegis-queries.yaml"
+        umask 077
+        printf '%s' "$AGE_IDENTITY" > "$identity_file"
+        repo-aegis-scan decrypt-query "$QUERIES_INPUT" \
+          --identity "$identity_file" \
+          --output "$out_file"
+        rm -f "$identity_file"
+        echo "path=${out_file}" >> "$GITHUB_OUTPUT"
+
+    - name: Run the sweep
+      id: run
+      shell: bash
+      env:
+        QUERIES_PATH: ${{ steps.queries.outputs.path }}
+        STATE_PATH: ${{ inputs.state }}
+        OUTPUT_FORMAT: ${{ inputs.output-format }}
+        REPORT_ISSUE_REPO: ${{ inputs.report-issue-repo }}
+        TOKEN_ENV: ${{ inputs.token-env }}
+        EXCLUDE_ORG: ${{ inputs.exclude-org }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+      # --reveal-matches is deliberately NOT exposed as an input. It prints
+      # literal matched content, and everything this step emits reaches a job
+      # log. There is no CI use for it.
+      run: |
+        set +e
+        excl=""
+        for org in $EXCLUDE_ORG; do
+          excl="$excl --exclude-org $org"
+        done
+        report=""
+        if [ "$OUTPUT_FORMAT" = "issue" ]; then
+          if [ -z "$REPORT_ISSUE_REPO" ]; then
+            echo "::error::output-format=issue requires report-issue-repo" >&2
+            exit 2
+          fi
+          report="--report-issue-repo $REPORT_ISSUE_REPO"
+        fi
+        # shellcheck disable=SC2086
+        repo-aegis-scan run \
+          --queries "$QUERIES_PATH" \
+          --state "$STATE_PATH" \
+          --output-format "$OUTPUT_FORMAT" \
+          --token "$TOKEN_ENV" \
+          $report $excl $EXTRA_ARGS
+        rc=$?
+        echo "exit-code=${rc}" >> "$GITHUB_OUTPUT"
+        # The queries file is marker-derived; do not leave a plaintext copy
+        # behind for a later step to pick up.
+        rm -f "${RUNNER_TEMP}/repo-aegis-queries.yaml"
+        if [ "$rc" = "2" ]; then
+          exit 2
+        fi
+        exit 0

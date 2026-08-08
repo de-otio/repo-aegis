@@ -22,7 +22,9 @@ jobs:
         node: [20, 22, 24]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0  # zizmor: ignore[cache-poisoning]
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -41,6 +43,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
@@ -49,18 +53,91 @@ jobs:
       - name: Validate action.yml
         run: bash tests/action-smoke.sh
 
+  # This repo ships workflow YAML as a PRODUCT: the composite actions, the
+  # reference examples, and — via `repo-aegis install ci` — the templates that
+  # land in consumer repos. Those artefacts get the same linting as our own
+  # workflows, because a defect in them is a defect we distribute.
+  #
+  # actionlint  syntax, expression validity, shellcheck over run blocks.
+  # zizmor      the security audits: template injection, pwn requests,
+  #             credential persistence, cache poisoning, unpinned actions.
+  # workflow-hygiene.mjs  the three project rules neither tool enforces —
+  #             no `${{ }}` inside run:, every job has timeout-minutes, every
+  #             third-party `uses:` is SHA-pinned — applied to the generated
+  #             templates as well as the checked-in files.
+  workflow-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0  # zizmor: ignore[cache-poisoning]
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          # Verified against the release's published checksums file. A linter
+          # that gates security findings is itself worth pinning by content.
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          curl -fsSL -o "${RUNNER_TEMP}/${tarball}" "$url"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}" actionlint
+
+      - name: actionlint
+        run: |
+          "${RUNNER_TEMP}/actionlint" -no-color -oneline
+
+      - name: Workflow hygiene (project rules + generated templates)
+        run: node tests/workflow-hygiene.mjs
+
+      # Run directly rather than via zizmor-action, for one specific reason:
+      # zizmor only DISCOVERS workflows under .github/workflows, so handing it
+      # the `examples` directory collects nothing and passes silently — the
+      # worst failure mode a linter has. Explicit paths with a shell-expanded
+      # glob means a new example file is linted the moment it lands.
+      #
+      # Version pinned, not `latest`: a linter that gates security findings is
+      # itself a dependency worth pinning.
+      - name: zizmor
+        env:
+          ZIZMOR_VERSION: 1.29.0
+        run: |
+          set -euo pipefail
+          pipx install "zizmor==${ZIZMOR_VERSION}"
+          zizmor --format plain \
+            .github/workflows \
+            action.yml \
+            actions/*/action.yml \
+            examples/*.yml
+
   # Aggregator: a single, stable name for the ruleset's
   # required-status-checks list. Lets us add/remove matrix entries
   # without re-editing branch protection.
   ci-success:
     if: always()
-    needs: [test, action-smoke]
+    needs: [test, action-smoke, workflow-lint]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Verify upstream jobs succeeded
+        env:
+          # Via env, not spliced into the script. These particular values are
+          # GitHub-computed booleans and cannot be attacker-influenced, but the
+          # "no ${{ }} inside run:" rule is only enforceable if it is
+          # unconditional — an exception here is an exception someone copies.
+          ANY_FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
         run: |
-          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" == "true" ]]; then
+          if [[ "$ANY_FAILED" == "true" ]]; then
             echo "One or more required jobs did not succeed."
             exit 1
           fi

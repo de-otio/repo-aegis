@@ -1,0 +1,84 @@
+# `audit --org` — the cheap sibling of the full Layer-2 sweep.
+#
+# One scheduled job per org, using the ordinary repo-aegis action. No queries
+# file, no state file, no second package: it derives seed queries from this
+# repo's own deny set and runs them against GitHub code search. In exchange it
+# has no memory — it reports the same finding every week until you fix it, and
+# it is capped at `--max-queries` seeds per run.
+#
+# Use this when you want org-level coverage without standing up the encrypted
+# queries + state-file deployment. Use `scheduled-sweep.yml` when you want
+# de-duplicated, issue-tracked results.
+#
+# ---------------------------------------------------------------------------
+# --accept-cross-border is a COMPLIANCE GATE, not a convenience flag.
+# ---------------------------------------------------------------------------
+# It sends substrings derived from your engagement markers to GitHub's search
+# API — a cross-border transfer of customer-identifying data to a US-operated
+# service. Under a typical DPA that needs to be a decision someone made on
+# purpose, with a record of it. The flag exists so that decision is explicit
+# and greppable rather than a default nobody noticed. If you are not certain
+# your engagement contracts permit it, do not set it.
+#
+# The same consent can be given via REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1.
+#
+# Secrets required:
+#   REPO_AEGIS_SEARCH_TOKEN   a fine-grained GitHub token with code-search read
+#
+# The `uses: de-otio/repo-aegis@v1` reference below is a floating major, which
+# is right for an example you are meant to read. In your own repo, pin it to a
+# full commit SHA (`de-otio/repo-aegis@<sha> # v1.2.3`) and let Dependabot move
+# it: a leak gate that an upstream tag-move can rewrite is not a gate.
+name: repo-aegis-org-sweep
+
+on:
+  schedule:
+    - cron: '41 5 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-aegis-org-sweep
+  cancel-in-progress: false
+
+jobs:
+  org-sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Org sweep
+        # Deliberately a floating major, not a SHA: this is an example meant
+        # to be read and copied. A SHA here would silently pin every reader
+        # to whatever commit was current when the doc was written. Pin it in
+        # YOUR repo — see this file's header.
+        uses: de-otio/repo-aegis@v1 # zizmor: ignore[unpinned-uses]
+        env:
+          GH_TOKEN: ${{ secrets.REPO_AEGIS_SEARCH_TOKEN }}
+        with:
+          command: audit
+          # Only the org check runs: everything else is the PR gate's job and
+          # would just duplicate it on a schedule.
+          args: >-
+            --org your-org
+            --accept-cross-border
+            --max-queries 30
+            --no-marker-scan
+            --no-lockfile-check
+            --no-fixture-check
+            --no-remote-check
+            --no-hooks-check
+          fail-on-hits: 'true'
+          # Findings land in a job log. On a public repo that is world-readable,
+          # so attribution stays redacted (the default) — and the org name above
+          # is already public anyway, unlike your engagement ids.
+          redact-attribution: 'true'

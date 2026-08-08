@@ -532,7 +532,23 @@ export type RepoVisibility = "public" | "private" | "unknown";
  * (`repo-aegis.visibility`). Populated by `classify` / `status`; absent →
  * "unknown". A single, fast, offline read so hooks never block on the network.
  */
-export function readCachedVisibility(cwd: string): RepoVisibility {
+export function readCachedVisibility(cwd: string, env: NodeJS.ProcessEnv = process.env): RepoVisibility {
+  // A CI runner checks out a fresh clone, so the git-config cache below is
+  // always absent there — while the workflow knows the answer authoritatively
+  // (`github.event.repository.private`, or the `public` event firing at the
+  // exact moment a repo flips). REPO_AEGIS_ASSUME_PUBLIC is how that knowledge
+  // gets in.
+  //
+  // It is deliberately ONE-DIRECTIONAL: it can assert "public", which turns
+  // egress enforcement ON, and there is no env var that asserts "private". A
+  // symmetric override would be a suppression primitive — an environment
+  // variable that switches findings off is indistinguishable from a waiver
+  // nobody reviewed, and it would be reachable from a shell profile, a
+  // Makefile, or a workflow edit, none of which leave the audit trail
+  // `repo-aegis waive` insists on. One-directional also needs no
+  // anti-spoofing story: nobody gains anything by asserting the stricter
+  // value.
+  if (env.REPO_AEGIS_ASSUME_PUBLIC === "1") return "public";
   try {
     const out = execFileSync("git", ["config", "--get", "repo-aegis.visibility"], {
       cwd,

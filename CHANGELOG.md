@@ -5,6 +5,129 @@ All notable changes to repo-aegis are documented here.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-08
+
+CI hardening. The client-side gate is advisory by construction — `--no-verify`
+bypasses it, a fresh clone has no hooks, and `check --push-ref` reads
+remote-tracking refs a hook can never refresh. This release builds out the
+server-side half, and fixes four defects found in artefacts repo-aegis was
+already shipping.
+
+Design record, including the security review that reshaped the plan before
+implementation: [`doc/plan-ci-hardening.md`](doc/plan-ci-hardening.md).
+
+### Changed — behaviour
+
+- **The GitHub Action now fails closed on an empty deny set.** The new
+  `require-deny-set` input defaults to `'true'`. Previously, a registry that
+  failed to load produced a deny set with zero patterns, a scan that matched
+  nothing, and exit 0 — a green check indistinguishable from a real pass. That
+  happens on a fork PR (secrets are not exposed to `pull_request` runs from
+  forks), a renamed or rotated secret, and a `registry` input pointing at a
+  path that does not exist.
+
+  **This will newly fail** for `scratch`-class repos and OSS repos with no
+  markers of their own. Set `require-deny-set: 'false'` (or `--min-patterns 0`)
+  if you intend a repo to be scanned with no deny set. Exit code is **2**, not
+  1: "the gate could not run" is a different fact from "the gate found
+  something", and conflating them is what let a broken gate look like a passing
+  one.
+
+- **The GitHub Action now redacts engagement attribution by default**
+  (`redact-attribution`, default `'true'`). Output keeps file, line, column,
+  the redacted preview, `_always` pattern ids, and an `engagementsAffected`
+  count; it drops engagement ids and engagement-derived pattern ids. Anything
+  the action emits can reach a job log, a step output, or a PR comment, all of
+  which are world-readable on a public repo — and an engagement id is usually
+  the customer's name.
+
+- **The Action's `version` input no longer defaults to `latest`.** It defaults
+  to the version the action shipped with. A compromised npm publish would
+  otherwise reach every consumer's gate on their next run. Pass `latest`
+  explicitly to opt back into floating.
+
+### Deprecated
+
+- **The Action's `hits-json` output** — use `results-file` instead, which is a
+  path to the JSON under `RUNNER_TEMP`. Removal in 0.9.0. Scan output contains
+  repo-derived file paths, and interpolating it into a `run:` block lets a path
+  containing a quote close the quoting and execute the remainder. Reading a
+  file has no such property. `hits-json` remains populated for one minor
+  version, now with a randomised heredoc delimiter.
+
+### Added
+
+- **`--min-patterns <n>` / `--require-deny-set` on `check` and `audit`**
+  (env: `REPO_AEGIS_MIN_PATTERNS`). Exit 2 when the computed deny set is
+  smaller than the floor. Enforced in the CLI where the size is computed, so
+  local runs, the MCP server, and scheduled sweeps inherit it — and checked
+  before `check`'s `no-deny-set` early return, which is the exact outcome it
+  exists to reject.
+- **`--redact-attribution` on `check` and `audit`** (env:
+  `REPO_AEGIS_REDACT_ATTRIBUTION`). Off locally, where attribution is the most
+  useful field on the line and the terminal is not a publication channel.
+- **`denySet` in `audit --json`**, mirroring `status` and `check`. Without it a
+  consumer could not distinguish "audit passed" from "audit had nothing to
+  scan".
+- **`repo-aegis install ci --profile <pr|strict|all>`.** `pr` is the previous
+  workflow, substantially hardened and extended with two jobs: `new-ref-scan`
+  (`check --push-ref` on tag pushes, where remote refs are authoritative rather
+  than possibly-stale as in a local hook) and `config-guard` (re-runs with
+  `--ignore-waivers` when a PR modifies `.repo-aegis.yml` or the workflow
+  itself). `strict` is new: a weekly audit with waivers and allow-comments
+  ignored, filing findings as a tracked issue — the PR gate must honour
+  suppressions to be usable, which is what makes suppression creep invisible.
+- **`REPO_AEGIS_ASSUME_PUBLIC=1`** — assert public visibility so the
+  private-registry egress check works on a fresh CI checkout, which has no
+  cached `repo-aegis.visibility`. Deliberately one-directional: there is no
+  counterpart that asserts "private", because an env var that switches findings
+  *off* is a waiver nobody reviewed.
+- **`de-otio/repo-aegis/actions/scan`** — the Layer-2 sweep as a composite
+  Action (age-decrypt queries into `RUNNER_TEMP`, run, file an issue), with
+  reference workflows in `examples/scheduled-sweep.yml` and
+  `examples/org-sweep.yml`. Deployment guidance stays private-repo-first: the
+  query strings *are* the customer markers.
+- **`audit --published` gate in this repo's own `publish.yml`** — packs once,
+  scans that artifact with the just-built CLI, and publishes the same bytes. A
+  tracked-file scan does not cover `files`/`.npmignore` drift, build output, or
+  stray fixtures.
+- **Workflow linting in CI** — actionlint, zizmor, and
+  `tests/workflow-hygiene.mjs` (no `${{ }}` inside `run:`, every job has
+  `timeout-minutes`, every third-party `uses:` is SHA-pinned), applied to the
+  generated templates as well as the checked-in files.
+
+### Fixed
+
+- **Script injection in the documented consumer snippet.** `doc/github-action.md`
+  showed `echo '${{ steps.scan.outputs.hits-json }}'` inside a `run:` block.
+  GitHub splices the expression in before the shell parses it, so a
+  repo-derived path containing a quote closes the quoting and the rest is
+  executed. The example workflow did it correctly via `env:`; the doc did not.
+- **The Action installed the CLI from inside the consumer's checkout.** npm
+  reads `./.npmrc` from the working directory, so a PR-supplied `.npmrc` could
+  repoint the registry and substitute the package, whose install scripts would
+  then run in the job. Now installed from `${{ runner.temp }}` with
+  `--ignore-scripts` and an explicit `--registry`. Low impact under
+  `pull_request` (read-only token, no secrets) — but it was the precondition
+  that would have made any secret-bearing trigger dangerous.
+- **The generated CI workflow was two years stale.** It emitted
+  `actions/checkout@v4`, `actions/setup-node@v4`, Node 20, no
+  `timeout-minutes`, and an unpinned global install, while `action.yml` in the
+  same repo used Node 24 — and repo-aegis shipped the stale one into every
+  consumer repo. Now SHA-pinned to node24 runtimes, timeout-bounded, with a
+  `dependabot.yml` fragment printed so the pins do not rot.
+- **The lockfile/egress check was disabled in the generated workflow.** It is
+  now on, paired with `REPO_AEGIS_ASSUME_PUBLIC` so it decides correctly on a
+  fresh checkout. The generated workflow also triggers on `public:`, which
+  GitHub fires the moment a repo flips private → public.
+- **Fixed `GITHUB_OUTPUT` heredoc delimiter** in the Action. Not exploitable —
+  `emitJson` pretty-prints, so every string value is indented and cannot match
+  the delimiter at column 0 — but that is a property of the formatter, not a
+  guarantee. Now randomised.
+- **`persist-credentials: false`** on every checkout in this repo's workflows,
+  and `security-events: write` in `codeql.yml` narrowed from the workflow to
+  the job that uses it.
+
 ## [0.7.1] - 2026-07-27
 
 ### Fixed
