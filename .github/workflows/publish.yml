@@ -174,5 +174,10 @@ jobs:
             ver=$(node -p "require('./${dir}/package.json').version")
             echo
             echo "==> Publishing ${name}@${ver} from ${tgz}"
+            # Both flag vars are deliberately unquoted: each is either empty
+            # (contributing no argument) or a single flag. Quoting would pass
+            # an empty string as a positional argument, which npm reads as a
+            # package spec.
+            # shellcheck disable=SC2086
             npm publish "$tgz" --access public $PROVENANCE_FLAG $DRY_RUN_FLAG
           done < "$PACK_DIR/manifest.txt"

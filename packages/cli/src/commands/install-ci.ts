@@ -556,21 +556,26 @@ export function installCi(opts: InstallCiOptions): void {
   const written: string[] = [];
   for (const spec of specs) {
     const target = join(cwd, spec.path);
-    if (existsSync(target) && !opts.force) {
-      emitError(
-        {
-          code: "WORKFLOW_EXISTS",
-          error: `${spec.path} already exists; pass --force to overwrite`,
-          details: target,
-        },
-        opts,
-      );
-    }
-    const overwritten = existsSync(target);
     try {
       mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, spec.content);
+      // `wx` = O_CREAT|O_EXCL: create, or fail with EEXIST. The obvious
+      // spelling — `existsSync(target)` and then write — leaves a window
+      // between the question and the answer, which is a real race for two
+      // concurrent `install ci` runs and which CodeQL flags as
+      // js/file-system-race. Letting the filesystem answer both at once
+      // removes the window instead of narrowing it.
+      writeFileSync(target, spec.content, opts.force ? {} : { flag: "wx" });
     } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        emitError(
+          {
+            code: "WORKFLOW_EXISTS",
+            error: `${spec.path} already exists; pass --force to overwrite`,
+            details: target,
+          },
+          opts,
+        );
+      }
       emitError(
         { code: "FS_ERROR", error: `failed to write workflow: ${(err as Error).message}` },
         opts,
@@ -584,7 +589,7 @@ export function installCi(opts: InstallCiOptions): void {
         action: "install-ci",
         cwd,
         repo: cwd,
-        details: { target, profile: spec.profile, force: !!opts.force, overwritten },
+        details: { target, profile: spec.profile, force: !!opts.force },
       });
     } catch {
       /* audit log must not break user-facing ops */
