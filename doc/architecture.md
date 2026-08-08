@@ -20,9 +20,13 @@ The monorepo has six packages plus a thin Action wrapper.
   code-search, filters out previously-seen hits via an atomic state
   file. Output formats: JSON, markdown report, or filed GitHub
   issue. Phase 3 adds opt-in `--semantic` mode and `rebuild-profiles`
-  verb. Deployment (the scheduled GitHub Action, encrypted query
-  list, and state file) lives in a private repo of the operator's
-  choosing — see
+  verb. Deployment is packaged as the `actions/scan` composite
+  Action, with a reference workflow in
+  [`examples/scheduled-sweep.yml`](../examples/scheduled-sweep.yml). It should
+  still be **deployed from a private repo** — that is a security property, not
+  an unfinished chore: the query strings ARE the customer markers, the state
+  file records where matches were found, and a code-search token spans every
+  org the operator can read. See
   [data-leaks-on-github/code-search-solution.md](https://github.com/de-otio/dot-notes/blob/main/doc/topics/data-leaks-on-github/code-search-solution.md).
 - **`@de-otio/repo-aegis-llm`** — LLM-assisted helpers (Ollama HTTP
   client, prose extraction, token synthesis, embedding profiles).
@@ -41,12 +45,17 @@ The monorepo has six packages plus a thin Action wrapper.
   enforced at the tool boundary. See
   [packages/mcp/README.md](../packages/mcp/README.md).
 
-Plus a thin wrapper:
+Plus two composite Actions:
 
-- **`de-otio/repo-aegis` GitHub Action (composite)** — `uses:
-  de-otio/repo-aegis@v1` in a workflow installs the CLI and runs
-  `audit` (or any subcommand) against the consuming repo. See
-  [github-action.md](github-action.md).
+- **`de-otio/repo-aegis`** — `uses: de-otio/repo-aegis@v1` installs the CLI
+  and runs `audit` (or any subcommand) against the consuming repo. Fails
+  closed on an empty deny set and redacts engagement attribution by default.
+- **`de-otio/repo-aegis/actions/scan`** — the scheduled Layer-2 sweep:
+  age-decrypts a queries file into `RUNNER_TEMP`, runs
+  `repo-aegis-scan run`, files new hits as an issue.
+
+Both are documented in [github-action.md](github-action.md), with reference
+workflows in [`examples/`](../examples/).
 
 All packages share the same marker list and engagement registry, so
 a string is identified as a leak by the same logic at every layer.
@@ -101,8 +110,27 @@ a string is identified as a leak by the same logic at every layer.
   --recipient <pubkey>` / `decrypt --identity <path>`.
 - **Operator audit log** — `repo-aegis audit-log on/off/show/path`
   (off by default).
-- **MCP server, VSCode extension, GitHub Action** — all in this
+- **MCP server, VSCode extension, GitHub Actions** — all in this
   monorepo.
+- **CI hardening (0.8.0).** The server-side half of the gate, since the
+  client-side one is advisory by construction (`--no-verify`, fresh clones
+  without hooks, stale remote-tracking refs):
+  - **Fail closed** — `--min-patterns` / `--require-deny-set`, enforced in the
+    CLI where the deny-set size is computed, so a registry that never loaded
+    stops producing a green check.
+  - **CI-safe output** — `--redact-attribution`, because a PR comment, an issue
+    body, and a public job log are publication channels and an engagement id is
+    usually the customer's name.
+  - **Generated workflow profiles** — `install ci --profile pr|strict|all`,
+    SHA-pinned and timeout-bounded, adding a tag/new-ref backstop and a
+    config-tamper guard.
+  - **One-directional visibility assertion** — `REPO_AEGIS_ASSUME_PUBLIC`, so
+    egress checks work on a fresh checkout without adding a way to switch
+    findings off.
+  - **Publish gate** — `audit --published` over a packed tarball, publishing
+    the exact archive that was scanned.
+  See [plan-ci-hardening.md](plan-ci-hardening.md) for the design record,
+  including the security review that reshaped it.
 
 ### Designed but not yet implemented
 

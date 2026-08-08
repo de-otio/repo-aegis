@@ -61,6 +61,63 @@ type ScanHitJson = {
 };
 ```
 
+**Under `--redact-attribution`** (see below), `engagement` is dropped and
+`patternId` survives only for `_always` stems. Everything else — path, line,
+column, `matchPreview`, `blob` — is unchanged.
+
+## CI-safe output (`--redact-attribution`)
+
+`redaction.ts` governs the matched *literal*. This governs *attribution*: which
+engagement a hit belongs to, which engagements the repo carries, which marker
+files the deny set was built from. That was never treated as sensitive because
+before CI it only ever reached a local terminal — which is inside the trust
+boundary. A PR comment, an issue body, and a job log on a public repo are not,
+and an engagement id is usually the customer's name.
+
+Set by `--redact-attribution` or `REPO_AEGIS_REDACT_ATTRIBUTION=1`. Both `check`
+and `audit` support it; the composite Action and every generated CI workflow set
+it by default. It is deliberately **not** the default locally, where attribution
+is the most useful field on the line.
+
+What it changes:
+
+| Field | Redacted form |
+|---|---|
+| hit `engagement` | dropped |
+| hit `patternId` | kept for `_always/…`, dropped otherwise |
+| `repo.engagements` / top-level `engagements` | `[]`, plus `engagementCount` on findings that carried a list |
+| `denySet.files` | non-`_always` stems replaced with `<redacted>`; length preserved |
+| `expiredWaivers[].pattern` | dropped unless `_always/…` |
+| text output `[engagement]` suffix | dropped; replaced by an `N engagement(s) affected` line |
+| `engagementsAffected` | added — the distinct-engagement count |
+| `attributionRedacted` | added — `true`, so a consumer can tell redacted output apart |
+
+A **clean** run is redacted too: `engagements` is emitted whether or not
+anything matched, so a redaction keyed on "did we find something" would leak on
+the common case. This is verified by an oracle test that greps the entire
+serialised payload for the fixture's engagement ids
+([`packages/cli/src/ci-output.test.ts`](../packages/cli/src/ci-output.test.ts)).
+
+## Failing closed on an empty deny set
+
+`--min-patterns <n>` (or `--require-deny-set`, or `REPO_AEGIS_MIN_PATTERNS`)
+makes `check` and `audit` **exit 2** when the computed deny set has fewer than
+`n` patterns.
+
+The failure it prevents is silent: a CI workflow restores the registry from a
+secret, secrets are not exposed to `pull_request` runs from forks, the restore
+writes an empty file, the deny set computes to zero patterns, nothing matches,
+and the job exits 0. A green check that scanned nothing looks exactly like a
+green check that scanned everything. The same shape occurs on a mistyped secret
+name, a rotated-away secret, and a `registry` path that does not exist;
+`--min-patterns <n>` above 1 additionally catches a registry that loaded but
+silently lost an engagement.
+
+Exit **2**, not 1: "the gate could not run" is a different fact from "the gate
+found something". The floor is checked before any early return, including
+`check`'s `no-deny-set` result — which is precisely the outcome it exists to
+reject.
+
 ---
 
 ## Per-repo workflow
@@ -148,6 +205,9 @@ calls it via `hook scan-after-write`.
 | `--max-file-bytes <n>` | 1048576 (1 MiB) | per-file size cap; larger files reported as `skipped: too-large` |
 | `--ignore-allowlist-comments` | off | do not respect `repo-aegis: allow` comments (audit-grade strict) |
 | `--ignore-waivers` | off | do not apply waivers from `.repo-aegis.yml`; report every `_always` finding even if a reviewed-benign waiver exists (audit-grade strict) |
+| `--min-patterns <n>` | 0 | exit **2** if the computed deny set has fewer than `<n>` patterns. Fail-closed: a scan that had nothing to match is not a clean scan. Env: `REPO_AEGIS_MIN_PATTERNS` |
+| `--require-deny-set` | off | sugar for `--min-patterns 1` |
+| `--redact-attribution` | off | strip engagement ids and engagement-derived pattern ids from output. Set this for anything published — PR comments, issues, public job logs. Env: `REPO_AEGIS_REDACT_ATTRIBUTION=1` |
 | `--verbose` | off | reveal literal matched markers (NEVER pass from hooks) |
 
 Behaviour:
@@ -159,7 +219,9 @@ Behaviour:
    underlying `git` failure (diff, rev-list, merge-base, log) also
    exits 2 rather than being swallowed as "clean" — a scan that
    couldn't run is not the same thing as a clean scan.
-4. Empty deny set → exit 0 with `{ "hits": [], "status": "no-deny-set" }`.
+4. Empty deny set → exit 0 with `{ "hits": [], "status": "no-deny-set" }` —
+   **unless** a `--min-patterns` floor is set, which is checked first and
+   exits 2. See [Failing closed](#failing-closed-on-an-empty-deny-set).
 5. Scan per the chosen mode. Filter binary/oversize per
    `SkippedFile` reason. Renamed/copied files (`R`/`C` diff entries)
    are scanned like any other changed file in `--staged`/`--range`/
@@ -452,14 +514,40 @@ managed block` and `# repo-aegis: end managed block`).
 
 ### `repo-aegis install ci`
 
-Emits (or `--write`s) `.github/workflows/leak-scan.yml`. The workflow
-runs `repo-aegis audit --json` once per repo (single subprocess —
-not N marker scans).
+Emits (or `--write`s) the generated leak-scan workflow(s), and prints a
+`dependabot.yml` fragment that keeps their action pins current.
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `--profile <name>` | `pr` for install, `all` for `--uninstall` | which workflow(s): `pr`, `strict`, or `all` |
 | `--write` | off | write to disk instead of printing |
 | `--force` | off | overwrite an existing workflow file |
+
+**Profiles.**
+
+- **`pr`** → `.github/workflows/leak-scan.yml`. The blocking gate: PRs, pushes
+  to a default branch, tag pushes, and the `public` event. Three jobs —
+  `leak-scan` (one `audit` per run, not one per file), `new-ref-scan`
+  (`check --push-ref` on tags, where remote refs are authoritative rather than
+  possibly-stale as they are in a local hook), and `config-guard` (re-runs with
+  `--ignore-waivers` when a PR modifies `.repo-aegis.yml` or the workflow
+  itself).
+- **`strict`** → `.github/workflows/leak-scan-strict.yml`. Weekly, with
+  `--ignore-waivers --ignore-allowlist-comments --history` and every optional
+  check enabled, filing findings as a single tracked issue. The PR gate must
+  honour suppressions to be usable, which makes the set of suppressions
+  invisible in the only place anyone looks; this is where it becomes visible.
+  Separate file, not another job, because it holds `issues: write` — a
+  permission a PR-triggered job must never be able to reach.
+
+Generated workflows are SHA-pinned, Node 24, timeout-bounded, install the CLI
+from outside the checkout with `--ignore-scripts`, and set
+`--require-deny-set` + `REPO_AEGIS_REDACT_ATTRIBUTION=1`. See
+[github-action.md](github-action.md).
+
+`config-guard` cannot protect itself — a PR can delete the job. Register it as a
+**required status check by name** in the ruleset so a missing job blocks the
+merge.
 
 ### `repo-aegis install claude-md`
 
@@ -578,6 +666,9 @@ a tarball / VSIX.
 | `--token <env-var>` | `GH_TOKEN` | env var holding the GitHub token for `--org` |
 | `--max-queries <n>` | 30 | cap on `--org` seed-derived queries per run |
 | `--accept-cross-border` | off | consent to sending `--org` seed substrings to GitHub |
+| `--min-patterns <n>` | 0 | exit **2** if the computed deny set has fewer than `<n>` patterns (see `check`) |
+| `--require-deny-set` | off | sugar for `--min-patterns 1` |
+| `--redact-attribution` | off | strip engagement attribution from output (see `check`) |
 | `--verbose` | off | reveal literal matches (NEVER from hooks) |
 
 Each check returns:
@@ -591,10 +682,32 @@ Each check returns:
 }
 ```
 
-`audit` exit code: 1 if any check fails, 2 on usage error, 0 if
-clean. A finding with `informational: true` is reported but never
-gates `ok` — see the fixture-check note immediately below and, for
-the hooks check, [`repo-aegis doctor`](#repo-aegis-doctor).
+`audit` exit code: 1 if any check fails, 2 on usage error or an unmet
+`--min-patterns` floor, 0 if clean. A finding with `informational: true` is
+reported but never gates `ok` — see the fixture-check note immediately below
+and, for the hooks check, [`repo-aegis doctor`](#repo-aegis-doctor).
+
+Top-level JSON envelope:
+
+```json
+{
+  "action": "audit",
+  "cwd": "/path/to/repo",
+  "class": "customer-coupled",
+  "engagements": ["customer-a"],
+  "checks": [ /* CheckResult[] */ ],
+  "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
+  "summary": { "run": 6, "failed": 0, "totalFindings": 0, "informationalFindings": 0 },
+  "warnings": []
+}
+```
+
+`denySet` is new in 0.8.0 and mirrors the shape `status` and `check` already
+emit. Without it, a consumer could not tell "audit passed" from "audit had
+nothing to scan" by reading the output — which is the failure
+[`--min-patterns`](#failing-closed-on-an-empty-deny-set) exists to remove.
+Under `--redact-attribution`, `engagements` is `[]`, `denySet.files` is masked,
+and `attributionRedacted: true` is added.
 
 **Fixture check keeps path exemptions honest.** `--no-fixture-check`
 skips the whole check; when it runs, it always scans with the **full**
