@@ -745,6 +745,209 @@ describe("audit — org", () => {
   });
 });
 
+// The universal secret-shape pass over `--published` archive contents.
+//
+// The property that matters: this is the ONLY part of the published check
+// that still does work when the deny set is empty, which is the normal
+// state in CI — the engagement registry is machine-local by design, so a
+// publish workflow scanning its own tarball never has engagement patterns.
+// Every test here therefore uses a home with NO markers, so a passing
+// assertion cannot be coming from the deny set.
+describe("audit --published — universal secret-shape scan", () => {
+  // Assembled from fragments so this tracked source file contains no
+  // contiguous secret-shaped literal of its own — same convention as
+  // self-hygiene.test.ts. A literal here would be exempt (the `_always`
+  // class is path-exempt in `*.test.*`), but a detector's own test suite
+  // tripping the detector is exactly the pattern that teaches operators to
+  // add exemptions.
+  const JWT_SHAPE =
+    "eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0" + "." + "dBjftJeZ4CVPmB92K27uhbUJU1p1r0wW1gFWFOEjXk";
+  const TOKEN_SHAPE = "ghp" + "_" + "A".repeat(36);
+
+  function tarballContaining(name: string, body: string): string {
+    const stage = mkdtempSync(join(tmp, "secret-stage-"));
+    mkdirSync(join(stage, "package"), { recursive: true });
+    writeFileSync(join(stage, "package", name), body);
+    const tgz = join(tmp, `secret-${name}.tgz`);
+    execFileSync("tar", ["-czf", tgz, "-C", stage, "package"]);
+    return tgz;
+  }
+
+  it("fails on a JWT-shaped string even with an EMPTY deny set", async () => {
+    const home = setupHome("secret-jwt", {});
+    const repo = makeRepo("secret-jwt-repo", { class: "private-strict" });
+    const tgz = tarballContaining("token.txt", `access=${JWT_SHAPE}\n`);
+
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, published: tgz })),
+    );
+
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as {
+      denySet: { patternCount: number };
+      checks: {
+        name: string;
+        ok: boolean;
+        findings: { message: string; detail?: { code?: string; kinds?: string[] } }[];
+      }[];
+    };
+    // Guard the premise: if this were non-zero the test would prove nothing
+    // about the secret scan, because the deny set could have caught it.
+    assert.equal(j.denySet.patternCount, 0, "premise: deny set must be empty");
+
+    const c = j.checks.find(c => c.name === "published");
+    assert.ok(c);
+    assert.equal(c!.ok, false);
+    const hit = c!.findings.find(f => f.detail?.code === "PUBLISHED_SECRET_SHAPE");
+    assert.ok(hit, `expected a secret-shape finding, got: ${JSON.stringify(c!.findings)}`);
+    assert.deepEqual(hit!.detail?.kinds, ["JWT"]);
+  });
+
+  it("fails on a forge-token shape", async () => {
+    const home = setupHome("secret-token", {});
+    const repo = makeRepo("secret-token-repo", { class: "private-strict" });
+    const tgz = tarballContaining("ci.env", `GH_TOKEN=${TOKEN_SHAPE}\n`);
+
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, published: tgz })),
+    );
+
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as {
+      checks: { name: string; findings: { detail?: { code?: string; kinds?: string[] } }[] }[];
+    };
+    const c = j.checks.find(c => c.name === "published");
+    const hit = c!.findings.find(f => f.detail?.code === "PUBLISHED_SECRET_SHAPE");
+    assert.ok(hit, "expected a secret-shape finding");
+    assert.deepEqual(hit!.detail?.kinds, ["GITHUB_TOKEN"]);
+  });
+
+  // The whole output of this check can reach a public job log — that is the
+  // deployment it was built for. `scanForSecrets` returns kind/offset/length
+  // and never the matched bytes; this asserts the CLI does not reintroduce
+  // them. Grep the WHOLE serialised payload, not selected fields: a
+  // per-field assertion passes while a sibling key leaks.
+  it("never echoes the matched secret back into output", async () => {
+    const home = setupHome("secret-noecho", {});
+    const repo = makeRepo("secret-noecho-repo", { class: "private-strict" });
+    const tgz = tarballContaining("leak.txt", `t=${JWT_SHAPE}\n`);
+
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, published: tgz })),
+    );
+
+    assert.ok(
+      !result.stdout.includes(JWT_SHAPE),
+      "matched secret must never appear in output",
+    );
+    // Also not the distinctive signature segment on its own.
+    assert.ok(!result.stdout.includes("dBjftJeZ4CVPmB92K27uhbUJU1p1r0wW1gFWFOEjXk"));
+  });
+
+  it("--no-secret-scan skips the pass", async () => {
+    const home = setupHome("secret-optout", {});
+    const repo = makeRepo("secret-optout-repo", { class: "private-strict" });
+    const tgz = tarballContaining("token2.txt", `access=${JWT_SHAPE}\n`);
+
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        audit({ cwd: repo, json: true, published: tgz, secretScan: false }),
+      ),
+    );
+
+    const j = JSON.parse(result.stdout) as {
+      checks: { name: string; ok: boolean; findings: { detail?: { code?: string } }[] }[];
+    };
+    const c = j.checks.find(c => c.name === "published");
+    assert.ok(c);
+    assert.equal(c!.ok, true, "opt-out must leave the check passing");
+    assert.ok(!c!.findings.some(f => f.detail?.code === "PUBLISHED_SECRET_SHAPE"));
+  });
+
+  it("a clean archive passes", async () => {
+    const home = setupHome("secret-clean", {});
+    const repo = makeRepo("secret-clean-repo", { class: "private-strict" });
+    const tgz = tarballContaining("README", "hello world, nothing to see\n");
+
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, published: tgz })),
+    );
+
+    const j = JSON.parse(result.stdout) as {
+      checks: { name: string; ok: boolean }[];
+    };
+    assert.equal(j.checks.find(c => c.name === "published")!.ok, true);
+  });
+});
+
+// An empty deny set is legitimate for `--published` (see checkPublished),
+// so it must not fail the check — but it must not be invisible either.
+describe("audit --published — inert marker scan is reported", () => {
+  it("emits an informational finding, keeps ok true, and exits 0", async () => {
+    const home = setupHome("pub-inert", {});
+    const repo = makeRepo("pub-inert-repo", { class: "private-strict" });
+
+    const stage = mkdtempSync(join(tmp, "inert-stage-"));
+    mkdirSync(join(stage, "package"), { recursive: true });
+    writeFileSync(join(stage, "package", "README"), "nothing interesting\n");
+    const tgz = join(tmp, "inert.tgz");
+    execFileSync("tar", ["-czf", tgz, "-C", stage, "package"]);
+
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() =>
+        audit({
+          cwd: repo,
+          json: true,
+          published: tgz,
+          markerScan: false,
+          lockfileCheck: false,
+          fixtureCheck: false,
+          remoteCheck: false,
+          hooksCheck: false,
+        }),
+      ),
+    );
+
+    assert.equal(result.exitCode, undefined, "an inert marker scan must not fail the publish");
+    const j = JSON.parse(result.stdout) as {
+      summary: { informationalFindings: number };
+      checks: {
+        name: string;
+        ok: boolean;
+        findings: { detail?: { code?: string }; informational?: boolean }[];
+      }[];
+    };
+    const c = j.checks.find(c => c.name === "published");
+    assert.ok(c);
+    assert.equal(c!.ok, true);
+    const inert = c!.findings.find(f => f.detail?.code === "PUBLISHED_EMPTY_DENY_SET");
+    assert.ok(inert, `expected PUBLISHED_EMPTY_DENY_SET, got ${JSON.stringify(c!.findings)}`);
+    assert.equal(inert!.informational, true);
+    assert.equal(j.summary.informationalFindings, 1);
+  });
+
+  it("is absent when the deny set has patterns", async () => {
+    const home = setupHome("pub-not-inert", { _always: ["zzz-marker-never-present"] });
+    const repo = makeRepo("pub-not-inert-repo", { class: "private-strict" });
+
+    const stage = mkdtempSync(join(tmp, "notinert-stage-"));
+    mkdirSync(join(stage, "package"), { recursive: true });
+    writeFileSync(join(stage, "package", "README"), "nothing interesting\n");
+    const tgz = join(tmp, "notinert.tgz");
+    execFileSync("tar", ["-czf", tgz, "-C", stage, "package"]);
+
+    const result = await withEnvAsync("REPO_AEGIS_HOME", home, () =>
+      captureOutputAsync(() => audit({ cwd: repo, json: true, published: tgz })),
+    );
+
+    const j = JSON.parse(result.stdout) as {
+      checks: { name: string; findings: { detail?: { code?: string } }[] }[];
+    };
+    const c = j.checks.find(c => c.name === "published");
+    assert.ok(!c!.findings.some(f => f.detail?.code === "PUBLISHED_EMPTY_DENY_SET"));
+  });
+});
+
 describe("audit --published — pre-flight binary checks", () => {
   it("emits NPM_NOT_FOUND when npm is not on PATH", async () => {
     const home = setupHome("preflight-no-npm", {});

@@ -331,6 +331,7 @@ export async function buildProgram(): Promise<Command> {
     .option("--no-remote-check", "skip the remote-vs-class consistency check")
     .option("--org <org>", "also run a one-shot GitHub code-search sweep against this org (needs GH_TOKEN)")
     .option("--published <pkg-or-tarball>", "also scan a packed npm tarball, VSIX bundle, or npm package name")
+    .option("--no-secret-scan", "with --published: skip the universal secret-shape scan (PEM keys, JWTs, forge tokens) over archive contents")
     .option("--token <env-var>", "env var holding the GitHub token for --org (default GH_TOKEN)")
     .option("--max-queries <n>", "cap on --org seed-derived queries per run (default 30)", v => parseInt(v, 10))
     .option("--accept-cross-border", "consent to sending --org seed substrings to GitHub (or set REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1)")

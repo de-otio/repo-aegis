@@ -23,6 +23,8 @@ import {
   ALWAYS_FILE_STEM,
   shouldRedactAttribution,
   redactStems,
+  scanForSecrets,
+  summariseHits,
   type RepoConfig,
   type DenySet,
   type ScanHit,
@@ -43,6 +45,8 @@ interface AuditOptions extends OutputOptions, DenySetFloorOptions {
   hooksCheck?: boolean;
   org?: string;
   published?: string;
+  /** Scan `--published` archive contents for universal secret shapes. */
+  secretScan?: boolean;
   token?: string;
   verbose?: boolean;
   maxQueries?: number;
@@ -754,8 +758,27 @@ function checkPublished(
   cwd: string,
   denySet: DenySet,
   reveal: boolean,
+  secretScan: boolean,
 ): CheckResult {
   const findings: Finding[] = [];
+
+  // An empty deny set is LEGITIMATE here and must not fail the check: the
+  // engagement registry is machine-local by design (it holds customer
+  // markers, which is precisely what must never reach a public CI runner),
+  // so a publish workflow scanning its own tarball will always have zero
+  // engagement patterns. But "scanned against nothing" and "scanned clean"
+  // must not render identically — that is the exact confusion the
+  // deny-set floor exists to prevent, and a gate that reports `ok: true`
+  // after matching no patterns is the shape of a green check nobody can
+  // trust. Report it, visibly, without gating on it.
+  if (denySet.patterns.length === 0) {
+    findings.push({
+      message:
+        "marker scan was inert: the deny set has 0 patterns, so archive contents were not matched against any engagement marker",
+      detail: { code: "PUBLISHED_EMPTY_DENY_SET", patternCount: 0, secretScan },
+      informational: true,
+    });
+  }
   const tmp = mkdtempSync(join(tmpdir(), "repo-aegis-published-"));
   let extractDir = tmp;
 
@@ -906,6 +929,40 @@ function checkPublished(
             detail: { path: rel, line: h.line, column: h.column, matchPreview: h.matchPreview },
           });
         }
+
+        // Universal secret shapes, independent of the deny set. This is the
+        // only part of the published check that still works when the deny
+        // set is empty — which, per the note at the top of this function, is
+        // the normal case in CI. It covers the threat that actually applies
+        // to a registry tarball: a private key, JWT, or forge token that
+        // reached the archive via build output or `files` drift rather than
+        // via a tracked source file the hooks already cover.
+        //
+        // `scanForSecrets` returns kind/offset/length and never the matched
+        // bytes, so these findings are safe to print in a public job log
+        // without the attribution-redaction machinery.
+        if (secretScan) {
+          let text: string;
+          try {
+            text = readFileSync(full, "utf8");
+          } catch {
+            continue;
+          }
+          const secretHits = scanForSecrets(text);
+          if (secretHits.length > 0) {
+            const rel = relative(extractDir, full);
+            const summary = summariseHits(secretHits);
+            findings.push({
+              message: `${rel}: ${summary.count} secret-shaped match(es) [${summary.kinds.join(", ")}]`,
+              detail: {
+                code: "PUBLISHED_SECRET_SHAPE",
+                path: rel,
+                kinds: summary.kinds,
+                count: summary.count,
+              },
+            });
+          }
+        }
       }
     }
 
@@ -919,7 +976,7 @@ function checkPublished(
     }
   }
 
-  return { name: "published", ok: findings.length === 0, findings };
+  return { name: "published", ok: blocking(findings).length === 0, findings };
 }
 
 function checkRemote(cwd: string, repo: RepoConfig): CheckResult {
@@ -1147,7 +1204,7 @@ export async function audit(opts: AuditOptions): Promise<void> {
   }
 
   if (opts.published) {
-    results.push(checkPublished(opts.published, cwd, denySet, reveal));
+    results.push(checkPublished(opts.published, cwd, denySet, reveal, opts.secretScan !== false));
   }
 
   const failedChecks = results.filter(c => !c.ok);

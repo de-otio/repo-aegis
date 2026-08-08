@@ -196,6 +196,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "--no-lockfile-check",
       "--no-marker-scan",
       "--no-remote-check",
+      "--no-secret-scan",
       "--org",
       "--published",
       "--redact-attribution",
