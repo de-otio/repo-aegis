@@ -29,7 +29,7 @@
   "dependencies": {
     "@de-otio/repo-aegis-core": "^0.8.2",
     "@de-otio/repo-aegis-llm": "^0.8.2",
-    "@octokit/request": "^10.0.13",
+    "@octokit/request": "^10.0.14",
     "commander": "^15.0.0",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
