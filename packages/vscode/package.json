@@ -65,8 +65,8 @@
     "@de-otio/repo-aegis-core": "^0.8.2"
   },
   "devDependencies": {
-    "@types/node": "^26.4.0",
-    "@types/vscode": "^1.134.0",
+    "@types/node": "^26.4.1",
+    "@types/vscode": "^1.136.0",
     "typescript": "^5.4.0"
   }
 }
