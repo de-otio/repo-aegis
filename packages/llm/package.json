@@ -29,6 +29,6 @@
   },
   "dependencies": {
     "@de-otio/repo-aegis-core": "^0.8.2",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   }
 }
