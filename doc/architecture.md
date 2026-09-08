@@ -166,6 +166,17 @@ a string is identified as a leak by the same logic at every layer.
 
 ### Designed but not yet implemented
 
+- **Egress guard** — destination-aware publishing controls. Every layer
+  above inspects *content*; none inspects *where it is going*, and two
+  right-bytes-wrong-boundary incidents in one week landed in that gap. One
+  decision function in core (`egress-intent` / `egress-policy`) enforced at
+  three points: the git pre-push hook (which already receives the remote URL
+  and ignores it), a `gh` shim on `PATH`, and the pre-command hooks of Claude
+  Code / Codex CLI / Gemini CLI. Shape rules refuse the implicit forms (`git
+  push` with no refspec, egress after `cd`, `;`-chained egress) with no
+  context; context rules `ask` for public destinations and fail open. Adds a
+  `selfIdentity` marker stem for the inverse direction (own material entering a
+  customer repo). See [design/egress-guard.md](design/egress-guard.md).
 - **Network-isolated mode** for `audit --published` (mirror registry).
 - **Auto-decrypt-on-demand** for `repo-aegis registry decrypt` so
   single commands that need the registry can fetch credentials inline
