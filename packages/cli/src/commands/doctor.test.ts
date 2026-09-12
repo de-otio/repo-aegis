@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { doctor } from "./doctor.js";
+import { withEnv } from "../_test-utils.js";
 import { HOOK_SCRIPTS } from "@de-otio/repo-aegis-core";
 
 // SAFETY: every case below runs against throwaway repos under a
@@ -31,10 +32,13 @@ interface Fixture {
   base: string;
   scanRoot: string;
   home: string;
+  /** The temp file GIT_CONFIG_GLOBAL points at — the "machine" git config
+   * under test for PUSH_DEFAULT_IMPLICIT. Never the developer's real one. */
+  globalConfig: string;
   run: <T>(fn: () => T) => T;
 }
 
-function makeFixture(name: string): Fixture {
+function makeFixture(name: string, extraEnv: Record<string, string> = {}): Fixture {
   const base = join(root, name);
   const scanRoot = join(base, "scan-root");
   const home = join(base, "home");
@@ -47,6 +51,7 @@ function makeFixture(name: string): Fixture {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: globalConfig,
     REPO_AEGIS_HOME: home,
+    ...extraEnv,
   };
 
   function run<T>(fn: () => T): T {
@@ -68,7 +73,7 @@ function makeFixture(name: string): Fixture {
     }
   }
 
-  return { base, scanRoot, home, run };
+  return { base, scanRoot, home, globalConfig, run };
 }
 
 function initRepo(dir: string, fx: Fixture): void {
@@ -153,6 +158,11 @@ function runDoctorCapturingExit(fn: () => void): number | undefined {
 
 class DoctorExitSignal extends Error {}
 
+// Every case in this block is about hook LIVENESS, so it passes
+// `egressChecks: false`. Without it PUSH_DEFAULT_IMPLICIT fires in all of
+// them — the fixture's GIT_CONFIG_GLOBAL is a fresh temp file, which by
+// definition has no `push.default` — and the "all clean" assertions would be
+// asserting the wrong thing. The egress checks get their own block below.
 describe("doctor", () => {
   it("two repos, one healthy one with a local override shadowing a correct global -> one failure, exit 1, names the failing tree", () => {
     const fx = makeFixture("basic");
@@ -174,7 +184,7 @@ describe("doctor", () => {
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
-        fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], egressChecks: false })),
       );
     });
 
@@ -192,7 +202,7 @@ describe("doctor", () => {
     initRepo(dir, fx);
     gitConfig(dir, fx, ["core.hooksPath", hooksDir]);
 
-    const exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+    const exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], egressChecks: false })));
     assert.equal(exitCode, undefined);
   });
 
@@ -214,7 +224,7 @@ describe("doctor", () => {
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
-        fx.run(() => doctor({ scanRoot: [fx.scanRoot], fix: true })),
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], egressChecks: false, fix: true })),
       );
     });
 
@@ -236,14 +246,14 @@ describe("doctor", () => {
     mkdirSync(emptyDir, { recursive: true });
     gitConfig(dir, fx, ["core.hooksPath", emptyDir]);
 
-    runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], fix: true, yes: true })));
+    runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], egressChecks: false, fix: true, yes: true })));
 
     const after = readLocalConfig(dir, fx, "core.hooksPath");
     assert.equal(after, null, "local override must be unset after --fix --yes");
 
     // Re-run: the repo now resolves through the correct global value,
     // so the fleet is clean and doctor does not call process.exit.
-    const exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+    const exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], egressChecks: false })));
     assert.equal(exitCode, undefined);
   });
 
@@ -269,7 +279,7 @@ describe("doctor", () => {
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
-        fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], egressChecks: false })),
       );
     });
 
@@ -297,7 +307,7 @@ describe("doctor", () => {
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
-        fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], egressChecks: false })),
       );
     });
 
@@ -327,7 +337,7 @@ describe("doctor", () => {
     // If capture were the inner wrapper, that throw would unwind past
     // the point where captureStdout returns its captured chunks.
     const { stdout } = captureStdout(() => {
-      runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], json: true })));
+      runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], egressChecks: false, json: true })));
     });
 
     const parsed = JSON.parse(stdout) as {
@@ -358,5 +368,314 @@ describe("doctor", () => {
     assert.equal(parsed.summary.scanned, 2);
     assert.equal(parsed.summary.failed, 1);
     assert.equal(parsed.summary.fixed, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Egress-guard checks (doc/design/egress-guard.md §7)
+//
+// Placeholder orgs only (`acme`, `example`): this repository is public and the
+// deny-set it ships is exactly about names like these not being real ones.
+// ---------------------------------------------------------------------------
+
+/** Writes the fixture's global git config so `push.default` is `nothing`. */
+function writeGlobalPushDefaultNothing(fx: Fixture): void {
+  writeFileSync(fx.globalConfig, "[push]\n\tdefault = nothing\n");
+}
+
+/** Writes a registry YAML under the fixture and returns its path. */
+function writeRegistry(fx: Fixture, body: string): string {
+  const path = join(fx.base, "engagements.yaml");
+  writeFileSync(path, body);
+  return path;
+}
+
+const REGISTRY_NO_ACME = `\
+always_block: []
+personalOrgs:
+  - example
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers:
+      - customer-a-marker
+`;
+
+const REGISTRY_WITH_ACME = `\
+always_block: []
+personalOrgs:
+  - acme
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers:
+      - customer-a-marker
+`;
+
+/** A repo whose hooks are healthy, so anything doctor reports about it comes
+ * from the egress checks and not from the liveness sweep. */
+function healthyRepo(fx: Fixture, name: string): string {
+  const dir = join(fx.scanRoot, name);
+  initRepo(dir, fx);
+  const hooksDir = expectedHooksDir(fx);
+  writeCorrectHooks(hooksDir);
+  gitConfig(dir, fx, ["core.hooksPath", hooksDir]);
+  return dir;
+}
+
+describe("doctor — egress checks: PUSH_DEFAULT_IMPLICIT", () => {
+  it("fires when the GLOBAL push.default is unset, and prints the one-line fix", () => {
+    const fx = makeFixture("push-default-unset");
+    healthyRepo(fx, "repo-a"); // no remote: contributes no per-repo checks
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+    });
+
+    assert.equal(exitCode, 1, "an implicit push.default must fail the sweep");
+    assert.match(stdout, /FAIL PUSH_DEFAULT_IMPLICIT/);
+    assert.match(stdout, /fix: git config --global push\.default nothing/);
+  });
+
+  it("is clean when the GLOBAL push.default is `nothing`", () => {
+    const fx = makeFixture("push-default-nothing");
+    writeGlobalPushDefaultNothing(fx);
+    healthyRepo(fx, "repo-a");
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+    });
+
+    assert.equal(exitCode, undefined);
+    assert.doesNotMatch(stdout, /PUSH_DEFAULT_IMPLICIT/);
+    assert.match(stdout, /all clean/);
+  });
+
+  it("reads the GLOBAL scope only: a repo-local push.default=nothing does not satisfy it", () => {
+    const fx = makeFixture("push-default-local-only");
+    const dir = healthyRepo(fx, "repo-a");
+    gitConfig(dir, fx, ["push.default", "nothing"]);
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stdout, /FAIL PUSH_DEFAULT_IMPLICIT/);
+  });
+
+  it("--no-egress-checks (egressChecks: false) runs none of them", () => {
+    const fx = makeFixture("egress-checks-off");
+    // Global push.default unset AND an unclassified repo with a GitHub
+    // remote: three checks would fire if they ran at all.
+    const dir = healthyRepo(fx, "repo-a");
+    gitConfig(dir, fx, ["remote.origin.url", "git@github.com:acme/x.git"]);
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], egressChecks: false })),
+      );
+    });
+
+    assert.equal(exitCode, undefined);
+    assert.doesNotMatch(stdout, /PUSH_DEFAULT_IMPLICIT|CLASS_VISIBILITY_UNRESOLVED|PERSONAL_ORG_UNREGISTERED/);
+  });
+});
+
+describe("doctor — egress checks: per-repo", () => {
+  it("CLASS_VISIBILITY_UNRESOLVED: a hook-healthy repo with a GitHub remote but no class is now listed", () => {
+    const fx = makeFixture("class-unresolved", {});
+    writeGlobalPushDefaultNothing(fx);
+    const dir = healthyRepo(fx, "unclassified-repo");
+    gitConfig(dir, fx, ["remote.origin.url", "git@github.com:acme/x.git"]);
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stdout, /unclassified-repo/);
+    assert.match(stdout, /FAIL CLASS_VISIBILITY_UNRESOLVED/);
+    assert.match(stdout, /fix: repo-aegis classify --apply/);
+  });
+
+  it("CLASS_VISIBILITY_UNRESOLVED is clean once class and cached visibility are both set", () => {
+    const fx = makeFixture("class-resolved");
+    writeGlobalPushDefaultNothing(fx);
+    const registryPath = writeRegistry(fx, REGISTRY_WITH_ACME);
+    const dir = healthyRepo(fx, "classified-repo");
+    gitConfig(dir, fx, ["remote.origin.url", "git@github.com:acme/x.git"]);
+    gitConfig(dir, fx, ["repo-aegis.class", "public-eligible"]);
+    gitConfig(dir, fx, ["repo-aegis.visibility", "public"]);
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+        ),
+      );
+    });
+
+    assert.equal(exitCode, undefined);
+    assert.match(stdout, /all clean/);
+  });
+
+  it("CLASS_VISIBILITY_UNRESOLVED still fires when the class is explicit but visibility is uncached", () => {
+    const fx = makeFixture("class-explicit-vis-unknown");
+    writeGlobalPushDefaultNothing(fx);
+    const registryPath = writeRegistry(fx, REGISTRY_WITH_ACME);
+    const dir = healthyRepo(fx, "half-classified-repo");
+    gitConfig(dir, fx, ["remote.origin.url", "git@github.com:acme/x.git"]);
+    gitConfig(dir, fx, ["repo-aegis.class", "public-eligible"]);
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+        ),
+      );
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stdout, /FAIL CLASS_VISIBILITY_UNRESOLVED/);
+  });
+
+  it("a repo with NO GitHub remote gets no per-repo checks at all", () => {
+    const fx = makeFixture("no-remote");
+    writeGlobalPushDefaultNothing(fx);
+    healthyRepo(fx, "local-only-repo"); // never gets a remote
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+    });
+
+    assert.equal(exitCode, undefined);
+    assert.doesNotMatch(stdout, /local-only-repo/);
+  });
+
+  it("PERSONAL_ORG_UNREGISTERED fires when the remote org is in neither personalOrgs nor any engagement, and names the org only in `fix`", () => {
+    const fx = makeFixture("org-unregistered");
+    writeGlobalPushDefaultNothing(fx);
+    const registryPath = writeRegistry(fx, REGISTRY_NO_ACME);
+    const dir = healthyRepo(fx, "foreign-org-repo");
+    gitConfig(dir, fx, ["remote.origin.url", "git@github.com:acme/x.git"]);
+    gitConfig(dir, fx, ["repo-aegis.class", "private-strict"]);
+    gitConfig(dir, fx, ["repo-aegis.visibility", "private"]);
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+        ),
+      );
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stdout, /FAIL PERSONAL_ORG_UNREGISTERED/);
+    assert.match(stdout, /fix: repo-aegis engagements add --personal-org acme/);
+    // The detail line must not carry the org — an unregistered org can be a
+    // customer's, and `detail` is the line that gets copied into a ticket.
+    const detailLine =
+      stdout.split("\n").find(l => l.includes("FAIL PERSONAL_ORG_UNREGISTERED")) ?? "";
+    assert.notEqual(detailLine, "", "expected a PERSONAL_ORG_UNREGISTERED detail line");
+    assert.doesNotMatch(detailLine, /acme/);
+  });
+
+  it("PERSONAL_ORG_UNREGISTERED is clean when the org is in personalOrgs", () => {
+    const fx = makeFixture("org-registered");
+    writeGlobalPushDefaultNothing(fx);
+    const registryPath = writeRegistry(fx, REGISTRY_WITH_ACME);
+    const dir = healthyRepo(fx, "known-org-repo");
+    gitConfig(dir, fx, ["remote.origin.url", "git@github.com:acme/x.git"]);
+    gitConfig(dir, fx, ["repo-aegis.class", "public-eligible"]);
+    gitConfig(dir, fx, ["repo-aegis.visibility", "public"]);
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+        ),
+      );
+    });
+
+    assert.equal(exitCode, undefined);
+    assert.doesNotMatch(stdout, /PERSONAL_ORG_UNREGISTERED/);
+  });
+
+  it("an unreadable registry skips PERSONAL_ORG_UNREGISTERED rather than reporting it", () => {
+    const fx = makeFixture("registry-missing");
+    writeGlobalPushDefaultNothing(fx);
+    const dir = healthyRepo(fx, "no-registry-repo");
+    gitConfig(dir, fx, ["remote.origin.url", "git@github.com:acme/x.git"]);
+    gitConfig(dir, fx, ["repo-aegis.class", "private-strict"]);
+    gitConfig(dir, fx, ["repo-aegis.visibility", "private"]);
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        withEnv("REPO_AEGIS_REGISTRY", join(fx.base, "no-such-registry.yaml"), () =>
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+        ),
+      );
+    });
+
+    assert.equal(exitCode, undefined, "a guardrail must not block on missing context");
+    assert.doesNotMatch(stdout, /PERSONAL_ORG_UNREGISTERED/);
+  });
+});
+
+describe("doctor — egress checks: JSON shape", () => {
+  it("--json gains `machine` and a per-repo `checks` array", () => {
+    const fx = makeFixture("egress-json");
+    const registryPath = writeRegistry(fx, REGISTRY_NO_ACME);
+    const dir = healthyRepo(fx, "unclassified-repo");
+    gitConfig(dir, fx, ["remote.origin.url", "git@github.com:acme/x.git"]);
+
+    const { stdout } = captureStdout(() => {
+      runDoctorCapturingExit(() =>
+        withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], json: true })),
+        ),
+      );
+    });
+
+    const parsed = JSON.parse(stdout) as {
+      machine: Array<{ code: string; ok: boolean; detail: string; fix?: string }>;
+      results: Array<{
+        workingTree: string;
+        ok: boolean;
+        checks: Array<{ code: string; ok: boolean; detail: string; fix?: string }>;
+      }>;
+      summary: { scanned: number; failed: number; fixed: number };
+    };
+
+    const pushDefault = parsed.machine.find(c => c.code === "PUSH_DEFAULT_IMPLICIT");
+    assert.ok(pushDefault, "machine[] must carry PUSH_DEFAULT_IMPLICIT");
+    assert.equal(pushDefault.ok, false);
+    assert.equal(pushDefault.fix, "git config --global push.default nothing");
+
+    assert.equal(parsed.results.length, 1);
+    const r = parsed.results[0]!;
+    assert.match(r.workingTree, /unclassified-repo$/);
+    // Hook liveness is fine here; it is listed purely for the egress checks.
+    assert.equal(r.ok, true);
+    assert.deepEqual(
+      r.checks.map(c => c.code).sort(),
+      ["CLASS_VISIBILITY_UNRESOLVED", "PERSONAL_ORG_UNREGISTERED"],
+    );
+    assert.ok(r.checks.every(c => !c.ok));
+
+    // 1 machine failure + 1 repo carrying failing checks.
+    assert.equal(parsed.summary.failed, 2);
   });
 });
