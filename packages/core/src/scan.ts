@@ -392,6 +392,20 @@ export interface ScanResult extends TextScanResult {
 }
 
 /**
+ * Resolve a caller-supplied scan target against the repo it is being scanned
+ * FOR, not against `process.cwd()`.
+ *
+ * A relative `--path` used to resolve against the process cwd even when
+ * `--cwd` named a different repo: the file missed, landed in `skipped` as
+ * "unreadable", and the run reported `hits: []` and exit 0 — a scan that
+ * scanned nothing, reading as a pass (issue #97.3). Every entry point that
+ * accepts a path plus a repo directory must funnel through this.
+ */
+export function resolveScanTarget(path: string, base: string): string {
+  return isAbsolute(path) ? path : join(base, path);
+}
+
+/**
  * Scan a single file from disk. Canonicalises the path via realpath to
  * defeat symlink-tricks. Rejects paths outside the repo working tree
  * (or current cwd if not in a git repo).

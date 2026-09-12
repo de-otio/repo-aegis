@@ -6,6 +6,7 @@ import {
   CustomerCoupledNoEngagementError,
   readRepoConfig,
   scanFile,
+  resolveScanTarget,
   scanStagedDiff,
   type HistoryHit,
   type RepoJson,
@@ -98,12 +99,28 @@ export function registerCheckTools(server: McpServer): void {
       }
       let hits: ScanHit[] = [];
       let skipped: SkippedFile[] = [];
+      // #97.3: a relative `path` resolves against the repo named by `cwd`, not
+      // against the SERVER's cwd — which is wherever the MCP host happened to
+      // start and almost never the repo the agent means.
+      const target = resolveScanTarget(path, repo.cwd);
       try {
-        const r = scanFile(path, denySet, SCAN_OPTS, repo.isGitRepo ? repo.cwd : undefined);
+        const r = scanFile(target, denySet, SCAN_OPTS, repo.isGitRepo ? repo.cwd : undefined);
         hits = r.hits;
         skipped = r.skipped;
       } catch (err) {
         return errorResult({ error: (err as Error).message });
+      }
+      // The requested path is the whole scope of this tool, so a skip means
+      // nothing was scanned. Returning `hits: []` would read to the agent as
+      // "this file is clean" — the one answer this tool must never give
+      // without having looked.
+      if (skipped.length > 0) {
+        return errorResult({
+          code: "PATH_NOT_SCANNED",
+          error:
+            `nothing was scanned: the requested path was skipped ` +
+            `(${skipped.map(s => s.reason).join(", ")}) — this is NOT a clean result`,
+        });
       }
       const result: CheckResultShape = {
         mode: "path",

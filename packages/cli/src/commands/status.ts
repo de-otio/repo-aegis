@@ -144,8 +144,36 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   // GitHub visibility drives the egress-hygiene gate. Refresh the cache
   // best-effort (a `gh` probe; no-op when gh/remote absent) so audit's
   // reconciliation check and the egress gate read a current value.
-  const visibility = repo.isGitRepo ? resolveVisibility(repo.cwd) : "unknown";
+  //
+  // #97.1: the probe's FAILURE MODE is reported too. A probe that could not
+  // see the repo is actionable ("you are on the wrong `gh` account"); a bare
+  // "unknown" is not, and is indistinguishable from "no remote" or "no gh".
+  const resolved = repo.isGitRepo ? resolveVisibility(repo.cwd) : null;
+  const visibility = resolved?.visibility ?? "unknown";
   const publicFacing = isPublicFacing(repo, { visibility });
+  const visibilityProbe =
+    resolved === null ? null : { ...resolved.probe, fromCache: resolved.fromCache };
+
+  // Warn when the operator's view of this repo is worse than they'd assume.
+  // `unauthorized` always warns, even when the cache answered: a stale cached
+  // value plus a blind probe is exactly how a repo keeps the wrong class. The
+  // other non-resolved statuses only warn when nothing answered at all —
+  // `no-remote` on a non-GitHub repo is a normal, uninteresting state.
+  const visibilityWarnings: string[] = [];
+  if (visibilityProbe !== null && visibilityProbe.status !== "resolved") {
+    const surface =
+      visibilityProbe.status === "unauthorized" ||
+      (visibility === "unknown" && visibilityProbe.status !== "no-remote");
+    if (surface) {
+      visibilityWarnings.push(
+        `github visibility probe: ${visibilityProbe.status} — ${visibilityProbe.detail}` +
+          (visibilityProbe.fromCache && visibility !== "unknown"
+            ? ` (showing the cached value \`${visibility}\`, which may be stale)`
+            : ""),
+      );
+      if (visibilityProbe.fix) visibilityWarnings.push(`fix: ${visibilityProbe.fix}`);
+    }
+  }
 
   // H1/H2: a repo-local core.hooksPath pointing at an empty (or foreign)
   // directory silently disables scanning, and a hook that never runs
@@ -182,6 +210,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   const result = {
     repo: repoJson,
     visibility,
+    visibilityProbe,
     publicFacing,
     allowedEngagements: allowed,
     denySet: {
@@ -206,7 +235,15 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   emitText(`repo-aegis status: ${repo.cwd}`);
   emitText(`  class:    ${repo.class}${repo.classExplicit ? "" : " (default; not set)"}`);
   emitText(
-    `  github:   ${visibility}${publicFacing ? " — egress-hygiene enforced" : ""}` +
+    `  github:   ${visibility}` +
+      // The probe's status rides on the same line as the value it failed to
+      // produce, so "unknown" can never again be read as a settled answer.
+      `${
+        visibilityProbe !== null && visibilityProbe.status !== "resolved"
+          ? ` (probe: ${visibilityProbe.status})`
+          : ""
+      }` +
+      `${publicFacing ? " — egress-hygiene enforced" : ""}` +
       `${visibility === "public" && repo.class !== "public-eligible" ? " (consider class=public-eligible)" : ""}`,
   );
   emitText(
@@ -220,6 +257,10 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   emitText(`  patterns: ${denySet.patterns.length} active (+ ${alwaysBlockCount} always-block)`);
   emitText(`  regex:    ${getRegexBackend()}`);
   for (const line of hooksStatusLines(hooks)) emitText(line);
+  for (let i = 0; i < visibilityWarnings.length; i++) {
+    // First line is the finding, any follow-up is its continuation.
+    emitText(i === 0 ? `  warning:  ${visibilityWarnings[i]}` : `            ${visibilityWarnings[i]}`);
+  }
   if (zeroMarkerEngagements.length > 0) {
     emitText(
       `  warning:  ${zeroMarkerEngagements.length} engagement(s) with 0 markers: ${zeroMarkerEngagements.join(", ")}`,

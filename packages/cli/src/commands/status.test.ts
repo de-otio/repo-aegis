@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureOutput, withEnv } from "../_test-utils.js";
+import { captureOutput, withEnv, fakeGh, withFakeGh, withoutGh } from "../_test-utils.js";
 import { status } from "./status.js";
 import { installHooks } from "./install-hooks.js";
 
@@ -207,5 +207,135 @@ describe("status — hooks (H2)", () => {
       assert.equal(rec!.details?.code, "HOOKS_PATH_UNSET");
       assert.equal(rec!.details?.ok, false);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #97.1 — the visibility probe collapsed every failure to "unknown".
+// On a machine with two `gh` accounts, a repo the active account cannot see
+// 404s and reads exactly like "no remote" or "gh not installed" — so a
+// private repo sat at whatever class `classify` assigned with nothing to
+// contradict it. An unseeable repo is ACTIONABLE; "unknown" is not.
+// ---------------------------------------------------------------------------
+describe("status — visibility probe diagnostics (#97.1)", () => {
+  function repoWithRemote(name: string, cls = "private-strict"): string {
+    const dir = makeRepo(name, cls);
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:some-org/some-repo.git"], {
+      cwd: dir,
+    });
+    return dir;
+  }
+
+  const UNAUTH_GH = `echo "GraphQL: Could not resolve to a Repository with the name 'x/y'. (repository)" >&2\nexit 1`;
+
+  it("JSON reports status=unauthorized, distinct from a plain unknown", () => {
+    const home = setupHome("status-probe-unauth");
+    const repo = repoWithRemote("status-probe-unauth-repo");
+    const gh = fakeGh(join(tmp, "gh-status-unauth"), UNAUTH_GH);
+    process.chdir(repo);
+    const result = withFakeGh(gh, () =>
+      withEnv("REPO_AEGIS_HOME", home, () => captureOutput(() => status({ json: true }))),
+    );
+    const j = JSON.parse(result.stdout) as {
+      visibility: string;
+      visibilityProbe: { status: string; fix?: string; fromCache: boolean };
+    };
+    assert.equal(j.visibility, "unknown");
+    assert.equal(j.visibilityProbe.status, "unauthorized");
+    assert.ok(j.visibilityProbe.fix, "an unauthorized probe must carry a fix hint");
+  });
+
+  it("JSON reports status=no-gh when gh is not installed", () => {
+    const home = setupHome("status-probe-nogh");
+    const repo = repoWithRemote("status-probe-nogh-repo");
+    process.chdir(repo);
+    const result = withoutGh(join(tmp, "status-nogh-path"), () =>
+      withEnv("REPO_AEGIS_HOME", home, () => captureOutput(() => status({ json: true }))),
+    );
+    const j = JSON.parse(result.stdout) as {
+      visibilityProbe: { status: string; fix?: string };
+    };
+    assert.equal(j.visibilityProbe.status, "no-gh");
+    assert.ok(j.visibilityProbe.fix);
+  });
+
+  it("JSON reports status=resolved when gh answers", () => {
+    const home = setupHome("status-probe-ok");
+    const repo = repoWithRemote("status-probe-ok-repo");
+    const gh = fakeGh(join(tmp, "gh-status-ok"), "echo PUBLIC");
+    process.chdir(repo);
+    const result = withFakeGh(gh, () =>
+      withEnv("REPO_AEGIS_HOME", home, () => captureOutput(() => status({ json: true }))),
+    );
+    const j = JSON.parse(result.stdout) as {
+      visibility: string;
+      visibilityProbe: { status: string; fromCache: boolean };
+    };
+    assert.equal(j.visibility, "public");
+    assert.equal(j.visibilityProbe.status, "resolved");
+    assert.equal(j.visibilityProbe.fromCache, false);
+  });
+
+  it("text output warns, with a fix, when the probe could not see the repo", () => {
+    const home = setupHome("status-probe-unauth-text");
+    const repo = repoWithRemote("status-probe-unauth-text-repo");
+    const gh = fakeGh(join(tmp, "gh-status-unauth-text"), UNAUTH_GH);
+    process.chdir(repo);
+    const result = withFakeGh(gh, () =>
+      withEnv("REPO_AEGIS_HOME", home, () => captureOutput(() => status({}))),
+    );
+    assert.match(result.stdout, /github:\s+unknown/);
+    assert.match(result.stdout, /unauthorized/);
+    assert.match(result.stdout, /warning:/);
+    assert.match(result.stdout, /GH_TOKEN|gh auth|account/i);
+  });
+
+  it("an unauthorized probe warns even when a stale cached value exists", () => {
+    const home = setupHome("status-probe-stale");
+    const repo = repoWithRemote("status-probe-stale-repo");
+    execFileSync("git", ["config", "repo-aegis.visibility", "public"], { cwd: repo });
+    const gh = fakeGh(join(tmp, "gh-status-stale"), UNAUTH_GH);
+    process.chdir(repo);
+    const result = withFakeGh(gh, () =>
+      withEnv("REPO_AEGIS_HOME", home, () => captureOutput(() => status({ json: true }))),
+    );
+    const j = JSON.parse(result.stdout) as {
+      visibility: string;
+      visibilityProbe: { status: string; fromCache: boolean };
+    };
+    // The cache still answers, but the operator must know the probe is blind.
+    assert.equal(j.visibility, "public");
+    assert.equal(j.visibilityProbe.status, "unauthorized");
+    assert.equal(j.visibilityProbe.fromCache, true);
+  });
+
+  it("a repo with no GitHub remote reports no-remote and does not warn", () => {
+    const home = setupHome("status-probe-noremote");
+    const repo = makeRepo("status-probe-noremote-repo", "private-strict");
+    const gh = fakeGh(
+      join(tmp, "gh-status-noremote"),
+      `echo "none of the git remotes configured for this repository point to a known GitHub host. To tell gh about a new GitHub host, please use \\\`gh auth login\\\`" >&2\nexit 1`,
+    );
+    process.chdir(repo);
+    const result = withFakeGh(gh, () =>
+      withEnv("REPO_AEGIS_HOME", home, () => captureOutput(() => status({ json: true }))),
+    );
+    const j = JSON.parse(result.stdout) as { visibilityProbe: { status: string } };
+    assert.equal(j.visibilityProbe.status, "no-remote");
+  });
+
+  it("the probe never echoes gh stderr (it can carry a customer repo name)", () => {
+    const home = setupHome("status-probe-noecho");
+    const repo = repoWithRemote("status-probe-noecho-repo");
+    const gh = fakeGh(
+      join(tmp, "gh-status-noecho"),
+      `echo "Could not resolve to a Repository with the name 'UNIQUE-STDERR-SENTINEL/x'." >&2\nexit 1`,
+    );
+    process.chdir(repo);
+    const result = withFakeGh(gh, () =>
+      withEnv("REPO_AEGIS_HOME", home, () => captureOutput(() => status({ json: true }))),
+    );
+    assert.doesNotMatch(result.stdout, /UNIQUE-STDERR-SENTINEL/);
+    assert.doesNotMatch(result.stderr, /UNIQUE-STDERR-SENTINEL/);
   });
 });

@@ -20,6 +20,7 @@ import {
   REPO_CLASSES,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { probeGithubVisibility, type VisibilityProbe } from "../visibility.js";
 
 // --------------------------------------------------------------------------
 // Types and schema
@@ -52,6 +53,12 @@ interface ClassifyOptions extends OutputOptions {
   apply?: boolean;
   rules?: string;
   cwd?: string;
+  /**
+   * Test seam: the GitHub visibility probe. Production uses the real `gh`
+   * probe; tests inject so the classification of a `personalOrgs` repo does
+   * not depend on the developer's own GitHub account.
+   */
+  probe?: (cwd: string) => VisibilityProbe;
 }
 
 // --------------------------------------------------------------------------
@@ -203,6 +210,11 @@ function classifyFromRegistry(remote: string): RegistryMatch | null {
   const personalOrgs = registry.personalOrgs ?? [];
   if (personalOrgs.includes(parsed.org)) {
     return {
+      // PROVISIONAL. "This org is mine" says nothing about whether this
+      // particular repo is public, and `isPublicFacing` treats
+      // `public-eligible` as public-facing — so a private repo classified
+      // this way starts refusing its own legitimate private-infra hosts
+      // (#97.2). The caller replaces this with the visibility-derived class.
       class: "public-eligible",
       engagement: null,
       source: "registry-personal",
@@ -276,10 +288,33 @@ export function classify(opts: ClassifyOptions): void {
   const warnings: string[] = [];
   let match: ClassifyMatch | null = null;
 
-  if (regMatch !== null) {
+  // 4a. #97.2: a `personalOrgs` match is a statement about the ORG, not the
+  //     repo. Ask GitHub which this repo actually is before choosing a class.
+  //     Only this source needs it — a customer-coupled match and a
+  //     classify.yml rule do not depend on visibility.
+  let probe: VisibilityProbe | null = null;
+  let visibilityUnresolved = false;
+  if (regMatch !== null && regMatch.source === "registry-personal") {
+    probe = (opts.probe ?? (c => probeGithubVisibility(c)))(cwd);
+    visibilityUnresolved = probe.visibility === "unknown";
+  }
+
+  if (regMatch !== null && !visibilityUnresolved) {
+    let resolvedClass: RepoClass = regMatch.class;
+    if (probe !== null) {
+      if (probe.visibility === "public") {
+        resolvedClass = "public-eligible";
+      } else {
+        resolvedClass = "private-strict";
+        warnings.push(
+          "this org is personal, but GitHub reports this repo is not public — " +
+            "classifying as private-strict, not public-eligible",
+        );
+      }
+    }
     match = {
       source: regMatch.source,
-      class: regMatch.class,
+      class: resolvedClass,
       engagement: regMatch.engagement,
       rule: null,
     };
@@ -292,6 +327,18 @@ export function classify(opts: ClassifyOptions): void {
           "run `repo-aegis init --migrate-classify` to migrate",
       );
     }
+  } else if (visibilityUnresolved && probe !== null) {
+    // Unresolved visibility on a personal-org repo. Guessing is wrong in both
+    // directions: `public-eligible` on a private repo makes egress hygiene
+    // reject the repo's own legitimate private-infra hosts, while
+    // `private-strict` on a public repo switches that enforcement OFF — the
+    // leak this tool exists to stop. So no class is suggested, and `--apply`
+    // refuses outright below.
+    warnings.push(
+      `github visibility unresolved (${probe.status}: ${probe.detail}); ` +
+        "cannot tell whether this personal repo is public-eligible or private-strict",
+    );
+    if (probe.fix) warnings.push(`fix: ${probe.fix}`);
   } else if (legacyConfig !== null) {
     // [SEC M-7] Fallback path: registry produced no result but
     // classify.yml has a rule. Use the legacy match and surface the
@@ -323,6 +370,55 @@ export function classify(opts: ClassifyOptions): void {
   // warning is a single line prefixed with "warning:".
   for (const w of warnings) {
     process.stderr.write(`warning: ${w}\n`);
+  }
+
+  // The visibility-derived fields ride on every envelope that had a personal
+  // match to resolve, matched or not — a tool reading this output must be able
+  // to tell "classified as private-strict because GitHub said private" from
+  // "classified as private-strict because a rule said so".
+  const visibilityPayload =
+    probe === null
+      ? {}
+      : { visibility: probe.visibility, visibilityProbe: { status: probe.status, detail: probe.detail, ...(probe.fix !== undefined && { fix: probe.fix }) } };
+
+  // 5a. #97.2: unresolved visibility on a personal-org repo. A dry run
+  //     reports it (it changes nothing); `--apply` refuses, because writing
+  //     either class here is a coin flip on whether egress hygiene is enforced.
+  if (visibilityUnresolved && probe !== null) {
+    if (opts.apply) {
+      emitError(
+        {
+          code: "VISIBILITY_UNRESOLVED",
+          error:
+            `cannot classify: this repo is in a personal org but its GitHub ` +
+            `visibility is unresolved (${probe.status}: ${probe.detail})`,
+          details:
+            (probe.fix ? `${probe.fix}\n  ` : "") +
+            `or set the class explicitly: git config repo-aegis.class <public-eligible|private-strict>`,
+        },
+        opts,
+      );
+    }
+    if (opts.json) {
+      emitJson({
+        action: "classify",
+        remote,
+        matched: null,
+        applied: false,
+        current: currentSnapshot,
+        ...visibilityPayload,
+        warnings,
+      });
+    } else {
+      emitText("repo-aegis classify: no class suggested — github visibility unresolved");
+      emitText(`  remote: ${remote}`);
+      emitText(`  probe:  ${probe.status} — ${probe.detail}`);
+      if (probe.fix) emitText(`  fix:    ${probe.fix}`);
+      emitText(
+        "  or set the class explicitly: git config repo-aegis.class <public-eligible|private-strict>",
+      );
+    }
+    return;
   }
 
   // 5. No match path.
@@ -390,6 +486,7 @@ export function classify(opts: ClassifyOptions): void {
         matched: matchedPayload,
         applied: false,
         current: currentSnapshot,
+        ...visibilityPayload,
         warnings,
       });
     } else {
@@ -399,6 +496,7 @@ export function classify(opts: ClassifyOptions): void {
       }
       emitText(`  remote: ${remote}`);
       emitText(`  source: ${match.source}`);
+      if (probe !== null) emitText(`  github: ${probe.visibility}`);
       emitText("  run with --apply to set");
     }
     return;
@@ -451,6 +549,7 @@ export function classify(opts: ClassifyOptions): void {
       applied: true,
       before: currentSnapshot,
       after: afterSnapshot,
+      ...visibilityPayload,
       warnings,
     });
   } else {
@@ -460,5 +559,6 @@ export function classify(opts: ClassifyOptions): void {
     }
     emitText(`  remote: ${remote}`);
     emitText(`  source: ${match.source}`);
+    if (probe !== null) emitText(`  github: ${probe.visibility}`);
   }
 }

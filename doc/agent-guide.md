@@ -177,7 +177,19 @@ org from the repo's `git remote get-url origin`, and:
 
 - If the org is in any engagement's `githubOrgs`, classifies the repo
   `customer-coupled` and `allow`s that engagement.
-- If the org is in `personalOrgs`, classifies the repo `public-eligible`.
+- If the org is in `personalOrgs`, probes the repo's GitHub visibility
+  (`gh repo view`) and classifies it `public-eligible` only when GitHub
+  says it really is **public**; private / internal repos get
+  `private-strict`. Being in a personal org says nothing about whether
+  this particular repo is public, and `public-eligible` turns on
+  egress-hygiene enforcement.
+  - If the probe cannot resolve visibility (no `gh`, or `gh` is on an
+    account that cannot see the repo), `--apply` **exits 2** with
+    `VISIBILITY_UNRESOLVED` and writes nothing. Do not retry blindly and
+    do not pick a class yourself: re-run with the right account
+    (`GH_TOKEN=$(gh auth token --user <user>) repo-aegis classify --apply`),
+    or surface the choice to the user, who can set it explicitly with
+    `git config repo-aegis.class <class>`.
 - If neither, falls back to a legacy `~/.config/repo-aegis/classify.yml`
   rules file (one-time deprecation warning naming the matched rule).
 - If nothing matches, sets nothing and reports `matched: null`. Ask
@@ -707,6 +719,8 @@ Codes you should recognise and act on:
 | `REMOVE_REQUIRES_HARD` | `engagements remove` without `--hard` | for soft removal use `engagements end <id> --purge`; for hard removal pass `--hard` (data-subject-erasure semantics) |
 | `LOCK_TIMEOUT` | another repo-aegis process is holding the registry lock | wait and retry; if persistent, the user has a stale lockfile to investigate |
 | `OUTSIDE_WORKING_TREE` | `check --path` (CLI invocation, not the hook) resolved a file outside the *named* repo's working tree, even after symlink resolution | the file is genuinely outside any git tree the call was scoped to. Surface to the user; do NOT auto-rerun on a different path. The PostToolUse hook does NOT raise this — it resolves the destination tree from the path automatically. |
+| `PATH_NOT_SCANNED` | `check --path` / `repo_aegis_check_path` skipped the one file it was asked to scan (missing, unreadable, binary, or over `--max-file-bytes`) | **this is not a clean result — nothing was scanned.** `error` names the reason. A missing file usually means a wrong path: relative paths resolve against `--cwd` (the repo), not your shell's cwd. Fix the path or the size limit and re-run; never report the file as clean. |
+| `VISIBILITY_UNRESOLVED` | `classify --apply` matched a `personalOrgs` org but could not determine whether the repo is public | the correct class depends on the answer and guessing is unsafe in both directions. Re-run with an account that can see the repo (`GH_TOKEN=$(gh auth token --user <user>) …`), or surface the choice to the user, who sets it with `git config repo-aegis.class <class>`. Do NOT pick one yourself. |
 | `CROSS_ORG_WRITE` | PostToolUse hook saw a write whose destination tree's trust boundary does not overlap the launcher's | the file is already on disk. Surface to the user, name the offending path, propose reverting. Do NOT modify `personalOrgs` / `githubOrgs` to widen the boundary; that's a compliance decision the user owns. |
 | `DEST_UNCLASSIFIED` (warning, not fatal) | PostToolUse hook scanned a write into a destination repo with no class, no engagements, and no remote it could parse | the scan ran against `_always` only. Suggest the user classify the destination (`cd <dest> && repo-aegis classify --apply`). The hit (if any) is still real; treat it like a normal scan result. |
 | `CUSTOMER_COUPLED_NO_ENGAGEMENT` | `check` ran in a `customer-coupled` repo with no engagement set | run `repo-aegis allow <id>` after confirming with the user which engagement(s) the repo references |

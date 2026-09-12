@@ -176,12 +176,12 @@ describe("check — customer-coupled-without-engagement", () => {
 });
 
 describe("check — scanFile error path", () => {
-  it("--path on a missing file is reported via skipped, not a thrown error", () => {
-    // scanFile() handles ENOENT internally by adding the file to
-    // `skipped` with reason "unreadable". The check command's
-    // try/catch around scanFile is only reached when scanFile itself
-    // throws (e.g. OutsideWorkingTreeError). For a missing file, the
-    // command exits 0 with an empty hits array.
+  it("--path on a missing file exits 2 (PATH_NOT_SCANNED), never a clean pass", () => {
+    // scanFile() handles ENOENT internally by adding the file to `skipped`
+    // with reason "unreadable". `check` used to emit that as `hits: []` and
+    // exit 0 — a scan that scanned nothing reading as a pass (issue #97.3).
+    // The requested path is the entire scope of --path mode, so its being
+    // skipped is a hard error.
     const home = setupHome("path-missing", { _always: ["leak-token"] });
     const repo = makeRepo("path-missing-repo", { class: "private-strict" });
     process.chdir(repo);
@@ -189,13 +189,14 @@ describe("check — scanFile error path", () => {
     const result = withEnv("REPO_AEGIS_HOME", home, () =>
       captureOutput(() => check({ path: target, json: true })),
     );
-    assert.equal(result.exitCode, undefined);
-    const j = JSON.parse(result.stdout) as {
-      hits: unknown[];
-      skipped: { path: string; reason: string }[];
+    assert.equal(result.exitCode, 2);
+    const j = JSON.parse(result.stderr) as {
+      code: string;
+      error: string;
+      details?: unknown;
     };
-    assert.equal(j.hits.length, 0);
-    assert.ok(j.skipped.some(s => s.path === target && s.reason === "unreadable"));
+    assert.equal(j.code, "PATH_NOT_SCANNED");
+    assert.match(j.error, /unreadable/);
   });
 
   it("--path outside the working tree exits 2 (OutsideWorkingTreeError)", () => {
@@ -212,6 +213,88 @@ describe("check — scanFile error path", () => {
     assert.equal(result.exitCode, 2);
     const j = JSON.parse(result.stderr) as { error: string };
     assert.match(j.error, /outside the working tree/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #97.3 — `check --cwd <repo> --path <relative>` silently scanned
+// nothing: the relative path resolved against the PROCESS cwd, missed, and
+// was reported as `skipped: [{reason: "unreadable"}]` with `hits: []` and
+// exit 0 — indistinguishable from a clean scan unless you read `skipped`.
+// ---------------------------------------------------------------------------
+describe("check — --path resolution and empty-scan detection (#97.3)", () => {
+  it("resolves a relative --path against --cwd, not the process cwd", () => {
+    const home = setupHome("path-rel", { _always: ["leak-token"] });
+    const repo = makeRepo("path-rel-repo", { class: "private-strict" });
+    mkdirSync(join(repo, "sub"), { recursive: true });
+    writeFileSync(join(repo, "sub", "leaky.txt"), "this line has leak-token in it\n");
+    // The reported invocation: process cwd is NOT the repo, --cwd points at
+    // it, and --path is relative to the repo.
+    process.chdir(tmp);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ cwd: repo, path: join("sub", "leaky.txt"), json: true })),
+    );
+    const j = JSON.parse(result.stdout) as {
+      hits: { line: number }[];
+      skipped: unknown[];
+    };
+    assert.deepEqual(j.skipped, []);
+    assert.equal(j.hits.length, 1, `hits: ${JSON.stringify(j.hits)}`);
+    // A real hit must still block.
+    assert.equal(result.exitCode, 1);
+  });
+
+  it("a clean relative --path under --cwd reports clean, not skipped", () => {
+    const home = setupHome("path-rel-clean", { _always: ["leak-token"] });
+    const repo = makeRepo("path-rel-clean-repo", { class: "private-strict" });
+    writeFileSync(join(repo, "fine.txt"), "nothing interesting here\n");
+    process.chdir(tmp);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ cwd: repo, path: "fine.txt", json: true })),
+    );
+    assert.equal(result.exitCode, undefined);
+    const j = JSON.parse(result.stdout) as { hits: unknown[]; skipped: unknown[] };
+    assert.deepEqual(j.skipped, []);
+    assert.equal(j.hits.length, 0);
+  });
+
+  it("exits 2 when a relative --path does not exist under --cwd", () => {
+    const home = setupHome("path-rel-missing", { _always: ["leak-token"] });
+    const repo = makeRepo("path-rel-missing-repo", { class: "private-strict" });
+    process.chdir(tmp);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ cwd: repo, path: "nope.txt", json: true })),
+    );
+    assert.equal(result.exitCode, 2);
+    const j = JSON.parse(result.stderr) as { code: string };
+    assert.equal(j.code, "PATH_NOT_SCANNED");
+  });
+
+  it("exits 2 when the requested --path was skipped as too-large", () => {
+    const home = setupHome("path-too-large", { _always: ["leak-token"] });
+    const repo = makeRepo("path-too-large-repo", { class: "private-strict" });
+    const target = join(repo, "big.txt");
+    writeFileSync(target, "x".repeat(4096));
+    process.chdir(repo);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ path: target, json: true, maxFileBytes: 16 })),
+    );
+    assert.equal(result.exitCode, 2);
+    const j = JSON.parse(result.stderr) as { code: string; error: string };
+    assert.equal(j.code, "PATH_NOT_SCANNED");
+    assert.match(j.error, /too-large/);
+  });
+
+  it("text mode also fails loudly rather than printing `clean`", () => {
+    const home = setupHome("path-missing-text", { _always: ["leak-token"] });
+    const repo = makeRepo("path-missing-text-repo", { class: "private-strict" });
+    process.chdir(repo);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ path: join(repo, "absent.txt") })),
+    );
+    assert.equal(result.exitCode, 2);
+    assert.doesNotMatch(result.stdout, /clean/);
+    assert.match(result.stderr, /not scanned|PATH_NOT_SCANNED|unreadable/);
   });
 });
 

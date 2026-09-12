@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { captureOutput } from "../_test-utils.js";
+import { captureOutput, fakeGh, withFakeGh, withoutGh, lastJsonLine } from "../_test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -16,6 +16,7 @@ let tmp: string;
 let gitDir: string;
 let nonGitDir: string;
 let rulesDir: string;
+let prevRegistryEnv: string | undefined;
 
 function gitCmd(cwd: string, args: string[]): string {
   return execFileSync("git", args, {
@@ -41,9 +42,23 @@ before(() => {
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: gitDir });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: gitDir });
   execFileSync("git", ["config", "user.name", "test"], { cwd: gitDir });
+
+  // Pin the registry away from the developer's real
+  // `~/.config/repo-aegis/engagements.yaml` for the whole file. Without
+  // this, every test that does not wrap itself in `withRegistry` reads the
+  // machine's live registry, so a classify.yml fixture silently loses to a
+  // real `personalOrgs`/`githubOrgs` entry and the assertions depend on who
+  // is running the suite. `withRegistry` still overrides per test.
+  prevRegistryEnv = process.env["REPO_AEGIS_REGISTRY"];
+  process.env["REPO_AEGIS_REGISTRY"] = join(tmp, "no-such-registry.yaml");
 });
 
 after(() => {
+  if (prevRegistryEnv === undefined) {
+    delete process.env["REPO_AEGIS_REGISTRY"];
+  } else {
+    process.env["REPO_AEGIS_REGISTRY"] = prevRegistryEnv;
+  }
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -512,18 +527,25 @@ engagements: []
     setRemote(gitDir, "git@github.com:my-handle/dotfiles.git");
     resetRepoAegis(gitDir);
 
-    const { stdout } = withRegistry(reg, () =>
-      captureOutput(() =>
-        classify({ cwd: gitDir, json: true, rules: join(rulesDir, "no-rules.yml") }),
+    // Pin the visibility probe: a personalOrgs match is only `public-eligible`
+    // when GitHub says the repo really is public (#97.2).
+    const gh = fakeGh(join(tmp, "gh-personal-public"), "echo PUBLIC");
+    const { stdout } = withFakeGh(gh, () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({ cwd: gitDir, json: true, rules: join(rulesDir, "no-rules.yml") }),
+        ),
       ),
     );
 
     const out = JSON.parse(stdout) as {
       matched: { source: string; class: string; engagement: string | null };
+      visibility: string;
     };
     assert.equal(out.matched.source, "registry-personal");
     assert.equal(out.matched.class, "public-eligible");
     assert.equal(out.matched.engagement, null);
+    assert.equal(out.visibility, "public");
   });
 
   it("engagement.githubOrgs match → customer-coupled with engagement (dry-run)", () => {
@@ -611,9 +633,12 @@ engagements: []
     setRemote(gitDir, "git@github.com:me/whatever.git");
     resetRepoAegis(gitDir);
 
-    const { stdout, stderr } = withRegistry(reg, () =>
-      captureOutput(() =>
-        classify({ cwd: gitDir, json: true, rules: rulesFile }),
+    const gh = fakeGh(join(tmp, "gh-precedence-public"), "echo PUBLIC");
+    const { stdout, stderr } = withFakeGh(gh, () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({ cwd: gitDir, json: true, rules: rulesFile }),
+        ),
       ),
     );
 
@@ -760,5 +785,218 @@ engagements: []
     // Should still find a match via classify.yml; registry being absent
     // is silent (regMatch returned null, fell through).
     assert.equal(out.matched.source, "classify-yml");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #97.2 — a `personalOrgs` match used to be `public-eligible`
+// unconditionally. `isPublicFacing` treats that class as public-facing, so a
+// PRIVATE repo classified this way starts refusing its own legitimate
+// private-infra hosts. The class must follow the repo's real visibility.
+// ---------------------------------------------------------------------------
+describe("classify — personalOrgs visibility probe (#97.2)", () => {
+  const REG = `schemaVersion: 2
+personalOrgs: [my-handle]
+engagements: []
+`;
+
+  function registryAt(name: string): string {
+    const p = join(tmp, name);
+    writeFileSync(p, REG);
+    return p;
+  }
+
+  it("a PRIVATE repo in a personalOrg is private-strict, not public-eligible", () => {
+    const reg = registryAt("reg-vis-private.yaml");
+    setRemote(gitDir, "git@github.com:my-handle/secrets.git");
+    resetRepoAegis(gitDir);
+    const gh = fakeGh(join(tmp, "gh-private"), "echo PRIVATE");
+
+    const { stdout } = withFakeGh(gh, () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({ cwd: gitDir, json: true, rules: join(rulesDir, "no-rules.yml") }),
+        ),
+      ),
+    );
+
+    const out = JSON.parse(stdout) as {
+      matched: { source: string; class: string };
+      visibility: string;
+    };
+    assert.equal(out.matched.source, "registry-personal");
+    assert.equal(out.matched.class, "private-strict");
+    assert.equal(out.visibility, "private");
+  });
+
+  it("--apply writes private-strict for a PRIVATE personal repo", () => {
+    const reg = registryAt("reg-vis-private-apply.yaml");
+    setRemote(gitDir, "git@github.com:my-handle/secrets.git");
+    resetRepoAegis(gitDir);
+    const gh = fakeGh(join(tmp, "gh-private-apply"), "echo PRIVATE");
+
+    const { stdout } = withFakeGh(gh, () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({
+            cwd: gitDir,
+            apply: true,
+            json: true,
+            rules: join(rulesDir, "no-rules.yml"),
+          }),
+        ),
+      ),
+    );
+
+    const out = JSON.parse(stdout) as { applied: boolean; after: { class: string } };
+    assert.equal(out.applied, true);
+    assert.equal(out.after.class, "private-strict");
+    assert.equal(gitCmd(gitDir, ["config", "--get", "repo-aegis.class"]), "private-strict");
+    resetRepoAegis(gitDir);
+  });
+
+  it("INTERNAL (GHE) counts as private", () => {
+    const reg = registryAt("reg-vis-internal.yaml");
+    setRemote(gitDir, "git@github.com:my-handle/internal-thing.git");
+    resetRepoAegis(gitDir);
+    const gh = fakeGh(join(tmp, "gh-internal"), "echo INTERNAL");
+
+    const { stdout } = withFakeGh(gh, () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({ cwd: gitDir, json: true, rules: join(rulesDir, "no-rules.yml") }),
+        ),
+      ),
+    );
+    const out = JSON.parse(stdout) as { matched: { class: string } };
+    assert.equal(out.matched.class, "private-strict");
+  });
+
+  it("--apply refuses (exit 2) when the probe cannot see the repo", () => {
+    const reg = registryAt("reg-vis-unauth.yaml");
+    setRemote(gitDir, "git@github.com:my-handle/invisible.git");
+    resetRepoAegis(gitDir);
+    // The reported multi-account case: `gh` runs under an account with no
+    // access to the org and 404s.
+    const gh = fakeGh(
+      join(tmp, "gh-unauth"),
+      `echo "GraphQL: Could not resolve to a Repository with the name 'x/y'. (repository)" >&2\nexit 1`,
+    );
+
+    const { stderr, exitCode } = withFakeGh(gh, () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({
+            cwd: gitDir,
+            apply: true,
+            json: true,
+            rules: join(rulesDir, "no-rules.yml"),
+          }),
+        ),
+      ),
+    );
+
+    assert.equal(exitCode, 2);
+    // stderr also carries the `warning:` lines; the payload is the last line.
+    const j = lastJsonLine<{ code: string; error: string }>(stderr);
+    assert.equal(j.code, "VISIBILITY_UNRESOLVED");
+    assert.match(j.error, /unauthorized|could not/i);
+    // Nothing was written.
+    assert.throws(() => gitCmd(gitDir, ["config", "--get", "repo-aegis.class"]));
+    resetRepoAegis(gitDir);
+  });
+
+  it("--apply refuses (exit 2) when gh is not installed", () => {
+    const reg = registryAt("reg-vis-nogh.yaml");
+    setRemote(gitDir, "git@github.com:my-handle/nogh.git");
+    resetRepoAegis(gitDir);
+    const res = withoutGh(join(tmp, "nogh-path"), () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({
+            cwd: gitDir,
+            apply: true,
+            json: true,
+            rules: join(rulesDir, "no-rules.yml"),
+          }),
+        ),
+      ),
+    );
+    assert.equal(res.exitCode, 2);
+    const j = lastJsonLine<{ code: string; error: string }>(res.stderr);
+    assert.equal(j.code, "VISIBILITY_UNRESOLVED");
+    assert.match(j.error, /no-gh/);
+    resetRepoAegis(gitDir);
+  });
+
+  it("dry run with an unresolved probe suggests no class and warns", () => {
+    const reg = registryAt("reg-vis-unauth-dry.yaml");
+    setRemote(gitDir, "git@github.com:my-handle/invisible.git");
+    resetRepoAegis(gitDir);
+    const gh = fakeGh(
+      join(tmp, "gh-unauth-dry"),
+      `echo "GraphQL: Could not resolve to a Repository with the name 'x/y'. (repository)" >&2\nexit 1`,
+    );
+
+    const { stdout, stderr, exitCode } = withFakeGh(gh, () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({ cwd: gitDir, json: true, rules: join(rulesDir, "no-rules.yml") }),
+        ),
+      ),
+    );
+
+    // A dry run changes nothing, so it reports rather than failing.
+    assert.equal(exitCode, undefined);
+    const out = JSON.parse(stdout) as {
+      matched: null | { class: string };
+      visibility: string;
+      visibilityProbe: { status: string };
+      warnings: string[];
+    };
+    assert.equal(out.matched, null);
+    assert.equal(out.visibility, "unknown");
+    assert.equal(out.visibilityProbe.status, "unauthorized");
+    assert.ok(
+      out.warnings.some(w => /visibility/i.test(w)),
+      `warnings: ${JSON.stringify(out.warnings)}`,
+    );
+    assert.match(stderr, /warning:/);
+  });
+
+  it("a customer-coupled (engagement) match never probes visibility", () => {
+    const reg = join(tmp, "reg-vis-engagement.yaml");
+    writeFileSync(
+      reg,
+      `schemaVersion: 2
+engagements:
+  - id: some-eng
+    name: Some Eng
+    githubOrgs: [other-org]
+    markers: [zzz]
+`,
+    );
+    setRemote(gitDir, "git@github.com:other-org/thing.git");
+    resetRepoAegis(gitDir);
+    // A `gh` that would fail loudly if it were called at all.
+    const gh = fakeGh(join(tmp, "gh-should-not-run"), `echo "boom" >&2\nexit 1`);
+
+    const { stdout, exitCode } = withFakeGh(gh, () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({
+            cwd: gitDir,
+            apply: true,
+            json: true,
+            rules: join(rulesDir, "no-rules.yml"),
+          }),
+        ),
+      ),
+    );
+
+    assert.equal(exitCode, undefined);
+    const out = JSON.parse(stdout) as { after: { class: string }; visibility?: string };
+    assert.equal(out.after.class, "customer-coupled");
+    resetRepoAegis(gitDir);
   });
 });

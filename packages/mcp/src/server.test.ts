@@ -194,4 +194,80 @@ if (!harness) {
       }
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #97.3, MCP side. `repo_aegis_check_path` had the same defect as the
+  // CLI: a relative `path` resolved against the SERVER's cwd (wherever the MCP
+  // host started), missed, and came back as `hits: []` with the miss buried in
+  // `skipped`. To an agent that reads as "this file is clean" — the one answer
+  // a leak check must never give without having looked.
+  // -------------------------------------------------------------------------
+  describe("repo_aegis_check_path — path resolution and empty-scan (#97.3)", () => {
+    let scopedHome: string;
+    let scopedRepo: string;
+    let prevHome: string | undefined;
+
+    async function callCheckPath(
+      args: Record<string, unknown>,
+    ): Promise<{ isError?: boolean; text: string }> {
+      const server = buildServer();
+      const client = new Client({ name: "test-client", version: "0.0.0" });
+      const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      try {
+        const result = await client.callTool({ name: "repo_aegis_check_path", arguments: args });
+        const content = result.content as Array<{ type: string; text: string }>;
+        return { isError: result.isError as boolean | undefined, text: content[0]!.text };
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
+
+    before(() => {
+      scopedHome = join(tmp, "home-97");
+      mkdirSync(join(scopedHome, "markers"), { recursive: true });
+      mkdirSync(join(scopedHome, "state"), { recursive: true });
+      writeFileSync(join(scopedHome, "markers", "_always.txt"), "leak-token\n");
+      scopedRepo = join(tmp, "repo-97");
+      mkdirSync(join(scopedRepo, "sub"), { recursive: true });
+      execFileSync("git", ["init", "-q"], { cwd: scopedRepo });
+      execFileSync("git", ["config", "user.name", "test"], { cwd: scopedRepo });
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: scopedRepo });
+      writeFileSync(join(scopedRepo, "sub", "leaky.txt"), "a line with leak-token in it\n");
+      writeFileSync(join(scopedRepo, "clean.txt"), "nothing to see\n");
+      prevHome = process.env["REPO_AEGIS_HOME"];
+      process.env["REPO_AEGIS_HOME"] = scopedHome;
+    });
+
+    after(() => {
+      if (prevHome === undefined) delete process.env["REPO_AEGIS_HOME"];
+      else process.env["REPO_AEGIS_HOME"] = prevHome;
+    });
+
+    it("resolves a relative path against `cwd`, not the server cwd", async () => {
+      const r = await callCheckPath({ path: "sub/leaky.txt", cwd: scopedRepo });
+      assert.equal(r.isError, undefined, `unexpected error: ${r.text}`);
+      const parsed = JSON.parse(r.text) as { hits: unknown[]; skipped: unknown[] };
+      assert.deepEqual(parsed.skipped, []);
+      assert.equal(parsed.hits.length, 1, `hits: ${r.text}`);
+    });
+
+    it("a clean relative path reports clean, not skipped", async () => {
+      const r = await callCheckPath({ path: "clean.txt", cwd: scopedRepo });
+      assert.equal(r.isError, undefined, `unexpected error: ${r.text}`);
+      const parsed = JSON.parse(r.text) as { hits: unknown[]; skipped: unknown[] };
+      assert.deepEqual(parsed.skipped, []);
+      assert.equal(parsed.hits.length, 0);
+    });
+
+    it("a path that could not be scanned is an ERROR, never an empty hits list", async () => {
+      const r = await callCheckPath({ path: "does-not-exist.txt", cwd: scopedRepo });
+      assert.equal(r.isError, true, `expected an error result, got: ${r.text}`);
+      const parsed = JSON.parse(r.text) as { code?: string; error: string };
+      assert.equal(parsed.code, "PATH_NOT_SCANNED");
+      // The agent must be told explicitly that this is not a pass.
+      assert.match(parsed.error, /NOT a clean result/);
+    });
+  });
 }

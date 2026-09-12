@@ -2,12 +2,13 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   readRepoConfig,
   computeDenySet,
   scanFile,
+  resolveScanTarget,
   scanStagedDiff,
   scanRange,
   scanNewRef,
@@ -190,7 +191,7 @@ function gatherEgressInputs(
 
   if (opts.path) {
     if (!isEgressRelevant(opts.path)) return out;
-    const abs = isAbsolute(opts.path) ? opts.path : join(repo.cwd, opts.path);
+    const abs = resolveScanTarget(opts.path, repo.cwd);
     if (!existsSync(abs)) return out;
     try {
       out.push({ path: opts.path, text: readFileSync(abs, "utf8") });
@@ -339,12 +340,34 @@ export function check(opts: CheckOptions): void {
         emitError({ code: "GIT_ERROR", error: (err as Error).message }, opts);
       }
     } else if (opts.path) {
+      // #97.3: resolve a relative path against the repo under test, not the
+      // process cwd. `--cwd <repo> --path <relative>` previously resolved
+      // against wherever the process happened to be, missed, and reported the
+      // miss as a skip inside an otherwise clean-looking result.
+      const target = resolveScanTarget(opts.path, repo.cwd);
       try {
-        const r = scanFile(opts.path, denySet, scanOpts, repo.isGitRepo ? repo.cwd : undefined);
+        const r = scanFile(target, denySet, scanOpts, repo.isGitRepo ? repo.cwd : undefined);
         hits = r.hits;
         skipped = r.skipped;
       } catch (err) {
         emitError({ error: (err as Error).message }, opts);
+      }
+      // The requested path IS the entire scope of --path mode, so if it was
+      // skipped, nothing was scanned. Reporting that as `hits: []` + exit 0 is
+      // the failure this tool exists to prevent: a leak check that quietly did
+      // not run, indistinguishable from one that ran and found nothing. Every
+      // other git-backed mode already fails closed with exit 2; so does this.
+      if (skipped.length > 0) {
+        emitError(
+          {
+            code: "PATH_NOT_SCANNED",
+            error:
+              `nothing was scanned: the requested --path was skipped ` +
+              `(${skipped.map(s => s.reason).join(", ")})`,
+            details: `path: ${target}`,
+          },
+          opts,
+        );
       }
     } else if (opts.range) {
       if (!repo.isGitRepo) {
