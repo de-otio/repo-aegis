@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+Three silent skips found while classifying ~90 repos on a machine with two
+`gh` accounts (#97). Each made a control believe less than it should without
+saying so, which is the one failure mode a leak-prevention tool cannot have.
+
+- **The visibility probe collapsed every failure into `unknown`.** `gh` not
+  installed, no GitHub remote, and — the dangerous one — `gh` running under an
+  account with no access to the org all produced the same answer. On a
+  two-account machine the third is routine: every public repo resolves and
+  every *private* repo 404s, so a whole org's private repos sat at whatever
+  class had been guessed for them with no visibility to contradict it.
+  `probeGithubVisibility` now returns a status (`resolved` / `no-gh` /
+  `no-remote` / `unauthorized` / `unrecognised`) with a fixed explanation and,
+  where one exists, a fix. `status` reports it in JSON as `visibilityProbe`,
+  puts it on the `github:` line, and warns whenever the probe could not see a
+  repo — including when a cached value still answered, because a stale cache
+  plus a blind probe is exactly how a repo keeps the wrong class.
+
+  The probe deliberately does **not** echo `gh`'s stderr: that text carries the
+  org and repo name, which in this tool's threat model may itself be the
+  customer marker being kept out of logs.
+
+- **`classify` gave every `personalOrgs` repo `public-eligible` regardless of
+  its actual visibility.** `isPublicFacing` treats that class as public-facing,
+  so a *private* repo classified this way starts refusing its own legitimate
+  private-infra hosts. A `personalOrgs` match is a statement about the org, not
+  the repo, so `classify` now probes: `public` → `public-eligible`, private or
+  internal → `private-strict` (with a warning that it differed). When the probe
+  cannot resolve visibility, `--apply` **refuses** with exit 2 and
+  `VISIBILITY_UNRESOLVED` rather than guessing — `public-eligible` on a private
+  repo causes false positives, but `private-strict` on a public repo switches
+  egress enforcement *off*, and neither is a coin flip worth taking silently.
+  A dry run reports the same state and suggests no class. Engagement matches
+  and `classify.yml` rules are unaffected; they do not depend on visibility.
+
+- **`check --cwd <repo> --path <relative>` scanned nothing and reported a
+  pass.** The relative path resolved against the process cwd, missed, and was
+  reported as `skipped: [{reason: "unreadable"}]` alongside `hits: []` and exit
+  0 — indistinguishable from a clean scan unless you thought to read `skipped`.
+  Relative paths now resolve against the repo under test (new
+  `resolveScanTarget` in core, shared with the egress sweep that already did
+  this), and because the requested path *is* the whole scope of `--path` mode,
+  a skip is now a hard error (`PATH_NOT_SCANNED`, exit 2) — matching how every
+  git-backed mode already fails closed. The same defect and the same fix apply
+  to the `repo_aegis_check_path` MCP tool, where an empty `hits` list reads to
+  an agent as "this file is clean".
+
 ### Added
 
 - **repo-aegis runs its own generated gate.** `.github/workflows/leak-scan.yml`

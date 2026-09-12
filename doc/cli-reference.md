@@ -158,6 +158,15 @@ JSON:
 ```json
 {
   "repo": { /* RepoJson */ },
+  "visibility": "unknown",
+  "visibilityProbe": {
+    "visibility": "unknown",
+    "status": "unauthorized",
+    "detail": "`gh` ran but could not see this repo — …",
+    "fix": "check which account `gh` is using (`gh auth status`), …",
+    "fromCache": true
+  },
+  "publicFacing": false,
   "allowedEngagements": [{ "id": "customer-a", "name": "Customer A", "active": true }],
   "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
   "alwaysBlock": { "patternCount": 3 },
@@ -170,6 +179,38 @@ JSON:
 installed and active for pattern validation, or `"in-process"`
 otherwise. See the design doc's locked-decisions row "Regex backend
 (validation)" for what the field means.
+
+#### `visibilityProbe` — why "unknown" is never the whole answer
+
+GitHub visibility drives the egress-hygiene gate, so a probe that
+*could not look* must not be mistaken for one that looked and found
+nothing interesting. `visibilityProbe.status` says which:
+
+| Status | Meaning |
+|---|---|
+| `resolved` | GitHub answered; `visibility` is authoritative |
+| `no-gh` | the `gh` CLI is not installed / not on PATH |
+| `no-remote` | the repo has no GitHub remote (nothing to ask about) |
+| `unauthorized` | `gh` ran but could not see this repo — wrong account, missing scope, expired auth, or the repo does not exist |
+| `unrecognised` | `gh` failed or answered in a way the probe cannot classify |
+
+`fromCache` is `true` when `visibility` came from the cached
+`repo-aegis.visibility` git-config value rather than this run's probe.
+`null` outside a git repo.
+
+`unauthorized` is the one to act on, and it is the common case on a
+machine with **two `gh` accounts**: every public repo resolves and every
+*private* repo 404s, so a whole org's private repos silently stay at
+`unknown`. Re-run under the right account, e.g.
+`GH_TOKEN=$(gh auth token --user <user>) repo-aegis status`.
+
+Text mode puts the status on the `github:` line and adds a `warning:`
+with the fix. It warns on `unauthorized` even when a cached value
+answered — a stale cache plus a blind probe is exactly how a repo keeps
+the wrong class. `status` never exits non-zero over this.
+
+The probe deliberately does **not** surface `gh`'s own stderr: that text
+carries the org and repo name, which may itself be a customer marker.
 
 Text output also gains a `hooks:` line reporting whether the
 pre-commit/pre-push gate is actually wired up for this repo (JSON:
@@ -196,7 +237,7 @@ calls it via `hook scan-after-write`.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--staged` | — | scan the staged diff |
-| `--path <path>` | — | scan a single file (canonicalised; symlinks resolved; rejected if outside cwd) |
+| `--path <path>` | — | scan a single file. A relative path resolves against `--cwd` (the repo under test), **not** the process cwd. Canonicalised; symlinks resolved; rejected if outside the working tree. If the file cannot be scanned at all, exit **2** with `PATH_NOT_SCANNED` — see step 5 below |
 | `--range <revspec>` | — | scan added lines in a commit range, e.g. `<remote>..<local>` |
 | `--push-ref <ref>` | — | scan a ref the remote does not have yet, relative to `refs/remotes/<remote>/*` (used by pre-push for new branches and tags) |
 | `--remote <name>` | `origin` | with `--push-ref`: remote whose tracking refs bound the scan |
@@ -226,6 +267,13 @@ Behaviour:
    `SkippedFile` reason. Renamed/copied files (`R`/`C` diff entries)
    are scanned like any other changed file in `--staged`/`--range`/
    `--push-ref` mode — a rename is not a way to skip the scanner.
+
+   **`--path` mode is all-or-nothing**: the requested file is the entire
+   scope of the run, so if it lands in `skipped` then nothing was
+   scanned, and that exits **2** with `PATH_NOT_SCANNED` rather than
+   reporting `hits: []`. Same fail-closed rule as the git-backed modes in
+   step 3 — a scan that could not run is not a clean scan. (In the other
+   modes a skipped file is one of many, so it stays a reported skip.)
 6. Waivers (see [`repo-aegis waive`](#repo-aegis-waive)) are applied
    next: a hit matching an unexpired `(patternId, blob)` waiver in
    `.repo-aegis.yml` is removed from `hits` and counted in `waived`
@@ -659,6 +707,39 @@ With `--apply`: sets `repo-aegis.class` and adds the engagement.
 
 Pattern safety: rule `match` regexes are validated through the same
 `validatePattern` pipeline as marker patterns.
+
+#### `personalOrgs` matches are visibility-checked
+
+The registry's `personalOrgs` says the **org** is yours. It says nothing
+about whether *this repo* is public — and `public-eligible` is what turns
+egress-hygiene enforcement on, so getting it wrong in either direction
+has teeth. When the remote's org is in `personalOrgs`, `classify` runs
+one `gh repo view` probe and picks the class from the answer:
+
+| Probe | Class |
+|---|---|
+| `public` | `public-eligible` |
+| `private` / `internal` | `private-strict` (with a warning that it differed) |
+| unresolved | **none** — see below |
+
+The probe result rides on the JSON envelope as `visibility` and
+`visibilityProbe` (same statuses as
+[`status`](#visibilityprobe--why-unknown-is-never-the-whole-answer)).
+
+When the probe cannot resolve visibility — no `gh`, or a `gh` account
+that cannot see the repo — `--apply` **exits 2** with
+`VISIBILITY_UNRESOLVED` and writes nothing. Neither guess is safe:
+`public-eligible` on a private repo makes egress hygiene reject the
+repo's own legitimate private-infra hosts, while `private-strict` on a
+public repo switches that enforcement *off*. A dry run reports the same
+state and suggests no class.
+
+To resolve it: re-run under an account that can see the repo
+(`GH_TOKEN=$(gh auth token --user <user>) repo-aegis classify --apply`),
+or set the class explicitly with `git config repo-aegis.class <class>`.
+
+Engagement (`githubOrgs`) matches and `classify.yml` rules are not
+probed — neither depends on visibility.
 
 ---
 

@@ -132,6 +132,7 @@ export {
   scanText,
   scanTextDetailed,
   scanFile,
+  resolveScanTarget,
   scanDiffText,
   scanDiffTextDetailed,
   scanStagedDiff,
