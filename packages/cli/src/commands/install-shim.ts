@@ -238,7 +238,8 @@ function firstGhOnPath(pathValue: string | undefined): string | null {
 /**
  * `doctor` checks for the shim: `SHIM_MISSING` when `<home>/bin/gh` does not
  * exist, `SHIM_NOT_FIRST` when it exists but another `gh` precedes it on
- * `PATH` (or nothing on PATH reaches it at all). A shim that exists but is
+ * `PATH` (or nothing on PATH reaches it at all), `SHIM_STALE` when the file
+ * on PATH is not the script this release generates. A shim that exists but is
  * shadowed is the "hooks installed but not running" failure in a new costume,
  * which is exactly why the shadowed case is a finding and not a detail.
  */
@@ -279,5 +280,24 @@ export function checkShim(env: NodeJS.ProcessEnv = process.env): DoctorCheck[] {
       },
     ];
   }
-  return [{ code: "SHIM_MISSING", ok: true, detail: "shim installed and first on PATH" }];
+  // The shim is a generated script that changes between releases — the
+  // hooks' `HOOKS_SCRIPT_STALE` in a new costume. `install shim` rewrites a
+  // differing file, but nothing runs it on upgrade unless something says to.
+  let current: string | null = null;
+  try {
+    current = readFileSync(shim, "utf8");
+  } catch {
+    current = null;
+  }
+  if (current !== null && current !== GH_SHIM_SCRIPT) {
+    return [
+      {
+        code: "SHIM_STALE",
+        ok: false,
+        detail: "the `gh` shim on PATH was written by an earlier repo-aegis release and differs from this one's",
+        fix: "repo-aegis install shim",
+      },
+    ];
+  }
+  return [{ code: "SHIM_MISSING", ok: true, detail: "shim installed, current, and first on PATH" }];
 }

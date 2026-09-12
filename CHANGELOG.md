@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the `gh` shim printed a receipt before `gh` ran
+
+- `egress-check` wrote `PUBLISHED → …` to stderr at decision time, so a
+  `gh` that then failed still got a receipt — seen live cutting v0.9.1,
+  when `gh release create` returned HTTP 422 under a `PUBLISHED` line.
+  The receipt hook's first rule is that a receipt must never claim a
+  publish that did not happen; the shim now honours it. `egress-check`
+  returns both lines in its verdict (`receipt`, `failedReceipt`) and the
+  shim prints exactly one **after** the real `gh` returns, keyed on its
+  exit code: `PUBLISHED →` on 0, `EGRESS FAILED →` otherwise. A failed
+  `gh pr create|edit` is no longer followed by a read-back (nothing was
+  published). `gh`'s own exit code and stderr are unchanged. The smoke
+  test gains the failing-`gh` case.
+- `doctor` reports **`SHIM_STALE`** when the shim on `PATH` is not the
+  script this release generates — the shim's `HOOKS_SCRIPT_STALE`. Fix:
+  `repo-aegis install shim`, which rewrites a differing file. **After
+  upgrading to this release, run it once.**
+
 ## [0.9.1] - 2026-09-12
 
 ### Fixed — egress guard: a destination named in full is now judged as itself

@@ -111,38 +111,67 @@ if [ "\$__ra_rc" -ne 0 ]; then
   echo "repo-aegis shim: egress-check failed (rc=\$__ra_rc); proceeding" >&2
 fi
 
-# --- 4. Run it --------------------------------------------------------------
+# --- 4. Run it, then say where it went ---------------------------------------
+# The verdict carries the two lines this shim may print afterwards: the
+# receipt (\`PUBLISHED → …\`) and its failure twin (\`EGRESS FAILED → …\`).
+# Neither is printed before \`gh\` has returned: a receipt that claims a
+# publish which did not happen is worse than none, and until v0.9.2 the
+# decision step printed one — a \`gh release create\` that failed with
+# HTTP 422 still read \`PUBLISHED\`. A command with no receipt carries no
+# publishing intent (a read inside a publishing group) and is passed
+# through untouched.
+__ra_receipt="\$(printf '%s\\n' "\$__ra_out" | sed -n 's/.*"receipt"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -n 1)"
+__ra_failed="\$(printf '%s\\n' "\$__ra_out" | sed -n 's/.*"failedReceipt"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -n 1)"
+if [ -z "\$__ra_receipt" ]; then
+  exec "\$__ra_real_gh" "\$@"
+fi
+
 # A \`pr create|edit\` that publishes a body FILE gets the body read back
 # afterwards. The verb has already published by then, so the read-back cannot
 # block anything; it only makes a wrong body loud within seconds instead of
 # invisible for an hour.
+__ra_body_file=""
+__ra_tmp=""
 case "\$__ra_out" in
-  *'"readback"'*) ;;
-  *) exec "\$__ra_real_gh" "\$@" ;;
+  *'"readback"'*)
+    __ra_body_file="\$(printf '%s\\n' "\$__ra_out" | sed -n 's/.*"bodyFile"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -n 1)"
+    # A TEMPLATE, not a bare \`mktemp\`: BSD mktemp (macOS) REQUIRES one and
+    # fails without it, which would silently skip the read-back on every Mac.
+    __ra_tmp="\$(mktemp "\${TMPDIR:-/tmp}/repo-aegis-shim.XXXXXX" 2>/dev/null || true)"
+    ;;
 esac
 
-__ra_body_file="\$(printf '%s\\n' "\$__ra_out" | sed -n 's/.*"bodyFile"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -n 1)"
-# A TEMPLATE, not a bare \`mktemp\`: BSD mktemp (macOS) REQUIRES one and
-# fails without it, which would silently skip the read-back on every Mac.
-__ra_tmp="\$(mktemp "\${TMPDIR:-/tmp}/repo-aegis-shim.XXXXXX" 2>/dev/null || true)"
-if [ -z "\$__ra_body_file" ] || [ -z "\$__ra_tmp" ]; then
-  exec "\$__ra_real_gh" "\$@"
+# NOT exec, in either branch: the receipt is printed after \`gh\` returns. On
+# the read-back path gh's stdout is also tee'd so the PR URL it prints can be
+# handed to the read-back, and the user still sees it unchanged. PIPESTATUS
+# preserves gh's own exit code (present in bash 3.2).
+if [ -n "\$__ra_body_file" ] && [ -n "\$__ra_tmp" ]; then
+  "\$__ra_real_gh" "\$@" | tee "\$__ra_tmp"
+  __ra_gh_rc="\${PIPESTATUS[0]}"
+else
+  "\$__ra_real_gh" "\$@"
+  __ra_gh_rc=\$?
 fi
 
-# NOT exec: gh's stdout is tee'd so the PR URL it prints can be handed to the
-# read-back, and the user still sees it unchanged. PIPESTATUS preserves gh's
-# own exit code (present in bash 3.2).
-"\$__ra_real_gh" "\$@" | tee "\$__ra_tmp"
-__ra_gh_rc="\${PIPESTATUS[0]}"
+if [ "\$__ra_gh_rc" -eq 0 ]; then
+  printf '%s\\n' "\$__ra_receipt" >&2
+else
+  printf '%s\\n' "\$__ra_failed" >&2
+fi
 
-repo-aegis egress-readback --cwd "\$PWD" --body-file "\$__ra_body_file" --pr "\$(cat "\$__ra_tmp")" --gh "\$__ra_real_gh"
-__ra_readback_rc=\$?
-rm -f "\$__ra_tmp"
-
-# A confirmed mismatch is the one post-publish condition worth failing on;
-# a read-back that could not run exits 0 and changes nothing.
-if [ "\$__ra_readback_rc" -ne 0 ]; then
-  exit "\$__ra_readback_rc"
+if [ -n "\$__ra_body_file" ] && [ -n "\$__ra_tmp" ]; then
+  __ra_readback_rc=0
+  if [ "\$__ra_gh_rc" -eq 0 ]; then
+    repo-aegis egress-readback --cwd "\$PWD" --body-file "\$__ra_body_file" --pr "\$(cat "\$__ra_tmp")" --gh "\$__ra_real_gh"
+    __ra_readback_rc=\$?
+  fi
+  rm -f "\$__ra_tmp"
+  # A confirmed mismatch is the one post-publish condition worth failing on;
+  # a read-back that could not run exits 0 and changes nothing. A gh that
+  # failed published nothing, so there is nothing to read back.
+  if [ "\$__ra_readback_rc" -ne 0 ]; then
+    exit "\$__ra_readback_rc"
+  fi
 fi
 exit "\$__ra_gh_rc"
 `;

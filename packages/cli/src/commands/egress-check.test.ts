@@ -218,19 +218,23 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
       action: string;
       destination?: { org: string; repo: string };
       readback?: { bodyFile: string; verb: string };
+      receipt?: string;
+      failedReceipt?: string;
     };
     assert.equal(payload.action, "allow");
     assert.equal(payload.destination?.org, "acme");
     assert.deepEqual(payload.readback, { bodyFile, verb: "gh-pr-create" });
-    // The receipt goes to stderr so it cannot corrupt the shim's stdout.
-    assert.ok(r.stderr.includes("PUBLISHED"));
-    assert.ok(r.stderr.includes("acme/svc"));
+    // Both receipt lines travel in the verdict; the shim prints one AFTER gh
+    // returns. Nothing has published at this point, so nothing says so here.
+    assert.equal(payload.receipt, "PUBLISHED → acme/svc (UNKNOWN, class public-eligible): gh pr create");
+    assert.equal(payload.failedReceipt, "EGRESS FAILED → acme/svc (UNKNOWN, class public-eligible): gh pr create");
+    assert.ok(!r.stderr.includes("PUBLISHED"), r.stderr);
   });
 
   it("allows a read with no read-back and no receipt", () => {
     const r = runCli(home, publicRepo, ["egress-check", "--cwd", publicRepo, "--", "pr", "view", "1"]);
     assert.equal(r.code, 0);
-    assert.deepEqual(JSON.parse(r.stdout), { action: "allow" });
+    assert.deepEqual(JSON.parse(r.stdout), { action: "allow" }); // no receipt: nothing to print
     assert.equal(r.stderr.trim(), "");
   });
 

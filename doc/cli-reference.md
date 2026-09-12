@@ -1074,10 +1074,15 @@ place and reported (`changed: false`, with the reason). The top-level
 ### `repo-aegis egress-check -- <gh args…>`
 
 The decision call behind the shim (usable directly). Exit 0 on allow with
-`{ action: "allow", destination?, readback? }` on stdout; exit 2 on deny
-with the structured reason on stderr. `readback` is set for `gh pr
-create|edit` with a body file, and tells the shim to run
-`egress-readback` afterwards.
+`{ action: "allow", destination?, readback?, receipt?, failedReceipt? }` on
+stdout; exit 2 on deny with the structured reason on stderr. `readback` is
+set for `gh pr create|edit` with a body file, and tells the shim to run
+`egress-readback` afterwards. `receipt` (`PUBLISHED → …`) and
+`failedReceipt` (`EGRESS FAILED → …`) are set whenever the command
+carries a publishing intent; the shim prints exactly one of them **after**
+the real `gh` has returned, keyed on its exit code — a receipt must never
+claim a publish that did not happen, and at decision time nothing has run.
+(Before 0.9.2 this command printed `PUBLISHED →` itself, before `gh` ran.)
 
 ### `repo-aegis egress-readback --body-file <path> --pr <ref> [--repo o/r] [--gh <path>] [--timeout-ms <n>]`
 
@@ -1097,7 +1102,7 @@ now reports, unless `--no-egress-checks`:
 | Check | Fires when | Fix |
 |---|---|---|
 | `PUSH_DEFAULT_IMPLICIT` | global `push.default` is unset or not `nothing` | `git config --global push.default nothing` |
-| `SHIM_MISSING` / `SHIM_NOT_FIRST` | no shim, or another `gh` precedes it on `PATH` | `repo-aegis install shim`; fix `PATH` order |
+| `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` | no shim; another `gh` precedes it on `PATH`; the shim on `PATH` is an earlier release's script | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
 | `GUARD_HOOK_UNREGISTERED` | Claude Code `settings.json` has no `guard-egress` entry | `repo-aegis install claude-md` |
 | `CLASS_VISIBILITY_UNRESOLVED` (per repo) | a repo with a GitHub remote has no explicit class or no cached visibility | `repo-aegis classify --apply && repo-aegis status` in that repo |
 | `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`) |
