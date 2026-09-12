@@ -159,9 +159,84 @@ describe("hook egress-receipt — git push", { skip: !SUBPROCESS_TESTS_AVAILABLE
     assert.match(contextOf(r), /^EGRESS FAILED/);
   });
 
-  it("falls back to the refspec when git printed no ref evidence", () => {
+  it("treats Everything up-to-date as confirmation, and falls back to the refspec", () => {
+    // Nothing travelled, but the remote provably has it: that is a
+    // confirmed state, not an unknown one.
     const r = runReceipt(payload("git push origin main", "Everything up-to-date", repo), repo);
     assert.match(contextOf(r), /PUBLISHED → acme\/svc \(.*\): main$/);
+  });
+
+  it("treats an '= [up to date]' ref line as confirmation too", () => {
+    const output = ["To github.com:acme/svc.git", " = [up to date]      main -> main"].join("\n");
+    const r = runReceipt(payload("git push origin main", output, repo), repo);
+    const ctx = contextOf(r);
+    assert.match(ctx, /^PUBLISHED → acme\/svc/);
+    assert.ok(!ctx.includes("main -> main"), "an up-to-date ref did not move");
+  });
+
+  it("reports EGRESS UNCONFIRMED when the output proves nothing either way", () => {
+    // The 2026-09-12 case: a push that died in ssh got `PUBLISHED →`
+    // because no ENGLISH failure word appeared, and absence of failure was
+    // read as success. Silence is not a receipt.
+    const r = runReceipt(payload("git push origin main", "", repo), repo);
+    const ctx = contextOf(r);
+    assert.match(ctx, /^EGRESS UNCONFIRMED → acme\/svc \(/);
+    assert.match(ctx, /verify before retrying$/);
+    assert.ok(!ctx.includes("PUBLISHED"), "must not claim a publish");
+  });
+
+  it("does not receipt a push that died at the ssh layer", () => {
+    // `ssh_dispatch_run_fatal:` slipped past `\bfatal:` — `_` is a word
+    // character, so there is no boundary before `fatal`.
+    const output = [
+      "ssh_dispatch_run_fatal: Connection to 140.82.121.4 port 22: Broken pipe",
+      "Schwerwiegend: Konnte nicht aus dem Remote-Repository lesen.",
+    ].join("\n");
+    const r = runReceipt(payload("git push origin main", output, repo), repo);
+    const ctx = contextOf(r);
+    assert.match(ctx, /^EGRESS FAILED → acme\/svc/);
+    assert.ok(!ctx.includes("PUBLISHED"), "must not claim a publish");
+  });
+
+  it("reads a rejection in a language it does not speak", () => {
+    // A German git writes `[zurückgewiesen]` and `Fehler:`; no failure
+    // pattern here matches either. The `!` flag and the arrow are not
+    // translated, and that is what the ref table is read for.
+    const output = [
+      "To github.com:acme/svc.git",
+      " ! [zurückgewiesen]  main -> main (nicht vorspulbar)",
+      "Fehler: Fehler beim Push einiger Referenzen nach 'github.com:acme/svc.git'",
+    ].join("\n");
+    const r = runReceipt(payload("git push origin main", output, repo), repo);
+    const ctx = contextOf(r);
+    assert.match(ctx, /^EGRESS FAILED → acme\/svc/);
+    assert.ok(!ctx.includes("PUBLISHED"), "must not claim a publish");
+  });
+
+  it("still reports a partly refused push as a publish, and says how partly", () => {
+    const output = [
+      "To github.com:acme/svc.git",
+      "   1a2b3c4..5d6e7f8  topic -> topic",
+      " ! [rejected]        main -> main (fetch first)",
+      "error: failed to push some refs",
+    ].join("\n");
+    const r = runReceipt(payload("git push origin", output, repo), repo);
+    const ctx = contextOf(r);
+    assert.match(ctx, /^PUBLISHED → acme\/svc/);
+    assert.match(ctx, /topic -> topic; 1 rejected$/);
+  });
+
+  it("believes the harness's own exit code over the absence of failure text", () => {
+    const r = runReceipt(
+      JSON.stringify({
+        tool_name: "Bash",
+        tool_input: { command: "git push origin main" },
+        tool_response: { stdout: "", stderr: "", exit_code: 1 },
+        cwd: repo,
+      }),
+      repo,
+    );
+    assert.match(contextOf(r), /^EGRESS FAILED → acme\/svc/);
   });
 
   it("repeats nothing from the tool output beyond the extracted refs", () => {
@@ -241,11 +316,27 @@ describe("hook egress-receipt — gh verbs", { skip: !SUBPROCESS_TESTS_AVAILABLE
   });
 
   it("falls back to the verb label when nothing identifiable was printed", () => {
+    // A verb with no success output of its own keeps the old rule: there is
+    // no evidence to require, so the failure scan is the only test there is.
     const r = runReceipt(
       payload("gh issue create --title x --body-file /abs/b.md --repo acme/svc", "", repo),
       repo,
     );
-    assert.match(contextOf(r), /gh issue create$/);
+    const ctx = contextOf(r);
+    assert.match(ctx, /^PUBLISHED → acme\/svc/);
+    assert.match(ctx, /gh issue create$/);
+  });
+
+  it("reports EGRESS UNCONFIRMED when gh printed no PR URL and no error", () => {
+    // `gh pr create` prints the URL on success and nothing on some
+    // failures; without the URL there is no evidence a PR exists.
+    const r = runReceipt(
+      payload("gh pr create --title x --body-file /abs/b.md --repo acme/svc", "", repo),
+      repo,
+    );
+    const ctx = contextOf(r);
+    assert.match(ctx, /^EGRESS UNCONFIRMED → acme\/svc/);
+    assert.ok(!ctx.includes("PUBLISHED"), "must not claim a publish");
   });
 
   it("reports EGRESS FAILED when gh refused", () => {

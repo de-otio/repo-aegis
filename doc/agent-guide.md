@@ -750,7 +750,10 @@ How to recover — the same three moves every time:
    `PUBLISHED → <org>/<repo> (<VISIBILITY>, class <class>): <ref | PR #n>`.
    If that is not the repository you intended, stop *before* the next
    command and say so — a deleted branch still serves its objects by sha,
-   so the only remediation is not doing the next thing.
+   so the only remediation is not doing the next thing. Two other lines
+   are possible: `EGRESS FAILED → …` (the command did not publish) and
+   `EGRESS UNCONFIRMED → …` (the output proves neither way — verify, and
+   do not report the work as published until you have).
 
 If `doctor` reports `PUSH_DEFAULT_IMPLICIT`, `CLASS_VISIBILITY_UNRESOLVED`,
 `PERSONAL_ORG_UNREGISTERED`, `SHIM_MISSING` / `SHIM_NOT_FIRST` or
@@ -1004,7 +1007,7 @@ shape we don't model.
 | `egress-check -- <gh args…>` | decide a `gh` publish (exit 0 allow / 2 deny) | `action`, `destination?`, `readback?`; deny reason on stderr |
 | `egress-readback --body-file <f> --pr <ref>` | diff the live PR body against the file | `ok`, `bytes` / `PUBLISHED_BODY_MISMATCH` with byte counts / `READBACK_UNAVAILABLE` |
 | `hook guard-egress [--agent <a>]` | (PreToolUse(Bash) entry) allow / ask / deny a publishing command | `hookSpecificOutput.permissionDecision` (+ reason); deny payload on stderr |
-| `hook egress-receipt` | (PostToolUse(Bash) entry) one `PUBLISHED → …` line per publish | `hookSpecificOutput.additionalContext` |
+| `hook egress-receipt` | (PostToolUse(Bash) entry) one `PUBLISHED →` / `EGRESS FAILED →` / `EGRESS UNCONFIRMED →` line per publishing operation | `hookSpecificOutput.additionalContext` |
 | `doctor` | hook liveness + egress-guard preconditions | `action`, `dryRun`, `roots`, `machine`, `results[].checks`, `summary` |
 | `scan-env --self [--accept self-identity]` | offer / record `selfIdentity` candidates | `action`, `dryRun`\|`placement`, `candidates`\|`added`, `skippedDuplicates`, `tooShort` |
 | `uninstall` (top-level) | reverse all install steps (hooks, gitignore, claude-md, ci, shim); opt-in flags purge home + per-repo config | `action`, `dryRun`, `steps`, `purgeRepos?`, `purgeHome?` |

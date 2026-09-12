@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — a failed push got a `PUBLISHED →` receipt
+
+The PostToolUse receipt decided between `PUBLISHED →` and
+`EGRESS FAILED →` by scanning the tool output for failure text and
+treating everything else as a publish. Absence of evidence read as
+evidence — the silent-skip shape again, and the one error the hook's own
+comment says it must never make. Observed on 2026-09-12: a push that died
+as `ssh_dispatch_run_fatal: … Broken pipe` was receipted as published.
+Two independent reasons it could not have been caught: `\bfatal:` cannot
+match `ssh_dispatch_run_fatal:` (`_` is a word character, so there is no
+boundary), and the failure patterns are English while git is translated —
+on a German machine a failed push says `Schwerwiegend:`, `Fehler:` and
+`[zurückgewiesen]`, none of which any pattern covers.
+
+- **Positive evidence is now required wherever the tool emits any.**
+  `git push` must show a `<src> -> <dst>` ref line that is not flagged
+  `!`, or `Everything up-to-date`; `gh pr create|edit` must show the
+  pull-request URL; `gh release create` must show the release URL.
+- **A third line, `EGRESS UNCONFIRMED → …`**, for output that proves
+  neither — including the transport failure above. It names the
+  destination and says plainly that nothing confirms the bytes landed.
+- **Read in any locale.** git's flag column (`!` refused, `=` already
+  current, `*` created) and the `->` arrow are untranslated, unlike every
+  word beside them, so a rejection is recognised as a rejection even when
+  the message is not English.
+- `fatal:` is matched mid-token, so ssh's `ssh_dispatch_run_fatal:`
+  counts; a non-zero `exit_code` on the tool response, where the harness
+  supplies one, outranks any text pattern.
+- A partly refused push still reads `PUBLISHED` — bytes did reach the
+  remote — and now says how many refs were refused. Verbs with no
+  distinctive success output (`gh issue create`, mutating `gh api`) keep
+  the previous rule; there is nothing to require.
+
 ## [0.10.1] - 2026-09-12
 
 ### Fixed — an `ask` the `gh` shim cannot back up is now a refusal

@@ -17,11 +17,21 @@
 //
 // Two rules keep the receipt trustworthy:
 //
-//   1. **A receipt must never claim a publish that did not happen.** If the
-//      tool output shows the verb failed (`fatal:`, `! [rejected]`,
-//      `Permission denied`, …) the line reads `EGRESS FAILED → …` instead.
-//      A false receipt is worse than none: it would teach the agent that
-//      the push landed and stop it retrying.
+//   1. **A receipt must never claim a publish that did not happen.** That
+//      used to be enforced by scanning for failure text (`fatal:`,
+//      `! [rejected]`, …) and calling everything else a publish — absence of
+//      evidence read as evidence of success. It is not: on a German machine a
+//      failed push says `Schwerwiegend:` and `Fehler:`, which no English
+//      pattern matches, and `ssh_dispatch_run_fatal: Broken pipe` slipped
+//      past `\bfatal:` because `_` is a word character. A push that died at
+//      the SSH layer got a `PUBLISHED →` receipt — the one error this hook
+//      must not make. So where the tool prints something only a real publish
+//      produces, that evidence is now *required*: git's `<src> -> <dst>` ref
+//      table (untranslated in every locale, unlike the words around it), the
+//      URL `gh pr create` prints. With no such evidence and no failure text
+//      the line reads `EGRESS UNCONFIRMED → …`, which is what we actually
+//      know. Verbs with no reliable success output keep the old behaviour;
+//      for them a failure scan is all there is.
 //   2. **Never the payload, never raw git/gh text.** The detail is
 //      assembled from extracted refs, an extracted PR number, or an
 //      extracted tag — nothing else from the output is repeated.
@@ -58,6 +68,13 @@ interface HookInput {
   cwd?: string;
   toolName?: string;
   output: string;
+  /**
+   * The harness's own verdict on the call, when it ships one: a non-zero
+   * exit code or an error flag on the tool response. Worth more than any
+   * text pattern — it is a number, not a translated sentence — but not
+   * every harness provides it, so it can only ever add certainty.
+   */
+  toolFailed?: boolean;
 }
 
 /** Read stdin to a string. Tool output is larger than a tool input, so 8 MiB (as `scan-bash-output`). */
@@ -82,6 +99,25 @@ function flattenCommand(value: unknown): string | undefined {
   const dashC = parts.findIndex(p => /^-[a-z]*c$/.test(p));
   if (dashC !== -1 && dashC + 1 < parts.length) return parts[dashC + 1];
   return parts.join(" ");
+}
+
+/**
+ * A harness's structured verdict on the call, if it ships one. Only a
+ * definite answer is returned: `undefined` means the response said nothing
+ * about success, which is not the same as saying it went well.
+ */
+function readFailureSignal(response: Record<string, unknown>): boolean | undefined {
+  for (const k of ["exit_code", "exitCode", "returnCode", "returncode", "status_code"]) {
+    const v = response[k];
+    if (typeof v === "number" && Number.isFinite(v)) return v !== 0;
+  }
+  for (const k of ["is_error", "isError", "error"]) {
+    const v = response[k];
+    if (typeof v === "boolean") return v;
+  }
+  const ok = response["success"];
+  if (typeof ok === "boolean") return !ok;
+  return undefined;
 }
 
 /**
@@ -127,6 +163,8 @@ function parseHookInput(json: string): HookInput {
       const v = trObj[k];
       if (typeof v === "string" && v.length > 0) parts.push(v);
     }
+    const failed = readFailureSignal(trObj);
+    if (failed !== undefined) out.toolFailed = failed;
   } else if (typeof tr === "string" && tr.length > 0) {
     parts.push(tr);
   }
@@ -139,11 +177,18 @@ function parseHookInput(json: string): HookInput {
 
 /**
  * Shapes git and gh print when the verb did NOT publish. Deliberately
- * broad: a missed failure produces a receipt for a publish that never
- * happened, which is the one error this hook must not make.
+ * broad — `fatal:` is matched mid-token so that ssh's
+ * `ssh_dispatch_run_fatal:` counts, which `\bfatal:` did not.
+ *
+ * These patterns are English, and git is translated: a German git says
+ * `Schwerwiegend:` for `fatal:`, `Fehler:` for `error:` and
+ * `[zurückgewiesen]` for `[rejected]`, and nothing here matches any of
+ * them. That is why they no longer decide whether a publish happened —
+ * they only decide whether a verb with no positive evidence is reported as
+ * *failed* or as *unconfirmed*. Both are honest; neither is a receipt.
  */
 const FAILURE_PATTERNS: readonly RegExp[] = [
-  /\bfatal:/,
+  /fatal:/i,
   /(^|\n)\s*(?:remote:\s*)?error:/i,
   /!\s*\[rejected\]/,
   /!\s*\[remote rejected\]/,
@@ -165,20 +210,48 @@ function sanitiseRef(ref: string): string {
 }
 
 /**
- * The `<local> -> <remote>` evidence git prints for each ref it actually
- * moved: `   main -> main`, ` * [new branch]      topic -> topic`,
- * ` + abc123...def456 main -> main (forced update)`.
+ * What git's push status table says happened to each ref. Every line is
+ * `<flag> <summary> <src> -> <dst>`, and while the summary is translated
+ * (`[neuer Branch]`, `[zurückgewiesen]`) the flag column and the arrow are
+ * not — which is what makes this readable in any locale:
+ *
+ *   `   1a2b3c4..5d6e7f8  main -> main`   (space) updated
+ *   ` * [new branch]      topic -> topic` (`*`)   created
+ *   ` + abc..def          main -> main`   (`+`)   force-updated
+ *   ` ! [rejected]        main -> main`   (`!`)   NOT pushed
+ *   ` = [up to date]      main -> main`   (`=`)   nothing to push
  */
-function extractPushRefs(output: string): string[] {
-  const refs: string[] = [];
+interface PushEvidence {
+  /** Refs git reports it moved — the only proof bytes actually left. */
+  moved: string[];
+  /** Refs git reports it refused. A `!` line is a failure in any language. */
+  rejected: string[];
+  /** The remote already had everything. Nothing published, nothing wrong. */
+  upToDate: boolean;
+}
+
+function readPushEvidence(output: string): PushEvidence {
+  const moved: string[] = [];
+  const rejected: string[] = [];
+  // git prints this one untranslated (it carries no `_()` in builtin/push.c),
+  // so it is safe to read in any locale.
+  let upToDate = /(^|\n)\s*Everything up-to-date/.test(output);
+
   for (const line of output.split("\n")) {
     const m = /(\S+)\s+->\s+(\S+)/.exec(line);
     if (m === null) continue;
+    const flagMatch = /^\s*([-+*!=])\s/.exec(line);
+    const flag = flagMatch === null ? " " : flagMatch[1]!;
+    if (flag === "=") {
+      upToDate = true;
+      continue;
+    }
     const pair = `${sanitiseRef(m[1]!)} -> ${sanitiseRef(m[2]!)}`;
-    if (!refs.includes(pair)) refs.push(pair);
-    if (refs.length >= 4) break;
+    const bucket = flag === "!" ? rejected : moved;
+    if (!bucket.includes(pair) && bucket.length < 4) bucket.push(pair);
   }
-  return refs;
+
+  return { moved, rejected, upToDate };
 }
 
 /** `https://github.com/<org>/<repo>/pull/<n>` — the URL `gh pr create|edit` prints on success. */
@@ -198,13 +271,16 @@ function extractReleaseTag(output: string): string | null {
  * refs for a push, the PR number for a PR verb, the tag for a release,
  * the verb label otherwise.
  */
-function detailFor(intent: EgressIntent, output: string): string {
+function detailFor(intent: EgressIntent, output: string, push: PushEvidence): string {
   if (intent.verb === "git-push") {
-    const refs = extractPushRefs(output);
-    if (refs.length > 0) {
+    const { moved, rejected } = push;
+    // A push can be partly refused. Naming the refs that landed without
+    // saying the rest did not would read as "all of it went".
+    const suffix = moved.length > 0 && rejected.length > 0 ? `; ${rejected.length} rejected` : "";
+    if (moved.length > 0) {
       return intent.refspec === undefined
-        ? refs.join(", ")
-        : `${sanitiseRef(intent.refspec)} (${refs.join(", ")})`;
+        ? `${moved.join(", ")}${suffix}`
+        : `${sanitiseRef(intent.refspec)} (${moved.join(", ")}${suffix})`;
     }
     return intent.refspec === undefined ? describeVerb(intent.verb) : sanitiseRef(intent.refspec);
   }
@@ -225,6 +301,61 @@ function detailFor(intent: EgressIntent, output: string): string {
 }
 
 /**
+ * Did the tool print something only a *successful* run of this verb
+ * produces? `undefined` means this verb has no such output to look for —
+ * `gh issue create` and a mutating `gh api` say nothing a failure could
+ * not also say — and for those the failure scan remains the only test
+ * available.
+ */
+function confirmsPublish(
+  intent: EgressIntent,
+  output: string,
+  push: PushEvidence,
+): boolean | undefined {
+  if (intent.verb === "git-push") {
+    return push.moved.length > 0 || push.upToDate;
+  }
+  if (intent.verb === "gh-pr-create" || intent.verb === "gh-pr-edit") {
+    return extractPrNumber(output) !== null;
+  }
+  if (intent.verb === "gh-release-create") {
+    return extractReleaseTag(output) !== null;
+  }
+  return undefined;
+}
+
+/**
+ * Evidence of refusal that survives translation: git's `!` flag on a ref
+ * line. The sentence beside it (`[rejected]`, `[zurückgewiesen]`) is
+ * localised; the flag column is not.
+ */
+function refused(intent: EgressIntent, push: PushEvidence): boolean {
+  return intent.verb === "git-push" && push.rejected.length > 0;
+}
+
+/** `PUBLISHED`, `EGRESS FAILED`, or the honest third answer. */
+type Outcome = "published" | "failed" | "unconfirmed";
+
+/**
+ * Evidence first, failure text second, and silence is never taken for
+ * success. A ref that moved outranks a failure message because a partly
+ * refused push still published — the bytes are on the remote either way,
+ * and that is what a receipt exists to say.
+ */
+function outcomeFor(
+  intent: EgressIntent,
+  output: string,
+  push: PushEvidence,
+  toolFailed: boolean,
+): Outcome {
+  const confirmed = confirmsPublish(intent, output, push);
+  if (confirmed === true) return "published";
+  if (toolFailed || refused(intent, push) || looksFailed(output)) return "failed";
+  if (confirmed === false) return "unconfirmed";
+  return "published";
+}
+
+/**
  * `repo-aegis hook egress-receipt` — PostToolUse(Bash). Always exits 0:
  * the tool has already run, so there is nothing left to block, and a
  * non-zero exit here would only surface as a spurious tool error.
@@ -233,7 +364,7 @@ export async function hookEgressReceipt(): Promise<void> {
   let lines: string[];
   try {
     const stdinText = await readStdin();
-    const { command, cwd, toolName, output } = parseHookInput(stdinText);
+    const { command, cwd, toolName, output, toolFailed } = parseHookInput(stdinText);
     if (toolName !== undefined && !SHELL_TOOL_NAMES.has(toolName.toLowerCase())) process.exit(0);
     if (command === undefined) process.exit(0);
 
@@ -241,8 +372,10 @@ export async function hookEgressReceipt(): Promise<void> {
     if (intents.length === 0) process.exit(0);
 
     const base = cwd ?? process.cwd();
-    const failed = looksFailed(output);
     const registry = registryOrUndefined();
+    // Read once, so the detail, the confirmation and the refusal check are
+    // provably reading the same table.
+    const push = readPushEvidence(output);
 
     lines = intents.map(intent => {
       let destination: Destination | null = null;
@@ -251,10 +384,19 @@ export async function hookEgressReceipt(): Promise<void> {
       } catch {
         destination = null;
       }
-      const detail = detailFor(intent, output);
-      return failed
-        ? `EGRESS FAILED → ${describeDestinationForReceipt(destination)}: ${detail}`
-        : formatReceipt(destination, detail);
+      const detail = detailFor(intent, output, push);
+      const where = describeDestinationForReceipt(destination);
+      switch (outcomeFor(intent, output, push, toolFailed === true)) {
+        case "failed":
+          return `EGRESS FAILED → ${where}: ${detail}`;
+        case "unconfirmed":
+          // Not a receipt and not a failure — the tool printed neither. The
+          // agent is told exactly that, because the alternative is to guess,
+          // and guessing "it published" is how a broken pipe got a receipt.
+          return `EGRESS UNCONFIRMED → ${where}: ${detail} — nothing in the output confirms it landed; verify before retrying`;
+        default:
+          return formatReceipt(destination, detail);
+      }
     });
   } catch {
     // A receipt is an observation, never an obstacle: any failure here is

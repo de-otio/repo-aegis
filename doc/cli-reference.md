@@ -1064,6 +1064,27 @@ PUBLISHED → <org>/<repo> (<VISIBILITY>, class <class>): <ref | PR #n | tag>
 or `EGRESS FAILED → …` when the tool output shows the publish did not
 happen. Silent otherwise.
 
+A publish is **confirmed, never assumed**. Where the tool prints something
+only a real publish produces, that evidence decides the line: git's
+`<src> -> <dst>` ref table (or `Everything up-to-date`), the pull-request
+URL `gh pr create|edit` prints, the release URL `gh release create`
+prints. Without it — and with no failure text either — the line reads
+
+```
+EGRESS UNCONFIRMED → <org>/<repo> (<VISIBILITY>, class <class>): <detail> — nothing in the output confirms it landed; verify before retrying
+```
+
+which is the honest answer when a push dies in transport and prints
+nothing a scanner recognises. The failure patterns are English while git
+is translated (a German git says `Schwerwiegend:`, `Fehler:`,
+`[zurückgewiesen]`), so they only choose between *failed* and
+*unconfirmed*; they are not what establishes a publish. Ref flags (`!`
+refused, `=` already current) and the arrow are not translated, and are
+read directly. Verbs with no distinctive success output — `gh issue
+create`, a mutating `gh api` — keep the older rule: no failure evidence
+reads as a publish. A non-zero `exit_code` on the tool response, when the
+harness supplies one, outranks any text.
+
 ### `repo-aegis install shim [tool]`
 
 Writes `<home>/bin/gh` (the only `tool` today), a wrapper to put first on
