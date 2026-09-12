@@ -586,3 +586,95 @@ engagements: []
     assert.deepEqual(reg.alwaysBlockExemptPaths, ["**/testdata/**"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// `selfIdentity` — the inverse direction (operator's own names).
+// ---------------------------------------------------------------------------
+
+describe("loadRegistry — selfIdentity", () => {
+  it("loads a list of patterns", () => {
+    const path = writeYaml(
+      "self-present.yaml",
+      `
+schemaVersion: 2
+selfIdentity:
+  - example-org
+  - internal-project-codename
+engagements: []
+`,
+    );
+    assert.deepEqual(loadRegistry(path).selfIdentity, [
+      "example-org",
+      "internal-project-codename",
+    ]);
+  });
+
+  it("accepts an explicitly empty list", () => {
+    const path = writeYaml(
+      "self-empty.yaml",
+      `
+schemaVersion: 2
+selfIdentity: []
+engagements: []
+`,
+    );
+    assert.deepEqual(loadRegistry(path).selfIdentity, []);
+  });
+
+  it("defaults to [] when absent — never undefined", () => {
+    // Unlike `alwaysBlockExemptPaths`, absent and empty mean the same thing
+    // here: no identity declared, so nothing joins the `_self_identity` stem.
+    // There is no built-in default list to select between.
+    const path = writeYaml(
+      "self-absent.yaml",
+      `
+schemaVersion: 2
+engagements: []
+`,
+    );
+    assert.deepEqual(loadRegistry(path).selfIdentity, []);
+  });
+
+  it("rejects a non-list", () => {
+    const path = writeYaml(
+      "self-scalar.yaml",
+      `
+schemaVersion: 2
+selfIdentity: example-org
+engagements: []
+`,
+    );
+    assert.throws(() => loadRegistry(path), RegistryParseError);
+  });
+
+  it("rejects a non-string entry", () => {
+    const path = writeYaml(
+      "self-bad-entry.yaml",
+      `
+schemaVersion: 2
+selfIdentity:
+  - example-org
+  - 42
+engagements: []
+`,
+    );
+    assert.throws(() => loadRegistry(path), RegistryParseError);
+  });
+
+  it("does not require a schemaVersion bump: a v1 registry may carry it", () => {
+    // Additive and optional. An older reader drops it via passthrough() and
+    // enforces the pre-selfIdentity deny set — the state every install was
+    // already in — rather than refusing the registry outright.
+    const path = writeYaml(
+      "self-v1.yaml",
+      `
+selfIdentity:
+  - example-org
+engagements: []
+`,
+    );
+    const reg = loadRegistry(path);
+    assert.equal(reg.schemaVersion, 1);
+    assert.deepEqual(reg.selfIdentity, ["example-org"]);
+  });
+});

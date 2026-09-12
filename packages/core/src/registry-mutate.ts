@@ -175,9 +175,11 @@ export function addMarkerPatterns(
 /**
  * The top-level registry lists that `addTopLevelPatterns` can append to.
  * `always_block` blocks everywhere; `privateInfra` blocks only in public-facing
- * repos (see the schema and `PRIVATE_INFRA_FILE_STEM`).
+ * repos (see the schema and `PRIVATE_INFRA_FILE_STEM`); `selfIdentity` blocks
+ * only in `customer-coupled` repos (`SELF_IDENTITY_FILE_STEM`) — the same
+ * mechanism pointed the other way.
  */
-export type TopLevelPatternList = "always_block" | "privateInfra";
+export type TopLevelPatternList = "always_block" | "privateInfra" | "selfIdentity";
 
 /**
  * Append validated patterns to a top-level registry list, creating the list if

@@ -207,3 +207,127 @@ describe("renderMarkers", () => {
     assert.equal(MARKER_FORMAT_VERSION, 1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// `selfIdentity` -> the reserved `_self_identity` stem.
+// ---------------------------------------------------------------------------
+
+describe("renderMarkers — selfIdentity", () => {
+  it("writes _self_identity.txt when the list is non-empty", () => {
+    const dir = join(tmp, "case-self");
+    mkdirSync(dir, { recursive: true });
+    const r = renderMarkers(
+      {
+        engagements: [{ id: "customer-a", name: "A", markers: ["acme-corp"] }],
+        alwaysBlock: [],
+        selfIdentity: ["example-org", "internal-project-codename"],
+        schemaVersion: 2,
+      },
+      { markersDir: dir, flatPath: join(tmp, "case-self.flat") },
+    );
+    assert.equal(r.invalidPatterns.length, 0);
+    const body = readFileSync(join(dir, "_self_identity.txt"), "utf8");
+    assert.match(body, /example-org/);
+    assert.match(body, /internal-project-codename/);
+    assert.match(body, /; engagement: _self_identity/);
+    assert.ok(
+      r.written.some(w => w.engagementId === "_self_identity" && w.patternCount === 2),
+    );
+  });
+
+  it("writes no file at all when the list is empty or absent", () => {
+    // The file's ABSENCE is the signal that this machine declares no identity;
+    // an always-present empty file would be indistinguishable from a render
+    // that silently dropped the list.
+    const dir = join(tmp, "case-self-empty");
+    mkdirSync(dir, { recursive: true });
+    renderMarkers(
+      { engagements: [], alwaysBlock: [], selfIdentity: [], schemaVersion: 2 },
+      { markersDir: dir, flatPath: join(tmp, "case-self-empty.flat") },
+    );
+    assert.ok(!existsSync(join(dir, "_self_identity.txt")));
+    renderMarkers(
+      { engagements: [], alwaysBlock: [], schemaVersion: 2 },
+      { markersDir: dir, flatPath: join(tmp, "case-self-empty.flat") },
+    );
+    assert.ok(!existsSync(join(dir, "_self_identity.txt")));
+  });
+
+  it("removes a stale _self_identity.txt once the list is emptied", () => {
+    const dir = join(tmp, "case-self-stale");
+    mkdirSync(dir, { recursive: true });
+    const flat = join(tmp, "case-self-stale.flat");
+    renderMarkers(
+      { engagements: [], alwaysBlock: [], selfIdentity: ["example-org"], schemaVersion: 2 },
+      { markersDir: dir, flatPath: flat },
+    );
+    assert.ok(existsSync(join(dir, "_self_identity.txt")));
+    renderMarkers(
+      { engagements: [], alwaysBlock: [], selfIdentity: [], schemaVersion: 2 },
+      { markersDir: dir, flatPath: flat },
+    );
+    assert.ok(!existsSync(join(dir, "_self_identity.txt")));
+  });
+
+  it("validates identity patterns strictly and writes nothing when one is bad", () => {
+    const dir = join(tmp, "case-self-invalid");
+    mkdirSync(dir, { recursive: true });
+    assert.throws(
+      () =>
+        renderMarkers(
+          {
+            engagements: [],
+            alwaysBlock: [],
+            selfIdentity: ["example-org", "(?<bad"],
+            schemaVersion: 2,
+          },
+          { markersDir: dir, flatPath: join(tmp, "case-self-invalid.flat") },
+        ),
+      PatternValidationError,
+    );
+    assert.ok(!existsSync(join(dir, "_self_identity.txt")));
+    assert.ok(!existsSync(join(dir, "_always.txt")), "nothing is written on a bad pattern");
+  });
+
+  it("attributes an invalid identity pattern to the _self_identity stem", () => {
+    const dir = join(tmp, "case-self-attr");
+    mkdirSync(dir, { recursive: true });
+    try {
+      renderMarkers(
+        { engagements: [], alwaysBlock: [], selfIdentity: ["(?<bad"], schemaVersion: 2 },
+        { markersDir: dir, flatPath: join(tmp, "case-self-attr.flat") },
+      );
+      assert.fail("expected PatternValidationError");
+    } catch (err) {
+      assert.ok(err instanceof PatternValidationError);
+      assert.ok(
+        err.invalid.some(pp => pp.engagementId === "_self_identity"),
+        "the operator must be told which list the bad pattern came from",
+      );
+    }
+  });
+
+  it("is ABSENT from the flat markers.txt union", () => {
+    // The flat file is for consumers with no notion of repo class. Including a
+    // class-gated stem there would block the operator's own org name in every
+    // repo the operator owns — the exact failure the gate exists to avoid.
+    const dir = join(tmp, "case-self-flat");
+    mkdirSync(dir, { recursive: true });
+    const flat = join(tmp, "case-self-flat.flat");
+    renderMarkers(
+      {
+        engagements: [{ id: "customer-a", name: "A", markers: ["acme-corp"] }],
+        alwaysBlock: ["PROJECT-CODENAME-ALPHA"],
+        selfIdentity: ["example-org"],
+        privateInfra: ["registry\\.internal\\.invalid"],
+        schemaVersion: 2,
+      },
+      { markersDir: dir, flatPath: flat },
+    );
+    const body = readFileSync(flat, "utf8");
+    assert.ok(body.includes("acme-corp"), "engagement markers are in the union");
+    assert.ok(body.includes("PROJECT-CODENAME-ALPHA"), "_always is in the union");
+    assert.ok(!body.includes("example-org"), "_self_identity must not be");
+    assert.ok(!body.includes("internal.invalid"), "_private_infra must not be either");
+  });
+});

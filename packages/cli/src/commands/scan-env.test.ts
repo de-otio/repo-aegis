@@ -10,7 +10,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withEnv, captureOutput } from "../_test-utils.js";
-import { scanEnv } from "./scan-env.js";
+import { scanEnv, findPackageNames, AGENT_SESSION_LINK_PATTERN } from "./scan-env.js";
 
 let tmp: string;
 let aegisHome: string;
@@ -146,5 +146,173 @@ describe("scan-env", { concurrency: 1 }, () => {
     assert.ok(!readFileSync(registryPath, "utf8").includes("internal.example.com"));
     assert.equal(run({ accept: "engagement", json: true }).exitCode, 2);
     assert.ok(!readFileSync(registryPath, "utf8").includes("internal.example.com"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `--self`: the inverse direction. Candidates are the operator's own names.
+// ---------------------------------------------------------------------------
+
+describe("scan-env --self", { concurrency: 1 }, () => {
+  let projectRoot: string;
+
+  /** A tiny workspace: a scoped root package and an unscoped nested one. */
+  function writeProject(): void {
+    projectRoot = join(tmp, "project");
+    rmSync(projectRoot, { recursive: true, force: true });
+    mkdirSync(join(projectRoot, "packages", "widget"), { recursive: true });
+    mkdirSync(join(projectRoot, "node_modules", "left-pad-placeholder"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(projectRoot, "package.json"),
+      JSON.stringify({ name: "@example-scope/toolkit" }),
+    );
+    writeFileSync(
+      join(projectRoot, "packages", "widget", "package.json"),
+      JSON.stringify({ name: "internal-project-codename" }),
+    );
+    writeFileSync(
+      join(projectRoot, "node_modules", "left-pad-placeholder", "package.json"),
+      JSON.stringify({ name: "somebody-elses-package" }),
+    );
+  }
+
+  function writeSelfRegistry(): void {
+    writeFileSync(
+      registryPath,
+      `schemaVersion: 2
+personalOrgs: [example-org, tiny]
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [acme-corp]
+`,
+    );
+  }
+
+  function runSelf(opts: Parameters<typeof scanEnv>[0] = {}): { exitCode?: number } {
+    return withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() =>
+        scanEnv({ self: true, from: projectRoot, registryPath, ...opts }),
+      ),
+    );
+  }
+
+  before(() => {
+    writeProject();
+  });
+
+  beforeEach(() => {
+    writeSelfRegistry();
+  });
+
+  it("finds package names, skipping node_modules — a dependency is someone else's identity", () => {
+    const names = findPackageNames(projectRoot).map(n => n.name);
+    // A scoped name yields BOTH halves: the scope travels in registry URLs and
+    // import paths, the bare name in stack traces and lockfiles.
+    assert.ok(names.includes("example-scope"));
+    assert.ok(names.includes("toolkit"));
+    assert.ok(names.includes("internal-project-codename"));
+    assert.ok(
+      !names.includes("somebody-elses-package"),
+      "blocking a dependency's name would block the world",
+    );
+  });
+
+  it("dry-runs by default: offers candidates and persists nothing", () => {
+    runSelf({ json: true });
+    const reg = readFileSync(registryPath, "utf8");
+    assert.ok(!reg.includes("selfIdentity"), "must not write without --accept");
+  });
+
+  it("offers personalOrgs, package names and the session-link shape", () => {
+    runSelf({ accept: "self-identity", json: true });
+    const reg = readFileSync(registryPath, "utf8");
+    assert.ok(reg.includes("selfIdentity"));
+    assert.ok(reg.includes("example-org"), "a declared personal org");
+    assert.ok(reg.includes("example-scope"), "the npm scope");
+    assert.ok(reg.includes("internal-project-codename"), "a workspace package name");
+    assert.ok(
+      reg.includes(AGENT_SESSION_LINK_PATTERN),
+      "the agent session-link shape is offered verbatim, already escaped",
+    );
+    assert.ok(!reg.includes("somebody-elses-package"));
+  });
+
+  it("drops names too short to match safely, rather than flooding every file", () => {
+    // `tiny` would match inside `destiny`, `mutiny`, `tinymce` — in a
+    // customer-coupled repo that is a guardrail nobody can work next to.
+    runSelf({ accept: "self-identity", json: true });
+    const reg = readFileSync(registryPath, "utf8");
+    const selfBlock = reg.slice(reg.indexOf("selfIdentity"));
+    assert.ok(!selfBlock.includes("tiny"), "short org must not become a pattern");
+  });
+
+  it("escapes the literals it synthesises — a name is not a regex", () => {
+    writeFileSync(
+      join(projectRoot, "package.json"),
+      JSON.stringify({ name: "example-scope.tool+kit" }),
+    );
+    runSelf({ accept: "self-identity", json: true });
+    const reg = readFileSync(registryPath, "utf8");
+    assert.ok(reg.includes("example-scope\\.tool\\+kit"), "dots and plus are escaped");
+    writeFileSync(
+      join(projectRoot, "package.json"),
+      JSON.stringify({ name: "@example-scope/toolkit" }),
+    );
+  });
+
+  it("renders to the reserved _self_identity stem, not markers.txt", () => {
+    runSelf({ accept: "self-identity", json: true });
+    const rendered = readFileSync(
+      join(aegisHome, "markers", "_self_identity.txt"),
+      "utf8",
+    );
+    assert.ok(rendered.includes("example-org"));
+    const flat = readFileSync(join(aegisHome, "markers.txt"), "utf8");
+    assert.ok(
+      !flat.includes("example-org"),
+      "the class-gated stem must stay out of the flat union",
+    );
+  });
+
+  it("is idempotent — a second --accept adds nothing new", () => {
+    runSelf({ accept: "self-identity", json: true });
+    const first = readFileSync(registryPath, "utf8");
+    runSelf({ accept: "self-identity", json: true });
+    assert.equal(readFileSync(registryPath, "utf8"), first);
+  });
+
+  it("still offers package names and the session shape when no registry can be read", () => {
+    const r = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() =>
+        scanEnv({
+          self: true,
+          from: projectRoot,
+          registryPath: join(tmp, "definitely-absent.yaml"),
+          json: true,
+        }),
+      ),
+    );
+    assert.notEqual(r.exitCode, 2, "a missing registry is not an error for a dry run");
+  });
+
+  it("refuses a host placement: --self records identity, not hosts", () => {
+    for (const bad of ["private-infra", "always-block", "engagement"]) {
+      assert.equal(runSelf({ accept: bad, json: true }).exitCode, 2);
+      assert.ok(!readFileSync(registryPath, "utf8").includes("selfIdentity"));
+    }
+  });
+
+  it("leaves the host-scanning mode untouched when --self is absent", () => {
+    // `self-identity` is not a host placement, so the unchanged path rejects it.
+    const r = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() =>
+        scanEnv({ scanHome, from: join(tmp, "no-project"), registryPath, accept: "self-identity", json: true }),
+      ),
+    );
+    assert.equal(r.exitCode, 2);
+    assert.ok(!readFileSync(registryPath, "utf8").includes("selfIdentity"));
   });
 });

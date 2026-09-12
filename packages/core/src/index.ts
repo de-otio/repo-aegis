@@ -123,6 +123,7 @@ export {
   loadExemptPaths,
   ALWAYS_FILE_STEM,
   PRIVATE_INFRA_FILE_STEM,
+  SELF_IDENTITY_FILE_STEM,
   BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS,
 } from "./deny-set.js";
 export type { DenySet, DenySetFile, DenySetOptions } from "./deny-set.js";

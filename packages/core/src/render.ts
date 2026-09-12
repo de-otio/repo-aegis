@@ -8,7 +8,11 @@ import {
   repoAegisHome,
 } from "./paths.js";
 import { isActive, type Registry, type Engagement } from "./registry.js";
-import { ALWAYS_FILE_STEM, PRIVATE_INFRA_FILE_STEM } from "./deny-set.js";
+import {
+  ALWAYS_FILE_STEM,
+  PRIVATE_INFRA_FILE_STEM,
+  SELF_IDENTITY_FILE_STEM,
+} from "./deny-set.js";
 import { validatePatterns } from "./regex-safety.js";
 import { PatternValidationError } from "./exceptions.js";
 
@@ -97,6 +101,14 @@ export function renderMarkers(reg: Registry, opts: RenderOptions = {}): RenderRe
         reason: inv.reason,
       });
     }
+    const selfR = validatePatterns(reg.selfIdentity ?? [], { strict: true });
+    for (const inv of selfR.invalid) {
+      invalidPatterns.push({
+        engagementId: SELF_IDENTITY_FILE_STEM,
+        pattern: inv.pattern,
+        reason: inv.reason,
+      });
+    }
     if (invalidPatterns.length > 0) {
       throw new PatternValidationError(
         invalidPatterns.map(p => ({
@@ -141,6 +153,21 @@ export function renderMarkers(reg: Registry, opts: RenderOptions = {}): RenderRe
       path: infraPath,
       engagementId: PRIVATE_INFRA_FILE_STEM,
       patternCount: infra.length,
+    });
+  }
+
+  // Self-identity file. Same "only when non-empty" rule, for the same reason:
+  // the file's absence is the signal that this machine has declared no
+  // identity markers, and `render` deletes stems not in the target set.
+  const self = reg.selfIdentity ?? [];
+  if (self.length > 0) {
+    targetStems.add(SELF_IDENTITY_FILE_STEM);
+    const selfPath = join(dir, `${SELF_IDENTITY_FILE_STEM}.txt`);
+    if (!dryRun) writeMarkerFile(selfPath, SELF_IDENTITY_FILE_STEM, self);
+    written.push({
+      path: selfPath,
+      engagementId: SELF_IDENTITY_FILE_STEM,
+      patternCount: self.length,
     });
   }
 
@@ -228,10 +255,13 @@ function buildFlatUnion(reg: Registry, retentionMonths: number): string {
     parts.push(...reg.alwaysBlock);
     parts.push("");
   }
-  // `privateInfra` is deliberately absent: this flat file is a back-compat
-  // union for consumers that have no notion of repo class, so including the
-  // class-gated patterns here would block private-infra hosts in the private
-  // repos where they legitimately belong.
+  // `privateInfra` and `selfIdentity` are deliberately absent: this flat file
+  // is a back-compat union for consumers that have no notion of repo class, so
+  // including either class-gated set here would block it everywhere — private-
+  // infra hosts in the private repos where they legitimately belong, and the
+  // operator's own org and project names in every repo the operator owns. A
+  // consumer that cannot ask "which class is this repo?" must not be handed
+  // patterns whose whole meaning is the answer.
   for (const e of reg.engagements as Engagement[]) {
     if (!isActive(e, retentionMonths)) continue;
     parts.push(`; ${e.id}${e.name ? ` (${e.name})` : ""}`);
