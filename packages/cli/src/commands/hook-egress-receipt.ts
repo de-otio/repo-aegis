@@ -28,11 +28,26 @@
 import {
   describeVerb,
   formatReceipt,
+  loadRegistry,
   parseEgressIntents,
   resolveDestinationOffline,
   type Destination,
   type EgressIntent,
+  type Registry,
 } from "@de-otio/repo-aegis-core";
+
+/**
+ * Best-effort registry for destination resolution: with it, a destination
+ * in an engagement's org is named as customer-coupled; without it the
+ * receipt still prints, with the class unknown. Never a reason to fail.
+ */
+function registryOrUndefined(): Registry | undefined {
+  try {
+    return loadRegistry();
+  } catch {
+    return undefined;
+  }
+}
 
 /** Same tolerant tool-name set as `hook guard-egress`. */
 const SHELL_TOOL_NAMES = new Set(["bash", "shell", "run_shell_command"]);
@@ -234,11 +249,12 @@ export async function hookEgressReceipt(): Promise<void> {
 
     const base = cwd ?? process.cwd();
     const failed = looksFailed(output);
+    const registry = registryOrUndefined();
 
     lines = intents.map(intent => {
       let destination: Destination | null = null;
       try {
-        destination = resolveDestinationOffline(intent, base);
+        destination = resolveDestinationOffline(intent, base, registry);
       } catch {
         destination = null;
       }

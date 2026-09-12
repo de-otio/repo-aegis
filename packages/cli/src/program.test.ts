@@ -139,7 +139,11 @@ const EXPECTED_SHAPE: CommandShape[] = [
     ],
     subcommands: [],
   },
-  { path: "doctor", flags: ["--fix", "--no-egress-checks", "--scan-root", "--yes"], subcommands: [] },
+  {
+    path: "doctor",
+    flags: ["--claude-home", "--fix", "--no-egress-checks", "--scan-root", "--yes"],
+    subcommands: [],
+  },
   { path: "egress-check", flags: [], subcommands: [] },
   {
     path: "egress-readback",

@@ -579,6 +579,7 @@ export async function buildProgram(): Promise<Command> {
       "--no-egress-checks",
       "skip the egress-guard checks (push.default, gh shim on PATH, guard hook registered, class + visibility resolved per repo)",
     )
+    .option("--claude-home <dir>", "override default ~/.claude location (for the guard-hook check)")
     .action((opts, cmd) => doctor(withGlobals(opts, cmd)));
 
   return program;

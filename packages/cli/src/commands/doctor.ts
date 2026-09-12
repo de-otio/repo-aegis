@@ -59,6 +59,8 @@ interface DoctorOptions extends OutputOptions {
    * has to be switched on is one nobody switches on.
    */
   egressChecks?: boolean;
+  /** Where Claude Code's `settings.json` lives, for `GUARD_HOOK_UNREGISTERED` (default `~/.claude`). */
+  claudeHome?: string;
 }
 
 export interface DoctorRepoResult {
@@ -190,8 +192,8 @@ function checkPushDefault(): DoctorCheck {
 }
 
 /** Machine-level checks: once per run, independent of any repo. */
-function machineChecks(): DoctorCheck[] {
-  return [checkPushDefault(), ...checkShim(), ...checkGuardHook()];
+function machineChecks(claudeHome?: string): DoctorCheck[] {
+  return [checkPushDefault(), ...checkShim(), ...checkGuardHook(claudeHome)];
 }
 
 /**
@@ -259,7 +261,7 @@ export function doctor(opts: DoctorOptions): void {
 
   // Commander's negation gives `false`; absence gives `undefined` -> ON.
   const egressChecksOn = opts.egressChecks !== false;
-  const machine = egressChecksOn ? machineChecks() : [];
+  const machine = egressChecksOn ? machineChecks(opts.claudeHome) : [];
   // Loaded once for the whole sweep, best-effort: a registry that cannot be
   // read means `PERSONAL_ORG_UNREGISTERED` is simply not answerable, and a
   // guardrail must not report a failure it cannot substantiate.

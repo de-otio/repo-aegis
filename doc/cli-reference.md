@@ -615,13 +615,27 @@ merge.
 
 ### `repo-aegis install claude-md`
 
-Wires the PostToolUse hook into Claude Code:
-1. Appends a managed block to `~/.claude/CLAUDE.md` describing how
-   the agent should react to a hit.
-2. Adds an entry to `~/.claude/settings.json` under
-   `hooks.PostToolUse[matcher = "Write|Edit|MultiEdit"]` with
-   `command = "repo-aegis hook scan-after-write"`. PATH-resolved at
-   hook time.
+Wires the repo-aegis hooks into Claude Code:
+1. Appends a managed block to `~/.claude/CLAUDE.md` describing how the
+   agent should react to a marker hit, and how to recover from an egress
+   denial (re-issue explicitly; never set `REPO_AEGIS_EGRESS_HUMAN`; read
+   the `PUBLISHED →` receipt after a publish).
+2. Adds entries to `~/.claude/settings.json`, all PATH-resolved at hook
+   time and all idempotent:
+
+| Event | Matcher | Command |
+|---|---|---|
+| `PreToolUse` | `Write\|Edit\|MultiEdit` | `repo-aegis hook check-write` |
+| `PreToolUse` | `Bash` | `repo-aegis hook guard-egress --agent claude` |
+| `PostToolUse` | `Write\|Edit\|MultiEdit` | `repo-aegis hook scan-after-write` |
+| `PostToolUse` | `Bash` | `repo-aegis hook scan-bash-output` |
+| `PostToolUse` | `Bash` | `repo-aegis hook egress-receipt` |
+| `SessionStart` | `*` | `repo-aegis hook first-touch` (only with `--first-touch`) |
+
+The two `PostToolUse` Bash hooks share one matcher entry and both run;
+neither replaces the other, and both coexist with any user-authored hook
+already in that entry. `--uninstall` removes every repo-aegis entry and
+reports the count per event.
 
 No file is written under `~/.claude/hooks/` — the bin command parses
 stdin JSON natively, so `jq` is no longer required.
@@ -1049,7 +1063,8 @@ now reports, unless `--no-egress-checks`:
 | `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`) |
 
 JSON gains `machine: DoctorCheck[]` and per-repo `checks: DoctorCheck[]`;
-`summary.failed` counts them.
+`summary.failed` counts them. `--claude-home <dir>` points the guard-hook
+check at a Claude Code home other than `~/.claude`.
 
 ### `scan-env --self`
 

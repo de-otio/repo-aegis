@@ -4,11 +4,12 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { doctor } from "./doctor.js";
 import { withEnv } from "../_test-utils.js";
 import { HOOK_SCRIPTS } from "@de-otio/repo-aegis-core";
+import { GH_SHIM_SCRIPT } from "./shim-script.js";
 
 // SAFETY: every case below runs against throwaway repos under a
 // per-case temp scan root, with GIT_CONFIG_GLOBAL/SYSTEM redirected to
@@ -35,22 +36,61 @@ interface Fixture {
   /** The temp file GIT_CONFIG_GLOBAL points at — the "machine" git config
    * under test for PUSH_DEFAULT_IMPLICIT. Never the developer's real one. */
   globalConfig: string;
+  /** A temp Claude Code home; `settings.json` there carries the guard hook unless `guardHook: false`. */
+  claudeHome: string;
   run: <T>(fn: () => T) => T;
 }
 
-function makeFixture(name: string, extraEnv: Record<string, string> = {}): Fixture {
+interface FixtureOptions {
+  /** Install the `gh` shim into `<home>/bin` and put it first on PATH (default true). */
+  shim?: boolean;
+  /** Register `repo-aegis hook guard-egress` in the temp Claude home (default true). */
+  guardHook?: boolean;
+}
+
+function makeFixture(
+  name: string,
+  extraEnv: Record<string, string> = {},
+  fxOpts: FixtureOptions = {},
+): Fixture {
   const base = join(root, name);
   const scanRoot = join(base, "scan-root");
   const home = join(base, "home");
   const globalConfig = join(base, "gitconfig-global");
+  const claudeHome = join(base, "claude-home");
   mkdirSync(scanRoot, { recursive: true });
   mkdirSync(home, { recursive: true });
+  mkdirSync(claudeHome, { recursive: true });
+
+  // The machine-level egress checks (SHIM_MISSING / SHIM_NOT_FIRST /
+  // GUARD_HOOK_UNREGISTERED) are satisfied by default so that every other
+  // case tests what it says it tests; the two cases that want them to fire
+  // opt out. Nothing here touches the real ~/.claude or the real PATH.
+  const binDir = join(home, "bin");
+  if (fxOpts.shim !== false) {
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(binDir, "gh"), GH_SHIM_SCRIPT, { mode: 0o755 });
+    chmodSync(join(binDir, "gh"), 0o755);
+  }
+  if (fxOpts.guardHook !== false) {
+    writeFileSync(
+      join(claudeHome, "settings.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { matcher: "Bash", hooks: [{ type: "command", command: "repo-aegis hook guard-egress --agent claude" }] },
+          ],
+        },
+      }),
+    );
+  }
 
   const overrides: Record<string, string> = {
     GIT_CONFIG_SYSTEM: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: globalConfig,
     REPO_AEGIS_HOME: home,
+    PATH: `${binDir}${delimiter}${process.env["PATH"] ?? ""}`,
     ...extraEnv,
   };
 
@@ -73,7 +113,7 @@ function makeFixture(name: string, extraEnv: Record<string, string> = {}): Fixtu
     }
   }
 
-  return { base, scanRoot, home, globalConfig, run };
+  return { base, scanRoot, home, globalConfig, claudeHome, run };
 }
 
 function initRepo(dir: string, fx: Fixture): void {
@@ -430,7 +470,7 @@ describe("doctor — egress checks: PUSH_DEFAULT_IMPLICIT", () => {
 
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
-      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })));
     });
 
     assert.equal(exitCode, 1, "an implicit push.default must fail the sweep");
@@ -445,7 +485,7 @@ describe("doctor — egress checks: PUSH_DEFAULT_IMPLICIT", () => {
 
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
-      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })));
     });
 
     assert.equal(exitCode, undefined);
@@ -460,7 +500,7 @@ describe("doctor — egress checks: PUSH_DEFAULT_IMPLICIT", () => {
 
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
-      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })));
     });
 
     assert.equal(exitCode, 1);
@@ -495,7 +535,7 @@ describe("doctor — egress checks: per-repo", () => {
 
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
-      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })));
     });
 
     assert.equal(exitCode, 1);
@@ -517,7 +557,7 @@ describe("doctor — egress checks: per-repo", () => {
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
         withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
-          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
         ),
       );
     });
@@ -538,7 +578,7 @@ describe("doctor — egress checks: per-repo", () => {
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
         withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
-          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
         ),
       );
     });
@@ -554,7 +594,7 @@ describe("doctor — egress checks: per-repo", () => {
 
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
-      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot] })));
+      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })));
     });
 
     assert.equal(exitCode, undefined);
@@ -574,7 +614,7 @@ describe("doctor — egress checks: per-repo", () => {
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
         withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
-          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
         ),
       );
     });
@@ -603,7 +643,7 @@ describe("doctor — egress checks: per-repo", () => {
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
         withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
-          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
         ),
       );
     });
@@ -624,7 +664,7 @@ describe("doctor — egress checks: per-repo", () => {
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
         withEnv("REPO_AEGIS_REGISTRY", join(fx.base, "no-such-registry.yaml"), () =>
-          fx.run(() => doctor({ scanRoot: [fx.scanRoot] })),
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
         ),
       );
     });
@@ -644,7 +684,7 @@ describe("doctor — egress checks: JSON shape", () => {
     const { stdout } = captureStdout(() => {
       runDoctorCapturingExit(() =>
         withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
-          fx.run(() => doctor({ scanRoot: [fx.scanRoot], json: true })),
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome, json: true })),
         ),
       );
     });
@@ -677,5 +717,43 @@ describe("doctor — egress checks: JSON shape", () => {
 
     // 1 machine failure + 1 repo carrying failing checks.
     assert.equal(parsed.summary.failed, 2);
+  });
+});
+
+describe("doctor — egress checks: shim and guard hook", () => {
+  it("SHIM_MISSING fires when <home>/bin/gh is absent", () => {
+    const fx = makeFixture("shim-missing", {}, { shim: false });
+    writeGlobalPushDefaultNothing(fx);
+    healthyRepo(fx, "repo-a");
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
+      );
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stdout, /FAIL SHIM_MISSING/);
+    assert.match(stdout, /fix: repo-aegis install shim/);
+    assert.doesNotMatch(stdout, /GUARD_HOOK_UNREGISTERED/);
+  });
+
+  it("GUARD_HOOK_UNREGISTERED fires when the Claude home has no guard-egress entry", () => {
+    const fx = makeFixture("guard-unregistered", {}, { guardHook: false });
+    writeGlobalPushDefaultNothing(fx);
+    healthyRepo(fx, "repo-a");
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
+      );
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stdout, /FAIL GUARD_HOOK_UNREGISTERED/);
+    assert.match(stdout, /fix: repo-aegis install claude-md/);
+    assert.doesNotMatch(stdout, /SHIM_MISSING/);
   });
 });
