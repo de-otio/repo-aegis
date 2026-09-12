@@ -3,7 +3,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -70,7 +70,15 @@ describe("destination cache", () => {
   it("recordWorkingTree creates the file (0600, atomically) and the entry is found by any casing", () => {
     const now = () => new Date("2026-09-12T16:00:00.000Z");
     assert.equal(recordWorkingTree(pub, cache, now), "acme/svc");
-    assert.equal(statSync(cache).mode & 0o777, 0o600);
+    // Mode and content through ONE descriptor: a stat-by-path followed by a
+    // read-by-path is the check-then-use shape CodeQL flags (js/file-system-race).
+    const fd = openSync(cache, "r");
+    try {
+      assert.equal(fstatSync(fd).mode & 0o777, 0o600);
+      assert.equal(readFileSync(fd, "utf8").includes('"acme/svc"'), true);
+    } finally {
+      closeSync(fd);
+    }
     assert.deepEqual(lookupDestination("ACME", "SVC", cache), {
       class: "public-eligible",
       classExplicit: true,
@@ -78,8 +86,6 @@ describe("destination cache", () => {
       workingTree: pub,
       checkedAt: "2026-09-12T16:00:00.000Z",
     });
-    // No temp file left behind.
-    assert.equal(readFileSync(cache, "utf8").includes('"acme/svc"'), true);
   });
 
   it("recording a second checkout keeps the first", () => {
