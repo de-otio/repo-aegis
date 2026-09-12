@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
+import { statSync } from "node:fs";
 import { z } from "zod";
 import {
   computeDenySet,
   CustomerCoupledNoEngagementError,
+  DEFAULT_MAX_SCAN_FILES,
   readRepoConfig,
   scanFile,
+  scanDirectory,
   resolveScanTarget,
   scanStagedDiff,
   type HistoryHit,
@@ -34,6 +37,18 @@ interface CheckResultShape {
   denySet: { files: string[]; patternCount: number };
   advisory: boolean;
   warnings: string[];
+  /** Directory scans only — see `check --path` in doc/cli-reference.md. */
+  filesScanned?: number;
+  skippedDirs?: string[];
+}
+
+/** True when `path` is a directory; false for anything that cannot be stat'ed. */
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function repoJson(repo: ReturnType<typeof readRepoConfig>): RepoJson {
@@ -50,7 +65,9 @@ const checkPathInput = {
   path: z
     .string()
     .describe(
-      "Path to scan. Resolved (symlinks followed) and rejected if it escapes the repo working tree.",
+      "File or directory to scan. Resolved (symlinks followed) and rejected if it escapes " +
+        "the repo working tree. A directory is walked recursively: `.git` is not entered, " +
+        "symlinks are not followed, and more than 10000 files is a refusal, not a partial scan.",
     ),
   cwd: z
     .string()
@@ -70,8 +87,9 @@ export function registerCheckTools(server: McpServer): void {
     "repo_aegis_check_path",
     {
       description:
-        "Scan a single file against this repo's scoped deny set. " +
-        "Equivalent to `repo-aegis check --path <file> --json`. Returns hits " +
+        "Scan a single file — or every file under a directory, recursively — " +
+        "against this repo's scoped deny set. " +
+        "Equivalent to `repo-aegis check --path <path> --json`. Returns hits " +
         "with line/column and engagement attribution; literal matches are " +
         "redacted (matchPreview), and the agent must NEVER paste them back to " +
         "the user verbatim — refer to the leak abstractly.",
@@ -103,23 +121,46 @@ export function registerCheckTools(server: McpServer): void {
       // against the SERVER's cwd — which is wherever the MCP host happened to
       // start and almost never the repo the agent means.
       const target = resolveScanTarget(path, repo.cwd);
+      const workingTree = repo.isGitRepo ? repo.cwd : undefined;
+      // Mirrors `check --path`: a directory is walked rather than handed to
+      // the file scanner, which used to read it as an unreadable file. Every
+      // file still goes through `scanFile`, so there is one scanning path.
+      let dirScan: { filesScanned: number; skippedDirs: string[] } | undefined;
       try {
-        const r = scanFile(target, denySet, SCAN_OPTS, repo.isGitRepo ? repo.cwd : undefined);
-        hits = r.hits;
-        skipped = r.skipped;
+        if (isDirectory(target)) {
+          const r = scanDirectory(target, denySet, SCAN_OPTS, workingTree);
+          if (r.limitExceeded) {
+            return errorResult({
+              code: "PATH_TOO_MANY_FILES",
+              error:
+                `nothing was scanned: the directory holds more than ${DEFAULT_MAX_SCAN_FILES} ` +
+                `file(s), and a truncated scan would read as a clean one — scan a narrower path`,
+            });
+          }
+          hits = r.hits;
+          skipped = r.skipped;
+          dirScan = { filesScanned: r.filesScanned, skippedDirs: r.skippedDirs };
+        } else {
+          const r = scanFile(target, denySet, SCAN_OPTS, workingTree);
+          hits = r.hits;
+          skipped = r.skipped;
+        }
       } catch (err) {
         return errorResult({ error: (err as Error).message });
       }
-      // The requested path is the whole scope of this tool, so a skip means
-      // nothing was scanned. Returning `hits: []` would read to the agent as
-      // "this file is clean" — the one answer this tool must never give
-      // without having looked.
-      if (skipped.length > 0) {
+      // The requested path is the whole scope of this tool, so reading
+      // nothing means nothing was scanned. Returning `hits: []` would read to
+      // the agent as "this is clean" — the one answer this tool must never
+      // give without having looked. For a directory, files skipped for size
+      // or binary content do not fail the run; the rest of the tree was read.
+      const scannedNothing = dirScan !== undefined ? dirScan.filesScanned === 0 : skipped.length > 0;
+      if (scannedNothing) {
+        const why = [...new Set(skipped.map(s => s.reason))].join(", ");
         return errorResult({
           code: "PATH_NOT_SCANNED",
           error:
-            `nothing was scanned: the requested path was skipped ` +
-            `(${skipped.map(s => s.reason).join(", ")}) — this is NOT a clean result`,
+            `nothing was scanned: ${dirScan !== undefined ? "no file under the requested directory was read" : "the requested path was skipped"}` +
+            `${why === "" ? "" : ` (${why})`} — this is NOT a clean result`,
         });
       }
       const result: CheckResultShape = {
@@ -127,6 +168,10 @@ export function registerCheckTools(server: McpServer): void {
         hits,
         historyHits: [],
         skipped,
+        ...(dirScan !== undefined && {
+          filesScanned: dirScan.filesScanned,
+          skippedDirs: dirScan.skippedDirs,
+        }),
         repo: repoJson(repo),
         denySet: { files: denySet.files.map(f => f.stem), patternCount: denySet.patterns.length },
         advisory: repo.class === "scratch",

@@ -127,6 +127,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "--ignore-allowlist-comments",
       "--ignore-waivers",
       "--max-file-bytes",
+      "--max-files",
       "--min-patterns",
       "--path",
       "--push-ref",

@@ -40,6 +40,36 @@ on a German machine a failed push says `Schwerwiegend:`, `Fehler:` and
   distinctive success output (`gh issue create`, mutating `gh api`) keep
   the previous rule; there is nothing to require.
 
+### Fixed — `check --path <dir>` called every readable directory "unreadable"
+
+A directory went straight to the file scanner, which `readFileSync`'d it,
+caught the `EISDIR`, and recorded it as `skipped: unreadable`. `--path`
+mode is all-or-nothing, so the run then failed closed with
+`PATH_NOT_SCANNED … (unreadable)` — the right outcome with the wrong
+cause, which sends the operator to look at permissions on something that
+was only ever the wrong shape. Found while scanning a folder of files
+before publishing them.
+
+- `scanFile` reports a directory as `skipped` reason **`directory`**, and
+  an unfollowed symlink as **`symlink`**. Neither is an I/O failure and
+  neither is called one now.
+- `check --path <dir>` (and the `repo_aegis_check_path` MCP tool) **walks
+  the directory**, scanning every regular file through the same `scanFile`
+  path as the single-file form — same canonicalisation, working-tree
+  check, path exemptions, size cap and binary detection. Lockfile/`.npmrc`
+  egress hygiene sweeps the tree too.
+- Nothing is hidden to make that cheap. `.git` is the only directory not
+  walked (compressed objects no line scan can read; history has
+  `--history`) and it is listed in `skippedDirs`. Symlinks are not
+  followed and are listed in `skipped`. Files skipped for size or binary
+  content are reported as usual and do not fail the run — the rest of the
+  tree was read. `--json` adds `filesScanned` so "clean" is never a claim
+  without a count behind it; the file form's envelope is unchanged.
+- More than `--max-files` (default 10000) exits **2** with
+  **`PATH_TOO_MANY_FILES`**. A truncated scan reported as a result is the
+  same failure one layer up, so the cap refuses instead of answering
+  short. An empty directory is still `PATH_NOT_SCANNED`.
+
 ## [0.10.1] - 2026-09-12
 
 ### Fixed — an `ask` the `gh` shim cannot back up is now a refusal

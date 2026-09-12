@@ -5,12 +5,14 @@ import {
   closeSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   rmSync,
   existsSync,
   statSync,
   realpathSync,
+  type Dirent,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
@@ -88,7 +90,14 @@ export interface ScanHit {
 
 export interface SkippedFile {
   path: string;
-  reason: "binary" | "too-large" | "unreadable";
+  /**
+   * `directory` and `symlink` exist so a skip is never mis-diagnosed as an
+   * I/O failure. A directory handed to {@link scanFile} used to `readFileSync`
+   * into `EISDIR` and land here as `unreadable`, which sent the operator to
+   * look at permissions for something that was only ever the wrong shape —
+   * and `--path` mode then failed closed (correctly) with the wrong reason.
+   */
+  reason: "binary" | "too-large" | "unreadable" | "directory" | "symlink";
   bytes?: number;
 }
 
@@ -448,6 +457,15 @@ export function scanFile(
     scanOpts = { ...opts, workingTree: wtReal };
   }
   const stat = statSync(real);
+  // A directory is not an unreadable file, and saying so was the bug: the
+  // read below throws EISDIR, the catch calls it `unreadable`, and the
+  // operator goes looking at permissions. `scanFile` still scans exactly one
+  // file — walking a tree is {@link scanDirectory}'s job — but it now says
+  // which of the two it was handed.
+  if (stat.isDirectory()) {
+    skipped.push({ path: real, reason: "directory" });
+    return empty();
+  }
   const max = opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
   if (stat.size > max) {
     skipped.push({ path: real, reason: "too-large", bytes: stat.size });
@@ -470,6 +488,149 @@ export function scanFile(
     hits: scanned.hits,
     skipped,
     suppressedKnownNonSecrets: scanned.suppressedKnownNonSecrets,
+  };
+}
+
+/**
+ * Directory names {@link walkScanFiles} never descends into.
+ *
+ * Exactly one entry, and deliberately so. Every silent skip in a leak
+ * scanner is a scan that did not happen reading as one that found nothing
+ * (#97), so the walk carries no convenience exclusions — not
+ * `node_modules`, not `dist`: a marker committed under either is still a
+ * marker committed. `.git` is excluded because its contents are compressed
+ * object files that no line-oriented scan can read, and because git history
+ * has its own mode (`check --history`) that reads it properly. The skip is
+ * reported, never assumed.
+ */
+export const SCAN_SKIP_DIRS = new Set([".git"]);
+
+/**
+ * Cap on the number of files one directory scan will read. Exceeding it is
+ * an error the caller must surface, NOT a truncated scan: silently stopping
+ * at N files is the #97 failure shape again, one layer up.
+ */
+export const DEFAULT_MAX_SCAN_FILES = 10_000;
+
+export interface DirectoryWalk {
+  /** Absolute paths of regular files, in a deterministic (sorted) order. */
+  files: string[];
+  /** Symlinks encountered and not followed — reported, never silent. */
+  symlinks: string[];
+  /** Directories not descended into ({@link SCAN_SKIP_DIRS}). */
+  skippedDirs: string[];
+  /** True when the file cap was hit; `files` is then incomplete. */
+  limitExceeded: boolean;
+}
+
+/**
+ * List the regular files under `dir`, recursively.
+ *
+ * Symlinks are not followed, in either shape. A symlinked directory can
+ * point back into the tree (an unbounded walk) or out of it, and a symlinked
+ * file is either a second name for something this walk already reaches or a
+ * pointer at content that lives outside the tree being scanned — which
+ * `scanFile`'s working-tree check would reject anyway. Both are collected in
+ * `symlinks` so the caller can report them.
+ */
+export function walkScanFiles(dir: string, opts: { maxFiles?: number } = {}): DirectoryWalk {
+  const max = opts.maxFiles ?? DEFAULT_MAX_SCAN_FILES;
+  const files: string[] = [];
+  const symlinks: string[] = [];
+  const skippedDirs: string[] = [];
+  let limitExceeded = false;
+
+  const stack: string[] = [dir];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      // An unreadable directory is a real skip, and the only one the walk
+      // cannot describe per-file. Recorded as a skipped dir so a caller that
+      // scanned nothing can say why.
+      skippedDirs.push(current);
+      continue;
+    }
+    // Sorted, and pushed in reverse so the stack yields ascending order:
+    // two runs over the same tree must produce the same output, or a
+    // `--max-files` refusal would name a different file each time.
+    const sorted = [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      const entry = sorted[i]!;
+      const full = join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        symlinks.push(full);
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (SCAN_SKIP_DIRS.has(entry.name)) skippedDirs.push(full);
+        else stack.push(full);
+        continue;
+      }
+      if (!entry.isFile()) continue; // sockets, fifos, devices: nothing to read
+      if (files.length >= max) {
+        limitExceeded = true;
+        return { files, symlinks, skippedDirs, limitExceeded };
+      }
+      files.push(full);
+    }
+  }
+  files.sort();
+  return { files, symlinks, skippedDirs, limitExceeded };
+}
+
+export interface DirectoryScanResult extends ScanResult {
+  /** Files whose content was actually read and matched. */
+  filesScanned: number;
+  /** Directories the walk did not descend into ({@link SCAN_SKIP_DIRS}). */
+  skippedDirs: string[];
+  /** True when the file cap stopped the walk; the scan is incomplete. */
+  limitExceeded: boolean;
+}
+
+/**
+ * Scan every regular file under `dir`, recursively.
+ *
+ * Each file goes through {@link scanFile}, so canonicalisation, the
+ * working-tree containment check, path-scoped exemptions, the size cap and
+ * binary detection behave exactly as they do for a single `--path` file —
+ * there is no second, subtly different scanning path to drift from the first.
+ *
+ * Nothing is hidden: files skipped for size or binary content land in
+ * `skipped`, unfollowed symlinks land there too, `.git` lands in
+ * `skippedDirs`, and hitting the file cap sets `limitExceeded` rather than
+ * quietly returning a short answer. What a caller does with an incomplete
+ * scan is the caller's decision — `check` refuses it.
+ */
+export function scanDirectory(
+  dir: string,
+  denySet: DenySet,
+  opts: ScanOptions & { maxFiles?: number } = {},
+  workingTree?: string,
+): DirectoryScanResult {
+  const walk = walkScanFiles(dir, opts.maxFiles !== undefined ? { maxFiles: opts.maxFiles } : {});
+  const hits: ScanHit[] = [];
+  const skipped: SkippedFile[] = walk.symlinks.map(path => ({ path, reason: "symlink" as const }));
+  let suppressedKnownNonSecrets = 0;
+  let filesScanned = 0;
+
+  for (const file of walk.files) {
+    const result = scanFile(file, denySet, opts, workingTree);
+    hits.push(...result.hits);
+    skipped.push(...result.skipped);
+    suppressedKnownNonSecrets += result.suppressedKnownNonSecrets;
+    if (result.skipped.length === 0) filesScanned++;
+  }
+
+  return {
+    hits,
+    skipped,
+    suppressedKnownNonSecrets,
+    filesScanned,
+    skippedDirs: walk.skippedDirs,
+    limitExceeded: walk.limitExceeded,
   };
 }
 

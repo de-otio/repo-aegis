@@ -3,13 +3,14 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   scanText,
   scanTextDetailed,
   scanFile,
+  scanDirectory,
   scanStagedDiff,
   scanRange,
   scanHistory,
@@ -206,6 +207,99 @@ describe("scanFile", () => {
     const ds = denySetWithPatterns(["a"]);
     const r = scanFile(join(tmp, "doesnotexist.txt"), ds);
     assert.equal(r.skipped[0]!.reason, "unreadable");
+  });
+
+  // The directory used to reach readFileSync, throw EISDIR, and be reported
+  // as `unreadable` — a true "nothing was scanned" with a false cause, which
+  // sends the operator to look at permissions on something that is readable.
+  it("reports `directory`, not `unreadable`, for a directory", () => {
+    const dir = join(tmp, "a-directory");
+    mkdirSync(dir, { recursive: true });
+    const ds = denySetWithPatterns(["acme-corp"]);
+    const r = scanFile(dir, ds);
+    assert.equal(r.hits.length, 0);
+    assert.equal(r.skipped.length, 1);
+    assert.equal(r.skipped[0]!.reason, "directory");
+  });
+});
+
+describe("scanDirectory", () => {
+  const ds = () => denySetWithPatterns(["acme-corp"]);
+
+  /** A fresh tree per test, so ordering and counts are independent. */
+  function tree(name: string): string {
+    const root = join(tmp, `dir-${name}`);
+    mkdirSync(join(root, "nested"), { recursive: true });
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, "clean.txt"), "nothing here\n");
+    writeFileSync(join(root, "nested", "marked.md"), "line one\nmentions acme-corp\n");
+    writeFileSync(join(root, ".git", "COMMIT_EDITMSG"), "acme-corp\n");
+    return root;
+  }
+
+  it("finds a hit in a nested file and reports how many files it read", () => {
+    const root = tree("hit");
+    const r = scanDirectory(root, ds());
+    assert.equal(r.hits.length, 1);
+    assert.equal(r.hits[0]!.line, 2);
+    assert.match(r.hits[0]!.path ?? "", /marked\.md$/);
+    assert.equal(r.filesScanned, 2);
+    assert.equal(r.limitExceeded, false);
+  });
+
+  // Not an optimisation: `.git` holds compressed objects no line scan can
+  // read, and history has its own mode. The skip is reported, so a caller
+  // can say what it did not look at.
+  it("does not walk .git, and says so", () => {
+    const root = tree("git");
+    const r = scanDirectory(root, ds());
+    assert.equal(r.skippedDirs.length, 1);
+    assert.match(r.skippedDirs[0]!, /\.git$/);
+    assert.equal(r.hits.every(h => !(h.path ?? "").includes(".git")), true);
+  });
+
+  it("does not follow symlinks, and reports them as skipped", () => {
+    const root = tree("symlink");
+    symlinkSync(join(root, "nested"), join(root, "loop"));
+    symlinkSync(join(root, "nested", "marked.md"), join(root, "alias.md"));
+    const r = scanDirectory(root, ds());
+    const symlinks = r.skipped.filter(s => s.reason === "symlink");
+    assert.equal(symlinks.length, 2);
+    // The marker is still found once, at its real path — a skipped symlink
+    // never hides content that lives inside the tree.
+    assert.equal(r.hits.length, 1);
+  });
+
+  // A truncated scan that reports `hits: []` is the #97 failure one layer up,
+  // so the walk says it stopped rather than answering short.
+  it("sets limitExceeded rather than silently scanning fewer files", () => {
+    const root = tree("limit");
+    const r = scanDirectory(root, ds(), { maxFiles: 1 });
+    assert.equal(r.limitExceeded, true);
+    assert.equal(r.filesScanned, 1);
+  });
+
+  it("carries per-file skips through instead of dropping them", () => {
+    const root = tree("skips");
+    writeFileSync(join(root, "big.txt"), "a".repeat(100));
+    const r = scanDirectory(root, ds(), { maxFileBytes: 50 });
+    const tooLarge = r.skipped.filter(s => s.reason === "too-large");
+    assert.equal(tooLarge.length, 1);
+    assert.match(tooLarge[0]!.path, /big\.txt$/);
+  });
+
+  it("refuses a file outside the working tree, exactly as scanFile does", () => {
+    const root = tree("outside");
+    assert.throws(() => scanDirectory(root, ds(), {}, join(tmp, "dir-hit")), /outside/i);
+  });
+
+  it("returns an empty, honest result for an empty directory", () => {
+    const root = join(tmp, "dir-empty");
+    mkdirSync(root, { recursive: true });
+    const r = scanDirectory(root, ds());
+    assert.deepEqual(r.hits, []);
+    assert.equal(r.filesScanned, 0);
+    assert.equal(r.limitExceeded, false);
   });
 });
 
