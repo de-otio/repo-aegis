@@ -236,6 +236,28 @@ function firstGhOnPath(pathValue: string | undefined): string | null {
 }
 
 /**
+ * Is the installed `gh` shim the FIRST `gh` on `env.PATH`?
+ *
+ * The same question `checkShim` answers as a `doctor` finding, as a plain
+ * predicate for callers that must act on it rather than report it — the
+ * agent hook, which reads its own environment because that is the one the
+ * host will hand the shell it is about to permit. False when the shim is
+ * not installed, when nothing on `PATH` reaches it, or when another `gh`
+ * precedes it: in all three the shim does not run.
+ *
+ * Reuses `firstGhOnPath`/`canonical` on purpose. A second PATH resolver
+ * that disagreed with `doctor`'s would be worse than no check at all — the
+ * operator would be told the shim is fine by the command whose job is to
+ * say so, while the guard silently believed otherwise.
+ */
+export function ghShimIsFirstOnPath(env: NodeJS.ProcessEnv = process.env): boolean {
+  const shim = join(env["REPO_AEGIS_HOME"] ?? repoAegisHome(), "bin", "gh");
+  if (!existsSync(shim)) return false;
+  const first = firstGhOnPath(env["PATH"]);
+  return first !== null && canonical(first) === canonical(shim);
+}
+
+/**
  * `doctor` checks for the shim: `SHIM_MISSING` when `<home>/bin/gh` does not
  * exist, `SHIM_NOT_FIRST` when it exists but another `gh` precedes it on
  * `PATH` (or nothing on PATH reaches it at all), `SHIM_STALE` when the file

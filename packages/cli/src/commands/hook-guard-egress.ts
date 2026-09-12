@@ -47,10 +47,32 @@ import {
   type EgressDecision,
   type Registry,
 } from "@de-otio/repo-aegis-core";
+import { ghShimIsFirstOnPath } from "./install-shim.js";
 
 export interface HookGuardEgressOptions {
   /** `claude` (default) | `codex` | `gemini`. Only `claude` is assumed to have an "ask". */
   agent?: string;
+  /** Test seam: the environment whose `PATH` decides whether the `gh` shim can run. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Whether the `gh` shim is the first `gh` on the PATH this hook was given —
+ * which is the PATH its host will hand the shell it is about to permit, so
+ * the hook's own environment is the right thing to read and not a guess
+ * about the caller.
+ *
+ * `undefined` on a throw, and the policy treats `undefined` as "not asked".
+ * The distinction matters: a lookup that SUCCEEDS and says the shim is
+ * absent is a fact to act on, while a lookup that failed is one of this
+ * guard's own defects, and this hook fails open on those by contract.
+ */
+function ghShimOnPath(env: NodeJS.ProcessEnv): boolean | undefined {
+  try {
+    return ghShimIsFirstOnPath(env);
+  } catch {
+    return undefined;
+  }
 }
 
 // PreToolUse exit-code contract, shared by all three frameworks:
@@ -300,7 +322,13 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
       // Only Claude Code is assumed to have an "ask". Anything else —
       // including an unrecognised `--agent` value — is treated as a
       // framework without one, so `ask` degrades to `deny`.
-      capabilities: { ask: (opts.agent ?? "claude") === "claude" },
+      capabilities: (() => {
+        const ask = (opts.agent ?? "claude") === "claude";
+        // Only worth answering where `ask` is on the table at all: without
+        // an ask, rule g already denies.
+        const shim = ask ? ghShimOnPath(opts.env ?? process.env) : undefined;
+        return { ask, ...(shim !== undefined && { ghShimOnPath: shim }) };
+      })(),
     });
   } catch (err) {
     // Fail open. A guard that blocks on its own defect is worse than one

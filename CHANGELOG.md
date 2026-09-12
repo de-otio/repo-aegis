@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — an `ask` the `gh` shim cannot back up is now a refusal
+
+The three enforcement layers do not degrade into each other. `PATH` is
+per-process, so the `gh` shim reaches only shells started after the
+profile line that puts it there — and an agent host that snapshots its
+launcher's environment hands every command the `PATH` the launcher had.
+In such a shell `gh` runs unshimmed, which leaves the agent hook alone on
+rule g, where its answer is `ask`; and an `ask` that no layer beneath it
+can enforce is not a refusal at all. Observed on a host whose auto mode
+answers an `ask` with a classifier rather than a person: `gh pr create`
+against a public repository reached GitHub, while the identical command
+with the shim's directory on `PATH` was refused.
+
+- The agent hook now reads its **own** `PATH` — the one its host will
+  hand the shell it is about to permit — and a `gh` publishing verb that
+  would have been `ask` under rule g is denied with
+  **`SHIM_UNREACHABLE_NEEDS_HUMAN`** when the shim is not the first `gh`
+  on it. The reason names both fixes: mint an approval
+  (`repo-aegis approve <org>/<repo>`) and re-run, or start the agent from
+  a shell where the shim comes first (`repo-aegis doctor` says which).
+- Scoped deliberately: `git push` is untouched (the pre-push hook is
+  `PATH`-independent and already refuses), and so is `npm publish`, which
+  has no shim to be unreachable. An approval-backed `allow` and an
+  earlier rule's `deny` both survive unchanged, and a `PATH` lookup that
+  throws changes nothing — the hook still fails open on its own defects.
+  Agents without an `ask` were already denying here.
+- `decideEgress` takes `capabilities.ghShimOnPath`; unset means "not
+  asked". The predicate is the resolver behind `doctor`'s
+  `SHIM_NOT_FIRST`, not a second one that could disagree with it.
+- Design: `doc/design/egress-guard.md` §4b (rule g′), with the layer-reach
+  table that was the missing half of §3.
+
 ## [0.10.0] - 2026-09-12
 
 ### Added — human approvals: `repo-aegis approve`

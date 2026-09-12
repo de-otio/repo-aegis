@@ -171,6 +171,17 @@ Two halves, and the command can only do the first:
    line and let them add it. A shim that is installed but not first on
    `PATH` never runs; `doctor` reports it as `SHIM_NOT_FIRST`.
 
+**`PATH` is per-process, so the profile line only reaches shells started
+after it.** Every process already running — the terminal window you are
+in, and an agent host that snapshotted its launcher's environment — keeps
+the `PATH` it started with. Tell the user to restart the shell *and* the
+agent host after the profile edit, and to run `doctor` in the shell they
+actually publish from: a missing `PUBLISHED →` receipt is otherwise the
+only sign the shim was bypassed. The agent hook refuses a `gh` publishing
+verb outright (`SHIM_UNREACHABLE_NEEDS_HUMAN`) when the shim is not first
+on its own `PATH`, rather than asking a question no layer beneath it could
+enforce — but that covers one agent, and only `gh`.
+
 Why this layer exists when the Claude Code hook already judges `gh`
 commands: the hook guards one agent's sessions. The shim sits in front of
 *every* `gh` invocation on the machine — a human terminal, Codex, Gemini,
@@ -477,6 +488,13 @@ when all three are in:
 Skipping the shim leaves the middle row empty: `gh pr create` from a
 terminal, from a script, or from an agent without a pre-command hook
 reaches GitHub without anyone judging the destination.
+
+The rows do not cover for each other, and the middle one has a condition
+the others do not: it reaches only shells whose `PATH` carries it. The
+pre-push hook is `PATH`-independent, so `git push` is covered either way;
+`gh` is not. That is why the agent hook checks its own `PATH` and denies a
+`gh` publishing verb (`SHIM_UNREACHABLE_NEEDS_HUMAN`) when the shim is
+missing from it — see `doc/design/egress-guard.md` §4b.
 
 ### Verify the registration
 

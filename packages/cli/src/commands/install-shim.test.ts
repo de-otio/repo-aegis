@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { captureOutput, fakeGh, lastJsonLine, withEnv } from "../_test-utils.js";
-import { checkShim, installShim, shimPathFor, type ShimResult } from "./install-shim.js";
+import { checkShim, ghShimIsFirstOnPath, installShim, shimPathFor, type ShimResult } from "./install-shim.js";
 import { GH_SHIM_SCRIPT, SHIM_HEADER_LINE } from "./shim-script.js";
 
 let root: string;
@@ -258,5 +258,56 @@ describe("checkShim", () => {
       PATH: [dir, join(home, "bin")].join(delimiter),
     });
     assert.equal(checks[0]?.ok, true);
+  });
+});
+
+describe("ghShimIsFirstOnPath", () => {
+  // The predicate the agent hook acts on. It must agree with `checkShim`
+  // on every case: `doctor` reporting a healthy shim while the guard
+  // silently believed otherwise would be worse than no check at all.
+  function both(env: NodeJS.ProcessEnv): { ok: boolean; predicate: boolean } {
+    return { ok: checkShim(env)[0]?.ok === true, predicate: ghShimIsFirstOnPath(env) };
+  }
+
+  it("false when no shim is installed, whatever is on PATH", () => {
+    const { home } = makeHome("pred-missing");
+    const other = fakeGh(join(root, "pred-missing-bin"), "echo real gh");
+    const r = both({ REPO_AEGIS_HOME: home, PATH: other });
+    assert.deepEqual(r, { ok: false, predicate: false });
+  });
+
+  it("false when another gh precedes the shim, or when nothing on PATH reaches it", () => {
+    const { home, run } = makeHome("pred-shadowed");
+    run(() => captureOutput(() => installShim(undefined, {})));
+    const other = fakeGh(join(root, "pred-shadowed-bin"), "echo real gh");
+    assert.deepEqual(both({ REPO_AEGIS_HOME: home, PATH: [other, join(home, "bin")].join(delimiter) }), {
+      ok: false,
+      predicate: false,
+    });
+    assert.deepEqual(both({ REPO_AEGIS_HOME: home, PATH: other }), { ok: false, predicate: false });
+    assert.equal(ghShimIsFirstOnPath({ REPO_AEGIS_HOME: home, PATH: "" }), false);
+    assert.equal(ghShimIsFirstOnPath({ REPO_AEGIS_HOME: home }), false);
+  });
+
+  it("true when the shim is installed and first on PATH", () => {
+    const { home, run } = makeHome("pred-first");
+    run(() => captureOutput(() => installShim(undefined, {})));
+    const other = fakeGh(join(root, "pred-first-bin"), "echo real gh");
+    assert.deepEqual(both({ REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), other].join(delimiter) }), {
+      ok: true,
+      predicate: true,
+    });
+  });
+
+  it("true for a stale shim: it is reachable, which is the question asked here", () => {
+    // `checkShim` reports SHIM_STALE and the predicate says true — the one
+    // deliberate disagreement. A stale shim still runs and still refuses;
+    // the fix for staleness is `install shim`, not a denied command.
+    const { home, run } = makeHome("pred-stale");
+    run(() => captureOutput(() => installShim(undefined, {})));
+    writeFileSync(join(home, "bin", "gh"), `#!/usr/bin/env bash\n${SHIM_HEADER_LINE}\nexec gh "$@"\n`);
+    const env = { REPO_AEGIS_HOME: home, PATH: join(home, "bin") };
+    assert.equal(checkShim(env)[0]?.code, "SHIM_STALE");
+    assert.equal(ghShimIsFirstOnPath(env), true);
   });
 });

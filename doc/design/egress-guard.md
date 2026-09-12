@@ -127,7 +127,10 @@ export function decideEgress(opts: {
   cwd: string;                     // where the command WILL run (hook payload cwd / shim cwd)
   registry: Registry;
   humanPresent: boolean;           // TTY on stderr, or REPO_AEGIS_EGRESS_HUMAN=1
-  capabilities: { ask: boolean };  // does the enforcing framework have an "ask"?
+  capabilities: {
+    ask: boolean;                  // does the enforcing framework have an "ask"?
+    ghShimOnPath?: boolean;        // can the layer below still refuse a `gh` verb?
+  };
 }): EgressDecision;
 ```
 
@@ -146,6 +149,7 @@ not blocking, so an unknown destination may still `ask`.
 | e | context | payload file's enclosing working tree has a trust boundary **positively disjoint** from the destination's | deny | `CROSS_ORG_EGRESS` |
 | f | context | payload content matches the destination's deny set (`check --path` with the destination's `RepoConfig`) | deny | `PAYLOAD_MARKER_HIT` |
 | g | context | destination `publicFacing`, or verb ∈ {`gh-pr-merge`, `gh-release-*`, `gh-repo-edit`, `npm-publish`}, and `!humanPresent` | `ask` if `capabilities.ask`, else deny | `PUBLIC_EGRESS_NEEDS_HUMAN` |
+| g′ | context | rule g on a `gh-*` verb with `capabilities.ghShimOnPath === false` | deny | `SHIM_UNREACHABLE_NEEDS_HUMAN` |
 | h | context | destination class `scratch` | allow | — |
 | — | — | otherwise | allow | — |
 
@@ -252,7 +256,13 @@ short timeout and never changes the shim's exit code on read-back *failure*
 
 `uninstall` removes the shim. `doctor` reports whether the shim directory
 precedes the real `gh` on `PATH` (`SHIM_NOT_FIRST`) — a shim that exists but is
-shadowed is the "hooks installed but not running" failure in a new costume.
+shadowed is the "hooks installed but not running" failure in a new costume — and
+whether the shim on `PATH` is this release's script (`SHIM_STALE`).
+
+This layer is the one with a reach condition, and §4b is about what follows
+from it: `PATH` is per-process, so the shim is absent from any shell whose
+environment was fixed before the profile line existed.  That is the ordinary
+state of an agent's shell, not an edge case.
 
 ### 4. Enforcement point: agent pre-command hooks (where offered; richer)
 
@@ -339,6 +349,68 @@ What this does not change: `REPO_AEGIS_EGRESS_HUMAN` keeps its contract
 stays "never set it, never work around a refusal" — the recovery is now
 "ask the human for an approval" instead of "ask the human to run it".
 
+### 4b. The layers do not degrade into each other — rule g′
+
+*Added 2026-09-12, from a finding on the host that runs this guard.* The
+three enforcement points are described above as defence in depth, which
+invites the assumption that losing one leaves the rest. For rule g that is
+false, and the reach of each layer is the reason:
+
+| Layer | Reaches an agent shell? | Rule g outcome |
+|---|---|---|
+| git pre-push hook (global `core.hooksPath`) | yes — `PATH`-independent | refuses outright (no TTY) |
+| `gh` shim | **only if `PATH` carries it** | refuses outright, exit 2 |
+| agent pre-command hook | yes — registered in the agent's settings | `ask` where the framework has one |
+
+The shim is on `PATH` only for processes started after the profile line
+that puts it there. An agent host that snapshots its launcher's
+environment — Claude Code writes a literal `export PATH=…` into its shell
+snapshot — hands every Bash call the `PATH` the launcher had, so a session
+started from a window that predates `install shim` never sees it, however
+correct the profile is. `which gh` in such a shell resolves to the real
+`gh`, and `doctor` says `SHIM_NOT_FIRST` — but only if someone runs it.
+
+That leaves the agent hook alone on rule g for `gh` verbs, and its answer
+there is `ask`. An `ask` is a refusal only while something below it can
+hold the command when the ask is not answered by a person — and on Claude
+Code in auto mode an `ask` is answered by the auto-mode classifier, not a
+human (the same observation §4a is built on). Observed 2026-09-12 from an
+agent shell: `gh pr create` against a public repository reached GitHub;
+the identical command with the shim's directory prepended to `PATH` was
+refused with `PUBLIC_EGRESS_NEEDS_HUMAN`, exit 2.
+
+So the hook reads its **own** `PATH` — the environment its host will hand
+the shell it is about to permit, not a guess about the caller — and passes
+`capabilities.ghShimOnPath` to the decision function. When it is `false`
+and rule g fires on a `gh-*` verb, the decision is `deny` with
+`SHIM_UNREACHABLE_NEEDS_HUMAN` rather than `ask`.
+
+Four boundaries, each chosen rather than fallen into:
+
+1. **`gh` verbs only.** `git push` keeps the pre-push hook, which is
+   `PATH`-independent and already refuses; `npm publish` has no shim to be
+   unreachable, so this `PATH` fact says nothing new about it. Denying
+   either on a `PATH` condition would be an unrelated behaviour change
+   smuggled in under this one.
+2. **Only where the decision would have been `ask`.** An earlier rule's
+   `deny` keeps its own code; an `allow` — including an approval-backed
+   allow, which is decided before the ask/deny split — must never become a
+   `deny` because of a `PATH` fact. An approval is the cheap fix here, and
+   it would be perverse if the missing shim defeated it.
+3. **Its own code.** The operator's fix is a `PATH` or an approval, not a
+   prompt, and the agent guide's error-code table is how a refusal gets
+   read. The reason names both halves of the fix.
+4. **Unknown ≠ absent.** The hook fails open on its own defects, so a
+   `PATH` lookup that *throws* leaves the capability unset and changes
+   nothing. A lookup that succeeds and says the shim is absent is a fact,
+   and is acted on. The predicate is `ghShimIsFirstOnPath`, the same
+   resolver `doctor`'s `SHIM_NOT_FIRST` uses — a second one that
+   disagreed would let `doctor` call a shim healthy while the guard
+   believed otherwise.
+
+Agents other than Claude Code are unaffected: `capabilities.ask` is
+already false for them, so rule g denies before g′ is reached.
+
 ### 5. Receipts
 
 After a permitted egress, one line to the agent: `PUBLISHED → <org>/<repo>
@@ -421,6 +493,7 @@ every agent and every human, with no repo-aegis involvement at all.
 |---|---|
 | Egress hook is decision-only | `hook guard-egress` returns `allow`/`ask`/`deny`; it never emits `updatedInput`. Rewriting a command reconstructs the implicit-destination defect. |
 | `ask` degrades to `deny` | On a framework without an `ask` decision, `ask` becomes `deny` with a "have a human run or approve this" reason — never `allow`. |
+| An `ask` needs a layer beneath it | Rule g′: on a `gh` verb, where the enforcing framework reports the `gh` shim is not first on its `PATH`, `ask` becomes `deny` (`SHIM_UNREACHABLE_NEEDS_HUMAN`) — an unanswered `ask` with nothing below it is not a refusal. `git push` (pre-push hook) and `npm publish` (no shim) are out of scope; an unknown `PATH` changes nothing. §4b. |
 | Shape rules are unconditional; context rules fail open | Rules that need no registry/class/visibility (`PUSH_IMPLICIT_TARGET`, `EGRESS_AFTER_CD`, `EGRESS_UNGUARDED_CHAIN`, `PAYLOAD_MODE_DEPENDENT_PATH`) always apply. Rules that need context never block on missing context, but may still `ask`. |
 | Human-presence test | `isatty(2)` on stderr, or `REPO_AEGIS_EGRESS_HUMAN=1`. Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`: documented human-only; agents are instructed never to set it. |
 | One network call, post-publish only | The `gh pr create/edit` read-back is the only network call on an enforcement path; it runs after the verb has published, cannot block, is best-effort with a timeout, and affects exit status only on a confirmed mismatch. |
@@ -441,11 +514,17 @@ every agent and every human, with no repo-aegis involvement at all.
 - **`egress-policy.test.ts`** — every rule in isolation; evaluation order;
   fail-open on unparseable remote / unclassified destination; `public-eligible`
   with uncached visibility ⇒ public-facing; `ask`→`deny` degradation when
-  `capabilities.ask` is false; `humanPresent` from both TTY and env.
+  `capabilities.ask` is false; `humanPresent` from both TTY and env. Rule g′:
+  a `gh` verb asks with `ghShimOnPath: true` and denies with `false`; an unset
+  capability changes nothing; `git push` and `npm publish` are unaffected by
+  `false`; an approval-backed allow and an earlier rule's deny both survive it.
 - **`hook-guard-egress.test.ts`** — subprocess tests feeding Claude Code,
   Codex-shaped and Gemini-shaped stdin; exit codes and stdout/stderr channels
   per decision; **no `updatedInput` ever present** (oracle test over the whole
-  serialised output).
+  serialised output); rule g′ end to end, with and without a shim on the
+  subprocess's `PATH`.
+- **`install-shim.test.ts`** — `ghShimIsFirstOnPath` agrees with `checkShim`
+  on every case but the stale one, where a reachable shim is still reachable.
 - **Pre-push integration** — against a local bare remote whose configured URL
   parses to a foreign org: push exits 2 with `CROSS_ORG_PUSH`; same org, public
   cached, `isatty(2)` false → `PUBLIC_PUSH_NEEDS_HUMAN`; with
@@ -458,7 +537,11 @@ every agent and every human, with no repo-aegis involvement at all.
   can emit for fixture payload content and fixture marker literals; must be
   absent.
 - **`ask` verified empirically** against a real Claude Code session in auto
-  mode before the docs claim it forces a prompt.
+  mode before the docs claim it forces a prompt. *Done 2026-09-12, and the
+  answer was no: under auto mode the classifier answers the `ask`, not the
+  person. §4a and §4b are what followed — an approval the human mints in
+  advance, and `deny` in place of an `ask` that nothing beneath it could
+  enforce.*
 
 ## Rollout
 
