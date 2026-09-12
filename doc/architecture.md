@@ -164,19 +164,33 @@ a string is identified as a leak by the same logic at every layer.
   CLI's version, the install must follow the release that contains the flags —
   see the CHANGELOG note on template evolution.
 
+- **Egress guard** — destination-aware publishing controls. Every layer
+  above inspects *content*; none inspected *where it is going*, and two
+  right-bytes-wrong-boundary incidents in one week landed in that gap. One
+  decision function in core (`egress-intent` parses a command line into its
+  publishing operations; `egress-policy` decides `allow` / `ask` / `deny`)
+  is enforced at three points: the git pre-push hook (`check --remote-url`,
+  fed the `$2` git always passed and the hook ignored), a `gh` shim on
+  `PATH` (`install shim`, `egress-check`, and a post-publish body read-back),
+  and the pre-command hooks of Claude Code / Codex CLI / Gemini CLI (`hook
+  guard-egress`, with a `hook egress-receipt` line after any publish). Shape
+  rules refuse the implicit forms (`git push` with no refspec, egress after
+  `cd`, `;`-chained egress, a payload path under `$TMPDIR`) with no context
+  at all; context rules refuse a cross-org destination, scan a payload
+  against the *destination's* deny set, and `ask` for a public destination
+  or an irreversible verb — degrading to `deny`, never `allow`, where the
+  framework has no ask. Decision-only by construction: no layer ever
+  rewrites a command. `selfIdentity` is the marker stem for the inverse
+  direction (own material entering a customer-coupled repo), gated on that
+  class exactly as `_private_infra` is gated on public-facing. `doctor`
+  reports the preconditions (`push.default`, shim on PATH, guard hook
+  registered, class + visibility resolved per repo), because a
+  destination-aware control on an unclassified estate is silent. See
+  [design/egress-guard.md](design/egress-guard.md); the server-side
+  `audit --pr-body` Action mode (its Phase 4) is not built.
+
 ### Designed but not yet implemented
 
-- **Egress guard** — destination-aware publishing controls. Every layer
-  above inspects *content*; none inspects *where it is going*, and two
-  right-bytes-wrong-boundary incidents in one week landed in that gap. One
-  decision function in core (`egress-intent` / `egress-policy`) enforced at
-  three points: the git pre-push hook (which already receives the remote URL
-  and ignores it), a `gh` shim on `PATH`, and the pre-command hooks of Claude
-  Code / Codex CLI / Gemini CLI. Shape rules refuse the implicit forms (`git
-  push` with no refspec, egress after `cd`, `;`-chained egress) with no
-  context; context rules `ask` for public destinations and fail open. Adds a
-  `selfIdentity` marker stem for the inverse direction (own material entering a
-  customer repo). See [design/egress-guard.md](design/egress-guard.md).
 - **Network-isolated mode** for `audit --published` (mirror registry).
 - **Auto-decrypt-on-demand** for `repo-aegis registry decrypt` so
   single commands that need the registry can fetch credentials inline

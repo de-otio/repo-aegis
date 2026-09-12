@@ -123,6 +123,7 @@ export {
   loadExemptPaths,
   ALWAYS_FILE_STEM,
   PRIVATE_INFRA_FILE_STEM,
+  SELF_IDENTITY_FILE_STEM,
   BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS,
 } from "./deny-set.js";
 export type { DenySet, DenySetFile, DenySetOptions } from "./deny-set.js";
@@ -230,6 +231,33 @@ export type {
   EgressInputFile,
   RepoVisibility,
 } from "./egress.js";
+
+// ---- egress guard (destination-aware publishing controls) ----------------
+// One decision function behind the pre-push hook, the `gh` shim and the
+// agent pre-command hooks. Shape rules are unconditional; context rules
+// fail open; the decision is never a rewritten command.
+export { parseEgressIntents } from "./egress-intent.js";
+export type { EgressIntent, EgressVerb, SegmentJoin } from "./egress-intent.js";
+export {
+  decideEgress,
+  resolveDestinationOffline,
+  scanPayloadAgainstDestination,
+  isHumanPresent,
+  isModeDependentPath,
+  describeVerb,
+  describeDestination,
+  formatReceipt,
+  EGRESS_HUMAN_ENV,
+  VERBS_NEEDING_HUMAN,
+} from "./egress-policy.js";
+export type {
+  EgressCode,
+  EgressDecision,
+  Destination,
+  DestinationResolver,
+  PayloadScanner,
+  DecideEgressOptions,
+} from "./egress-policy.js";
 
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";

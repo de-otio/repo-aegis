@@ -12,7 +12,9 @@ import {
   ALWAYS_FILE_STEM,
   PRIVATE_INFRA_FILE_STEM,
   MIN_AUTO_BLOCK_IDENTIFIER_LENGTH,
+  SELF_IDENTITY_FILE_STEM,
 } from "./deny-set.js";
+import { isPublishableStem } from "./ci-output.js";
 import { GlobTooBroadError } from "./globs.js";
 import { scanText } from "./scan.js";
 import type { RepoConfig, RepoClass } from "./repo.js";
@@ -158,10 +160,11 @@ describe("computeDenySet", () => {
       patterns: string[];
       combinedRegex: string;
     };
-    // Bumped to 5 alongside the strict/exemptible regex split; a stale 0.6.x
-    // cache must be rejected or the split would be missing from every warm
-    // machine and path exemptions would silently never engage.
-    assert.equal(cached.schemaVersion, 5);
+    // Bumped to 5 alongside the strict/exemptible regex split, and to 6 when
+    // the class-gated `_self_identity` stem arrived; a stale cache must be
+    // rejected on each of those, or the new shape would be missing from every
+    // warm machine and the feature would silently never engage.
+    assert.equal(cached.schemaVersion, 6);
     assert.equal(typeof cached.key, "string");
     assert.equal(cached.key.length, 64, "fingerprint is sha256 hex");
     assert.deepEqual(cached.patterns, ds.patterns);
@@ -649,6 +652,177 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
     });
     assert.equal(typeof ds.strictRegex, "string", "recomputed, not served from v4");
     assert.deepEqual(ds.exemptPaths, ["**/test/**"]);
+    rmSync(cachePath, { force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `_self_identity`: the other class-gated marker file, gated the other way.
+//
+// `_private_infra` is a leak when it leaves a private repo for a public one.
+// `_self_identity` is a leak when it leaves OUR repos for a customer's. So one
+// is included for public-facing repos and the other for `customer-coupled`
+// ones, and neither is ever included for both.
+// ---------------------------------------------------------------------------
+
+describe("computeDenySet — _self_identity gating", () => {
+  const SELF = "example-org";
+  let selfDir: string;
+
+  before(() => {
+    selfDir = join(tmp, "self-markers");
+    rmSync(selfDir, { recursive: true, force: true });
+    mkdirSync(selfDir, { recursive: true });
+    writeFileSync(join(selfDir, `${ALWAYS_FILE_STEM}.txt`), "PROJECT-CODENAME-ALPHA\n");
+    writeFileSync(join(selfDir, "customer-a.txt"), "acme-corp\n");
+    writeFileSync(join(selfDir, `${SELF_IDENTITY_FILE_STEM}.txt`), `${SELF}\n`);
+  });
+
+  it("includes identity patterns in a customer-coupled repo", () => {
+    const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
+      markersDir: selfDir,
+      cachePath: null,
+      publicFacing: false,
+    });
+    assert.ok(ds.patterns.includes(SELF), "our own name must not reach a customer repo");
+    assert.ok(ds.files.some(f => f.stem === SELF_IDENTITY_FILE_STEM));
+  });
+
+  for (const cls of ["private-strict", "public-eligible", "scratch"] as const) {
+    it(`EXCLUDES them in a ${cls} repo, where our own name belongs`, () => {
+      const ds = computeDenySet(makeRepo(cls), {
+        markersDir: selfDir,
+        cachePath: null,
+        // Both values of the private-infra gate, so the two gates cannot be
+        // confused for one another.
+        publicFacing: cls === "public-eligible",
+      });
+      assert.ok(!ds.patterns.includes(SELF), `must not fire in a ${cls} repo`);
+      assert.ok(!ds.files.some(f => f.stem === SELF_IDENTITY_FILE_STEM));
+      // The rest of the deny set is unaffected by the gate.
+      assert.ok(ds.patterns.includes("PROJECT-CODENAME-ALPHA"));
+    });
+  }
+
+  it("the gate survives the customer-coupled engagement scoping", () => {
+    // `scratch` and `customer-coupled` share the scoping branch that drops the
+    // repo's own engagement files. The reserved stem must be decided by its own
+    // gate before it reaches that branch — otherwise `scratch` would let it
+    // through as "not one of my engagements".
+    const coupled = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
+      markersDir: selfDir,
+      cachePath: null,
+      publicFacing: false,
+    });
+    const scratch = computeDenySet(makeRepo("scratch", ["customer-a"]), {
+      markersDir: selfDir,
+      cachePath: null,
+      publicFacing: false,
+    });
+    assert.ok(coupled.patterns.includes(SELF));
+    assert.ok(!scratch.patterns.includes(SELF));
+  });
+
+  it("scanText over a customer-coupled deny set hits an identity literal", () => {
+    const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
+      markersDir: selfDir,
+      cachePath: null,
+      publicFacing: false,
+    });
+    const hits = scanText(`maintained by ${SELF} — see the internal tracker`, ds);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0]!.engagement, SELF_IDENTITY_FILE_STEM);
+    // The redaction contract is unchanged: the literal never appears in the
+    // preview a hook or CI report would carry.
+    assert.ok(
+      !hits[0]!.matchPreview.includes(SELF),
+      "matchPreview must stay redacted for this stem like every other",
+    );
+  });
+
+  it("joins strictRegex, never the exemptible class", () => {
+    // Our project name in a test fixture we hand to a customer is still our
+    // name in their repository; only generic secret shapes are exemptible.
+    const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
+      markersDir: selfDir,
+      cachePath: null,
+      publicFacing: false,
+      exemptPaths: ["**/test/**"],
+    });
+    assert.ok(ds.strictRegex!.includes(SELF));
+    assert.ok(!ds.exemptibleRegex!.includes(SELF));
+  });
+
+  it("never auto-blocks the reserved stem as a literal identifier", () => {
+    const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
+      markersDir: selfDir,
+      cachePath: null,
+      publicFacing: false,
+    });
+    assert.ok(!ds.patterns.includes(SELF_IDENTITY_FILE_STEM));
+  });
+
+  it("is not publishable in CI output — it names the operator, and where", () => {
+    assert.equal(isPublishableStem(SELF_IDENTITY_FILE_STEM), false);
+    assert.equal(isPublishableStem(ALWAYS_FILE_STEM), true);
+  });
+
+  it("the cache key separates a customer-coupled set from a private-strict one", () => {
+    // Same marker files, same mtimes, same exempt paths — only the class
+    // differs. A fingerprint blind to the gate would serve whichever set was
+    // computed first to both.
+    const cachePath = join(tmp, "self-gate-cache.json");
+    rmSync(cachePath, { force: true });
+    const priv = computeDenySet(makeRepo("private-strict"), {
+      markersDir: selfDir,
+      cachePath,
+      publicFacing: false,
+    });
+    assert.ok(!priv.patterns.includes(SELF));
+    const coupled = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
+      markersDir: selfDir,
+      cachePath,
+      publicFacing: false,
+    });
+    assert.ok(coupled.patterns.includes(SELF), "cache must not mask the class gate");
+    // …and back again, so neither direction is the lucky one.
+    const priv2 = computeDenySet(makeRepo("private-strict"), {
+      markersDir: selfDir,
+      cachePath,
+      publicFacing: false,
+    });
+    assert.ok(!priv2.patterns.includes(SELF));
+    rmSync(cachePath, { force: true });
+  });
+
+  it("a v5-schema cache is rejected so the new stem takes effect on upgrade", () => {
+    // The marker files' mtimes and sizes are unchanged by an upgrade, so
+    // without the CACHE_VERSION bump a warm machine would be served a deny set
+    // that never knew about `_self_identity` — the feature silently inert.
+    const cachePath = join(tmp, "v5-cache.json");
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        schemaVersion: 5,
+        key: "shaped-but-stale",
+        files: [],
+        patterns: ["STALE-CACHE-SENTINEL"],
+        patternSources: [ALWAYS_FILE_STEM],
+        combinedRegex: "STALE-CACHE-SENTINEL",
+        strictRegex: "",
+        exemptibleRegex: "STALE-CACHE-SENTINEL",
+        exemptPaths: [],
+        warnings: [],
+      }),
+    );
+    const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
+      markersDir: selfDir,
+      cachePath,
+      publicFacing: false,
+      exemptPaths: [],
+    });
+    assert.ok(!ds.patterns.includes("STALE-CACHE-SENTINEL"), "v5 entry must be rejected");
+    assert.ok(ds.patterns.includes(SELF), "recomputed with the new stem");
     rmSync(cachePath, { force: true });
   });
 });

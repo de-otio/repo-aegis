@@ -7,7 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — the egress guard (destination-aware publishing controls)
+
+Two leaks in one week were one defect (design: `doc/design/egress-guard.md`).
+A PR description went to an org-internal customer repository from a body
+file that belonged to another project — `$TMPDIR` resolves to two different
+directories depending on whether the shell runs sandboxed, and a stale
+`pr-body.md` from another session was waiting in the other one. The next
+day a bare `git push` at the tail of a compound command whose leading `cd`
+had not taken effect ran in the wrong checkout and published a private
+in-progress branch to a public remote. Every existing control passed,
+correctly: neither incident had unsafe bytes. Both had bytes going to the
+wrong place, and the stack had no axis for *where*. The pre-push hook was
+even handed the remote URL as `$2` and ignored it.
+
+The fix is mechanical and sits in the command path, because instruction
+text does not change the failure rate of attention. **One decision function
+in core**, enforced wherever a publishing command must pass:
+
+- **`egress-intent` / `egress-policy` (core).** A quote-aware, operator-
+  splitting parser turns a shell command line into the publishing
+  operations it carries (`git push`, the mutating `gh` verbs, `npm|pnpm|yarn
+  publish`) with the facts the policy needs — remote and refspec, `--repo`,
+  payload files, whether an earlier segment was a `cd`, the operator that
+  joined the segment, `git -C`. The policy applies rules a–h in a fixed
+  order. **Shape rules are unconditional**: a bare `git push`
+  (`PUSH_IMPLICIT_TARGET`), egress after `cd` in the same command
+  (`EGRESS_AFTER_CD`), egress joined with `;` / `||` / `&`
+  (`EGRESS_UNGUARDED_CHAIN`), a payload path that is relative, expands
+  `$TMPDIR`, or sits under a mode-dependent temp root
+  (`PAYLOAD_MODE_DEPENDENT_PATH`). **Context rules fail open** — a
+  guardrail must not block on its own inability to determine context, the
+  lesson of the spurious `CROSS_ORG_WRITE` blocks: a destination in a
+  disjoint trust boundary (`CROSS_ORG_EGRESS`), a payload matching the
+  *destination's* deny set (`PAYLOAD_MARKER_HIT`), and a public destination
+  or an irreversible verb with nobody present (`PUBLIC_EGRESS_NEEDS_HUMAN`),
+  which `ask`s where the framework can and degrades to `deny` — never to
+  `allow` — where it cannot. Destination resolution is offline. Reasons
+  name `<org>/<repo>`, visibility, class and ref; never payload content.
+  **Decision-only:** no layer rewrites a command, because turning `git
+  push` into `git push origin <branch>` silently would rebuild the
+  implicit-destination defect one layer up. The two incident commands,
+  genericised, are test fixtures.
+
+  One deviation from the design as written: the sandboxed `$TMPDIR` on the
+  machine that had both incidents is `/tmp/claude-<uid>`, the parent of the
+  agent's session scratchpad — the one place the design tells agents to
+  put payloads. Rule d therefore exempts a session-unique `…/scratchpad/`
+  segment under that root and refuses everything else there.
+
+- **Git pre-push: `check --remote-url <url>`.** The generated pre-push
+  template passes git's `$2` through. `check` parses it and, before the
+  content scan, refuses a push into an org disjoint from the repo's trust
+  boundary (`CROSS_ORG_PUSH`, deterministic, offline) and a push to a
+  public-facing repo from a shell with no TTY on stderr
+  (`PUBLIC_PUSH_NEEDS_HUMAN`), unless a human sets
+  `REPO_AEGIS_EGRESS_HUMAN=1` for that one invocation — the same contract
+  as `REPO_AEGIS_WAIVE_NONINTERACTIVE`: documented human-only, a visible
+  act in any transcript. Otherwise it prints the git-native receipt,
+  `repo-aegis: pushing <ref> → <org>/<repo> (<visibility>)`. The template
+  digest changes, so installed copies report `HOOKS_SCRIPT_STALE` until
+  `install hooks` is re-run. This is the layer that reaches every agent
+  and every terminal, because git is the one choke point every push passes
+  through — and it is inert until a repo is classified and its visibility
+  cached, which is why `doctor` now says so.
+
+- **A `gh` shim on `PATH`: `install shim`, `egress-check`,
+  `egress-readback`.** Nothing chokes `gh` the way pre-push chokes `git`,
+  so `install shim` writes `<home>/bin/gh`, a wrapper that passes reads
+  through untouched and runs `repo-aegis egress-check` for the publishing
+  verbs — with `capabilities.ask = false`, since a shell has no prompt to
+  offer. After a permitted `gh pr create|edit --body-file`, the shim runs
+  the real `gh`, then reads the live body back and diffs it against the
+  file: `PUBLISHED_BODY_MISMATCH` with byte counts, never content. That
+  read-back is the design's one deliberate network call on an enforcement
+  path: the verb has already published, so it cannot block, and a wrong
+  body found in seconds is a 57-minute exposure not had. `uninstall`
+  removes the shim; the shim never resolves to itself.
+
+- **Agent pre-command hooks: `hook guard-egress [--agent claude|codex|gemini]`
+  and `hook egress-receipt`.** Registered by `install claude-md` on
+  `PreToolUse(Bash)` / `PostToolUse(Bash)`; equivalent snippets for Codex
+  CLI and Gemini CLI are in `doc/agent-install.md`. This is the only layer
+  that sees the *whole* compound command before anything executes, so it
+  is where the shape rules live, and on Claude Code it can return
+  `permissionDecision: "ask"`, which forces a human prompt even under
+  auto-mode — a guardrail written in prose becoming one that exists. After
+  a permitted publish the receipt hook returns one line as
+  `additionalContext`: `PUBLISHED → <org>/<repo> (<VISIBILITY>, class
+  <class>): <ref | PR #n>`. A model will skim past twenty lines of git
+  output; it will not skim past one line that says PUBLIC and a name it
+  did not intend. The hook never emits `updatedInput` — a test serialises
+  every output the hook can produce and asserts the string is absent.
+
+- **`selfIdentity` — the inverse direction.** Engagement markers stop
+  *customer* strings entering *our* repos. The first incident was *our*
+  strings entering a *customer's* repository, the direction with the
+  business cost. A new registry list renders to the reserved
+  `_self_identity` stem and joins the deny set **only** for
+  `customer-coupled` repos — and, through the egress guard, customer-
+  coupled destinations, which the guard infers from the registry when the
+  target org is in an engagement's `githubOrgs`, whatever directory the
+  command runs from — exactly as `_private_infra` joins only for
+  public-facing ones; excluded from the flat `markers.txt` for the same
+  reason; part of the deny-set cache key. `scan-env --self` offers the
+  operator's own org names, package names under the scan root, and the
+  agent session-link shape as candidates, dry-run by default.
+
+- **`doctor` reports the preconditions.** On the machine that had both
+  incidents, the public repository involved had no explicit class and no
+  cached visibility, because its org was not in `personalOrgs`; every
+  destination-aware rule would have been silent. `doctor` now checks
+  `push.default` (`PUSH_DEFAULT_IMPLICIT` — the single cheapest line in the
+  design: `git config --global push.default nothing` makes a bare push an
+  error in every shell, for every agent and every human, with no
+  repo-aegis involvement), the shim (`SHIM_MISSING` / `SHIM_NOT_FIRST`),
+  the guard hook (`GUARD_HOOK_UNREGISTERED`), and per repo
+  `CLASS_VISIBILITY_UNRESOLVED` and `PERSONAL_ORG_UNREGISTERED`.
+  `--no-egress-checks` restores the hook-liveness-only sweep.
+
+Not built: the server-side `audit --pr-body` Action mode (the design's
+Phase 4). Not defeated, by construction: `--no-verify`, `-c
+core.hooksPath=…`, calling the real `gh` by absolute path — client-side
+controls are advisory; these layers add friction and make bypass a
+visible, auditable act.
+
 ### Fixed
+
+- **The pre-push hook never chained to a repo's own `pre-push` on macOS.**
+  The chaining branch called `mktemp` with no template; BSD `mktemp`
+  requires one and prints nothing without it, the `|| true` hid the usage
+  error, and the empty-string guard fell through to a plain exit — so a
+  hook a human or another tool had installed into `.git/hooks` was silently
+  skipped on every push since the v0.7 global-`core.hooksPath` default. Found
+  by the `gh` shim's smoke test, which made the same mistake and caught it.
+  The template now names one; a script-level test runs the real hook in a
+  real repo against a chained hook that records what it receives.
 
 Three silent skips found while classifying ~90 repos on a machine with two
 `gh` accounts (#97). Each made a control believe less than it should without

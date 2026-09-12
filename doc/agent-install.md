@@ -118,8 +118,11 @@ This is idempotent. It:
 4. Installs git hooks at `~/.config/repo-aegis/hooks/` (pre-commit,
    pre-push) and sets `core.hooksPath` per repo.
 5. Installs the Claude Code hooks: PreToolUse `check-write` (refuses
-   cross-org writes), PostToolUse `scan-after-write` (deny-set
-   scan), PostToolUse `scan-bash-output` (secret-shape scan), and
+   cross-org writes), PreToolUse `guard-egress` (judges where a
+   publishing command would send bytes), PostToolUse
+   `scan-after-write` (deny-set scan), PostToolUse
+   `scan-bash-output` (secret-shape scan), PostToolUse
+   `egress-receipt` (names the destination after a publish), and
    the SessionStart `first-touch` hook (auto-classify on first
    touch).
 6. Appends a managed block to `~/.claude/CLAUDE.md` describing the
@@ -326,6 +329,158 @@ Surface to the user:
 >
 > Optional: enable the audit log (`repo-aegis audit-log on`) for a
 > compliance trail of state-changing CLI invocations.
+
+## The egress guard (destination-aware publishing controls)
+
+Everything above answers one question: *are these bytes safe in this
+repository?* The egress guard answers a different one: *is this the
+repository those bytes were meant for?* It exists because two incidents in
+one week were **right bytes, wrong boundary** — a PR body published to the
+wrong repository from a `$TMPDIR` path that resolved differently under a
+sandbox, and a bare `git push` at the tail of a compound command whose
+leading `cd` had not taken effect. Every content control behaved correctly
+in both. See [doc/design/egress-guard.md](design/egress-guard.md).
+
+### What `install claude-md` registers
+
+Two more hook entries, alongside the existing ones, both idempotent:
+
+| Event | Matcher | Command |
+|---|---|---|
+| `PreToolUse` | `Bash` | `repo-aegis hook guard-egress --agent claude` |
+| `PostToolUse` | `Bash` | `repo-aegis hook egress-receipt` |
+
+The PostToolUse `Bash` matcher entry now carries **two** repo-aegis hooks —
+`scan-bash-output` and `egress-receipt`. They do different jobs on the same
+tool result; neither replaces the other, and both coexist with any
+user-authored hook in the same entry.
+
+`repo-aegis install claude-md --print-only` shows exactly what would be
+written without touching disk. `repo-aegis install claude-md --uninstall`
+removes both again.
+
+**The guard:** reads the pending shell command on stdin before anything
+runs, extracts every publishing operation it carries (`git push`, the
+mutating `gh` verbs, `npm publish`), and returns `allow` / `ask` / `deny`.
+
+- **Shape rules are unconditional** — a `git push` with no explicit
+  `<remote> <refspec>`, an egress verb after a `cd` in the same command, an
+  egress verb joined by `;` or `||` to a prerequisite that may have failed,
+  a payload file on a mode-dependent path (`$TMPDIR`, a relative path, the
+  shared sandbox temp root). These need no registry, no classification and
+  no network, so they work on a machine that has only just installed the
+  tool.
+- **Context rules fail open** — cross-org egress, a payload matching the
+  destination's deny set, a public destination with no human present. They
+  need class and cached visibility; where those are missing, the guard does
+  not block. Run `repo-aegis classify --apply` in each repo so they are not
+  silently inert (`doctor` reports `CLASS_VISIBILITY_UNRESOLVED`).
+- **It is decision-only.** The guard never rewrites a command and never
+  emits `updatedInput`. A refusal means *you* re-issue the command
+  explicitly: `git push <remote> <branch>`, `git -C <abs-path>`,
+  `gh --repo <org>/<repo>`, and payload files written to the session
+  scratchpad and passed by absolute path.
+- **Never set `REPO_AEGIS_EGRESS_HUMAN`.** It is the human's declaration
+  that a person is at the keyboard, with the same contract as
+  `REPO_AEGIS_WAIVE_NONINTERACTIVE`. An agent setting it is the agent
+  approving its own publish.
+
+**The receipt:** after a command that published, one line of
+`additionalContext`:
+
+```
+PUBLISHED → acme/svc (PUBLIC, class public-eligible): main -> main
+```
+
+Read it. If the destination named there is not the one you intended, stop
+and tell the user immediately — that is the whole point of the line. If the
+command did not actually publish, the line reads `EGRESS FAILED → …`
+instead; a receipt never claims a publish that did not happen.
+
+### Verify the registration
+
+```sh
+repo-aegis doctor
+```
+
+`GUARD_HOOK_UNREGISTERED` means `settings.json` has no `PreToolUse` entry
+with matcher `Bash` running `repo-aegis hook guard-egress`. Fix with
+`repo-aegis install claude-md`. A guard that is not registered is invisible:
+a session with no guard looks exactly like a session where nothing needed
+guarding, which is why `doctor` checks for it rather than trusting that a
+past install happened.
+
+### Other agents
+
+The same entry point serves Codex CLI and Gemini CLI; only the event name,
+the matcher and the `--agent` value change. Register it by hand in that
+agent's settings (consult the agent's own documentation for the file
+location and exact key spelling — repo-aegis writes only Claude Code's
+`settings.json`).
+
+**Codex CLI** — `PreToolUse`, command in `tool_input.command`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "shell",
+        "hooks": [
+          { "type": "command", "command": "repo-aegis hook guard-egress --agent codex" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Gemini CLI** — `BeforeTool`, matcher `run_shell_command`, command in
+`tool_input.command`:
+
+```json
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          { "type": "command", "command": "repo-aegis hook guard-egress --agent gemini" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+On both of those, **`ask` degrades to `deny`** — never to `allow`. Neither
+framework is assumed to have an "ask" decision, so a case Claude Code would
+put in front of the user (a public destination with no human present)
+becomes a refusal whose reason says to have a human run or approve the
+command. That is the conservative direction, and it is deliberate: a guard
+that silently allowed what it could not ask about would be worse than no
+guard, because the operator would believe they had one.
+
+The hook reads stdin tolerantly and exits 0 on anything it cannot parse, so
+registering it against a tool that sends a different payload shape is
+harmless — but it also means a misregistration is silent. Test it once:
+
+```sh
+echo '{"tool_name":"Bash","tool_input":{"command":"git push"}}' | repo-aegis hook guard-egress
+echo $?    # 2, with a PUSH_IMPLICIT_TARGET reason on stderr
+```
+
+### Caveat: Claude Code's `ask` is not yet empirically verified
+
+The design relies on `hookSpecificOutput.permissionDecision: "ask"` forcing
+a user prompt **even under auto-accept**. That behaviour has not yet been
+verified end-to-end in a real Claude Code session against the version you
+are installing. Until it has been, treat `ask` as "the guard's decision was
+recorded and the framework was asked to prompt", not as a guarantee that a
+human saw it. The `deny` path — exit 2 — is the one whose blocking
+behaviour is part of the documented hook contract, and every shape rule
+uses it. If you verify the `ask` behaviour, say so to the user; if you
+observe it NOT prompting under auto mode, that is a finding worth an issue.
 
 ## Common pitfalls
 

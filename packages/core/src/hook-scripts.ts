@@ -108,9 +108,20 @@ export const PRE_PUSH_SCRIPT = `\
 #                       REPO_AEGIS_NEW_REF_FULL_SCAN=1 to force the old
 #                       whole-history behaviour.
 #
-# Git passes \`<remote-name> <remote-url>\` as positional args 1 and 2; the
-# remote NAME is what
-# selects the refs/remotes/<name>/* namespace to compare against.
+# Git passes \`<remote-name> <remote-url>\` as positional args 1 and 2. The
+# remote NAME selects the refs/remotes/<name>/* namespace to compare against.
+# The remote URL is the DESTINATION, and it is passed on as
+# \`--remote-url\` (doc/design/egress-guard.md §2): this hook is the one place
+# in the stack that sees where the bytes are going at the moment of egress,
+# and ignoring \$2 is what let a bare \`git push\` in the wrong checkout publish
+# a private branch to a public remote with every content check passing. With
+# it, \`check\` can refuse a cross-org push (\`CROSS_ORG_PUSH\`) or an
+# unattended push to a public-facing repo (\`PUBLIC_PUSH_NEEDS_HUMAN\`), and
+# otherwise prints a one-line receipt naming the destination.
+#
+# \$2 is empty when a push names a URL that git has no remote entry for; the
+# helper below then omits the flag entirely rather than passing an empty
+# value, so \`check\` sees exactly the pre-egress-guard argument list.
 #
 # Fail-open if repo-aegis is not on PATH so the git workflow doesn't
 # break for users who haven't yet installed the CLI globally.
@@ -124,6 +135,19 @@ ${SAME_FILE_HELPER}
 
 zero="0000000000000000000000000000000000000000"
 remote_name="\${1:-origin}"
+remote_url="\${2:-}"
+
+# Appends --remote-url only when git actually gave us one. An explicit
+# if/else rather than an array: bash 3.2 (macOS's stock /bin/bash) treats
+# "\${arr[@]}" on an EMPTY array as an unbound variable under \`set -u\`, so the
+# obvious array form would abort the hook on every push that has no \$2.
+__repo_aegis_check() {
+  if [ -n "$remote_url" ]; then
+    repo-aegis "$@" --remote-url "$remote_url"
+  else
+    repo-aegis "$@"
+  fi
+}
 
 exit_rc=0
 stdin_lines=()
@@ -136,14 +160,14 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     continue
   fi
   if [ "$remote_sha" = "$zero" ]; then
-    if ! repo-aegis check --push-ref "$local_ref" --remote "$remote_name"; then
-      echo "repo-aegis: hits in new ref $local_ref (remote: $remote_name)" >&2
+    if ! __repo_aegis_check check --push-ref "$local_ref" --remote "$remote_name"; then
+      echo "repo-aegis: blocked push of new ref $local_ref (remote: $remote_name); reason above" >&2
       exit_rc=1
     fi
   else
     range="\${remote_sha}..\${local_sha}"
-    if ! repo-aegis check --range "$range"; then
-      echo "repo-aegis: hits in range $range (ref: $local_ref)" >&2
+    if ! __repo_aegis_check check --range "$range"; then
+      echo "repo-aegis: blocked push of range $range (ref: $local_ref); reason above" >&2
       exit_rc=1
     fi
   fi
@@ -174,7 +198,13 @@ fi
 if [ -n "$hooks_dir" ]; then
   chained="$hooks_dir/pre-push"
   if [ -x "$chained" ] && ! __repo_aegis_same_file "$chained" "$0"; then
-    tmp_stdin="$(mktemp 2>/dev/null || true)"
+    # A TEMPLATE, not a bare \`mktemp\`: BSD mktemp (macOS's stock one)
+    # requires one and prints nothing without it, which made this whole
+    # chaining branch a silent no-op on macOS from the day it shipped —
+    # the "|| true" below turned the usage error into an empty string and
+    # the guard then fell through to the plain exit. Found by the gh
+    # shim's smoke test, which made the same mistake and caught it.
+    tmp_stdin="$(mktemp "\${TMPDIR:-/tmp}/repo-aegis-prepush.XXXXXX" 2>/dev/null || true)"
     if [ -n "$tmp_stdin" ]; then
       printf '%s\\n' "\${stdin_lines[@]}" > "$tmp_stdin"
       exec 3< "$tmp_stdin"

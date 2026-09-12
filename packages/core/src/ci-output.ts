@@ -41,10 +41,18 @@ import { ALWAYS_FILE_STEM } from "./deny-set.js";
  * True when a marker-file stem is safe to name in published output.
  *
  * Only `_always` qualifies: it is the universal secret-shape set, identical in
- * every install, and names no customer. Every other stem is either an
- * engagement id or `_private_infra` — the first is a customer name, the second
- * discloses that the operator has private infrastructure markers and, by
- * position in a hit list, where they matched.
+ * every install, and names no customer. Every other stem is an engagement id,
+ * `_private_infra`, or `_self_identity` — the first is a customer name, the
+ * second discloses that the operator has private infrastructure markers and,
+ * by position in a hit list, where they matched.
+ *
+ * `_self_identity` names the operator rather than a customer, so the
+ * confidentiality argument that damns an engagement stem does not apply to
+ * it. It is still not publishable, for the reason `_private_infra` is not: a
+ * published hit list that named the stem would tell a reader *which class* of
+ * the operator's private material a file tripped and where — the same
+ * positional disclosure, about the operator instead of their client. The
+ * operator re-runs locally to see attribution; CI output carries the count.
  */
 export function isPublishableStem(stem: string): boolean {
   return stem === ALWAYS_FILE_STEM;

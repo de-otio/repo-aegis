@@ -692,6 +692,70 @@ working with repo-aegis:
    sessions, rather than being pinned in your context where the next
    "concrete example" prompt will reach for it.
 
+## Publishing (egress): what the guard does and how you recover
+
+Everything above is about *content*. The egress guard is about
+*destination*: it sits in the path of every command that publishes —
+`git push`, `gh pr|issue|release|repo|api …`, `npm publish` — and decides
+`allow`, `ask` (a human is prompted) or `deny` before the command runs.
+It reaches you through three doors, and you may meet any of them:
+
+- **Your own pre-command hook** (`repo-aegis hook guard-egress`, registered
+  by `install claude-md` on Claude Code; Codex CLI and Gemini CLI have
+  equivalents). This one sees your *whole* compound command before it runs,
+  so it is where the shape rules live.
+- **The git pre-push hook**, which now reads the remote URL git hands it
+  (`check --remote-url`). It refuses a cross-org push (`CROSS_ORG_PUSH`)
+  and, for a public destination with nobody at a terminal, asks for a
+  person (`PUBLIC_PUSH_NEEDS_HUMAN`). On success it prints one line:
+  `repo-aegis: pushing <ref> → <org>/<repo> (<visibility>)`.
+- **A `gh` shim on `PATH`** (`install shim`), which runs the same decision
+  for every publishing `gh` verb and, after `gh pr create|edit --body-file`,
+  reads the live body back and reports `PUBLISHED_BODY_MISMATCH` if it is
+  not the file you passed.
+
+Four rules need no context and always apply. Learn their shapes; they
+are the ones you will hit:
+
+| You wrote | Refused as | Write instead |
+|---|---|---|
+| `git push` (no remote, or no refspec) | `PUSH_IMPLICIT_TARGET` | `git push origin <branch>` — always both |
+| `cd /x && … && git push origin main` | `EGRESS_AFTER_CD` | `git -C /x push origin main`, or `gh --repo <org>/<repo> …`, in its **own** tool call |
+| `make ; git push origin main` (or `\|\|`, or `&`) | `EGRESS_UNGUARDED_CHAIN` | `make && git push origin main`, or a separate call |
+| `gh pr create --body-file "$TMPDIR/pr-body.md"` (or a relative path, or `/var/folders/…`) | `PAYLOAD_MODE_DEPENDENT_PATH` | an absolute, session-unique path in the session scratchpad |
+
+The context rules fail open when the estate cannot answer, and never
+block on their own uncertainty: `CROSS_ORG_EGRESS` (the payload's tree or
+the pushed repo sits in a trust boundary disjoint from the destination's),
+`PAYLOAD_MARKER_HIT` (the body file matches the destination's deny set —
+including `selfIdentity` when the destination is customer-coupled), and
+`PUBLIC_EGRESS_NEEDS_HUMAN` (public destination, or `merge` / `release` /
+`publish` / `repo edit` / `workflow run`, and no person present).
+
+How to recover — the same three moves every time:
+
+1. **Re-issue the command explicitly.** The guard is decision-only: it
+   never rewrites your command, and it will not accept a rewrite from you
+   that keeps the implicit form. Name the remote and the branch; name the
+   repo; give the egress its own call; put the payload in the scratchpad.
+2. **If it asked, that is the user's decision, not yours.** Do not retry
+   in a different shape to avoid the prompt, do not split the command to
+   get under the rule, and never set `REPO_AEGIS_EGRESS_HUMAN`. Tell the
+   user what will be published where (the reason names `<org>/<repo>`,
+   its visibility and class) and stop until they answer.
+3. **Read the receipt.** After a permitted publish you get one line:
+   `PUBLISHED → <org>/<repo> (<VISIBILITY>, class <class>): <ref | PR #n>`.
+   If that is not the repository you intended, stop *before* the next
+   command and say so — a deleted branch still serves its objects by sha,
+   so the only remediation is not doing the next thing.
+
+If `doctor` reports `PUSH_DEFAULT_IMPLICIT`, `CLASS_VISIBILITY_UNRESOLVED`,
+`PERSONAL_ORG_UNREGISTERED`, `SHIM_MISSING` / `SHIM_NOT_FIRST` or
+`GUARD_HOOK_UNREGISTERED`, the destination-aware rules are partly blind on
+this machine. Surface the `fix` line to the user; do not run
+`engagements add` or `classify --apply` on your own initiative — which org
+is "ours" is a compliance decision the user owns.
+
 ## Error codes
 
 Every CLI failure with exit 2 emits a JSON error payload (under
@@ -743,6 +807,20 @@ Codes you should recognise and act on:
 | `BUNDLE_TOO_LARGE` | extracted prose exceeded the model's context budget | `details.bytes` carries the size; the user owns whether to shrink the corpus |
 | `BUNDLE_FENCE_COLLISION` | extracted prose contained the chosen fence delimiter | retry happens automatically with a fresh delimiter; surfacing this means the retry also failed |
 | `ROOT_CONTAINMENT` | `extractProse` resolved a forbidden ancestor path (`~/.config/repo-aegis`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/git`) | a likely symlink-attack indicator; do NOT bypass |
+| `PUSH_IMPLICIT_TARGET` | egress guard: `git push` without both `<remote>` and `<refspec>` | re-issue as `git push <remote> <branch>`. The guard never rewrites the command for you; do not ask it to. |
+| `EGRESS_AFTER_CD` | egress guard: a publishing command follows a `cd`/`pushd` in the same command line | use `git -C <abs-path>` or `gh --repo <org>/<repo>`, and give the publishing command its own tool call |
+| `EGRESS_UNGUARDED_CHAIN` | egress guard: a publishing command is joined to earlier segments with `;`, `\|\|` or `&` | chain with `&&`, or run it as a separate call |
+| `PAYLOAD_MODE_DEPENDENT_PATH` | egress guard: a `--body-file` / `-F` / `--notes-file` / `--input` path is relative, expands `$TMPDIR`, or sits under a mode-dependent temp root | write the payload to an absolute, session-unique path in the session scratchpad and pass that |
+| `CROSS_ORG_EGRESS` / `CROSS_ORG_PUSH` | egress guard: the pushed repo (or the payload's tree) belongs to a trust boundary disjoint from the destination's | this is the boundary both incidents crossed. Stop; name the destination to the user. Do NOT widen `personalOrgs` / `githubOrgs` to make it pass. |
+| `PAYLOAD_MARKER_HIT` | egress guard: the body file matches the destination's deny set (`selfIdentity` included for a customer-coupled destination) | run `repo-aegis check --path <file>` from the destination repo to see which stems (never `--verbose` from a hook); redact; re-run. The reason carries a hit count only. |
+| `PUBLIC_EGRESS_NEEDS_HUMAN` / `PUBLIC_PUSH_NEEDS_HUMAN` | egress guard: public destination, or `merge` / `release` / `publish` / `repo edit` / `workflow run`, and no human present | on Claude Code this arrives as a permission prompt — the user's decision. Elsewhere: tell the user what would be published where and stop. Never set `REPO_AEGIS_EGRESS_HUMAN`; never re-shape the command to dodge the rule. |
+| `PUBLISHED_BODY_MISMATCH` | `gh` shim read-back: the live PR body differs from the file that was passed (byte counts in `details`, never content) | the wrong document is published. Surface immediately; propose `gh pr edit --body-file <right file>` for the user to run; do not guess which file was meant. |
+| `READBACK_UNAVAILABLE` (warning) | the read-back could not run (no PR identified, `gh` failed, timeout) | the publish itself succeeded; tell the user the body was not verified and offer to view it |
+| `SHIM_PATH_OCCUPIED` | `install shim` found a file at `<home>/bin/gh` that repo-aegis did not write | surface the path; the user decides on `--force` |
+| `PUSH_DEFAULT_IMPLICIT` (`doctor`) | global `push.default` is unset or not `nothing` | suggest `git config --global push.default nothing` — one line, every shell, every agent |
+| `CLASS_VISIBILITY_UNRESOLVED` (`doctor`) | a repo with a GitHub remote has no explicit class or no cached visibility, so the destination rules are blind there | suggest `repo-aegis classify --apply && repo-aegis status` in that repo; do not run it yourself (see `VISIBILITY_UNRESOLVED`) |
+| `PERSONAL_ORG_UNREGISTERED` (`doctor`) | the repo's remote org is in no engagement and not in `personalOrgs` | surface the `fix` line; which org is "ours" is the user's compliance decision |
+| `SHIM_MISSING` / `SHIM_NOT_FIRST` / `GUARD_HOOK_UNREGISTERED` (`doctor`) | the `gh` shim is absent or shadowed on `PATH`; the guard hook is not in `settings.json` | suggest `repo-aegis install shim` / fixing `PATH` order / `repo-aegis install claude-md` |
 
 `audit` also emits per-finding diagnostic codes inside its
 `checks[].findings[].detail.code` field (NOT top-level error codes —
@@ -831,6 +909,8 @@ If you're running this from an agent context:
 | `REPO_AEGIS_HOME` | Override `~/.config/repo-aegis` as the config home | Stderr warning printed on every TTY invocation when set; suppressed in hook context. |
 | `REPO_AEGIS_REGISTRY` | Override the registry path independently from home | Set by the `--registry-path` global flag. |
 | `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER` | Equivalent to passing `--accept-cross-border` to `audit --org` | The user must set this themselves; do not auto-set. |
+| `REPO_AEGIS_EGRESS_HUMAN` | Declares that a human is present for one publishing command (`=1`), satisfying the egress guard's "needs a person" rule where no TTY is on stderr | **Human-only, by contract.** Never set it, never suggest setting it, never wrap a command in it. Setting it from an agent is a visible act in the transcript and defeats the one control that exists for exactly that case. If a publish needs a person, say so and stop. |
+| `REPO_AEGIS_WAIVE_NONINTERACTIVE` | The equivalent escape for `repo-aegis waive` | Same contract: human-only. |
 
 `REPO_AEGIS_REVEAL_MATCHES` is **not** an env var. The previous
 env-var path was deliberately removed because env vars propagate to
@@ -915,7 +995,15 @@ shape we don't model.
 | `install gitignore --uninstall` | strip managed block | `action`, `target`, `removed`, `reason?` |
 | `install claude-md --uninstall` | strip managed block + hook entries | `action`, `claudeMd`, `settings` |
 | `install ci --uninstall` | remove the workflow file | `action`, `target`, `removed`, `absent?` |
-| `uninstall` (top-level) | reverse all install steps; opt-in flags purge home + per-repo config | `action`, `dryRun`, `steps`, `purgeRepos?`, `purgeHome?` |
+| `install shim [gh]` | write the `gh` egress shim to `<home>/bin` | `action`, `path`, `changed`, `tool`, `binDir`, `pathInstruction`, `reason?` |
+| `install shim --uninstall` | remove the shim (never a file repo-aegis did not write) | `action`, `path`, `changed`, `reason?` |
+| `egress-check -- <gh args…>` | decide a `gh` publish (exit 0 allow / 2 deny) | `action`, `destination?`, `readback?`; deny reason on stderr |
+| `egress-readback --body-file <f> --pr <ref>` | diff the live PR body against the file | `ok`, `bytes` / `PUBLISHED_BODY_MISMATCH` with byte counts / `READBACK_UNAVAILABLE` |
+| `hook guard-egress [--agent <a>]` | (PreToolUse(Bash) entry) allow / ask / deny a publishing command | `hookSpecificOutput.permissionDecision` (+ reason); deny payload on stderr |
+| `hook egress-receipt` | (PostToolUse(Bash) entry) one `PUBLISHED → …` line per publish | `hookSpecificOutput.additionalContext` |
+| `doctor` | hook liveness + egress-guard preconditions | `action`, `dryRun`, `roots`, `machine`, `results[].checks`, `summary` |
+| `scan-env --self [--accept self-identity]` | offer / record `selfIdentity` candidates | `action`, `dryRun`\|`placement`, `candidates`\|`added`, `skippedDuplicates`, `tooShort` |
+| `uninstall` (top-level) | reverse all install steps (hooks, gitignore, claude-md, ci, shim); opt-in flags purge home + per-repo config | `action`, `dryRun`, `steps`, `purgeRepos?`, `purgeHome?` |
 | `uninstall sweep-repos` | walk roots, unset `repo-aegis.*` git config | `action`, `dryRun`, `roots`, `results` |
 
 Always pass `--json` when you want machine-readable output. Without

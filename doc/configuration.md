@@ -84,6 +84,84 @@ an exemption stays visible on audit even when `check` doesn't block on
 it. See [cli-reference.md](cli-reference.md#repo-aegis-audit) and the
 design doc's threat-model table.
 
+## The operator's own identity (`selfIdentity`)
+
+`privateInfra:` in the registry holds this machine's private
+infrastructure — internal registry hosts, internal domains — and is
+enforced **only in public-facing repos**, because those hosts are
+legitimate (often required) in a private one. `selfIdentity:` is its
+mirror image, enforced **only in `customer-coupled` repos**:
+
+```yaml
+# ~/.config/repo-aegis/engagements.yaml
+selfIdentity:
+  - example-org
+  - internal-project-codename
+  - claude\.ai/code/session_
+```
+
+It holds the operator's **own** names — the GitHub orgs they own, their
+project and package names, internal project codenames, internal
+hostnames, and the agent session-link shape.
+
+**Why the gate points the other way.** Engagement markers stop a
+*customer's* strings entering *our* repos. `selfIdentity` stops *our*
+strings entering a *customer's* repo — a PR body naming our internal
+codename, a fixture carrying our npm scope, an agent session URL pasted
+into a commit message. Outside a customer repo these strings are not
+merely harmless but load-bearing: our own org name is in the remote URL
+of every repo we own, so enforcing it anywhere else would fire
+constantly in exactly the places it belongs. Hence `public-eligible`,
+`private-strict` and `scratch` never load the list.
+
+**Where it applies.** Two places, both from the same gate:
+
+- a repo whose class is `customer-coupled`, on every path `check` and
+  the hooks already cover; and
+- via the egress guard, an egress **destination** that resolves to a
+  `customer-coupled` repo — so a PR body or release note is scanned
+  against the destination's rules before it is published, not against
+  the rules of the tree it was written in.
+
+**Rendered to a reserved stem, and excluded from `markers.txt`.** The
+patterns become `markers/_self_identity.txt`, never per-engagement
+files, and — like `_private_infra` — are deliberately **absent from the
+flat `markers.txt` union**. That file exists for consumers with no
+notion of repo class; handing it a class-gated set would enforce it
+everywhere, which for this list means blocking the operator's own name
+in every repo the operator owns.
+
+Like every non-`_always` stem, `_self_identity` is never path-exempt
+(`alwaysBlockExemptPaths` does not reach it — our project name in a
+fixture we hand to a customer is still our name in their repository),
+never waivable, and never named in `--redact-attribution` output.
+
+**Populating it — `scan-env --self`.** The same discovery-then-offer
+discipline as the host scan, dry-run by default:
+
+```sh
+repo-aegis scan-env --self                      # show candidates, write nothing
+repo-aegis scan-env --self --from ~/code        # scan a different tree
+repo-aegis scan-env --self --accept self-identity   # record them
+```
+
+Candidates come from three places: every org in the registry's
+`personalOrgs`, the `name` of every `package.json` under `--from`
+(default: the current directory, `node_modules` skipped — a
+dependency's name is somebody else's identity), and the built-in agent
+session-link shape. A scoped package name yields both halves:
+`@example-scope/toolkit` offers `example-scope` and `toolkit`. Names
+shorter than six characters are reported and dropped rather than
+recorded, for the reason short markers are always dropped — a four-
+character literal matched case-insensitively as a substring would
+flood unrelated content. `--accept` takes `self-identity` and nothing
+else here; the host placements (`private-infra`, `always-block`,
+`engagement`) are a usage error together with `--self`.
+
+`selfIdentity` is optional and additive, and needs **no
+`schemaVersion` bump** — see the compatibility note at the end of this
+document.
+
 ## Reviewed-benign waivers (`waivers:`)
 
 `.repo-aegis.yml` also carries a `waivers:` list — the auditable
@@ -179,7 +257,7 @@ Note the asymmetry worth remembering: `--verbose` is a thing a human opts *into*
 at a terminal; redaction is a thing CI opts *into* on the way out. They are
 independent, and a hook must never pass either.
 
-## Compatibility of `alwaysBlockExemptPaths` and `waivers`
+## Compatibility of `alwaysBlockExemptPaths`, `waivers` and `selfIdentity`
 
 Both keys are **optional and additive**, in both the registry and
 `.repo-aegis.yml` — neither requires a `schemaVersion` bump. Both
@@ -192,3 +270,14 @@ waivers (nothing filtered out). In both directions that's the
 over-blocking relative to a newer one, but it can never under-block
 because it doesn't understand a key. Stated explicitly here so the
 next person doesn't have to re-derive it from the schema code.
+
+`selfIdentity` is the same shape of addition with the opposite lean,
+and it is worth being precise about it. An older repo-aegis drops the
+key and therefore does **not** enforce `_self_identity` — laxer, not
+stricter, but only in `customer-coupled` repos and only by declining a
+protection that install never had. Version gating exists to stop a
+stale reader from **mis-enforcing** a key it half-understands; a reader
+that ignores the key enforces exactly the pre-`selfIdentity` deny set,
+which is the state every install was already in. Gating it behind a
+`schemaVersion` bump would trade an absent addition for a hard failure:
+every older client would refuse the registry outright.

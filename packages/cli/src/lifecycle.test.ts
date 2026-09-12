@@ -62,7 +62,13 @@ after(() => {
 
 describe("v0.2 full lifecycle", skipOpts, () => {
   it("step 1: init scaffolds home and renders empty markers", () => {
-    const r = runCli(home, repo, ["init", "--json"]);
+    // `--claude-home` keeps `init --with-claude` (on by default) inside the
+    // test's own tmp dir. Without it the step writes hook entries into the
+    // developer's real ~/.claude — which passed only for as long as every
+    // hook it registers happened to be present there already, and failed
+    // the moment a new one was added. Tests must never depend on the
+    // developer's environment (CONTRIBUTING.md).
+    const r = runCli(home, repo, ["init", "--json", "--claude-home", join(tmp, "claude")]);
     assert.equal(r.code, 0);
     const j = r.json as {
       action: string;

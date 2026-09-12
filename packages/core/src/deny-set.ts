@@ -32,6 +32,21 @@ export const ALWAYS_FILE_STEM = "_always";
 export const PRIVATE_INFRA_FILE_STEM = "_private_infra";
 
 /**
+ * Reserved stem for the operator's own-identity marker file — the mirror of
+ * {@link PRIVATE_INFRA_FILE_STEM}, class-gated in the opposite direction: it
+ * joins the deny set only when the repo (or, for the egress guard, the
+ * destination) is `customer-coupled`.
+ *
+ * Engagement markers keep a customer's strings out of our repos. These keep
+ * our strings — our org and package names, our internal codenames, an agent
+ * session link — out of a customer's. Everywhere else they are not merely
+ * harmless but load-bearing: our own org name appears in every remote URL of
+ * every repo we own, so blocking it outside a customer repo would fire
+ * constantly in exactly the places it belongs.
+ */
+export const SELF_IDENTITY_FILE_STEM = "_self_identity";
+
+/**
  * Minimum engagement-identifier length for the auto-block self-marker (see
  * computeDenySet). Identifiers shorter than this are NOT auto-added as patterns,
  * because a 2–3 character literal (e.g. `qa`, `ci`, `api`) matched
@@ -227,7 +242,13 @@ export interface DenySetOptions {
 // and no `exemptPaths` — the new fields would read as "absent", which scanners
 // interpret (correctly, and fail-closed) as "no exemptions", and the feature
 // would silently do nothing on every already-warm machine.
-const DENY_SET_CACHE_VERSION = 5;
+// Bumped to 6 when the class-gated `_self_identity` stem was introduced. The
+// same reasoning a third time: the *computed* pattern set changed shape while
+// every marker file's mtime and size stayed the same, so a cache written by
+// 0.7.x would be served to a customer-coupled repo forever without the new
+// stem — the feature would silently do nothing on every already-warm machine,
+// which is precisely the failure mode this counter exists to prevent.
+const DENY_SET_CACHE_VERSION = 6;
 
 interface CacheEntry {
   schemaVersion: number;
@@ -254,6 +275,7 @@ function computeFingerprint(
   repo: RepoConfig,
   dir: string,
   publicFacing: boolean,
+  selfIdentityActive: boolean,
   exemptPaths: readonly string[],
 ): string {
   const fileSummaries: string[] = [];
@@ -277,9 +299,16 @@ function computeFingerprint(
   // JSON-encoded rather than joined on a separator: a glob is a path pattern
   // and may legally contain whatever separator character we might pick, so a
   // naive join would let two different lists collide on one fingerprint.
+  // `selfIdentityActive` participates for the same reason as `publicFacing`:
+  // it gates whether `_self_identity.txt` joins the set. Today it is derived
+  // from `repo.class`, which is already in the fingerprint, so this term is
+  // redundant — deliberately. The gate and its cache key must not be able to
+  // drift apart if the gate ever widens (a destination-supplied class, say),
+  // and a redundant term costs one character of hash input.
   const input =
     `v${DENY_SET_CACHE_VERSION}|${repo.class}|${sortedEng}|` +
-    `pf=${publicFacing ? 1 : 0}|ep=${JSON.stringify(exemptPaths)}|` +
+    `pf=${publicFacing ? 1 : 0}|si=${selfIdentityActive ? 1 : 0}|` +
+    `ep=${JSON.stringify(exemptPaths)}|` +
     fileSummaries.join(";");
   return createHash("sha256").update(input).digest("hex");
 }
@@ -345,8 +374,8 @@ function resolveExemptPaths(repo: RepoConfig, opts: DenySetOptions): string[] {
  *
  * - `public-eligible` / `private-strict`: full union (every marker file).
  *   Engagement field on the repo is ignored; if set, a warning is emitted.
- * - `customer-coupled`: union of `_always.txt` + every per-engagement file
- *   whose stem is NOT in this repo's `engagements` list.
+ * - `customer-coupled`: union of `_always.txt` + `_self_identity.txt` + every
+ *   per-engagement file whose stem is NOT in this repo's `engagements` list.
  * - `scratch`: same set as `customer-coupled`, but the caller (the CLI's
  *   `check`) treats hits as advisory and exits 0.
  */
@@ -371,12 +400,24 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
   const cachePath =
     opts.cachePath === null ? null : opts.cachePath ?? defaultDenySetCachePath();
   const publicFacing = opts.publicFacing ?? isPublicFacing(repo);
+  // The `_self_identity` gate. Deliberately NOT a `DenySetOptions` field: the
+  // condition is the repo's class and nothing else, and `readRepoConfig` /
+  // the egress guard's destination resolution already produce that class. An
+  // override option would be a second, silent way to switch the stem on — the
+  // kind of knob that ends up set in a hook script and never reviewed.
+  const selfIdentityActive = repo.class === "customer-coupled";
   // Resolved BEFORE the cache lookup, because the resolved list is part of the
   // fingerprint (see computeFingerprint) — and because a too-broad glob must
   // fail loudly even on a cache hit, rather than being masked by a warm cache
   // written before the bad config existed.
   const exemptPaths = resolveExemptPaths(repo, opts);
-  const fingerprint = computeFingerprint(repo, dir, publicFacing, exemptPaths);
+  const fingerprint = computeFingerprint(
+    repo,
+    dir,
+    publicFacing,
+    selfIdentityActive,
+    exemptPaths,
+  );
 
   if (cachePath !== null) {
     const cached = readCache(cachePath);
@@ -432,6 +473,10 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
       if (stem === ALWAYS_FILE_STEM) return true;
       // Private infra is blocked only where it would actually be a leak.
       if (stem === PRIVATE_INFRA_FILE_STEM) return publicFacing;
+      // Our own identity is a leak only in a customer's repo. Checked before
+      // the scoping branch below, which would otherwise wave this system stem
+      // through as "not one of this repo's own engagements".
+      if (stem === SELF_IDENTITY_FILE_STEM) return selfIdentityActive;
       if (!useScoping) return true;
       return !own.has(stem);
     });
@@ -468,9 +513,15 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
   // so a repo may still mention its own engagement id; only OTHER engagements'
   // ids are blocked. `_always` is a system stem, not an identifier.
   for (const f of files) {
-    // Both reserved stems are system names, not engagement identifiers — they
+    // The reserved stems are system names, not engagement identifiers — they
     // must never be auto-blocked as literals.
-    if (f.stem === ALWAYS_FILE_STEM || f.stem === PRIVATE_INFRA_FILE_STEM) continue;
+    if (
+      f.stem === ALWAYS_FILE_STEM ||
+      f.stem === PRIVATE_INFRA_FILE_STEM ||
+      f.stem === SELF_IDENTITY_FILE_STEM
+    ) {
+      continue;
+    }
     if (f.stem.length < MIN_AUTO_BLOCK_IDENTIFIER_LENGTH) continue;
     const literal = escapeRegexLiteral(f.stem);
     if (patterns.includes(literal)) continue; // already present as an explicit marker
@@ -483,10 +534,14 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
   // never disagree about which pattern belongs where.
   //
   // Note which stems land on which side: ONLY `_always` is exemptible.
-  // `_private_infra` joins `strictRegex` alongside the engagement markers,
-  // because a private registry host or internal domain in a test fixture of a
-  // public repo is still a leak — the fixture directory is not a safe home for
-  // it the way it is for a throwaway keypair.
+  // `_private_infra` and `_self_identity` join `strictRegex` alongside the
+  // engagement markers, because a private registry host or internal domain in
+  // a test fixture of a public repo is still a leak — the fixture directory is
+  // not a safe home for it the way it is for a throwaway keypair — and our own
+  // project name in a fixture we hand to a customer is still our name in their
+  // repository. Both stems have already survived their class gate by the time
+  // they reach here; the path-exemption question is separate and the answer is
+  // no for every non-`_always` stem.
   const strictPatterns: string[] = [];
   const exemptiblePatterns: string[] = [];
   for (let i = 0; i < patterns.length; i++) {

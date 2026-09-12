@@ -8,6 +8,7 @@
 //   - install gitignore --uninstall
 //   - install claude-md --uninstall
 //   - install ci --uninstall      (per-repo workflow file)
+//   - install shim --uninstall    (the `gh` PATH shim)
 //
 // And, opt-in:
 //   - --purge-repos: sweep `repo-aegis.*` git config keys out of every
@@ -34,6 +35,7 @@ import { installHooks } from "./install-hooks.js";
 import { installGitignore } from "./install-gitignore.js";
 import { installClaudeMd } from "./install-claude-md.js";
 import { installCi } from "./install-ci.js";
+import { installShim, shimPathFor } from "./install-shim.js";
 import { uninstallSweepRepos } from "./uninstall-sweep-repos.js";
 
 interface UninstallOptions extends OutputOptions {
@@ -146,11 +148,24 @@ export function uninstall(opts: UninstallOptions): void {
         details: { skipped: true, reason: "cwd is not a git repo" },
       });
     }
+    // Machine-level, not per-repo: the `gh` shim lives under the repo-aegis
+    // home and guards every repo on the machine, so it is removed regardless
+    // of what cwd happens to be. It refuses to delete a file it did not
+    // write, which is why this is safe to run unconditionally.
+    runStepSilent("install-shim --uninstall", reports, () =>
+      installShim(undefined, { uninstall: true, silent: true, json: false }),
+    );
   } else {
     reports.push({ step: "install-hooks --uninstall", ok: true, details: { dryRun: true } });
     reports.push({ step: "install-gitignore --uninstall", ok: true, details: { dryRun: true } });
     reports.push({ step: "install-claude-md --uninstall", ok: true, details: { dryRun: true } });
     reports.push({ step: "install-ci --uninstall", ok: true, details: { dryRun: true } });
+    const shimPath = shimPathFor();
+    reports.push({
+      step: "install-shim --uninstall",
+      ok: true,
+      details: { dryRun: true, wouldRemove: existsSync(shimPath) ? shimPath : null },
+    });
   }
 
   // 2. --purge-repos
@@ -258,6 +273,8 @@ export function uninstall(opts: UninstallOptions): void {
   }
   for (const r of reports) {
     emitText(`  ${r.ok ? "✓" : "✗"} ${r.step}`);
+    const d = r.details as { wouldRemove?: string | null } | undefined;
+    if (d && typeof d.wouldRemove === "string") emitText(`      would remove ${d.wouldRemove}`);
   }
   if (purgeHomeReport) {
     if (purgeHomeReport.removed) emitText(`  ✓ purge-home: removed ${purgeHomeReport.path}`);
@@ -293,7 +310,7 @@ function runStep(label: string, reports: StepReport[], fn: () => void | InstallR
 function runStepSilent(
   label: string,
   reports: StepReport[],
-  fn: () => InstallReturning,
+  fn: () => InstallReturning | object,
 ): void {
   try {
     const result = fn();
