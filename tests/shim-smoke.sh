@@ -90,6 +90,10 @@ if [ "\$1" = "pr" ] && [ "\$2" = "create" ]; then
   echo "https://github.com/acme/svc/pull/4242"
   exit 0
 fi
+if [ "\$1" = "release" ] && [ "\$2" = "create" ]; then
+  echo "HTTP 422: Validation Failed" >&2
+  exit 1
+fi
 echo "gh argv: \$*"
 exit 0
 EOF
@@ -200,6 +204,44 @@ if grep -q "THE-BODY-WE-MEANT-TO-PUBLISH" "${WORK}/c.err" ||
   fail "c) body content leaked into the mismatch report"
 else
   pass "c) the mismatch report carries byte counts, not content"
+fi
+
+if grep -q "^PUBLISHED → acme/svc" "${WORK}/c.err"; then
+  pass "c) the receipt names the destination"
+else
+  fail "c) no receipt on stderr: $(cat "${WORK}/c.err")"
+fi
+
+# ---------------------------------------------------------------------------
+# e) a receipt never claims a publish that did not happen
+# ---------------------------------------------------------------------------
+# The fake gh fails `release create` the way the real one did on 2026-09-12
+# (HTTP 422). Until v0.9.2 the shim had already printed PUBLISHED by then.
+e_rc=0
+(
+  cd "${REPO}" &&
+    REPO_AEGIS_EGRESS_HUMAN=1 run_with_timeout 30 gh release create v9.9.9 --title t
+) >"${WORK}/e.out" 2>"${WORK}/e.err" || e_rc=$?
+
+if [ "${e_rc}" -eq 1 ]; then
+  pass "e) gh's own exit code is preserved"
+else
+  fail "e) expected gh's exit 1, got ${e_rc}"
+fi
+if grep -q "PUBLISHED" "${WORK}/e.err" "${WORK}/e.out"; then
+  fail "e) a PUBLISHED receipt for a publish that failed: $(cat "${WORK}/e.err")"
+else
+  pass "e) no PUBLISHED receipt for a failed gh"
+fi
+if grep -q "^EGRESS FAILED → acme/svc" "${WORK}/e.err"; then
+  pass "e) the failure line names the destination"
+else
+  fail "e) no EGRESS FAILED line on stderr: $(cat "${WORK}/e.err")"
+fi
+if grep -q "HTTP 422" "${WORK}/e.err"; then
+  pass "e) gh's own stderr still reaches the user"
+else
+  fail "e) gh's stderr was swallowed: $(cat "${WORK}/e.err")"
 fi
 
 # ---------------------------------------------------------------------------

@@ -222,8 +222,27 @@ describe("checkShim", () => {
     });
     assert.equal(checks.length, 1);
     assert.equal(checks[0]?.ok, true);
-    assert.equal(checks[0]?.detail, "shim installed and first on PATH");
+    assert.equal(checks[0]?.detail, "shim installed, current, and first on PATH");
     assert.equal(checks[0]?.fix, undefined);
+  });
+
+  it("SHIM_STALE when the shim on PATH is an earlier release's script", () => {
+    const { home, run } = makeHome("check-stale");
+    run(() => captureOutput(() => installShim(undefined, {})));
+    // An older generated shim: same header line, different body.
+    writeFileSync(join(home, "bin", "gh"), `#!/usr/bin/env bash\n${SHIM_HEADER_LINE}\nexec gh "$@"\n`);
+    const other = fakeGh(join(root, "check-stale-bin"), "echo real gh");
+
+    const checks = checkShim({
+      REPO_AEGIS_HOME: home,
+      PATH: [join(home, "bin"), other].join(delimiter),
+    });
+    assert.equal(checks[0]?.code, "SHIM_STALE");
+    assert.equal(checks[0]?.ok, false);
+    assert.equal(checks[0]?.fix, "repo-aegis install shim");
+    // And `install shim` is the fix: it rewrites the stale file and the check clears.
+    run(() => captureOutput(() => installShim(undefined, {})));
+    assert.equal(checkShim({ REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), other].join(delimiter) })[0]?.ok, true);
   });
 
   it("ignores a non-executable gh earlier on PATH", () => {

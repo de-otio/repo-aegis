@@ -22,6 +22,7 @@ import { readFileSync } from "node:fs";
 import {
   decideEgress,
   recordWorkingTree,
+  describeDestinationForReceipt,
   describeVerb,
   formatReceipt,
   isHumanPresent,
@@ -159,23 +160,27 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   }
 
   const readback = readbackFor(intents);
+  // §5: the one line the model will not skim past — but a receipt must never
+  // claim a publish that did not happen, and at this point nothing has run.
+  // So the two possible lines travel in the verdict, and the shim prints
+  // exactly one of them AFTER the real `gh` has returned, keyed on its exit
+  // code. (Until v0.9.2 this command printed `PUBLISHED →` here, before
+  // `gh` ran: a `gh release create` that failed with HTTP 422 still got a
+  // receipt.) Only for a command that actually publishes, so `gh pr view`
+  // carries none.
+  const detail =
+    first === undefined
+      ? undefined
+      : `${describeVerb(first.verb)}${first.refspec !== undefined ? ` ${first.refspec}` : ""}`;
   emitJson({
     action: "allow",
     ...(destination && { destination: destinationJson(destination) }),
     ...(readback && { readback }),
+    ...(detail !== undefined && {
+      receipt: formatReceipt(destination, detail),
+      failedReceipt: `EGRESS FAILED → ${describeDestinationForReceipt(destination)}: ${detail}`,
+    }),
   });
-
-  // §5: one line the model will not skim past. stderr, because stdout is the
-  // shim's machine-readable channel — and only for a command that actually
-  // publishes, so `gh pr view` stays silent.
-  if (first !== undefined) {
-    process.stderr.write(
-      formatReceipt(
-        destination,
-        `${describeVerb(first.verb)}${first.refspec !== undefined ? ` ${first.refspec}` : ""}`,
-      ) + "\n",
-    );
-  }
 }
 
 /** Exit 1: a fault in the guard, which the shim treats as "proceed". */

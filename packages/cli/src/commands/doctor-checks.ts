@@ -15,6 +15,7 @@ export interface DoctorCheck {
     | "CLASS_VISIBILITY_UNRESOLVED"
     | "PERSONAL_ORG_UNREGISTERED"
     | "SHIM_MISSING"
+    | "SHIM_STALE"
     | "SHIM_NOT_FIRST"
     | "GUARD_HOOK_UNREGISTERED";
   ok: boolean;

@@ -485,7 +485,10 @@ past install happened.
 `SHIM_MISSING` means `repo-aegis install shim` has not run;
 `SHIM_NOT_FIRST` means it has, but another `gh` precedes the shim on
 `PATH` (or the check ran in a shell that never sourced the profile
-line). Both are [Step 2b](#step-2b--install-the-gh-shim).
+line); `SHIM_STALE` means the shim on `PATH` was written by an earlier
+release — re-run `repo-aegis install shim` after every upgrade, the way
+`install hooks` is re-run for `HOOKS_SCRIPT_STALE`. All three are
+[Step 2b](#step-2b--install-the-gh-shim).
 `PUSH_DEFAULT_IMPLICIT` is the one-line `git config --global
 push.default nothing` recommendation.
 
