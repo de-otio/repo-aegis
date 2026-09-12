@@ -11,7 +11,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addMarkerPattern, addMarkerPatterns } from "./registry-mutate.js";
+import {
+  addMarkerPattern,
+  addMarkerPatterns,
+  addTopLevelPatterns,
+} from "./registry-mutate.js";
 import {
   EngagementNotFoundError,
   PatternValidationError,
@@ -130,5 +134,54 @@ describe("addMarkerPatterns — [SEC M-3] lock scope", () => {
     const reg = readFileSync(registryPath, "utf8");
     assert.match(reg, /\\bnew-foo\\b/);
     assert.match(reg, /\\bnew-bar\\b/);
+  });
+});
+
+describe("addTopLevelPatterns — selfIdentity", () => {
+  it("creates the list when absent and appends to it thereafter", () => {
+    const first = addTopLevelPatterns("selfIdentity", ["example-org"], { registryPath });
+    assert.deepEqual(first.added, ["example-org"]);
+    assert.match(readFileSync(registryPath, "utf8"), /selfIdentity/);
+
+    const second = addTopLevelPatterns(
+      "selfIdentity",
+      ["internal-project-codename"],
+      { registryPath },
+    );
+    assert.deepEqual(second.added, ["internal-project-codename"]);
+    const reg = readFileSync(registryPath, "utf8");
+    assert.match(reg, /example-org/);
+    assert.match(reg, /internal-project-codename/);
+  });
+
+  it("de-duplicates: a pattern already present is skipped, not appended twice", () => {
+    addTopLevelPatterns("selfIdentity", ["example-org"], { registryPath });
+    const again = addTopLevelPatterns(
+      "selfIdentity",
+      ["example-org", "second-example-org"],
+      { registryPath },
+    );
+    assert.deepEqual(again.added, ["second-example-org"]);
+    assert.deepEqual(again.skipped, ["example-org"]);
+    const occurrences = readFileSync(registryPath, "utf8").match(/example-org/g) ?? [];
+    // "example-org" once, "second-example-org" once — never a duplicate entry.
+    assert.equal(occurrences.length, 2);
+  });
+
+  it("renders the patterns to the reserved `_self_identity` stem", () => {
+    addTopLevelPatterns("selfIdentity", ["example-org"], { registryPath });
+    const rendered = readFileSync(join(home, "markers", "_self_identity.txt"), "utf8");
+    assert.match(rendered, /example-org/);
+  });
+
+  it("keeps the two top-level lists apart", () => {
+    addTopLevelPatterns("selfIdentity", ["example-org"], { registryPath });
+    addTopLevelPatterns("privateInfra", ["registry\\.internal\\.invalid"], {
+      registryPath,
+    });
+    const selfFile = readFileSync(join(home, "markers", "_self_identity.txt"), "utf8");
+    const infraFile = readFileSync(join(home, "markers", "_private_infra.txt"), "utf8");
+    assert.ok(!selfFile.includes("internal.invalid"));
+    assert.ok(!infraFile.includes("example-org"));
   });
 });

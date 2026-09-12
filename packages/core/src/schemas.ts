@@ -173,6 +173,43 @@ export const registryFileSchema = z
       })
       .optional(),
     /**
+     * Patterns for the operator's OWN identity — the GitHub orgs they own,
+     * their project and package names, their internal project codenames, and
+     * the agent session-link shape.
+     *
+     * The inverse direction of every other list here. Engagement markers stop
+     * a *customer's* strings entering *our* repos; `selfIdentity` stops *our*
+     * strings entering a *customer's* repo, which is the direction with the
+     * business cost. Rendered to the reserved `_self_identity` marker stem and
+     * included in the deny set only when the repo — or, for the egress guard,
+     * the destination — is `customer-coupled`. Exactly the mirror of
+     * `privateInfra`, which is included only for public-facing repos: each is
+     * a set of strings that is entirely legitimate at home and a leak abroad,
+     * and "abroad" is a different class for each.
+     *
+     * Populated by `scan-env --self`. Names only — never a credential.
+     *
+     * camelCase like `privateInfra` and every other key added since the
+     * legacy snake_case `always_block`.
+     *
+     * **No `schemaVersion` bump.** The key is optional and additive, so an
+     * older repo-aegis reading a registry that declares it drops the key via
+     * `.passthrough()` and simply does not gain the new stem. Unlike
+     * `alwaysBlockExemptPaths` the old reader is *laxer*, not stricter — but
+     * only in `customer-coupled` repos, and only by declining a protection it
+     * never had in the first place. Version gating exists to stop a stale
+     * reader from **mis-enforcing** what it half-understands; a reader that
+     * ignores the key enforces exactly the pre-`selfIdentity` deny set, which
+     * is a state every install was already in. Gating this behind a version
+     * bump would instead make every older client refuse the registry outright
+     * — a hard failure traded for an absent addition.
+     */
+    selfIdentity: z
+      .array(z.string({ message: "'selfIdentity' entries must be strings" }), {
+        message: "'selfIdentity' must be a list of patterns",
+      })
+      .optional(),
+    /**
      * Path globs (see `globs.ts` for the `*`/`?`/`**` semantics) inside which
      * the `_always` marker class — and ONLY that class — is not enforced.
      *

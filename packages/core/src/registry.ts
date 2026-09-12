@@ -56,6 +56,14 @@ export interface Registry {
    */
   privateInfra?: string[];
   /**
+   * Operator-identity marker patterns, blocked only in `customer-coupled`
+   * repos (and, via the egress guard, at `customer-coupled` destinations).
+   * The mirror of {@link Registry.privateInfra}; see the schema for why the
+   * two gates point in opposite directions. Always populated by
+   * `loadRegistry` (`[]` when absent).
+   */
+  selfIdentity?: string[];
+  /**
    * Path globs inside which the `_always` marker class is not enforced.
    * Engagement markers and `_private_infra` are never exempted — see the
    * schema comment for why that asymmetry is load-bearing.
@@ -175,6 +183,7 @@ export function loadRegistry(path: string = registryPath()): Registry {
     // `isHostAllowed` compares by exact equality.
     publicRegistries: (validated.publicRegistries ?? []).map(h => h.toLowerCase()),
     privateInfra: validated.privateInfra ?? [],
+    selfIdentity: validated.selfIdentity ?? [],
     // Conditional spread, not `?? []`: the absent/empty distinction decides
     // between "built-in default exemptions" and "no exemptions at all".
     ...(validated.alwaysBlockExemptPaths !== undefined && {
