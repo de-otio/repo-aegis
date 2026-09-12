@@ -35,6 +35,7 @@
 //      output and no registry read.
 import {
   decideEgress,
+  recordWorkingTree,
   describeVerb,
   isHumanPresent,
   loadRegistry,
@@ -248,6 +249,12 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
 
     const loaded = loadRegistryOrEmpty();
     registryNote = loaded.note;
+
+    // Write-through: whatever this directory declares about its own origin
+    // goes into the machine-wide destination cache, so the next command that
+    // names this repository from *elsewhere* is judged by that declaration.
+    // Best-effort by contract; a cache miss is not a reason to block.
+    recordWorkingTree(cwd ?? process.cwd());
 
     decision = decideEgress({
       intents,

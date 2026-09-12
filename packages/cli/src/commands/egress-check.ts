@@ -21,6 +21,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
   decideEgress,
+  recordWorkingTree,
   describeVerb,
   formatReceipt,
   isHumanPresent,
@@ -112,6 +113,11 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   }
 
   const registry = loadRegistryOrEmpty();
+  // Write-through into the machine-wide destination cache (see
+  // `hook guard-egress`): a command judged from inside a repository leaves
+  // that repository's declaration where a later command from elsewhere can
+  // find it. Best-effort.
+  recordWorkingTree(cwd);
   let decision;
   try {
     decision = decideEgress({

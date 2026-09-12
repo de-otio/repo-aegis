@@ -259,4 +259,22 @@ describe("hook egress-receipt — gh verbs", { skip: !SUBPROCESS_TESTS_AVAILABLE
     );
     assert.match(contextOf(r), /^EGRESS FAILED/);
   });
+
+  it("gh api: the receipt names the repository in the API path, not the cwd's origin", () => {
+    // The 2026-09-12 receipt read `PUBLISHED → <the cwd's private repo>` for a
+    // merge into a different, public one. The path names the destination.
+    const elsewhere = makeRepo("receipt-gh-api-cwd", {
+      remote: "git@github.com:acme/notes.git",
+      class: "private-strict",
+    });
+    const r = runReceipt(
+      payload(
+        "gh api -X PUT repos/acme/svc/pulls/103/merge -f merge_method=squash",
+        '{"sha":"abc","merged":true}\n',
+        elsewhere,
+      ),
+      elsewhere,
+    );
+    assert.match(contextOf(r), /^PUBLISHED → acme\/svc \(.*\): gh api \(mutating\)$/);
+  });
 });

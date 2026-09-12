@@ -22,6 +22,7 @@ import {
 } from "./egress-policy.js";
 import type { Registry } from "./registry.js";
 import type { TrustBoundary } from "./trust-boundary.js";
+import { recordWorkingTree } from "./destination-cache.js";
 
 const REGISTRY: Registry = {
   engagements: [
@@ -392,6 +393,9 @@ describe("resolveDestinationOffline — real git config", () => {
   let root: string;
   let repo: string;
   let other: string;
+  /** A second, PRIVATE checkout in the same personal org — the 2026-09-12 cwd. */
+  let priv: string;
+  let priorHome: string | undefined;
 
   function git(cwd: string, args: string[]): void {
     execFileSync("git", args, { cwd, stdio: ["ignore", "ignore", "ignore"] });
@@ -401,8 +405,10 @@ describe("resolveDestinationOffline — real git config", () => {
     root = mkdtempSync(join(tmpdir(), "egress-policy-"));
     repo = join(root, "svc");
     other = join(root, "elsewhere");
+    priv = join(root, "notes");
     mkdirSync(repo);
     mkdirSync(other);
+    mkdirSync(priv);
     git(repo, ["init", "-q"]);
     git(repo, ["remote", "add", "origin", "git@github.com:acme/svc.git"]);
     git(repo, ["remote", "add", "customer", "https://github.com/customer-a-org/thing.git"]);
@@ -410,9 +416,19 @@ describe("resolveDestinationOffline — real git config", () => {
     git(repo, ["config", "repo-aegis.class", "public-eligible"]);
     git(repo, ["config", "repo-aegis.visibility", "public"]);
     writeFileSync(join(repo, "README.md"), "hello\n");
+    git(priv, ["init", "-q"]);
+    git(priv, ["remote", "add", "origin", "git@github.com:acme/notes.git"]);
+    git(priv, ["config", "repo-aegis.class", "private-strict"]);
+    git(priv, ["config", "repo-aegis.visibility", "private"]);
+    // The destination cache lives under REPO_AEGIS_HOME; point it at this
+    // fixture so the tests neither read nor write the developer's own.
+    priorHome = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = join(root, "home");
   });
 
   after(() => {
+    if (priorHome === undefined) delete process.env["REPO_AEGIS_HOME"];
+    else process.env["REPO_AEGIS_HOME"] = priorHome;
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -429,6 +445,7 @@ describe("resolveDestinationOffline — real git config", () => {
       visibility: "public",
       publicFacing: true,
       classKnown: true,
+      workingTree: repo,
     });
   });
 
@@ -584,5 +601,127 @@ describe("resolveDestinationOffline — real git config", () => {
       capabilities: { ask: true },
     });
     assert.equal(d.action === "deny" && d.code, "CROSS_ORG_EGRESS");
+  });
+
+  // ---- gh api: the destination is in the path ---------------------------
+
+  const MERGE = "gh api -X PUT repos/acme/svc/pulls/103/merge -f merge_method=squash";
+
+  it("gh api repos/o/r/… is resolved from the path, not the cwd", () => {
+    const d = resolveDestinationOffline(intent(MERGE), priv);
+    assert.equal(d?.org, "acme");
+    assert.equal(d?.repo, "svc"); // not `notes`, the cwd's origin
+  });
+
+  it("gh api orgs/o/… resolves to the org with repo `*`", () => {
+    const d = resolveDestinationOffline(intent("gh api -X POST orgs/customer-a-org/repos -f name=x"), priv, REGISTRY);
+    assert.equal(d?.org, "customer-a-org");
+    assert.equal(d?.repo, "*");
+    assert.equal(d?.class, "customer-coupled");
+  });
+
+  it("gh api with {owner}/{repo} placeholders resolves from the cwd, as gh does", () => {
+    const d = resolveDestinationOffline(intent("gh api repos/{owner}/{repo}/issues -f title=x"), repo);
+    assert.equal(d?.repo, "svc");
+    assert.equal(d?.classKnown, true);
+  });
+
+  it("gh api graphql from a directory with no origin → null", () => {
+    assert.equal(resolveDestinationOffline(intent("gh api graphql -f query=x"), other), null);
+  });
+
+  // ---- an uncached personal-org destination is treated as public --------
+
+  it("an uncached destination in a personal org is assumed public-facing (with a registry)", () => {
+    const d = resolveDestinationOffline(intent("gh pr create -t x -b y --repo acme/other"), priv, REGISTRY);
+    assert.equal(d?.classKnown, false);
+    assert.equal(d?.assumedPublic, true);
+    assert.equal(d?.publicFacing, true);
+    assert.equal(describeDestination(d), "acme/other (visibility uncached, treated as public, class unknown)");
+    assert.equal(formatReceipt(d!, "PR #1"), "PUBLISHED → acme/other (VISIBILITY UNCACHED, TREATED AS PUBLIC, class unknown): PR #1");
+  });
+
+  it("… and the policy asks rather than allows", () => {
+    const d = decideEgress({
+      intents: parseEgressIntents("gh pr create -t x -b y --repo acme/other"),
+      cwd: priv,
+      registry: REGISTRY,
+      humanPresent: false,
+      capabilities: { ask: true },
+    });
+    assert.equal(d.action, "ask");
+  });
+
+  // ---- the machine-wide destination cache -------------------------------
+
+  it("before the cache knows the destination: the merge from the private cwd is assumed public, not allowed", () => {
+    const d = decideEgress({
+      intents: parseEgressIntents(MERGE),
+      cwd: priv,
+      registry: REGISTRY,
+      humanPresent: false,
+      capabilities: { ask: true },
+    });
+    assert.equal(d.action, "ask");
+    assert.ok(d.action === "ask" && d.destination?.assumedPublic === true);
+  });
+
+  it("once the public checkout is recorded, a foreign-cwd command is judged by its declaration", () => {
+    assert.equal(recordWorkingTree(repo), "acme/svc");
+    const d = resolveDestinationOffline(intent(MERGE), priv, REGISTRY);
+    assert.deepEqual(d, {
+      org: "acme",
+      repo: "svc",
+      class: "public-eligible",
+      visibility: "public",
+      publicFacing: true,
+      classKnown: true,
+      fromCache: true,
+      workingTree: repo,
+    });
+    // `--repo` from elsewhere, the same way.
+    const viaFlag = resolveDestinationOffline(intent("gh pr create -t x -b y --repo acme/svc"), other, REGISTRY);
+    assert.equal(viaFlag?.fromCache, true);
+    assert.equal(viaFlag?.publicFacing, true);
+    // A remote URL given to git push from elsewhere, the same way.
+    const viaUrl = resolveDestinationOffline(intent("git push git@github.com:acme/svc.git main"), other, REGISTRY);
+    assert.equal(viaUrl?.fromCache, true);
+  });
+
+  it("the 2026-09-12 command: a merge into the public repo from the private checkout now asks, naming the destination", () => {
+    const d = decideEgress({
+      intents: parseEgressIntents(MERGE),
+      cwd: priv,
+      registry: REGISTRY,
+      humanPresent: false,
+      capabilities: { ask: true },
+    });
+    assert.equal(d.action, "ask");
+    assert.ok(d.action === "ask" && d.reason.includes("acme/svc (public, public-eligible)"), d.action === "ask" ? d.reason : "");
+    assert.ok(d.action === "ask" && d.reason.includes(`from the checkout at ${repo}`));
+  });
+
+  it("… and the receipt names the destination, not the cwd", () => {
+    const dest = resolveDestinationOffline(intent(MERGE), priv, REGISTRY);
+    assert.equal(formatReceipt(dest, "gh api (mutating)"), "PUBLISHED → acme/svc (PUBLIC, class public-eligible): gh api (mutating)");
+  });
+
+  it("the cache follows the live config: flipping the checkout's visibility flips the judgement", () => {
+    git(repo, ["config", "repo-aegis.class", "private-strict"]);
+    git(repo, ["config", "repo-aegis.visibility", "private"]);
+    try {
+      const d = resolveDestinationOffline(intent(MERGE), priv, REGISTRY);
+      assert.equal(d?.publicFacing, false);
+      assert.equal(d?.fromCache, true);
+    } finally {
+      git(repo, ["config", "repo-aegis.class", "public-eligible"]);
+      git(repo, ["config", "repo-aegis.visibility", "public"]);
+    }
+  });
+
+  it("the own-origin path is unchanged by the cache", () => {
+    const d = resolveDestinationOffline(intent("git push origin main"), repo, REGISTRY);
+    assert.equal(d?.fromCache, undefined);
+    assert.equal(d?.workingTree, repo);
   });
 });

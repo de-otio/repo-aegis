@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { captureOutput, fakeGh, withFakeGh, withoutGh, lastJsonLine } from "../_test-utils.js";
+import { destinationCachePath, readDestinationCache } from "@de-otio/repo-aegis-core";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -17,6 +18,7 @@ let gitDir: string;
 let nonGitDir: string;
 let rulesDir: string;
 let prevRegistryEnv: string | undefined;
+let prevHomeEnv: string | undefined;
 
 function gitCmd(cwd: string, args: string[]): string {
   return execFileSync("git", args, {
@@ -51,6 +53,10 @@ before(() => {
   // is running the suite. `withRegistry` still overrides per test.
   prevRegistryEnv = process.env["REPO_AEGIS_REGISTRY"];
   process.env["REPO_AEGIS_REGISTRY"] = join(tmp, "no-such-registry.yaml");
+  // Same for the home: `classify --apply` writes the audit log and the
+  // destination cache under it, and neither belongs in the developer's own.
+  prevHomeEnv = process.env["REPO_AEGIS_HOME"];
+  process.env["REPO_AEGIS_HOME"] = join(tmp, "home");
 });
 
 after(() => {
@@ -58,6 +64,11 @@ after(() => {
     delete process.env["REPO_AEGIS_REGISTRY"];
   } else {
     process.env["REPO_AEGIS_REGISTRY"] = prevRegistryEnv;
+  }
+  if (prevHomeEnv === undefined) {
+    delete process.env["REPO_AEGIS_HOME"];
+  } else {
+    process.env["REPO_AEGIS_HOME"] = prevHomeEnv;
   }
   rmSync(tmp, { recursive: true, force: true });
 });
@@ -546,6 +557,42 @@ engagements: []
     assert.equal(out.matched.class, "public-eligible");
     assert.equal(out.matched.engagement, null);
     assert.equal(out.visibility, "public");
+  });
+
+  it("apply: a personalOrgs match caches the probed visibility and records the checkout in the destination cache", () => {
+    const reg = join(tmp, "reg-personal-apply.yaml");
+    writeFileSync(
+      reg,
+      `schemaVersion: 2
+personalOrgs: [my-handle]
+engagements: []
+`,
+    );
+    setRemote(gitDir, "git@github.com:my-handle/dotfiles.git");
+    resetRepoAegis(gitDir);
+    try {
+      execFileSync("git", ["config", "--unset", "repo-aegis.visibility"], { cwd: gitDir, stdio: "ignore" });
+    } catch {
+      /* not set */
+    }
+
+    const gh = fakeGh(join(tmp, "gh-personal-public-apply"), "echo PUBLIC");
+    withFakeGh(gh, () =>
+      withRegistry(reg, () =>
+        captureOutput(() =>
+          classify({ cwd: gitDir, apply: true, json: true, rules: join(rulesDir, "no-rules.yml") }),
+        ),
+      ),
+    );
+
+    assert.equal(gitCmd(gitDir, ["config", "repo-aegis.class"]), "public-eligible");
+    // The probe's answer is cached — `status` is no longer needed for that half.
+    assert.equal(gitCmd(gitDir, ["config", "repo-aegis.visibility"]), "public");
+    // And the machine-wide cache points at this checkout.
+    const cache = readDestinationCache(destinationCachePath(join(tmp, "home")));
+    assert.equal(cache.repos["my-handle/dotfiles"]?.workingTree, gitDir);
+    assert.equal(cache.repos["my-handle/dotfiles"]?.class, "public-eligible");
+    assert.equal(cache.repos["my-handle/dotfiles"]?.visibility, "public");
   });
 
   it("engagement.githubOrgs match → customer-coupled with engagement (dry-run)", () => {

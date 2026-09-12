@@ -8,7 +8,7 @@ import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { doctor } from "./doctor.js";
 import { withEnv } from "../_test-utils.js";
-import { HOOK_SCRIPTS } from "@de-otio/repo-aegis-core";
+import { HOOK_SCRIPTS, destinationCachePath, readDestinationCache } from "@de-otio/repo-aegis-core";
 import { GH_SHIM_SCRIPT } from "./shim-script.js";
 
 // SAFETY: every case below runs against throwaway repos under a
@@ -564,6 +564,42 @@ describe("doctor — egress checks: per-repo", () => {
 
     assert.equal(exitCode, undefined);
     assert.match(stdout, /all clean/);
+  });
+
+  it("the sweep records every checkout with a GitHub origin into the destination cache", () => {
+    const fx = makeFixture("destination-cache");
+    writeGlobalPushDefaultNothing(fx);
+    const registryPath = writeRegistry(fx, REGISTRY_WITH_ACME);
+    const pub = healthyRepo(fx, "pub-repo");
+    gitConfig(pub, fx, ["remote.origin.url", "git@github.com:acme/pub.git"]);
+    gitConfig(pub, fx, ["repo-aegis.class", "public-eligible"]);
+    gitConfig(pub, fx, ["repo-aegis.visibility", "public"]);
+    healthyRepo(fx, "no-remote-repo"); // nothing to key on: not recorded
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
+        ),
+      );
+    });
+
+    assert.equal(exitCode, undefined);
+    assert.match(stdout, /recorded 1 checkout\(s\) into the destination cache/);
+    const cache = readDestinationCache(destinationCachePath(fx.home));
+    assert.deepEqual(Object.keys(cache.repos), ["acme/pub"]);
+    assert.equal(cache.repos["acme/pub"]?.workingTree, pub);
+    assert.equal(cache.repos["acme/pub"]?.visibility, "public");
+    // And --json carries the count.
+    const { stdout: json } = captureStdout(() =>
+      runDoctorCapturingExit(() =>
+        withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome, json: true })),
+        ),
+      ),
+    );
+    assert.equal((JSON.parse(json) as { summary: { destinationsRecorded: number } }).summary.destinationsRecorded, 1);
   });
 
   it("CLASS_VISIBILITY_UNRESOLVED still fires when the class is explicit but visibility is uncached", () => {

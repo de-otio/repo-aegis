@@ -23,6 +23,9 @@ import {
   parseRemoteUrl,
   computeTrustBoundary,
   readCachedVisibility,
+  recordWorkingTree,
+  resolveCachedDestination,
+  getRemoteUrl,
   isHumanPresent,
   EGRESS_HUMAN_ENV,
   loadRegistry,
@@ -268,6 +271,15 @@ export interface CheckDestination {
   visibility: RepoVisibility;
   class: RepoConfig["class"];
   publicFacing: boolean;
+  /**
+   * Where `class` / `visibility` came from: this repository's own config
+   * (the remote is its origin), another checkout of the destination on this
+   * machine (the machine-wide destination cache), or nothing — the remote
+   * is a repository this machine holds no declaration about, and the values
+   * above are this repository's, which is the best available and may be
+   * wrong for it.
+   */
+  declaredBy: "origin" | "cache" | "none";
 }
 
 /** The ref or range this run is about, for reasons and the receipt line. */
@@ -327,17 +339,46 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   if (parsed === null) return null;
 
   const ref = refLabel(opts);
-  const visibility = readCachedVisibility(repo.cwd);
+  // The pushing repository's declaration describes the destination only when
+  // the destination IS its origin. A push to any other URL (`git push
+  // git@github.com:o/other.git main`) must be judged by `o/other`'s own
+  // declaration, which this machine may hold in another checkout.
+  recordWorkingTree(repo.cwd);
+  const ownUrl = getRemoteUrl(repo.cwd);
+  const own = ownUrl === null ? null : parseRemoteUrl(ownUrl);
+  const isOwn = own !== null && own.org === parsed.org && own.repo === parsed.repo;
+  let visibility = readCachedVisibility(repo.cwd);
+  let cls = repo.class;
+  let publicFacing = isPublicFacing(repo, { visibility });
+  let declaredBy: CheckDestination["declaredBy"] = isOwn ? "origin" : "none";
+  const registry = registryForBoundary();
+  if (!isOwn) {
+    const cached = resolveCachedDestination(parsed.org, parsed.repo);
+    if (cached !== null) {
+      visibility = cached.visibility;
+      cls = cached.class;
+      publicFacing = cached.class === "public-eligible" || cached.visibility === "public";
+      declaredBy = "cache";
+    } else if ((registry?.personalOrgs ?? []).some(o => o.toLowerCase() === parsed.org)) {
+      // Nothing describes it, but it is in the operator's own org — where the
+      // public repositories live. Same rule as the egress policy: treated as
+      // public-facing, so the human-presence gate below applies rather than
+      // an unknown destination slipping through.
+      visibility = "unknown";
+      cls = "private-strict";
+      publicFacing = true;
+    }
+  }
   const dest: CheckDestination = {
     org: parsed.org,
     repo: parsed.repo,
     visibility,
-    class: repo.class,
-    publicFacing: isPublicFacing(repo, { visibility }),
+    class: cls,
+    publicFacing,
+    declaredBy,
   };
 
   // --- CROSS_ORG_PUSH ------------------------------------------------------
-  const registry = registryForBoundary();
   if (registry !== null) {
     let boundaryOrgs: string[] | null = null;
     try {
@@ -378,14 +419,14 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
         code: "PUBLIC_PUSH_NEEDS_HUMAN",
         error:
           `refusing to push ${ref} to ${parsed.org}/${parsed.repo} ` +
-          `(${visibility}, ${repo.class}) with no human present: ` +
+          `(${visibility}, ${cls}) with no human present: ` +
           `run it from a terminal, or a human sets ${EGRESS_HUMAN_ENV}=1 for this one ` +
           `invocation (an agent never sets it).`,
         details: {
           destination: `${parsed.org}/${parsed.repo}`,
           ref,
           visibility,
-          class: repo.class,
+          class: cls,
         },
       },
       opts,

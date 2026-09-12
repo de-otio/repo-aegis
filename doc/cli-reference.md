@@ -960,12 +960,29 @@ documented human-only escape with the same contract as
 `REPO_AEGIS_WAIVE_NONINTERACTIVE`: an agent never sets it, and setting it
 is a visible act in any transcript. Destination resolution is offline:
 `git push <remote>` reads `remote.<remote>.url` from the `git -C`
-directory or the cwd; `gh … --repo o/r` is direct; other `gh` uses the
-cwd's origin. Class and cached visibility apply when the destination is
-the tree's own origin; `public-eligible` with no cached visibility is
+directory or the cwd; `gh … --repo o/r` is direct; `gh api repos/o/r/…`
+reads the org and repo from the API path (`orgs/o/…` gives the org with
+repo `*`; a path with `{owner}`/`{repo}` placeholders, `graphql`, and the
+account-level endpoints fall back to the cwd's origin, which for the
+placeholders is what `gh` itself does); other `gh` uses the cwd's origin.
+Class and cached visibility apply when the destination is the tree's own
+origin, **or when this machine holds another checkout of it**: the
+machine-wide destination cache (`$REPO_AEGIS_HOME/destinations.json`) maps
+`<org>/<repo>` to the checkout that declares it, and the resolver reads
+that checkout's live config (its snapshot, if the checkout is gone). The
+cache is written by everything that visits a repository and reads its
+class — `classify --apply`, `status`, `doctor`'s sweep, and the guard
+itself on every command it judges from inside a repository — so it needs
+no maintenance of its own; `doctor` is the way to fill it in one go. A
+destination that is in `personalOrgs` but nowhere in the cache is
+**treated as public-facing** (printed as `visibility uncached, treated as
+public`), so rule g asks rather than lets an unknown personal-org
+destination through. `public-eligible` with no cached visibility is
 public-facing, because the class is a declaration and the cache only an
 optimisation. Reasons name `<org>/<repo>`, visibility, class and ref —
-never payload content, matched substrings, or registry entries.
+never payload content, matched substrings, or registry entries — and say
+where the class came from (`from --repo`, `from the API path`, `from the
+checkout at <path>`).
 
 ### `check --remote-url <url>` (the git pre-push layer)
 
@@ -978,16 +995,21 @@ The generated pre-push hook passes git's `$2` (the remote URL) to both
 2. refuses with **`CROSS_ORG_PUSH`** (exit 2) when the URL's org is
    positively disjoint from the repo's trust boundary — deterministic,
    offline, no TTY involved;
-3. refuses with **`PUBLIC_PUSH_NEEDS_HUMAN`** (exit 2) when the repo is
-   public-facing (`public-eligible`, or cached visibility `public`) and no
-   human is present;
+3. refuses with **`PUBLIC_PUSH_NEEDS_HUMAN`** (exit 2) when the destination
+   is public-facing and no human is present. The destination's class and
+   visibility are this repository's own when the URL is its origin; when
+   the URL names another repository, they come from that repository's
+   checkout via the destination cache (see above), or — in a personal org
+   with nothing cached — the destination is treated as public-facing;
 4. otherwise prints one stderr line, the git-native receipt:
    `repo-aegis: pushing <ref-or-range> → <org>/<repo> (<visibility>)`.
 
 With `--json`, the output object carries `destination: { org, repo,
-visibility, class, publicFacing }`. Either refusal is recorded in the audit
-log when it is on. The template change bumps the hook digest: installed
-copies report `HOOKS_SCRIPT_STALE` until `install hooks` runs again.
+visibility, class, publicFacing, declaredBy }`, where `declaredBy` is
+`origin`, `cache`, or `none` (the values are this repository's and may not
+describe the destination). Either refusal is recorded in the audit log
+when it is on. The template change bumps the hook digest: installed copies
+report `HOOKS_SCRIPT_STALE` until `install hooks` runs again.
 
 ### `repo-aegis hook guard-egress [--agent claude|codex|gemini]`
 
@@ -1082,7 +1104,11 @@ now reports, unless `--no-egress-checks`:
 
 JSON gains `machine: DoctorCheck[]` and per-repo `checks: DoctorCheck[]`;
 `summary.failed` counts them. `--claude-home <dir>` points the guard-hook
-check at a Claude Code home other than `~/.claude`.
+check at a Claude Code home other than `~/.claude`. The sweep also records
+every checkout with a GitHub origin into the destination cache
+(`summary.destinationsRecorded`; the text output says `recorded N
+checkout(s) into the destination cache`) — run `doctor` once after
+installing to give the egress guard its map of the machine.
 
 ### `scan-env --self`
 

@@ -26,6 +26,7 @@
 //      assembled from extracted refs, an extracted PR number, or an
 //      extracted tag — nothing else from the output is repeated.
 import {
+  describeDestinationForReceipt,
   describeVerb,
   formatReceipt,
   loadRegistry,
@@ -223,14 +224,6 @@ function detailFor(intent: EgressIntent, output: string): string {
   return describeVerb(intent.verb);
 }
 
-/** `<org>/<repo> (<visibility>, <class>)`, or a plain marker when nothing resolved. */
-function describeFailedDestination(destination: Destination | null): string {
-  if (destination === null) return "(destination not resolved)";
-  const vis = destination.classKnown ? destination.visibility.toUpperCase() : "VISIBILITY UNKNOWN";
-  const cls = destination.classKnown ? `class ${destination.class}` : "class unknown";
-  return `${destination.org}/${destination.repo} (${vis}, ${cls})`;
-}
-
 /**
  * `repo-aegis hook egress-receipt` — PostToolUse(Bash). Always exits 0:
  * the tool has already run, so there is nothing left to block, and a
@@ -260,7 +253,7 @@ export async function hookEgressReceipt(): Promise<void> {
       }
       const detail = detailFor(intent, output);
       return failed
-        ? `EGRESS FAILED → ${describeFailedDestination(destination)}: ${detail}`
+        ? `EGRESS FAILED → ${describeDestinationForReceipt(destination)}: ${detail}`
         : formatReceipt(destination, detail);
     });
   } catch {

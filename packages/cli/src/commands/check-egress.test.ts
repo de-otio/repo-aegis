@@ -390,6 +390,7 @@ describe("check --remote-url — --json destination", () => {
       visibility: "private",
       class: "private-strict",
       publicFacing: false,
+      declaredBy: "origin",
     });
   });
 
@@ -416,5 +417,75 @@ describe("check --remote-url — --json destination", () => {
     };
     assert.equal(parsed.destination.publicFacing, true);
     assert.equal(parsed.destination.visibility, "public");
+  });
+});
+
+describe("check --remote-url — a destination that is not this repo's origin", () => {
+  // The third face of the 2026-09-12 finding: the pre-push hook judged every
+  // push by the PUSHING repo's class and visibility, which describe the
+  // destination only when the destination is the repo's own origin.
+
+  it("with nothing cached, a foreign URL in a personal org is treated as public and refused without a human", () => {
+    const ctx = setup("foreign-uncached");
+    const repo = makeRepo("foreign-uncached-repo", { class: "private-strict", visibility: "private" });
+
+    const result = run(ctx, {
+      cwd: repo,
+      range: "HEAD~1..HEAD",
+      remoteUrl: "git@github.com:acme/other.git",
+      json: true,
+    });
+
+    assert.equal(result.exitCode, 2);
+    const j = lastJsonLine<{ code: string; error: string }>(result.stderr);
+    assert.equal(j.code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    assert.match(j.error, /acme\/other/);
+  });
+
+  it("with the destination's checkout recorded, the push is judged by THAT checkout's declaration", () => {
+    const ctx = setup("foreign-cached");
+    const src = makeRepo("foreign-cached-src", { class: "private-strict", visibility: "private" });
+    // A private repo elsewhere on the machine; `check` from inside it records it.
+    const dest = makeRepo("foreign-cached-dest", {
+      class: "private-strict",
+      visibility: "private",
+      originUrl: "git@github.com:acme/other.git",
+    });
+    run(ctx, { cwd: dest, range: "HEAD~1..HEAD", remoteUrl: "git@github.com:acme/other.git", json: true });
+
+    const result = run(ctx, {
+      cwd: src,
+      range: "HEAD~1..HEAD",
+      remoteUrl: "git@github.com:acme/other.git",
+      json: true,
+    });
+
+    assert.equal(result.exitCode, undefined);
+    const parsed = JSON.parse(result.stdout) as { destination: { publicFacing: boolean; declaredBy: string } };
+    assert.equal(parsed.destination.declaredBy, "cache");
+    assert.equal(parsed.destination.publicFacing, false);
+  });
+
+  it("… and a PUBLIC destination checkout makes a push from a private repo need a human", () => {
+    const ctx = setup("foreign-cached-public");
+    const src = makeRepo("foreign-cached-public-src", { class: "private-strict", visibility: "private" });
+    const dest = makeRepo("foreign-cached-public-dest", {
+      class: "public-eligible",
+      visibility: "public",
+      originUrl: "git@github.com:acme/pub.git",
+    });
+    run(ctx, { cwd: dest, range: "HEAD~1..HEAD", remoteUrl: "git@github.com:acme/pub.git", json: true }, { human: "1" });
+
+    const result = run(ctx, {
+      cwd: src,
+      range: "HEAD~1..HEAD",
+      remoteUrl: "git@github.com:acme/pub.git",
+      json: true,
+    });
+
+    assert.equal(result.exitCode, 2);
+    const j = lastJsonLine<{ code: string; error: string }>(result.stderr);
+    assert.equal(j.code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    assert.match(j.error, /acme\/pub \(public, public-eligible\)/);
   });
 });
