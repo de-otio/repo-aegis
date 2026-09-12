@@ -128,6 +128,13 @@ This is idempotent. It:
 6. Appends a managed block to `~/.claude/CLAUDE.md` describing the
    hook behaviour to the agent.
 
+It does **not** install the `gh` shim — the egress guard's one layer
+that works for every agent and every human, not only Claude Code —
+because the shim needs a shell-profile edit only the user can make.
+That is [Step 2b](#step-2b--install-the-gh-shim), and it is not
+optional: without it a `gh pr create` from a terminal, from Codex, or
+from Gemini reaches GitHub unjudged.
+
 After `init`:
 
 ```sh
@@ -141,6 +148,48 @@ yet.
 If the user has `REPO_AEGIS_HOME` set in their environment (a
 non-default config home), `init` honours it. Don't try to "fix"
 this — it's deliberate.
+
+## Step 2b — install the `gh` shim
+
+```sh
+repo-aegis install shim
+# -> installed shim at ~/.config/repo-aegis/bin/gh
+#    The shim only guards once ~/.config/repo-aegis/bin comes FIRST on PATH. Add to your shell profile:
+#      export PATH="/home/<user>/.config/repo-aegis/bin:$PATH"
+```
+
+Two halves, and the command can only do the first:
+
+1. **Write the shim.** Idempotent; a second run reports `already
+   installed`. If a file that repo-aegis did not write is already at
+   that path, the command refuses with `SHIM_PATH_OCCUPIED` and leaves
+   it alone — surface that to the user; it is their wrapper, not yours
+   to overwrite.
+2. **Put the shim's directory first on `PATH`.** Ask the user which
+   shell profile they use (`~/.zshrc`, `~/.bashrc`, `~/.config/fish/…`)
+   and add the printed `export PATH=…` line to it — or show them the
+   line and let them add it. A shim that is installed but not first on
+   `PATH` never runs; `doctor` reports it as `SHIM_NOT_FIRST`.
+
+Why this layer exists when the Claude Code hook already judges `gh`
+commands: the hook guards one agent's sessions. The shim sits in front of
+*every* `gh` invocation on the machine — a human terminal, Codex, Gemini,
+a script — and it is the only place the post-publish read-back
+(`PUBLISHED_BODY_MISMATCH`) happens. Non-publishing verbs (`gh pr view`,
+`gh api GET`) pass straight through.
+
+After the profile edit, in a **new** shell:
+
+```sh
+repo-aegis doctor
+# -> SHIM_MISSING ok, SHIM_NOT_FIRST ok, PUSH_DEFAULT_IMPLICIT ...
+```
+
+If `PUSH_DEFAULT_IMPLICIT` is not ok, `git config --global push.default`
+is unset or `simple`, so a bare `git push` still works. The guard
+refuses a bare push from an agent anyway, but making it an error for
+humans too is one line — recommend
+`git config --global push.default nothing` and let the user decide.
 
 ## Step 3 — collect engagement information from the user
 
@@ -323,6 +372,13 @@ Surface to the user:
 > result will carry a redacted hit with the engagement id and the
 > file:line:column.
 >
+> Publishing commands (`git push`, `gh pr create`, `npm publish`, …)
+> are judged by destination before they run — in this agent's
+> sessions by a hook, and everywhere else on the machine by the git
+> pre-push hook and the `gh` shim. {The shim is on PATH — `doctor` is
+> clean. | The shim is written but your shell profile still needs the
+> PATH line: `export PATH="…/.config/repo-aegis/bin:$PATH"`.}
+>
 > If you ever want to remove repo-aegis, run `repo-aegis uninstall`
 > (dry-run by default; pass `--yes` to apply). Don't hand-edit
 > `~/.claude/settings.json` to remove the hooks.
@@ -397,6 +453,22 @@ and tell the user immediately — that is the whole point of the line. If the
 command did not actually publish, the line reads `EGRESS FAILED → …`
 instead; a receipt never claims a publish that did not happen.
 
+### The three enforcement points
+
+The hooks above are the richest layer, not the only one. The same
+decision function runs at three places, and an install is complete only
+when all three are in:
+
+| Layer | Installed by | Catches | Who it protects |
+|---|---|---|---|
+| git `pre-push` hook | `repo-aegis init` / `install hooks` | `git push` to a cross-org or public destination, with the remote URL git hands the hook | every agent and every human, in every repo with `core.hooksPath` set |
+| `gh` shim on `PATH` | `repo-aegis install shim` + the profile line ([Step 2b](#step-2b--install-the-gh-shim)) | the publishing verbs of `gh pr`, `gh issue`, `gh release`, `gh repo` and mutating `gh api`, plus the post-publish read-back | every agent and every human, in every shell where the shim is first |
+| agent pre-command hook | `repo-aegis install claude-md` (Claude Code); see below for Codex and Gemini | everything, before the command runs, with `ask` where the agent supports it | that one agent |
+
+Skipping the shim leaves the middle row empty: `gh pr create` from a
+terminal, from a script, or from an agent without a pre-command hook
+reaches GitHub without anyone judging the destination.
+
 ### Verify the registration
 
 ```sh
@@ -409,6 +481,13 @@ with matcher `Bash` running `repo-aegis hook guard-egress`. Fix with
 a session with no guard looks exactly like a session where nothing needed
 guarding, which is why `doctor` checks for it rather than trusting that a
 past install happened.
+
+`SHIM_MISSING` means `repo-aegis install shim` has not run;
+`SHIM_NOT_FIRST` means it has, but another `gh` precedes the shim on
+`PATH` (or the check ran in a shell that never sourced the profile
+line). Both are [Step 2b](#step-2b--install-the-gh-shim).
+`PUSH_DEFAULT_IMPLICIT` is the one-line `git config --global
+push.default nothing` recommendation.
 
 ### Other agents
 
@@ -557,6 +636,9 @@ npm install -g @de-otio/repo-aegis
 # 2. bootstrap
 repo-aegis init
 
+# 2b. gh shim — then add the printed `export PATH=…` line to the user's shell profile
+repo-aegis install shim
+
 # 3 + 4. for each engagement the user named, with their markers:
 repo-aegis engagements add <id> \
   --name "<Name>" \
@@ -575,6 +657,7 @@ repo-aegis classify --apply       # or `git config repo-aegis.class ...; repo-ae
 repo-aegis engagements list --json
 repo-aegis status
 repo-aegis markers test '<known-marker>'
+repo-aegis doctor                 # in a NEW shell, so the PATH line has taken effect
 ```
 
 Then read [doc/agent-guide.md](agent-guide.md).

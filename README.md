@@ -85,12 +85,20 @@ Prefer a manual install? The minimum is:
 ```sh
 npm install -g @de-otio/repo-aegis
 repo-aegis init                                  # bootstrap registry, hooks, Claude Code wiring
+repo-aegis install shim                          # gh wrapper for the egress guard; then put
+                                                 # ~/.config/repo-aegis/bin FIRST on PATH (it prints the line)
 repo-aegis engagements add customer-a \
   --github-org acme-corp                         # attach a GitHub org so future repos auto-classify
 cd /path/to/customer-a-repo
 repo-aegis classify --apply                      # set repo-aegis.class + repo-aegis.engagement
 repo-aegis status                                # confirm class and deny set
+repo-aegis doctor                                # machine-wide: push.default, shim first on PATH, hooks current
 ```
+
+`init` does not install the shim: it writes a file into a directory
+that must precede the real `gh` on `PATH`, and only you can edit your
+shell profile. `doctor` reports `SHIM_MISSING` / `SHIM_NOT_FIRST`
+until both halves are done.
 
 For ongoing operation, see the [agent operator
 guide](doc/agent-guide.md). For the full command catalog with flags,
