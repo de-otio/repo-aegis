@@ -29,6 +29,19 @@ set. If the agent receives a tool result with a marker hit, it must:
 
 If a marker is hit, run \`repo-aegis status\` (without \`--verbose\`) to
 see the repo's class, allowed engagements, and deny-set summary.
+
+Publishing commands — \`git push\`, \`gh pr|issue|release|repo|api\`,
+\`npm publish\` — also pass through a PreToolUse egress guard that judges
+*where* the bytes are going, not just what they are. A denial is
+decision-only: the command is never rewritten for you. Re-issue it
+explicitly — \`git push <remote> <branch>\`, \`git -C <abs-path>\`,
+\`gh --repo <org>/<repo>\`, and payload files (\`--body-file\`) written to
+the session scratchpad and passed by absolute path. Never work around a
+denial, and never set \`REPO_AEGIS_EGRESS_HUMAN\`: it is the human's
+declaration that a person is present, and an agent setting it is the
+agent approving its own publish. After a command that published, read the
+\`PUBLISHED → …\` receipt in the tool result and stop if the destination
+named there is not the one you intended.
 ${CLAUDE_MD_END}
 `;
 
@@ -73,6 +86,26 @@ const FIRST_TOUCH_HOOK_MATCHER = "*";
 const BASH_HOOK_COMMAND = "repo-aegis hook scan-bash-output";
 
 const BASH_HOOK_MATCHER = "Bash";
+
+/**
+ * PreToolUse(Bash) egress guard — doc/design/egress-guard.md §4. Judges
+ * the *destination* of a publishing command before the shell runs it, which
+ * is the axis every content-based control in this tool is blind to. The
+ * `--agent claude` flag is explicit rather than defaulted so the registered
+ * command reads the same as the Codex / Gemini snippets in
+ * doc/agent-install.md, where the flag is what selects the `ask` degradation.
+ *
+ * Same naming-stability rule as the other hook commands: changing this
+ * string does not auto-update anyone's settings.json.
+ */
+const GUARD_EGRESS_HOOK_COMMAND = "repo-aegis hook guard-egress --agent claude";
+
+/**
+ * PostToolUse(Bash) receipt — doc/design/egress-guard.md §5. Shares the
+ * `Bash` matcher entry with `scan-bash-output`; both hooks run on the same
+ * tool result and neither replaces the other.
+ */
+const EGRESS_RECEIPT_HOOK_COMMAND = "repo-aegis hook egress-receipt";
 
 interface InstallClaudeMdOptions extends OutputOptions {
   claudeHome?: string;
@@ -290,12 +323,21 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   const merge = mergeHook(settings!, HOOK_COMMAND);
   const checkWriteMerge = mergePreToolUseHook(settings!, HOOK_MATCHER, CHECK_WRITE_HOOK_COMMAND);
   const bashMerge = mergePostToolUseHook(settings!, BASH_HOOK_MATCHER, BASH_HOOK_COMMAND);
+  const guardEgressMerge = mergePreToolUseHook(settings!, BASH_HOOK_MATCHER, GUARD_EGRESS_HOOK_COMMAND);
+  const egressReceiptMerge = mergePostToolUseHook(settings!, BASH_HOOK_MATCHER, EGRESS_RECEIPT_HOOK_COMMAND);
   const firstTouchMerge: MergeResult | null = opts.firstTouch
     ? mergeFirstTouchHook(settings!, FIRST_TOUCH_HOOK_COMMAND)
     : null;
 
   // Write if any hook was added.
-  if (merge.added || checkWriteMerge.added || bashMerge.added || (firstTouchMerge && firstTouchMerge.added)) {
+  if (
+    merge.added ||
+    checkWriteMerge.added ||
+    bashMerge.added ||
+    guardEgressMerge.added ||
+    egressReceiptMerge.added ||
+    (firstTouchMerge && firstTouchMerge.added)
+  ) {
     try {
       writeFileSync(settingsPath, JSON.stringify(settings!, null, 2) + "\n");
     } catch (err) {
@@ -325,6 +367,10 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
         checkWriteHookAlreadyPresent: checkWriteMerge.alreadyPresent,
         bashHookAdded: bashMerge.added,
         bashHookAlreadyPresent: bashMerge.alreadyPresent,
+        guardEgressHookAdded: guardEgressMerge.added,
+        guardEgressHookAlreadyPresent: guardEgressMerge.alreadyPresent,
+        egressReceiptHookAdded: egressReceiptMerge.added,
+        egressReceiptHookAlreadyPresent: egressReceiptMerge.alreadyPresent,
         ...(firstTouchMerge && {
           firstTouchAdded: firstTouchMerge.added,
           firstTouchAlreadyPresent: firstTouchMerge.alreadyPresent,
@@ -354,6 +400,16 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
         added: bashMerge.added,
         alreadyPresent: bashMerge.alreadyPresent,
       },
+      guardEgressHook: {
+        hookCommand: GUARD_EGRESS_HOOK_COMMAND,
+        added: guardEgressMerge.added,
+        alreadyPresent: guardEgressMerge.alreadyPresent,
+      },
+      egressReceiptHook: {
+        hookCommand: EGRESS_RECEIPT_HOOK_COMMAND,
+        added: egressReceiptMerge.added,
+        alreadyPresent: egressReceiptMerge.alreadyPresent,
+      },
       ...(firstTouchMerge && {
         firstTouch: {
           hookCommand: FIRST_TOUCH_HOOK_COMMAND,
@@ -374,9 +430,15 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   if (merge.added) emitText(`registered PostToolUse(Write|Edit|MultiEdit) hook in ${settingsPath}`);
   else emitText(`PostToolUse(Write|Edit|MultiEdit) hook already registered in ${settingsPath}`);
   emitText(`  command: ${HOOK_COMMAND}`);
+  if (guardEgressMerge.added) emitText(`registered PreToolUse(Bash) hook in ${settingsPath}`);
+  else emitText(`PreToolUse(Bash) hook already registered in ${settingsPath}`);
+  emitText(`  command: ${GUARD_EGRESS_HOOK_COMMAND}`);
   if (bashMerge.added) emitText(`registered PostToolUse(Bash) hook in ${settingsPath}`);
   else emitText(`PostToolUse(Bash) hook already registered in ${settingsPath}`);
   emitText(`  command: ${BASH_HOOK_COMMAND}`);
+  if (egressReceiptMerge.added) emitText(`registered PostToolUse(Bash) hook in ${settingsPath}`);
+  else emitText(`PostToolUse(Bash) hook already registered in ${settingsPath}`);
+  emitText(`  command: ${EGRESS_RECEIPT_HOOK_COMMAND}`);
   if (firstTouchMerge) {
     if (firstTouchMerge.added) {
       emitText(`registered SessionStart hook in ${settingsPath}`);
@@ -433,6 +495,8 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   const merge = mergeHook(settings, HOOK_COMMAND);
   const checkWriteMerge = mergePreToolUseHook(settings, HOOK_MATCHER, CHECK_WRITE_HOOK_COMMAND);
   const bashMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, BASH_HOOK_COMMAND);
+  const guardEgressMerge = mergePreToolUseHook(settings, BASH_HOOK_MATCHER, GUARD_EGRESS_HOOK_COMMAND);
+  const egressReceiptMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, EGRESS_RECEIPT_HOOK_COMMAND);
   const wouldBeSettings = JSON.stringify(settings, null, 2) + "\n";
 
   // 3. strict-mode flag (read-only check)
@@ -469,6 +533,16 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
         wouldAdd: bashMerge.added,
         alreadyPresent: bashMerge.alreadyPresent,
       },
+      guardEgressHook: {
+        hookCommand: GUARD_EGRESS_HOOK_COMMAND,
+        wouldAdd: guardEgressMerge.added,
+        alreadyPresent: guardEgressMerge.alreadyPresent,
+      },
+      egressReceiptHook: {
+        hookCommand: EGRESS_RECEIPT_HOOK_COMMAND,
+        wouldAdd: egressReceiptMerge.added,
+        alreadyPresent: egressReceiptMerge.alreadyPresent,
+      },
       strictModeOn,
     });
     return;
@@ -487,11 +561,19 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   emitText("");
   emitText(`# Hook commands (to be registered in settings.json):`);
   emitText(`#   ${CHECK_WRITE_HOOK_COMMAND}    (PreToolUse: Write|Edit|MultiEdit)`);
+  emitText(`#   ${GUARD_EGRESS_HOOK_COMMAND}    (PreToolUse: Bash)`);
   emitText(`#   ${HOOK_COMMAND}  (PostToolUse: Write|Edit|MultiEdit)`);
   emitText(`#   ${BASH_HOOK_COMMAND}  (PostToolUse: Bash)`);
+  emitText(`#   ${EGRESS_RECEIPT_HOOK_COMMAND}  (PostToolUse: Bash)`);
   emitText("");
   emitText(`# Would-be settings.json at: ${settingsPath}`);
-  if (merge.alreadyPresent && checkWriteMerge.alreadyPresent && bashMerge.alreadyPresent) {
+  if (
+    merge.alreadyPresent &&
+    checkWriteMerge.alreadyPresent &&
+    bashMerge.alreadyPresent &&
+    guardEgressMerge.alreadyPresent &&
+    egressReceiptMerge.alreadyPresent
+  ) {
     emitText("# (Pre/PostToolUse hooks already registered; settings.json unchanged)");
   }
   emitText(wouldBeSettings);
@@ -510,10 +592,15 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
  * permissive: any command whose value contains `repo-aegis` AND
  * `scan-after-write` (or `first-touch`) is treated as ours.
  */
-function isRepoAegisHookCommand(
-  command: string,
-  kind: "scan-after-write" | "first-touch" | "scan-bash-output" | "check-write",
-): boolean {
+type HookKind =
+  | "scan-after-write"
+  | "first-touch"
+  | "scan-bash-output"
+  | "check-write"
+  | "guard-egress"
+  | "egress-receipt";
+
+function isRepoAegisHookCommand(command: string, kind: HookKind): boolean {
   return command.includes("repo-aegis") && command.includes(kind);
 }
 
@@ -523,6 +610,8 @@ interface SettingsCleanupResult {
   firstTouchRemoved: number;
   bashScanRemoved: number;
   checkWriteRemoved: number;
+  guardEgressRemoved: number;
+  egressReceiptRemoved: number;
 }
 
 /**
@@ -543,12 +632,14 @@ function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
     firstTouchRemoved: 0,
     bashScanRemoved: 0,
     checkWriteRemoved: 0,
+    guardEgressRemoved: 0,
+    egressReceiptRemoved: 0,
   };
   if (!settings.hooks) return result;
 
   const filterEvent = (
     eventName: "PreToolUse" | "PostToolUse" | "SessionStart",
-    kind: "scan-after-write" | "first-touch" | "scan-bash-output" | "check-write",
+    kind: HookKind,
   ) => {
     const entries = settings.hooks?.[eventName];
     if (!entries) return;
@@ -564,6 +655,8 @@ function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
       else if (kind === "first-touch") result.firstTouchRemoved += removed;
       else if (kind === "scan-bash-output") result.bashScanRemoved += removed;
       else if (kind === "check-write") result.checkWriteRemoved += removed;
+      else if (kind === "guard-egress") result.guardEgressRemoved += removed;
+      else if (kind === "egress-receipt") result.egressReceiptRemoved += removed;
     }
     // Collapse any matcher entry whose hooks array is now empty.
     settings.hooks![eventName] = entries.filter(e => e.hooks && e.hooks.length > 0);
@@ -573,8 +666,10 @@ function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
   };
 
   filterEvent("PreToolUse", "check-write");
+  filterEvent("PreToolUse", "guard-egress");
   filterEvent("PostToolUse", "scan-after-write");
   filterEvent("PostToolUse", "scan-bash-output");
+  filterEvent("PostToolUse", "egress-receipt");
   filterEvent("SessionStart", "first-touch");
 
   if (Object.keys(settings.hooks).length === 0) {
@@ -622,6 +717,8 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
     firstTouchRemoved: 0,
     bashScanRemoved: 0,
     checkWriteRemoved: 0,
+    guardEgressRemoved: 0,
+    egressReceiptRemoved: 0,
   };
   let settingsAbsent = !existsSync(settingsPath);
   if (!settingsAbsent) {
@@ -659,6 +756,8 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         scanHookEntriesRemoved: settingsResult.scanRemoved,
         checkWriteHookEntriesRemoved: settingsResult.checkWriteRemoved,
         bashHookEntriesRemoved: settingsResult.bashScanRemoved,
+        guardEgressHookEntriesRemoved: settingsResult.guardEgressRemoved,
+        egressReceiptHookEntriesRemoved: settingsResult.egressReceiptRemoved,
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
         settingsAbsent,
       },
@@ -681,6 +780,8 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         scanHookEntriesRemoved: settingsResult.scanRemoved,
         checkWriteHookEntriesRemoved: settingsResult.checkWriteRemoved,
         bashHookEntriesRemoved: settingsResult.bashScanRemoved,
+        guardEgressHookEntriesRemoved: settingsResult.guardEgressRemoved,
+        egressReceiptHookEntriesRemoved: settingsResult.egressReceiptRemoved,
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
       },
     });
@@ -698,8 +799,10 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
   } else {
     emitText(
       `removed ${settingsResult.removed} hook entr${settingsResult.removed === 1 ? "y" : "ies"} from ${settingsPath}` +
-        ` (PreToolUse: ${settingsResult.checkWriteRemoved},` +
-        ` PostToolUse: ${settingsResult.scanRemoved + settingsResult.bashScanRemoved},` +
+        ` (PreToolUse: ${settingsResult.checkWriteRemoved + settingsResult.guardEgressRemoved},` +
+        ` PostToolUse: ${
+          settingsResult.scanRemoved + settingsResult.bashScanRemoved + settingsResult.egressReceiptRemoved
+        },` +
         ` SessionStart: ${settingsResult.firstTouchRemoved})`,
     );
   }
@@ -709,11 +812,71 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
 // Egress guard (doc/design/egress-guard.md §4, §7)
 // ---------------------------------------------------------------------------
 
+/** The prefix a registered guard command must start with, whatever `--agent` follows it. */
+const GUARD_EGRESS_COMMAND_PREFIX = "repo-aegis hook guard-egress";
+
 /**
  * `doctor` check: `GUARD_HOOK_UNREGISTERED` when the Claude Code
- * `settings.json` under `claudeHome` has no `PreToolUse(Bash)` entry for
- * `repo-aegis hook guard-egress`. Returns `[]` until the L3 lane lands.
+ * `settings.json` under `claudeHome` has no `PreToolUse` entry with matcher
+ * `Bash` whose command starts with `repo-aegis hook guard-egress`.
+ *
+ * This exists because the guard is invisible when it is absent. Every other
+ * failure mode of the egress design announces itself — a denial is loud, a
+ * receipt is loud — but an unregistered hook looks exactly like a session
+ * where nothing needed guarding. That is the "hooks installed but not
+ * running" failure in a new costume (doc/design/egress-guard.md §7).
+ *
+ * Best-effort by construction: a missing or unparseable settings.json is
+ * reported as unregistered with the reason, never thrown. `doctor` must
+ * survive a machine whose Claude Code config does not exist.
  */
-export function checkGuardHook(_claudeHome?: string): import("./doctor-checks.js").DoctorCheck[] {
-  return [];
+export function checkGuardHook(claudeHome?: string): import("./doctor-checks.js").DoctorCheck[] {
+  const home = claudeHome ?? defaultClaudeHome();
+  const settingsPath = join(home, "settings.json");
+  const unregistered = (detail: string): import("./doctor-checks.js").DoctorCheck[] => [
+    {
+      code: "GUARD_HOOK_UNREGISTERED",
+      ok: false,
+      detail,
+      fix: "repo-aegis install claude-md",
+    },
+  ];
+
+  let settings: SettingsJson;
+  try {
+    if (!existsSync(settingsPath)) {
+      return unregistered(
+        `no settings.json at ${settingsPath}, so the PreToolUse(Bash) egress guard is not registered`,
+      );
+    }
+    settings = readSettings(settingsPath);
+  } catch {
+    return unregistered(
+      `settings.json at ${settingsPath} could not be parsed, so the PreToolUse(Bash) egress guard cannot be confirmed`,
+    );
+  }
+
+  const entries = settings.hooks?.["PreToolUse"] ?? [];
+  const registered = entries.some(
+    entry =>
+      entry.matcher === BASH_HOOK_MATCHER &&
+      (entry.hooks ?? []).some(
+        h => typeof h.command === "string" && h.command.trim().startsWith(GUARD_EGRESS_COMMAND_PREFIX),
+      ),
+  );
+
+  if (!registered) {
+    return unregistered(
+      `settings.json at ${settingsPath} has no PreToolUse(Bash) entry running \`${GUARD_EGRESS_COMMAND_PREFIX}\`, ` +
+        `so publishing commands are not destination-checked before they run`,
+    );
+  }
+
+  return [
+    {
+      code: "GUARD_HOOK_UNREGISTERED",
+      ok: true,
+      detail: `\`${GUARD_EGRESS_COMMAND_PREFIX}\` is registered as a PreToolUse(Bash) hook in ${settingsPath}`,
+    },
+  ];
 }
