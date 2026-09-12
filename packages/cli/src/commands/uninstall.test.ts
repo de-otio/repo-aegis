@@ -18,6 +18,7 @@ import { captureOutput, withEnv } from "../_test-utils.js";
 import { uninstall } from "./uninstall.js";
 import { installClaudeMd } from "./install-claude-md.js";
 import { installGitignore } from "./install-gitignore.js";
+import { installShim, shimPathFor } from "./install-shim.js";
 
 let tmp: string;
 
@@ -314,6 +315,87 @@ describe("repo-aegis uninstall — outside a git repo", () => {
         assert.ok(hooksStep);
         assert.equal(hooksStep!.ok, true);
         assert.equal(hooksStep!.details?.skipped, true);
+      });
+    });
+  });
+});
+
+describe("repo-aegis uninstall — the gh shim", () => {
+  it("dry run reports the shim it would remove, and removes nothing", () => {
+    const aegisHome = makeAegisHome("shim-dryrun");
+    const claudeHome = makeClaudeHome("shim-dryrun");
+    const base = join(tmp, "shim-dryrun-git-isolation");
+    mkdirSync(base, { recursive: true });
+
+    withHooksIsolation(base, () => {
+      withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+        captureOutput(() => installShim(undefined, { silent: true }));
+        const shim = shimPathFor();
+        assert.ok(existsSync(shim));
+
+        const r = captureOutput(() => uninstall({ claudeHome, cwd: base, json: true }));
+        const j = JSON.parse(r.stdout) as {
+          steps: Array<{ step: string; details?: { wouldRemove?: string | null } }>;
+        };
+        const step = j.steps.find(s => s.step === "install-shim --uninstall");
+        assert.ok(step, "uninstall must report a shim step");
+        assert.equal(step!.details?.wouldRemove, shim);
+        assert.ok(existsSync(shim), "dry run must not remove the shim");
+
+        // And the text rendering says so in words.
+        const text = captureOutput(() => uninstall({ claudeHome, cwd: base }));
+        assert.ok(text.stdout.includes(`would remove ${shim}`));
+      });
+    });
+  });
+
+  it("--yes removes the shim", () => {
+    const aegisHome = makeAegisHome("shim-apply");
+    const claudeHome = makeClaudeHome("shim-apply");
+    const base = join(tmp, "shim-apply-git-isolation");
+    mkdirSync(base, { recursive: true });
+    const repo = makeGitRepo(join(base, "repo"));
+
+    withHooksIsolation(base, () => {
+      withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+        captureOutput(() => installShim(undefined, { silent: true }));
+        const shim = shimPathFor();
+
+        const r = captureOutput(() =>
+          uninstall({ claudeHome, cwd: repo, yes: true, json: true }),
+        );
+        const j = JSON.parse(r.stdout) as {
+          steps: Array<{ step: string; ok: boolean; details?: { changed?: boolean } }>;
+        };
+        const step = j.steps.find(s => s.step === "install-shim --uninstall");
+        assert.ok(step);
+        assert.equal(step!.ok, true);
+        assert.equal(step!.details?.changed, true);
+        assert.equal(existsSync(shim), false);
+      });
+    });
+  });
+
+  it("--yes with no shim installed is a no-op, not a failure", () => {
+    const aegisHome = makeAegisHome("shim-absent");
+    const claudeHome = makeClaudeHome("shim-absent");
+    const base = join(tmp, "shim-absent-git-isolation");
+    mkdirSync(base, { recursive: true });
+    const repo = makeGitRepo(join(base, "repo"));
+
+    withHooksIsolation(base, () => {
+      withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+        const r = captureOutput(() =>
+          uninstall({ claudeHome, cwd: repo, yes: true, json: true }),
+        );
+        const j = JSON.parse(r.stdout) as {
+          steps: Array<{ step: string; ok: boolean; details?: { changed?: boolean; reason?: string } }>;
+        };
+        const step = j.steps.find(s => s.step === "install-shim --uninstall");
+        assert.ok(step);
+        assert.equal(step!.ok, true);
+        assert.equal(step!.details?.changed, false);
+        assert.equal(step!.details?.reason, "no shim installed");
       });
     });
   });

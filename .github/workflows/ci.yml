@@ -53,6 +53,25 @@ jobs:
       - name: Validate action.yml
         run: bash tests/action-smoke.sh
 
+  # The `gh` shim is the one enforcement point that is a shell script rather
+  # than TypeScript, so its behaviour — pass-through, deny, read-back, and
+  # never resolving to itself — is only provable end to end.
+  shim-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0  # zizmor: ignore[cache-poisoning]
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Shim smoke test
+        run: npm run test:shim
+
   # This repo ships workflow YAML as a PRODUCT: the composite actions, the
   # reference examples, and — via `repo-aegis install ci` — the templates that
   # land in consumer repos. Those artefacts get the same linting as our own
@@ -125,7 +144,7 @@ jobs:
   # without re-editing branch protection.
   ci-success:
     if: always()
-    needs: [test, action-smoke, workflow-lint]
+    needs: [test, action-smoke, shim-smoke, workflow-lint]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
