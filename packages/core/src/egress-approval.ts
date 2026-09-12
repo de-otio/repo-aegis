@@ -68,9 +68,18 @@ export function approvalsPath(home: string = repoAegisHome()): string {
   return join(home, APPROVALS_FILE);
 }
 
-/** `15m`, `2h`, `90s`, `1d`, or a bare number of minutes → milliseconds; null when unparseable or non-positive. */
+/**
+ * `15m`, `2h`, `90s`, `1d`, or a bare number of minutes → milliseconds; null
+ * when unparseable or non-positive.
+ *
+ * The whitespace is trimmed BEFORE matching and the pattern itself has no
+ * `\s*` runs: `^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$` backtracks
+ * polynomially on a long run of tabs after a digit (js/polynomial-redos).
+ * The value reaches here from a CLI flag, so the input is short in practice —
+ * but a guardrail that can be wedged by its own argument is not one.
+ */
 export function parseTtl(text: string): number | null {
-  const m = /^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$/i.exec(text);
+  const m = /^(\d+(?:\.\d+)?)([smhd]?)$/i.exec(text.trim());
   if (m === null) return null;
   const n = Number(m[1]);
   if (!Number.isFinite(n) || n <= 0) return null;

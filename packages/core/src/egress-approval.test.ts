@@ -29,7 +29,12 @@ describe("parseTtl / parseApprovalTarget / normaliseRef", () => {
     assert.equal(parseTtl("90s"), 90_000);
     assert.equal(parseTtl("1d"), 86_400_000);
     assert.equal(parseTtl("10"), 10 * 60_000); // bare number = minutes
-    for (const bad of ["", "0m", "-5m", "soon", "1w", "1.5.3h"]) assert.equal(parseTtl(bad), null, bad);
+    assert.equal(parseTtl("  15m  "), 15 * 60_000); // trimmed, not matched with \s* runs
+    for (const bad of ["", "0m", "-5m", "soon", "1w", "1.5.3h", "15 m"]) assert.equal(parseTtl(bad), null, bad);
+    // js/polynomial-redos: a long run of tabs after a digit must not backtrack.
+    const started = Date.now();
+    assert.equal(parseTtl("0" + "\t".repeat(50_000) + "!"), null);
+    assert.ok(Date.now() - started < 500, "parseTtl must not backtrack on adversarial whitespace");
   });
 
   it("targets", () => {
