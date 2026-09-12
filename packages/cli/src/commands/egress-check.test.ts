@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { captureOutput, fakeGh, withEnv } from "../_test-utils.js";
 import { cliBuilt, runCli } from "../_subprocess-utils.js";
 import { buildGhCommand, egressReadback, parsePrRef, shellQuote } from "./egress-check.js";
+import { approvalsPath, mintApproval, revokeApprovals } from "@de-otio/repo-aegis-core";
 
 // FIXTURE LOCATION, deliberately not the temp dir: rule d refuses a payload
 // path under `/var/folders/**` (macOS's per-user temp, which is exactly what
@@ -229,6 +230,23 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
     assert.equal(payload.receipt, "PUBLISHED → acme/svc (UNKNOWN, class public-eligible): gh pr create");
     assert.equal(payload.failedReceipt, "EGRESS FAILED → acme/svc (UNKNOWN, class public-eligible): gh pr create");
     assert.ok(!r.stderr.includes("PUBLISHED"), r.stderr);
+  });
+
+  it("allows a public publish on a live human approval and names it in the verdict", () => {
+    const home2 = join(root, "approved-home");
+    mkdirSync(join(home2, "markers"), { recursive: true });
+    writeFileSync(join(home2, "markers", "_always.txt"), "");
+    const a = mintApproval({ target: { org: "acme", repo: "svc" }, path: approvalsPath(home2) });
+    const r = runCli(home2, publicRepo, ["egress-check", "--cwd", publicRepo, "--", "pr", "create", "--title", "t", "--body", "b"]);
+    assert.equal(r.code, 0, r.stderr);
+    const payload = JSON.parse(r.stdout) as { action: string; approval?: { id: string } };
+    assert.equal(payload.action, "allow");
+    assert.equal(payload.approval?.id, a.id);
+    // The same command without one is a deny on this path (a shell has no ask).
+    revokeApprovals("all", approvalsPath(home2));
+    const r2 = runCli(home2, publicRepo, ["egress-check", "--cwd", publicRepo, "--", "pr", "create", "--title", "t", "--body", "b"]);
+    assert.equal(r2.code, 2);
+    assert.match(r2.stderr, /repo-aegis approve acme\/svc/);
   });
 
   it("allows a read with no read-back and no receipt", () => {

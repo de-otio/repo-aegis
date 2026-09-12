@@ -272,7 +272,26 @@ export type {
   DestinationResolver,
   PayloadScanner,
   DecideEgressOptions,
+  ApprovalFinder,
 } from "./egress-policy.js";
+export { findApprovalDefault } from "./egress-policy.js";
+// Human-minted, time-limited, destination-scoped approvals that satisfy
+// rule g from a shell with no TTY (`repo-aegis approve`).
+export {
+  approvalsPath,
+  parseTtl,
+  parseApprovalTarget,
+  readApprovalStore,
+  listApprovals,
+  mintApproval,
+  revokeApprovals,
+  findApproval,
+  normaliseRef,
+  APPROVALS_FILE,
+  DEFAULT_APPROVAL_TTL_MS,
+  MAX_APPROVAL_TTL_MS,
+} from "./egress-approval.js";
+export type { EgressApproval, ApprovalStore, MintOptions } from "./egress-approval.js";
 
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";

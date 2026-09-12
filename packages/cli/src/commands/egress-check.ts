@@ -20,6 +20,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
+  appendAuditRecord,
   decideEgress,
   recordWorkingTree,
   describeDestinationForReceipt,
@@ -159,6 +160,23 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
     }
   }
 
+  if (decision.action === "allow" && decision.approval !== undefined) {
+    try {
+      appendAuditRecord({
+        action: "egress-approval-use",
+        cwd,
+        details: {
+          id: decision.approval.id,
+          layer: "gh shim",
+          ...(decision.intent && { verb: describeVerb(decision.intent.verb) }),
+          ...(decision.destination && { destination: `${decision.destination.org}/${decision.destination.repo}` }),
+        },
+      });
+    } catch {
+      /* audit must not block the allow */
+    }
+  }
+
   const readback = readbackFor(intents);
   // §5: the one line the model will not skim past — but a receipt must never
   // claim a publish that did not happen, and at this point nothing has run.
@@ -175,6 +193,10 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   emitJson({
     action: "allow",
     ...(destination && { destination: destinationJson(destination) }),
+    ...(decision.action === "allow" &&
+      decision.approval !== undefined && {
+        approval: { id: decision.approval.id, expiresAt: decision.approval.expiresAt },
+      }),
     ...(readback && { readback }),
     ...(detail !== undefined && {
       receipt: formatReceipt(destination, detail),

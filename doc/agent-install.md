@@ -378,6 +378,9 @@ Surface to the user:
 > pre-push hook and the `gh` shim. {The shim is on PATH — `doctor` is
 > clean. | The shim is written but your shell profile still needs the
 > PATH line: `export PATH="…/.config/repo-aegis/bin:$PATH"`.}
+> A publish to a public repository from an agent needs you: either run
+> it yourself, or run `repo-aegis approve <org>/<repo>` from a terminal
+> and the agent can run it for the next 15 minutes.
 >
 > If you ever want to remove repo-aegis, run `repo-aegis uninstall`
 > (dry-run by default; pass `--yes` to apply). Don't hand-edit
@@ -440,6 +443,12 @@ mutating `gh` verbs, `npm publish`), and returns `allow` / `ask` / `deny`.
   that a person is at the keyboard, with the same contract as
   `REPO_AEGIS_WAIVE_NONINTERACTIVE`. An agent setting it is the agent
   approving its own publish.
+- **When refused for want of a person, ask for an approval.** The human
+  runs `repo-aegis approve <org>/<repo>` (optionally `--ref`, `--ttl`)
+  from their terminal — the mint refuses without a TTY, so the agent
+  cannot do it — and the agent re-issues the same command. The approval
+  satisfies rule g only, for that destination, for 15 minutes by default;
+  the refusal's reason spells out the exact `approve` line.
 
 **The receipt:** after a command that published, one line of
 `additionalContext`:

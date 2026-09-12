@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv, lastJsonLine } from "../_test-utils.js";
 import { check } from "./check.js";
+import { approvalsPath, mintApproval } from "@de-otio/repo-aegis-core";
 
 let tmp: string;
 let originalCwd: string;
@@ -417,6 +418,35 @@ describe("check --remote-url — --json destination", () => {
     };
     assert.equal(parsed.destination.publicFacing, true);
     assert.equal(parsed.destination.visibility, "public");
+  });
+});
+
+describe("check --remote-url — a human approval stands in for the TTY", () => {
+  it("a live approval for the destination lets the public push through, and says so", () => {
+    const ctx = setup("approval-live");
+    const repo = makeRepo("approval-live-repo", { class: "public-eligible", visibility: "public" });
+    const a = mintApproval({ target: { org: "acme", repo: "x" }, path: approvalsPath(ctx.home) });
+
+    const result = run(ctx, { cwd: repo, pushRef: "refs/heads/main", remoteUrl: "git@github.com:acme/x.git", json: true });
+
+    assert.equal(result.exitCode, undefined, result.stderr);
+    assert.match(result.stderr, new RegExp(`human approval ${a.id} stands in`));
+    assert.match(result.stderr, /repo-aegis: pushing refs\/heads\/main → acme\/x \(public\)/);
+  });
+
+  it("a ref-scoped approval covers that ref only", () => {
+    const ctx = setup("approval-ref");
+    const repo = makeRepo("approval-ref-repo", { class: "public-eligible", visibility: "public" });
+    execFileSync("git", ["branch", "release/v1"], { cwd: repo });
+    mintApproval({ target: { org: "acme", repo: "x" }, ref: "release/v1", path: approvalsPath(ctx.home) });
+
+    const ok = run(ctx, { cwd: repo, pushRef: "refs/heads/release/v1", remoteUrl: "git@github.com:acme/x.git", json: true });
+    assert.equal(ok.exitCode, undefined, ok.stderr);
+    const no = run(ctx, { cwd: repo, pushRef: "refs/heads/main", remoteUrl: "git@github.com:acme/x.git", json: true });
+    assert.equal(no.exitCode, 2);
+    const j = lastJsonLine<{ code: string; error: string }>(no.stderr);
+    assert.equal(j.code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    assert.match(j.error, /repo-aegis approve acme\/x/);
   });
 });
 

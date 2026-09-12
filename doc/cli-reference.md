@@ -951,7 +951,7 @@ context rules fail open, and no layer ever rewrites a command:
 | d | payload path (`--body-file`, `-F`, `--notes-file`, `--input`, `--body @f`, `-F k=@f`) is relative, expands `$TMPDIR`, or sits under `/var/folders/**` or the shared sandbox temp root (the session-unique `…/scratchpad/` segment is exempt; `-` is stdin) | `PAYLOAD_MODE_DEPENDENT_PATH` | deny |
 | e | the pushed repo's (or the payload file's tree's) trust boundary is positively disjoint from the destination's | `CROSS_ORG_EGRESS` | deny |
 | f | payload content matches the destination's deny set (its own class when the destination is the tree's origin; `customer-coupled` to the matching engagement when the destination org is in an engagement's `githubOrgs`, whatever the cwd; `_always` only otherwise; `_self_identity` joins for customer-coupled) | `PAYLOAD_MARKER_HIT` | deny (hit count only) |
-| g | destination public-facing, or verb ∈ {`gh pr merge`, `gh release *`, `gh repo create\|edit`, `gh gist create`, `gh workflow run`, `npm publish`}, and no human present | `PUBLIC_EGRESS_NEEDS_HUMAN` | `ask` where the framework has it; `deny` otherwise — never `allow` |
+| g | destination public-facing, or verb ∈ {`gh pr merge`, `gh release *`, `gh repo create\|edit`, `gh gist create`, `gh workflow run`, `npm publish`}, and no human present — and no live approval (`repo-aegis approve`) for the destination | `PUBLIC_EGRESS_NEEDS_HUMAN` | `ask` where the framework has it; `deny` otherwise — never `allow` |
 | h | otherwise (including class `scratch`) | — | allow |
 
 "Human present" is a TTY on stderr — stdin is often a pipe even for a
@@ -1070,6 +1070,28 @@ halves are done.
 file carries a header line); a foreign file at the shim path is left in
 place and reported (`changed: false`, with the reason). The top-level
 `uninstall` applies the same rule.
+
+### `repo-aegis approve <org>/<repo> | <org>/* | * [--ref <ref>] [--ttl <duration>] [--note <text>]`, `approve --list`, `approve --revoke <id|all>`
+
+The human's side of rule g. Minting **requires a TTY on stderr** and does
+not honour `REPO_AEGIS_EGRESS_HUMAN` — so an agent, whose shell has
+neither, cannot mint its own approval (`APPROVE_NEEDS_TTY`, exit 2). A
+live approval whose scope matches the destination (and, when `--ref` was
+given, the ref) stands in for the person in **every** layer — the agent
+hook, the `gh` shim, the git pre-push hook — for rule g and nothing else:
+the shape rules, the cross-org boundary and the payload scan still
+apply. Default TTL 15 minutes; `--ttl 2h`, `90s`, `1d`; never more than
+24 hours. `*` is the only scope that covers a destination-less verb
+(`npm publish`). Stored at `$REPO_AEGIS_HOME/egress-approvals.json`
+(0600); not consumed on use (a push passes two layers). Mint, every use
+(with the layer) and revoke are audit records (`egress-approval-mint`,
+`egress-approval-use`, `egress-approval-revoke`). The agent hook answers
+an approved publish with an explicit `allow` whose reason names the
+approval; `egress-check` reports it as `approval: { id, expiresAt }`;
+the pre-push hook prints `repo-aegis: human approval <id> stands in for
+a person on this push`. `--list` and `--revoke` need no TTY. The typical
+use: `repo-aegis approve <org>/<repo> --ttl 15m` once, then let the agent
+push, open the PR, merge, tag and release.
 
 ### `repo-aegis egress-check -- <gh args…>`
 

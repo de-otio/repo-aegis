@@ -39,9 +39,13 @@ explicitly — \`git push <remote> <branch>\`, \`git -C <abs-path>\`,
 the session scratchpad and passed by absolute path. Never work around a
 denial, and never set \`REPO_AEGIS_EGRESS_HUMAN\`: it is the human's
 declaration that a person is present, and an agent setting it is the
-agent approving its own publish. After a command that published, read the
-\`PUBLISHED → …\` receipt in the tool result and stop if the destination
-named there is not the one you intended.
+agent approving its own publish. When a public destination or an
+irreversible verb is refused for want of a person, ask the human to mint
+an approval — \`repo-aegis approve <org>/<repo>\` from their terminal
+(it refuses without a TTY, so you cannot) — then re-issue the same
+command. After a command that published, read the \`PUBLISHED → …\`
+receipt in the tool result and stop if the destination named there is
+not the one you intended.
 ${CLAUDE_MD_END}
 `;
 

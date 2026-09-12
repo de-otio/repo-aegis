@@ -29,6 +29,7 @@ import { execFileSync } from "node:child_process";
 import { readCachedVisibility, type RepoVisibility } from "./egress.js";
 import { parseApiEndpoint, type EgressIntent, type EgressVerb } from "./egress-intent.js";
 import { resolveCachedDestination } from "./destination-cache.js";
+import { findApproval, type EgressApproval } from "./egress-approval.js";
 import { parseRemoteUrl } from "./remote-url.js";
 import { readRepoConfig, type RepoClass, type RepoConfig } from "./repo.js";
 import type { Registry } from "./registry.js";
@@ -98,7 +99,16 @@ export interface Destination {
 }
 
 export type EgressDecision =
-  | { action: "allow" }
+  | {
+      action: "allow";
+      /**
+       * Set when rule g would have needed a person and a live human-minted
+       * approval stood in (`repo-aegis approve`). Callers record the use.
+       */
+      approval?: EgressApproval;
+      intent?: EgressIntent;
+      destination?: Destination;
+    }
   | { action: "ask"; code: EgressCode; reason: string; destination?: Destination; intent: EgressIntent }
   | { action: "deny"; code: EgressCode; reason: string; destination?: Destination; intent: EgressIntent };
 
@@ -144,6 +154,14 @@ export type DestinationResolver = (
  */
 export type PayloadScanner = (file: string, destination: Destination, cwd: string) => number | null;
 
+/**
+ * Looks up a live human-minted approval for a destination (null when the
+ * command has none, e.g. `npm publish`) and the ref the command names.
+ * Injectable for tests; defaults to the approvals store under
+ * `REPO_AEGIS_HOME`.
+ */
+export type ApprovalFinder = (destination: Destination | null, ref: string | undefined) => EgressApproval | null;
+
 export interface DecideEgressOptions {
   intents: EgressIntent[];
   /** Where the command WILL run: the hook payload's cwd, or the shim's `$PWD`. */
@@ -157,7 +175,13 @@ export interface DecideEgressOptions {
   scanPayload?: PayloadScanner;
   /** Injectable for tests; defaults to `computeTrustBoundary`. */
   trustBoundaryOf?: (workingTree: string) => TrustBoundary;
+  /** Injectable for tests; defaults to the approvals store. */
+  findApproval?: ApprovalFinder;
 }
+
+/** Default {@link ApprovalFinder}: a destination-less command is covered only by a `*` approval. */
+export const findApprovalDefault: ApprovalFinder = (destination, ref) =>
+  findApproval(destination ?? { org: "*", repo: "*" }, ref);
 
 // ---------------------------------------------------------------------------
 // Destination resolution (offline)
@@ -581,6 +605,18 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   const irreversible = VERBS_NEEDING_HUMAN.has(intent.verb);
   const publicFacing = destination?.publicFacing === true;
   if ((publicFacing || irreversible) && !opts.humanPresent) {
+    // A person may have declared themselves in advance: a live approval
+    // minted at a terminal for this destination (and ref, when scoped).
+    // Rule g is the ONLY rule it satisfies — everything above still ran.
+    let approval: EgressApproval | null = null;
+    try {
+      approval = (opts.findApproval ?? findApprovalDefault)(destination, intent.refspec);
+    } catch {
+      approval = null;
+    }
+    if (approval !== null) {
+      return { action: "allow", approval, intent, ...(destination && { destination }) };
+    }
     const what = publicFacing
       ? `PUBLIC destination`
       : `an operation that is hard to undo`;
@@ -596,9 +632,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
             : "") +
       `, from a non-interactive shell. A person must approve this` +
       (opts.capabilities.ask
-        ? `.`
-        : `: re-run it from a terminal, or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation ` +
-          `(an agent never sets it).`);
+        ? `, or mint an approval first: \`repo-aegis approve ${destination ? `${destination.org}/${destination.repo}` : "*"}\` from a terminal.`
+        : `: re-run it from a terminal, mint an approval first (\`repo-aegis approve ${destination ? `${destination.org}/${destination.repo}` : "*"}\`), ` +
+          `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).`);
     if (opts.capabilities.ask) {
       return { action: "ask", code: "PUBLIC_EGRESS_NEEDS_HUMAN", reason, ...(destination && { destination }), intent };
     }
@@ -616,12 +652,14 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
  */
 export function decideEgress(opts: DecideEgressOptions): EgressDecision {
   let ask: EgressDecision | null = null;
+  let approved: EgressDecision | null = null;
   for (const intent of opts.intents) {
     const d = decideOne(intent, opts);
     if (d.action === "deny") return d;
     if (d.action === "ask" && ask === null) ask = d;
+    if (d.action === "allow" && d.approval !== undefined && approved === null) approved = d;
   }
-  return ask ?? { action: "allow" };
+  return ask ?? approved ?? { action: "allow" };
 }
 
 /**

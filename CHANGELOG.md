@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-12
+
+### Added — human approvals: `repo-aegis approve`
+
+Rule g needs a person, and until now the guard's only test for one was a
+TTY — so every publish to a public repository that an agent was asked to
+make had to be typed by the operator instead (four terminal round-trips
+per release on the first day), while the instruction actually given
+("push it") sat in a chat the guard cannot see. And on Claude Code in
+auto mode the hook's `ask` never reached the human at all: the auto-mode
+classifier answered it, with a refusal.
+
+- **`repo-aegis approve <org>/<repo> | <org>/* | * [--ref <ref>] [--ttl
+  15m] [--note …]`** mints a scoped, time-limited approval; `--list` and
+  `--revoke <id|all>` manage them. Minting **requires a TTY on stderr and
+  does not honour `REPO_AEGIS_EGRESS_HUMAN`**, so an agent cannot mint its
+  own (`APPROVE_NEEDS_TTY`). Default 15 minutes, never more than a day.
+- Every layer — the agent hook, the `gh` shim, the git pre-push hook —
+  treats a matching live approval as "human present" **for rule g only**:
+  shape rules, the cross-org boundary and the payload scan still refuse.
+  A destination-less verb (`npm publish`) is covered only by `*`.
+- Mint, every use (with the layer) and revoke are audit records. The
+  agent hook returns an explicit `allow` naming the approval;
+  `egress-check` reports `approval: { id, expiresAt }`; the pre-push hook
+  prints one line. Rule g's refusal now ends with the exact `approve`
+  command to type. Design: `doc/design/egress-guard.md` §4a.
+- The managed CLAUDE.md block tells the agent to ask for an approval
+  rather than for the human to run the command. (Re-run `install
+  claude-md` after an uninstall to refresh an existing block.)
+
 ### Fixed — the `gh` shim printed a receipt before `gh` ran
 
 - `egress-check` wrote `PUBLISHED → …` to stderr at decision time, so a
@@ -1241,7 +1271,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/de-otio/repo-aegis/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/de-otio/repo-aegis/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/de-otio/repo-aegis/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/de-otio/repo-aegis/compare/v0.8.1...v0.8.2
