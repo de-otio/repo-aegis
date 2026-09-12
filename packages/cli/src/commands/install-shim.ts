@@ -56,13 +56,23 @@ export function shimPathFor(tool: string = "gh"): string {
   return join(shimBinDir(), tool);
 }
 
-/** True when the file at `path` is a script this command generated. */
-function isOurShim(path: string): boolean {
+/**
+ * The current content of the file at `path`, or `null` when there is none
+ * (or it cannot be read). One read, and every decision below is made on
+ * what that read returned — never an `existsSync` followed by a second
+ * look, which is a check-then-act race (CodeQL js/file-system-race).
+ */
+function readShim(path: string): string | null {
   try {
-    return readFileSync(path, "utf8").includes(SHIM_HEADER_LINE);
+    return readFileSync(path, "utf8");
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** True when `content` is a script this command generated. */
+function isOurShimContent(content: string): boolean {
+  return content.includes(SHIM_HEADER_LINE);
 }
 
 function pathInstruction(): string {
@@ -71,9 +81,10 @@ function pathInstruction(): string {
 
 function uninstallShim(path: string, opts: InstallShimOptions): ShimResult {
   let result: ShimResult;
-  if (!existsSync(path)) {
+  const current = readShim(path);
+  if (current === null) {
     result = { action: "uninstall-shim", path, changed: false, reason: "no shim installed" };
-  } else if (!isOurShim(path)) {
+  } else if (!isOurShimContent(current)) {
     // Symmetric with the install-side refusal: a `gh` wrapper repo-aegis did
     // not write is not repo-aegis's to delete.
     result = {
@@ -128,8 +139,9 @@ export function installShim(tool: string | undefined, opts: InstallShimOptions):
 
   if (opts.uninstall) return uninstallShim(path, opts);
 
-  const exists = existsSync(path);
-  const wasForeign = exists && !isOurShim(path);
+  const current = readShim(path);
+  const exists = current !== null;
+  const wasForeign = current !== null && !isOurShimContent(current);
   if (wasForeign && !opts.force) {
     return emitError(
       {
@@ -147,14 +159,7 @@ export function installShim(tool: string | undefined, opts: InstallShimOptions):
 
   // Idempotence is the point, not a nicety: this command is meant to be safe
   // to re-run from a shell profile or a provisioning script.
-  let unchanged = false;
-  if (exists) {
-    try {
-      unchanged = readFileSync(path, "utf8") === GH_SHIM_SCRIPT;
-    } catch {
-      unchanged = false;
-    }
-  }
+  const unchanged = current === GH_SHIM_SCRIPT;
 
   if (!unchanged) {
     try {
