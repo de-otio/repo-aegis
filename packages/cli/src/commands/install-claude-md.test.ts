@@ -13,10 +13,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv } from "../_test-utils.js";
-import { installClaudeMd } from "./install-claude-md.js";
+import { checkGuardHook, installClaudeMd } from "./install-claude-md.js";
 
 const HOOK_COMMAND = "repo-aegis hook scan-after-write";
 const CHECK_WRITE_HOOK_COMMAND = "repo-aegis hook check-write";
+const GUARD_EGRESS_HOOK_COMMAND = "repo-aegis hook guard-egress --agent claude";
+const EGRESS_RECEIPT_HOOK_COMMAND = "repo-aegis hook egress-receipt";
 
 let tmp: string;
 
@@ -77,11 +79,17 @@ describe("install-claude-md — fresh install", () => {
     assert.equal(fileEntry!.hooks[0]!.type, "command");
     assert.equal(fileEntry!.hooks[0]!.command, "repo-aegis hook scan-after-write");
 
+    // The Bash matcher entry carries BOTH PostToolUse Bash hooks: the
+    // secret-shape scan of the output and the egress receipt. They are
+    // different jobs on the same tool result; neither replaces the other.
     const bashEntry = post.find(e => e.matcher === "Bash");
     assert.ok(bashEntry, "missing Bash matcher entry");
-    assert.equal(bashEntry!.hooks.length, 1);
-    assert.equal(bashEntry!.hooks[0]!.type, "command");
-    assert.equal(bashEntry!.hooks[0]!.command, "repo-aegis hook scan-bash-output");
+    assert.equal(bashEntry!.hooks.length, 2);
+    assert.deepEqual(
+      bashEntry!.hooks.map(h => h.command),
+      ["repo-aegis hook scan-bash-output", EGRESS_RECEIPT_HOOK_COMMAND],
+    );
+    for (const h of bashEntry!.hooks) assert.equal(h.type, "command");
   });
 
   it("registers PreToolUse check-write hook in settings.json by bin name", () => {
@@ -94,13 +102,29 @@ describe("install-claude-md — fresh install", () => {
     };
     const pre = settings.hooks.PreToolUse;
     assert.ok(pre, "expect PreToolUse key in settings.hooks");
-    assert.equal(pre!.length, 1, "expect single Write|Edit|MultiEdit matcher entry");
+    assert.equal(pre!.length, 2, "expect Write|Edit|MultiEdit and Bash matcher entries");
 
-    const entry = pre![0]!;
-    assert.equal(entry.matcher, "Write|Edit|MultiEdit");
-    assert.equal(entry.hooks.length, 1);
-    assert.equal(entry.hooks[0]!.type, "command");
-    assert.equal(entry.hooks[0]!.command, CHECK_WRITE_HOOK_COMMAND);
+    const entry = pre!.find(e => e.matcher === "Write|Edit|MultiEdit");
+    assert.ok(entry, "missing Write|Edit|MultiEdit PreToolUse entry");
+    assert.equal(entry!.hooks.length, 1);
+    assert.equal(entry!.hooks[0]!.type, "command");
+    assert.equal(entry!.hooks[0]!.command, CHECK_WRITE_HOOK_COMMAND);
+  });
+
+  it("registers the PreToolUse(Bash) egress guard in settings.json by bin name", () => {
+    // doc/design/egress-guard.md §4: the guard must sit on PreToolUse, not
+    // PostToolUse — it is the only enforcement point that sees the whole
+    // compound command before a shell has resolved it, and exit 2 there is
+    // what blocks the publish rather than reporting it afterwards.
+    const settingsPath = join(claudeHome, "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      hooks: { PreToolUse?: { matcher: string; hooks: { type: string; command: string }[] }[] };
+    };
+    const bashEntry = settings.hooks.PreToolUse!.find(e => e.matcher === "Bash");
+    assert.ok(bashEntry, "missing Bash matcher entry on PreToolUse");
+    assert.equal(bashEntry!.hooks.length, 1);
+    assert.equal(bashEntry!.hooks[0]!.type, "command");
+    assert.equal(bashEntry!.hooks[0]!.command, GUARD_EGRESS_HOOK_COMMAND);
   });
 });
 
@@ -128,15 +152,24 @@ describe("install-claude-md — idempotency", () => {
     };
     const post = settings.hooks.PostToolUse;
     assert.equal(post.length, 2, "two matcher entries (Write|Edit|MultiEdit and Bash)");
+    // Write|Edit|MultiEdit carries scan-after-write; Bash carries
+    // scan-bash-output AND egress-receipt. Each exactly once.
+    const expectedPostCounts: Record<string, number> = { "Write|Edit|MultiEdit": 1, Bash: 2 };
     for (const entry of post) {
-      assert.equal(entry.hooks.length, 1, `hook command should appear exactly once in ${entry.matcher}`);
+      assert.equal(
+        entry.hooks.length,
+        expectedPostCounts[entry.matcher],
+        `hook commands should appear exactly once each in ${entry.matcher}`,
+      );
     }
 
-    // PreToolUse check-write should also be deduplicated.
+    // PreToolUse check-write and guard-egress should also be deduplicated.
     const pre = settings.hooks.PreToolUse;
     assert.ok(pre, "PreToolUse key still present after re-run");
-    assert.equal(pre!.length, 1, "single Write|Edit|MultiEdit PreToolUse matcher");
-    assert.equal(pre![0]!.hooks.length, 1, "check-write should appear exactly once");
+    assert.equal(pre!.length, 2, "Write|Edit|MultiEdit and Bash PreToolUse matchers");
+    for (const entry of pre!) {
+      assert.equal(entry.hooks.length, 1, `PreToolUse ${entry.matcher} hook should appear exactly once`);
+    }
   });
 });
 
@@ -668,6 +701,49 @@ describe("install-claude-md — uninstall", () => {
     });
   });
 
+  it("removes the egress guard and receipt entries and reports them in the counts", () => {
+    // doc/design/egress-guard.md §4/§5: uninstall must leave no
+    // half-installed egress layer behind. A guard entry that survives an
+    // uninstall points at a `repo-aegis` that may no longer be on PATH,
+    // which turns every Bash call into a hook error.
+    const claudeHome = makeClaudeHome("uninstall-egress");
+    const aegisHome = aegisHomeFor("uninstall-egress");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome }));
+      const out = captureOutput(() =>
+        installClaudeMd({ claudeHome, uninstall: true, json: true }),
+      );
+      const j = JSON.parse(out.stdout) as {
+        settings: {
+          hookEntriesRemoved: number;
+          guardEgressHookEntriesRemoved: number;
+          egressReceiptHookEntriesRemoved: number;
+        };
+      };
+      assert.equal(j.settings.guardEgressHookEntriesRemoved, 1);
+      assert.equal(j.settings.egressReceiptHookEntriesRemoved, 1);
+      // scan-after-write + scan-bash-output + check-write + guard + receipt
+      assert.equal(j.settings.hookEntriesRemoved, 5);
+    });
+    const settings = JSON.parse(
+      readFileSync(join(claudeHome, "settings.json"), "utf8"),
+    ) as { hooks?: Record<string, unknown> };
+    assert.ok(!settings.hooks || !("PreToolUse" in settings.hooks));
+    assert.ok(!settings.hooks || !("PostToolUse" in settings.hooks));
+  });
+
+  it("counts the egress entries in the text report's per-event totals", () => {
+    const claudeHome = makeClaudeHome("uninstall-egress-text");
+    const aegisHome = aegisHomeFor("uninstall-egress-text");
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ claudeHome }));
+      return captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
+    });
+    assert.match(result.stdout, /removed 5 hook entries/);
+    assert.match(result.stdout, /PreToolUse: 2/);
+    assert.match(result.stdout, /PostToolUse: 3/);
+  });
+
   it("recognises a legacy absolute-path hook command", () => {
     const claudeHome = makeClaudeHome("uninstall-legacy");
     const aegisHome = aegisHomeFor("uninstall-legacy");
@@ -697,5 +773,186 @@ describe("install-claude-md — uninstall", () => {
       hooks?: { PostToolUse?: unknown };
     };
     assert.ok(!settings.hooks || !("PostToolUse" in settings.hooks));
+  });
+});
+
+describe("install-claude-md — egress guard registration", () => {
+  it("puts the egress paragraph in the managed CLAUDE.md block", () => {
+    // The guard is decision-only, so the agent's recovery path has to be
+    // written down somewhere it will read: re-issue explicitly, and never
+    // set the human-presence variable.
+    const claudeHome = makeClaudeHome("egress-md");
+    const aegisHome = aegisHomeFor("egress-md");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome })),
+    );
+    const body = readFileSync(join(claudeHome, "CLAUDE.md"), "utf8");
+    assert.match(body, /PreToolUse egress guard/);
+    assert.match(body, /git push <remote> <branch>/);
+    assert.match(body, /never set `REPO_AEGIS_EGRESS_HUMAN`/);
+    assert.match(body, /PUBLISHED/);
+  });
+
+  it("lists both egress hook commands in the dry-run output", () => {
+    const claudeHome = makeClaudeHome("egress-dryrun");
+    const aegisHome = aegisHomeFor("egress-dryrun");
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+    );
+    assert.ok(result.stdout.includes(GUARD_EGRESS_HOOK_COMMAND));
+    assert.ok(result.stdout.includes(EGRESS_RECEIPT_HOOK_COMMAND));
+    assert.ok(result.stdout.includes("(PreToolUse: Bash)"));
+    // Nothing written.
+    assert.ok(!existsSync(join(claudeHome, "settings.json")));
+  });
+
+  it("reports both egress hooks in the dry-run JSON", () => {
+    const claudeHome = makeClaudeHome("egress-dryrun-json");
+    const aegisHome = aegisHomeFor("egress-dryrun-json");
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true, json: true })),
+    );
+    const j = JSON.parse(result.stdout) as {
+      guardEgressHook: { hookCommand: string; wouldAdd: boolean };
+      egressReceiptHook: { hookCommand: string; wouldAdd: boolean };
+    };
+    assert.equal(j.guardEgressHook.hookCommand, GUARD_EGRESS_HOOK_COMMAND);
+    assert.equal(j.guardEgressHook.wouldAdd, true);
+    assert.equal(j.egressReceiptHook.hookCommand, EGRESS_RECEIPT_HOOK_COMMAND);
+    assert.equal(j.egressReceiptHook.wouldAdd, true);
+  });
+
+  it("reports both egress hooks in the install JSON", () => {
+    const claudeHome = makeClaudeHome("egress-json");
+    const aegisHome = aegisHomeFor("egress-json");
+    const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome, json: true })),
+    );
+    const j = JSON.parse(result.stdout) as {
+      guardEgressHook: { hookCommand: string; added: boolean };
+      egressReceiptHook: { hookCommand: string; added: boolean };
+    };
+    assert.equal(j.guardEgressHook.added, true);
+    assert.equal(j.egressReceiptHook.added, true);
+  });
+
+  it("coexists with a user-authored PreToolUse(Bash) hook", () => {
+    const claudeHome = makeClaudeHome("egress-coexist");
+    const aegisHome = aegisHomeFor("egress-coexist");
+    const settingsPath = join(claudeHome, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { matcher: "Bash", hooks: [{ type: "command", command: "/path/to/other/pre-bash.sh" }] },
+          ],
+        },
+      }),
+    );
+    withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome })),
+    );
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
+      hooks: { PreToolUse: { matcher: string; hooks: { command: string }[] }[] };
+    };
+    const bashEntry = settings.hooks.PreToolUse.find(e => e.matcher === "Bash")!;
+    assert.deepEqual(
+      bashEntry.hooks.map(h => h.command),
+      ["/path/to/other/pre-bash.sh", GUARD_EGRESS_HOOK_COMMAND],
+    );
+  });
+});
+
+describe("checkGuardHook", () => {
+  it("reports GUARD_HOOK_UNREGISTERED when settings.json is absent", () => {
+    const claudeHome = makeClaudeHome("guard-check-absent");
+    const checks = checkGuardHook(claudeHome);
+    assert.equal(checks.length, 1);
+    assert.equal(checks[0]!.code, "GUARD_HOOK_UNREGISTERED");
+    assert.equal(checks[0]!.ok, false);
+    assert.match(checks[0]!.detail, /no settings\.json/);
+    assert.equal(checks[0]!.fix, "repo-aegis install claude-md");
+  });
+
+  it("reports GUARD_HOOK_UNREGISTERED when settings.json is unparseable", () => {
+    const claudeHome = makeClaudeHome("guard-check-garbage");
+    writeFileSync(join(claudeHome, "settings.json"), "{ not json");
+    const checks = checkGuardHook(claudeHome);
+    assert.equal(checks[0]!.ok, false);
+    assert.match(checks[0]!.detail, /could not be parsed/);
+  });
+
+  it("reports GUARD_HOOK_UNREGISTERED when the Bash PreToolUse entry carries other hooks only", () => {
+    const claudeHome = makeClaudeHome("guard-check-other");
+    writeFileSync(
+      join(claudeHome, "settings.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { matcher: "Bash", hooks: [{ type: "command", command: "/path/to/other/pre-bash.sh" }] },
+            {
+              matcher: "Write|Edit|MultiEdit",
+              hooks: [{ type: "command", command: CHECK_WRITE_HOOK_COMMAND }],
+            },
+          ],
+        },
+      }),
+    );
+    const checks = checkGuardHook(claudeHome);
+    assert.equal(checks[0]!.ok, false);
+    assert.match(checks[0]!.detail, /no PreToolUse\(Bash\) entry/);
+  });
+
+  it("does not accept the guard on the wrong matcher", () => {
+    // A guard registered against Write|Edit|MultiEdit never sees a shell
+    // command, so it is not a guard.
+    const claudeHome = makeClaudeHome("guard-check-wrong-matcher");
+    writeFileSync(
+      join(claudeHome, "settings.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Write|Edit|MultiEdit",
+              hooks: [{ type: "command", command: GUARD_EGRESS_HOOK_COMMAND }],
+            },
+          ],
+        },
+      }),
+    );
+    assert.equal(checkGuardHook(claudeHome)[0]!.ok, false);
+  });
+
+  it("reports ok once `install claude-md` has registered the guard", () => {
+    const claudeHome = makeClaudeHome("guard-check-ok");
+    const aegisHome = aegisHomeFor("guard-check-ok");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () =>
+      captureOutput(() => installClaudeMd({ claudeHome })),
+    );
+    const checks = checkGuardHook(claudeHome);
+    assert.equal(checks.length, 1);
+    assert.equal(checks[0]!.code, "GUARD_HOOK_UNREGISTERED");
+    assert.equal(checks[0]!.ok, true);
+    assert.match(checks[0]!.detail, /registered/);
+    assert.equal(checks[0]!.fix, undefined);
+  });
+
+  it("accepts any --agent spelling on the registered command", () => {
+    const claudeHome = makeClaudeHome("guard-check-agent");
+    writeFileSync(
+      join(claudeHome, "settings.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Bash",
+              hooks: [{ type: "command", command: "repo-aegis hook guard-egress" }],
+            },
+          ],
+        },
+      }),
+    );
+    assert.equal(checkGuardHook(claudeHome)[0]!.ok, true);
   });
 });
