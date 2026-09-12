@@ -922,6 +922,144 @@ Otherwise: hands off to `check`. Exit semantics are `check`'s.
 
 ---
 
+## Egress guard (destination-aware publishing)
+
+Design: [design/egress-guard.md](design/egress-guard.md). One decision
+function in core (`parseEgressIntents` + `decideEgress`) enforced at three
+points. The rules, in evaluation order — shape rules are unconditional,
+context rules fail open, and no layer ever rewrites a command:
+
+| # | Rule | Code | Decision |
+|---|---|---|---|
+| a | `git push` without both `<remote>` and `<refspec>` | `PUSH_IMPLICIT_TARGET` | deny |
+| b | egress after a `cd` / `pushd` earlier in the same command | `EGRESS_AFTER_CD` | deny |
+| c | egress joined to earlier segments with `;`, `\|\|` or `&` | `EGRESS_UNGUARDED_CHAIN` | deny |
+| d | payload path (`--body-file`, `-F`, `--notes-file`, `--input`, `--body @f`, `-F k=@f`) is relative, expands `$TMPDIR`, or sits under `/var/folders/**` or the shared sandbox temp root (the session-unique `…/scratchpad/` segment is exempt; `-` is stdin) | `PAYLOAD_MODE_DEPENDENT_PATH` | deny |
+| e | the pushed repo's (or the payload file's tree's) trust boundary is positively disjoint from the destination's | `CROSS_ORG_EGRESS` | deny |
+| f | payload content matches the destination's deny set (its own class when the destination is the tree's origin; `_always` only otherwise; `_self_identity` joins for customer-coupled) | `PAYLOAD_MARKER_HIT` | deny (hit count only) |
+| g | destination public-facing, or verb ∈ {`gh pr merge`, `gh release *`, `gh repo create\|edit`, `gh gist create`, `gh workflow run`, `npm publish`}, and no human present | `PUBLIC_EGRESS_NEEDS_HUMAN` | `ask` where the framework has it; `deny` otherwise — never `allow` |
+| h | otherwise (including class `scratch`) | — | allow |
+
+"Human present" is a TTY on stderr — stdin is often a pipe even for a
+person, so it is never the signal — or `REPO_AEGIS_EGRESS_HUMAN=1`, a
+documented human-only escape with the same contract as
+`REPO_AEGIS_WAIVE_NONINTERACTIVE`: an agent never sets it, and setting it
+is a visible act in any transcript. Destination resolution is offline:
+`git push <remote>` reads `remote.<remote>.url` from the `git -C`
+directory or the cwd; `gh … --repo o/r` is direct; other `gh` uses the
+cwd's origin. Class and cached visibility apply when the destination is
+the tree's own origin; `public-eligible` with no cached visibility is
+public-facing, because the class is a declaration and the cache only an
+optimisation. Reasons name `<org>/<repo>`, visibility, class and ref —
+never payload content, matched substrings, or registry entries.
+
+### `check --remote-url <url>` (the git pre-push layer)
+
+The generated pre-push hook passes git's `$2` (the remote URL) to both
+`check --push-ref … --remote-url <url>` and `check --range … --remote-url
+<url>`. Before the content scan, `check`:
+
+1. parses the URL (GitHub only; anything else skips these checks — fail
+   open);
+2. refuses with **`CROSS_ORG_PUSH`** (exit 2) when the URL's org is
+   positively disjoint from the repo's trust boundary — deterministic,
+   offline, no TTY involved;
+3. refuses with **`PUBLIC_PUSH_NEEDS_HUMAN`** (exit 2) when the repo is
+   public-facing (`public-eligible`, or cached visibility `public`) and no
+   human is present;
+4. otherwise prints one stderr line, the git-native receipt:
+   `repo-aegis: pushing <ref-or-range> → <org>/<repo> (<visibility>)`.
+
+With `--json`, the output object carries `destination: { org, repo,
+visibility, class, publicFacing }`. Either refusal is recorded in the audit
+log when it is on. The template change bumps the hook digest: installed
+copies report `HOOKS_SCRIPT_STALE` until `install hooks` runs again.
+
+### `repo-aegis hook guard-egress [--agent claude|codex|gemini]`
+
+The pre-command hook. Reads the framework's JSON on stdin
+(`tool_input.command`, `cwd`), parses the command, runs `decideEgress`
+with `capabilities.ask` true for `claude` (the default) and false
+otherwise, and answers:
+
+| Decision | Exit | stdout | stderr |
+|---|---|---|---|
+| allow (or no publishing operation in the command) | 0 | — | — |
+| ask | 0 | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":…}}` | — |
+| deny | 2 | the same shape with `"deny"` | `{ code, error, details: { verb, destination? } }` |
+
+It never emits `updatedInput`. A registry that is missing, encrypted or
+unreadable does not disable the shape rules. Registered by
+`install claude-md` on `PreToolUse` matcher `Bash`; Codex CLI and Gemini
+CLI snippets are in [agent-install.md](agent-install.md) (there `ask`
+degrades to `deny`).
+
+### `repo-aegis hook egress-receipt`
+
+The post-command hook (`PostToolUse` matcher `Bash`). If the command that
+just ran carried a publishing operation, returns one line per operation as
+`additionalContext`:
+
+```
+PUBLISHED → <org>/<repo> (<VISIBILITY>, class <class>): <ref | PR #n | tag>
+```
+
+or `EGRESS FAILED → …` when the tool output shows the publish did not
+happen. Silent otherwise.
+
+### `repo-aegis install shim [tool]`
+
+Writes `<home>/bin/gh` (the only `tool` today), a wrapper to put first on
+`PATH`. It locates the real `gh` by scanning `PATH` past its own directory
+— never a hard-coded path, never itself — passes every non-publishing
+invocation through untouched, and for the publishing verbs runs
+`repo-aegis egress-check` first. `--uninstall` removes it; `--force`
+overwrites a file at that path that repo-aegis did not write
+(`SHIM_PATH_OCCUPIED` otherwise). `uninstall` removes it too.
+
+### `repo-aegis egress-check -- <gh args…>`
+
+The decision call behind the shim (usable directly). Exit 0 on allow with
+`{ action: "allow", destination?, readback? }` on stdout; exit 2 on deny
+with the structured reason on stderr. `readback` is set for `gh pr
+create|edit` with a body file, and tells the shim to run
+`egress-readback` afterwards.
+
+### `repo-aegis egress-readback --body-file <path> --pr <ref> [--repo o/r] [--gh <path>] [--timeout-ms <n>]`
+
+After `gh pr create|edit`, reads the live PR body back (`gh pr view --json
+body`) and compares it to the file. Exit 1 with
+**`PUBLISHED_BODY_MISMATCH`** and byte counts — never either content — on
+difference; exit 0 on match; exit 0 with `READBACK_UNAVAILABLE` on any
+read-back failure, because a failed check must not fail the publish it
+could not have blocked anyway.
+
+### `doctor` — egress-guard checks
+
+Every context rule reads class and cached visibility, so a
+destination-aware control on an unclassified estate is silent. `doctor`
+now reports, unless `--no-egress-checks`:
+
+| Check | Fires when | Fix |
+|---|---|---|
+| `PUSH_DEFAULT_IMPLICIT` | global `push.default` is unset or not `nothing` | `git config --global push.default nothing` |
+| `SHIM_MISSING` / `SHIM_NOT_FIRST` | no shim, or another `gh` precedes it on `PATH` | `repo-aegis install shim`; fix `PATH` order |
+| `GUARD_HOOK_UNREGISTERED` | Claude Code `settings.json` has no `guard-egress` entry | `repo-aegis install claude-md` |
+| `CLASS_VISIBILITY_UNRESOLVED` (per repo) | a repo with a GitHub remote has no explicit class or no cached visibility | `repo-aegis classify --apply && repo-aegis status` in that repo |
+| `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`) |
+
+JSON gains `machine: DoctorCheck[]` and per-repo `checks: DoctorCheck[]`;
+`summary.failed` counts them.
+
+### `scan-env --self`
+
+Offers `selfIdentity` candidates — the registry's `personalOrgs`,
+`package.json` names under `--from`, the agent session-link shape — dry-run
+by default; `--accept self-identity` persists them. See
+[configuration.md](configuration.md).
+
+---
+
 ## Scanner subcommands (`repo-aegis-scan`)
 
 The scanner is published as a separate npm package

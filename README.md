@@ -34,6 +34,23 @@ marker list when working on customer-A's own code.
   configurable. Detection-only by design: PostToolUse fires after
   the leak has reached the agent context, so the hook points at
   credential rotation instead of pretending the leak can be unsent.
+- **Destination-aware egress guard.** Every control above asks "are
+  these bytes safe in this repo?"; none asked "is this going to the
+  right place?" — and two right-bytes-wrong-boundary leaks in one week
+  landed in that gap. One decision function (`egress-intent` /
+  `egress-policy`) now runs at three enforcement points: the git
+  pre-push hook (which finally reads the remote URL git hands it), a
+  `gh` shim on `PATH` (`install shim`), and the pre-command hooks of
+  Claude Code / Codex CLI / Gemini CLI (`hook guard-egress`). Shape
+  rules refuse the implicit forms with no context at all — a bare `git
+  push`, an egress after `cd` in the same command, a `;`-chained push,
+  a PR body under `$TMPDIR` — and context rules `ask` a human for a
+  public destination or an irreversible verb (`merge`, `release`,
+  `publish`), refuse a cross-org destination, and scan a PR body
+  against the *destination's* deny set. Decision-only: the guard never
+  rewrites a command. `selfIdentity` markers cover the inverse
+  direction — the operator's own project names and session links
+  entering a customer's repository.
 - **Engagement-scoped CLI verbs.** `allow`, `deny`, `status`,
   `check`, `classify`, `audit`, `engagements add | end | show`,
   `markers test`, `suggest-markers`, `uninstall`. Stable JSON

@@ -1,6 +1,11 @@
 # Design: egress guard (destination-aware publishing controls)
 
-**Status:** proposed
+**Status:** implemented — rollout phases 1–3 (shape rules, receipts, agent
+hooks; git-native destination; the `gh` shim, payload rules, `selfIdentity`,
+`doctor` checks). Phase 4 (server-side `audit --pr-body`) is not built. One
+recorded deviation: rule d exempts the agent's session-unique scratchpad under
+the sandboxed `$TMPDIR` root (see `isModeDependentPath`), because that is the
+location the design tells agents to use.
 **Author:** (drafted with Claude Code)
 **Scope:** `@de-otio/repo-aegis-core`, `@de-otio/repo-aegis` (CLI), the generated
 git hooks, a new `PATH` shim
