@@ -992,9 +992,9 @@ copies report `HOOKS_SCRIPT_STALE` until `install hooks` runs again.
 ### `repo-aegis hook guard-egress [--agent claude|codex|gemini]`
 
 The pre-command hook. Reads the framework's JSON on stdin
-(`tool_input.command`, `cwd`), parses the command, runs `decideEgress`
-with `capabilities.ask` true for `claude` (the default) and false
-otherwise, and answers:
+(`tool_input.command` or a root-level `command`, plus the root `cwd`),
+parses the command, runs `decideEgress` with `capabilities.ask` true for
+`claude` (the default) and false otherwise, and answers:
 
 | Decision | Exit | stdout | stderr |
 |---|---|---|---|
@@ -1007,6 +1007,13 @@ unreadable does not disable the shape rules. Registered by
 `install claude-md` on `PreToolUse` matcher `Bash`; Codex CLI and Gemini
 CLI snippets are in [agent-install.md](agent-install.md) (there `ask`
 degrades to `deny`).
+
+`command` may be a string or an argv array. An array is flattened
+before parsing: if it carries a `-c` / `-lc`-style flag the element
+after it is the script the policy judges (`["bash", "-lc", "git
+push"]` → `git push`); otherwise the elements are joined with spaces.
+The `cwd` used is the harness's root `cwd` — where the command *will*
+run — never the hook process's own working directory.
 
 ### `repo-aegis hook egress-receipt`
 
@@ -1027,9 +1034,20 @@ Writes `<home>/bin/gh` (the only `tool` today), a wrapper to put first on
 `PATH`. It locates the real `gh` by scanning `PATH` past its own directory
 — never a hard-coded path, never itself — passes every non-publishing
 invocation through untouched, and for the publishing verbs runs
-`repo-aegis egress-check` first. `--uninstall` removes it; `--force`
-overwrites a file at that path that repo-aegis did not write
-(`SHIM_PATH_OCCUPIED` otherwise). `uninstall` removes it too.
+`repo-aegis egress-check` first. Idempotent: a second run reports
+`already installed`. A file at that path that repo-aegis did not write
+is refused with `SHIM_PATH_OCCUPIED` unless `--force` is passed.
+
+Installing is not enabling: the shim only guards once `<home>/bin`
+precedes the real `gh` on `PATH`, which this command prints (also as
+`pathInstruction` in `--json`) but cannot do — it is a shell-profile
+edit. `doctor` reports `SHIM_MISSING` / `SHIM_NOT_FIRST` until both
+halves are done.
+
+`--uninstall` removes the shim **only if repo-aegis wrote it** (the
+file carries a header line); a foreign file at the shim path is left in
+place and reported (`changed: false`, with the reason). The top-level
+`uninstall` applies the same rule.
 
 ### `repo-aegis egress-check -- <gh args…>`
 

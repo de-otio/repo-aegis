@@ -5,6 +5,23 @@ All notable changes to repo-aegis are documented here.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — docs
+
+- The install path now names the `gh` shim. `init` deliberately does
+  not write it (it needs a shell-profile edit only the user can make),
+  but neither the README quick start nor `doc/agent-install.md` told
+  anyone to run `install shim` — so an install that followed the docs
+  ended with the pre-push hook and the agent hooks in place and the one
+  layer shared by every agent and every human missing, visible only
+  through `doctor`. The agent guide gains Step 2b, a three-layer table
+  and the `doctor` codes to expect; the quick start gains the two lines.
+- `doc/cli-reference.md`: `install shim --uninstall` never removes a
+  file repo-aegis did not write (the previous wording implied it did);
+  `hook guard-egress` documents the argv-array `command` flattening
+  (`["bash", "-lc", "…"]`) and which `cwd` it uses.
+
 ## [0.9.0] - 2026-09-12
 
 ### Added — the egress guard (destination-aware publishing controls)
@@ -1170,7 +1187,11 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/de-otio/repo-aegis/compare/v0.8.2...v0.9.0
+[0.8.2]: https://github.com/de-otio/repo-aegis/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/de-otio/repo-aegis/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/de-otio/repo-aegis/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/de-otio/repo-aegis/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/de-otio/repo-aegis/compare/v0.6.0...v0.7.0
 [0.1.0]: https://github.com/de-otio/repo-aegis/releases/tag/v0.1.0
