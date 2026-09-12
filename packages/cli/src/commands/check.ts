@@ -18,6 +18,18 @@ import {
   isEgressRelevant,
   isPublicFacing,
   loadEgressPolicy,
+  // Destination awareness (doc/design/egress-guard.md §2). The pre-push hook
+  // is handed the remote URL as `$2`; `--remote-url` is how it reaches here.
+  parseRemoteUrl,
+  computeTrustBoundary,
+  readCachedVisibility,
+  isHumanPresent,
+  EGRESS_HUMAN_ENV,
+  loadRegistry,
+  appendAuditRecord,
+  RegistryNotFoundError,
+  type Registry,
+  type RepoVisibility,
   CustomerCoupledNoEngagementError,
   OVERRIDE_FILENAME,
   WaiverParseError,
@@ -67,6 +79,17 @@ interface CheckOptions extends DenySetFloorOptions {
   pushRef?: string;
   /** Remote name for --push-ref. Defaults to `origin`. */
   remote?: string;
+  /**
+   * The destination remote URL, as git hands it to `pre-push` in `$2`.
+   *
+   * This is the one place in the stack that sees *where* content is going at
+   * the moment of egress. Present → the destination checks below run before
+   * any content is scanned; absent → nothing changes, so every existing
+   * caller (and every hook installed before this shipped) behaves exactly as
+   * it did. Meaningful with `--push-ref` / `--range`; accepted in any mode
+   * because refusing it elsewhere would only invite callers to drop it.
+   */
+  remoteUrl?: string;
   /** With --history, only scan commits reachable from this revspec. */
   since?: string;
   maxFileBytes?: number;
@@ -229,6 +252,157 @@ function gatherEgressInputs(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Destination checks (doc/design/egress-guard.md §2)
+// ---------------------------------------------------------------------------
+
+/**
+ * What `--json` reports about where this push is going. Deliberately small:
+ * `<org>/<repo>`, the cached visibility, the repo's class, and the one derived
+ * boolean the policy turns on. Never a remote URL (it can carry a username),
+ * never registry contents.
+ */
+export interface CheckDestination {
+  org: string;
+  repo: string;
+  visibility: RepoVisibility;
+  class: RepoConfig["class"];
+  publicFacing: boolean;
+}
+
+/** The ref or range this run is about, for reasons and the receipt line. */
+function refLabel(opts: CheckOptions): string {
+  return opts.pushRef ?? opts.range ?? "(no ref)";
+}
+
+/**
+ * Load the registry for the trust-boundary comparison, best-effort.
+ *
+ * `null` means "skip the cross-org check": a guardrail must not block on its
+ * own inability to determine context (the spurious `CROSS_ORG_WRITE` flake,
+ * doc/bugs/repo-aegis-check-write-flake.md). A *missing* registry is the one
+ * error that is not ambiguous — there is simply no registry on this machine —
+ * so it degrades to an empty one, which still lets the remote-origin fallback
+ * inside `computeTrustBoundary` supply the repo's own org.
+ */
+function registryForBoundary(): Registry | null {
+  try {
+    return loadRegistry();
+  } catch (err) {
+    if (err instanceof RegistryNotFoundError) return { engagements: [], alwaysBlock: [] };
+    return null;
+  }
+}
+
+/** Best-effort audit trail for a refusal. Never content, never the URL. */
+function auditRefusal(code: string, repo: RepoConfig, dest: CheckDestination, ref: string): void {
+  try {
+    appendAuditRecord({
+      action: "check-egress-refused",
+      cwd: repo.cwd,
+      repo: repo.cwd,
+      details: { code, destination: `${dest.org}/${dest.repo}`, ref },
+    });
+  } catch {
+    /* the audit log must never break the refusal itself */
+  }
+}
+
+/**
+ * Run the destination checks for `--remote-url` and return what `--json`
+ * should report. Refusals exit through `emitError` (exit 2) and never return.
+ *
+ * Order matters: `CROSS_ORG_PUSH` is deterministic and offline, so it is
+ * decided first and is unaffected by whether a human happens to be at the
+ * keyboard. `PUBLIC_PUSH_NEEDS_HUMAN` is the softer gate underneath it.
+ *
+ * Fail-open by construction: a URL that does not parse (a non-GitHub host, a
+ * local path, a bare directory) yields `null` and no checks at all. That is
+ * the documented Phase-1 scope of `parseRemoteUrl`, and refusing what it
+ * cannot read would make every non-GitHub remote unpushable.
+ */
+function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestination | null {
+  if (opts.remoteUrl === undefined || opts.remoteUrl.trim() === "") return null;
+  const parsed = parseRemoteUrl(opts.remoteUrl);
+  if (parsed === null) return null;
+
+  const ref = refLabel(opts);
+  const visibility = readCachedVisibility(repo.cwd);
+  const dest: CheckDestination = {
+    org: parsed.org,
+    repo: parsed.repo,
+    visibility,
+    class: repo.class,
+    publicFacing: isPublicFacing(repo, { visibility }),
+  };
+
+  // --- CROSS_ORG_PUSH ------------------------------------------------------
+  const registry = registryForBoundary();
+  if (registry !== null) {
+    let boundaryOrgs: string[] | null = null;
+    try {
+      boundaryOrgs = [...computeTrustBoundary(repo.cwd, registry).orgs].sort();
+    } catch {
+      boundaryOrgs = null; // context unavailable -> fail open
+    }
+    // An empty org set is "no signal", not "no orgs allowed" — same rule as
+    // `trustBoundariesOverlap`, which treats two empty sets as non-overlapping
+    // rather than as a match.
+    if (boundaryOrgs !== null && boundaryOrgs.length > 0 && !boundaryOrgs.includes(parsed.org)) {
+      auditRefusal("CROSS_ORG_PUSH", repo, dest, ref);
+      emitError(
+        {
+          code: "CROSS_ORG_PUSH",
+          error:
+            `refusing to push ${ref} to ${parsed.org}/${parsed.repo}: this repo's trust boundary ` +
+            `is ${boundaryOrgs.join(", ")} and does not include ${parsed.org}. ` +
+            `Push to a remote inside the boundary, or classify this repo so the boundary is right.`,
+          details: {
+            destination: `${parsed.org}/${parsed.repo}`,
+            ref,
+            boundaryOrgs,
+          },
+        },
+        opts,
+      );
+    }
+  }
+
+  // --- PUBLIC_PUSH_NEEDS_HUMAN --------------------------------------------
+  // `isHumanPresent` tests stderr's TTY. stdin is git's ref list on this path
+  // and is never the signal.
+  if (dest.publicFacing && !isHumanPresent()) {
+    auditRefusal("PUBLIC_PUSH_NEEDS_HUMAN", repo, dest, ref);
+    emitError(
+      {
+        code: "PUBLIC_PUSH_NEEDS_HUMAN",
+        error:
+          `refusing to push ${ref} to ${parsed.org}/${parsed.repo} ` +
+          `(${visibility}, ${repo.class}) with no human present: ` +
+          `run it from a terminal, or a human sets ${EGRESS_HUMAN_ENV}=1 for this one ` +
+          `invocation (an agent never sets it).`,
+        details: {
+          destination: `${parsed.org}/${parsed.repo}`,
+          ref,
+          visibility,
+          class: repo.class,
+        },
+      },
+      opts,
+    );
+  }
+
+  // --- the git-native receipt ---------------------------------------------
+  // One line, on stderr, so it rides out with git's own output and lands in
+  // the agent's tool result. A model skims twenty lines of git output; it does
+  // not skim one line naming a repository it did not intend.
+  process.stderr.write(
+    `repo-aegis: pushing ${ref} → ${parsed.org}/${parsed.repo} (${visibility})\n`,
+  );
+
+  return dest;
+}
+
 export function check(opts: CheckOptions): void {
   // Validate flags FIRST. Exactly one of --staged, --path, --range,
   // --push-ref, --history must be specified.
@@ -253,6 +427,12 @@ export function check(opts: CheckOptions): void {
     const err = new CustomerCoupledNoEngagementError();
     emitError({ code: err.code, error: err.message }, opts);
   }
+
+  // Destination first, content second. A push to the wrong repository is
+  // wrong even when the bytes are clean — that is the whole point of §2 — and
+  // deciding it before the scan means the refusal costs nothing and cannot be
+  // masked by a scan failure.
+  const destination = evaluateDestination(repo, opts);
 
   const denySet = computeDenySet(repo);
   // Fail-closed floor, before anything can report "clean" — including the
@@ -313,7 +493,14 @@ export function check(opts: CheckOptions): void {
 
   if (!hasDenySet && egress.length === 0) {
     if (opts.json) {
-      emitJson({ hits: [], skipped: [], egress: [], status: "no-deny-set", warnings: denySet.warnings });
+      emitJson({
+        hits: [],
+        skipped: [],
+        egress: [],
+        status: "no-deny-set",
+        warnings: denySet.warnings,
+        ...(destination !== null && { destination }),
+      });
     } else {
       emitText("repo-aegis: no deny set (marker dir empty or all engagements allowed here)");
     }
@@ -504,6 +691,9 @@ export function check(opts: CheckOptions): void {
 
   const result = {
     mode,
+    // Present only when `--remote-url` parsed. Omitted otherwise so the
+    // envelope every existing consumer reads stays byte-identical.
+    ...(destination !== null && { destination }),
     // Only --push-ref resolves a range mode; omitting the key elsewhere keeps
     // the envelope of the other four modes byte-identical to before.
     ...(newRef !== undefined && {
