@@ -198,7 +198,13 @@ fi
 if [ -n "$hooks_dir" ]; then
   chained="$hooks_dir/pre-push"
   if [ -x "$chained" ] && ! __repo_aegis_same_file "$chained" "$0"; then
-    tmp_stdin="$(mktemp 2>/dev/null || true)"
+    # A TEMPLATE, not a bare \`mktemp\`: BSD mktemp (macOS's stock one)
+    # requires one and prints nothing without it, which made this whole
+    # chaining branch a silent no-op on macOS from the day it shipped —
+    # the "|| true" below turned the usage error into an empty string and
+    # the guard then fell through to the plain exit. Found by the gh
+    # shim's smoke test, which made the same mistake and caught it.
+    tmp_stdin="$(mktemp "\${TMPDIR:-/tmp}/repo-aegis-prepush.XXXXXX" 2>/dev/null || true)"
     if [ -n "$tmp_stdin" ]; then
       printf '%s\\n' "\${stdin_lines[@]}" > "$tmp_stdin"
       exec 3< "$tmp_stdin"

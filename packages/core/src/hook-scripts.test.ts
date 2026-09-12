@@ -137,3 +137,48 @@ describe("PRE_PUSH_SCRIPT — remote URL pass-through", () => {
     assert.match(calls[0]!, /--remote-url https:\/\/github\.com\/acme\/svc\.git/);
   });
 });
+
+describe("PRE_PUSH_SCRIPT — chaining to the repo's own pre-push", () => {
+  it("replays git's ref list to a chained .git/hooks/pre-push (BSD mktemp needs a template)", () => {
+    // Before the template fix, `mktemp` with no argument printed nothing on
+    // macOS, `|| true` hid the usage error, and the chained hook was never
+    // exec'd. This test runs the real script in a real repo with a chained
+    // hook that records what it received.
+    const dir = join(tmp, "chain");
+    const bin = join(dir, "bin");
+    mkdirSync(bin, { recursive: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir, stdio: "ignore" });
+
+    const fake = join(bin, "repo-aegis");
+    writeFileSync(fake, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    chmodSync(fake, 0o755);
+
+    const received = join(dir, "chained.log");
+    const chained = join(dir, ".git", "hooks", "pre-push");
+    mkdirSync(join(dir, ".git", "hooks"), { recursive: true });
+    writeFileSync(
+      chained,
+      `#!/bin/sh\nprintf 'args=%s\\n' "$*" > "${received}"\ncat >> "${received}"\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    chmodSync(chained, 0o755);
+
+    // Install our script somewhere that is NOT .git/hooks, as core.hooksPath does.
+    const script = join(dir, "ours", "pre-push");
+    mkdirSync(join(dir, "ours"), { recursive: true });
+    writeFileSync(script, PRE_PUSH_SCRIPT, { mode: 0o755 });
+    chmodSync(script, 0o755);
+
+    const stdin = `refs/heads/main ${LOCAL_SHA} refs/heads/main ${REMOTE_SHA}\n`;
+    execFileSync("bash", [script, "origin", "git@github.com:acme/svc.git"], {
+      cwd: dir,
+      input: stdin,
+      env: { ...process.env, PATH: `${bin}${delimiter}${process.env["PATH"] ?? ""}` },
+      encoding: "utf8",
+    });
+
+    const body = readFileSync(received, "utf8");
+    assert.ok(body.startsWith("args=origin git@github.com:acme/svc.git\n"), body);
+    assert.ok(body.includes(`refs/heads/main ${LOCAL_SHA} refs/heads/main ${REMOTE_SHA}`), body);
+  });
+});

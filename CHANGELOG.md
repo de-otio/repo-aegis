@@ -134,6 +134,16 @@ visible, auditable act.
 
 ### Fixed
 
+- **The pre-push hook never chained to a repo's own `pre-push` on macOS.**
+  The chaining branch called `mktemp` with no template; BSD `mktemp`
+  requires one and prints nothing without it, the `|| true` hid the usage
+  error, and the empty-string guard fell through to a plain exit — so a
+  hook a human or another tool had installed into `.git/hooks` was silently
+  skipped on every push since the v0.7 global-`core.hooksPath` default. Found
+  by the `gh` shim's smoke test, which made the same mistake and caught it.
+  The template now names one; a script-level test runs the real hook in a
+  real repo against a chained hook that records what it receives.
+
 Three silent skips found while classifying ~90 repos on a machine with two
 `gh` accounts (#97). Each made a control believe less than it should without
 saying so, which is the one failure mode a leak-prevention tool cannot have.

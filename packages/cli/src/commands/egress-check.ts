@@ -111,12 +111,13 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
     return internalError(`could not parse the gh command line: ${(err as Error).message}`);
   }
 
+  const registry = loadRegistryOrEmpty();
   let decision;
   try {
     decision = decideEgress({
       intents,
       cwd,
-      registry: loadRegistryOrEmpty(),
+      registry,
       humanPresent: isHumanPresent(),
       // A shell has no prompt to offer, so `ask` degrades to `deny` in core.
       capabilities: { ask: false },
@@ -145,7 +146,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   const first = intents[0];
   if (first !== undefined) {
     try {
-      destination = resolveDestinationOffline(first, cwd);
+      destination = resolveDestinationOffline(first, cwd, registry);
     } catch {
       destination = null;
     }
