@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — egress guard: a destination named in full is now judged as itself
+
+Two ways an explicitly named destination was judged from the wrong place,
+both found live on 2026-09-12 while merging a PR into a public repository
+from a private checkout — the exact shape of the first incident.
+
+- **`gh api` paths were never parsed.** `gh api -X PUT
+  repos/<o>/<r>/pulls/<n>/merge` was resolved to the cwd's origin: allowed
+  silently from a private checkout, and receipted as `PUBLISHED → <the
+  cwd's repo>`. The parser now captures the endpoint positional and the
+  resolver reads `repos/<o>/<r>` (and `orgs/<o>` → repo `*`) from it. Paths
+  with `{owner}`/`{repo}` placeholders keep resolving from the cwd, which
+  is what `gh` does with them.
+- **A destination outside the cwd fell open.** Class and visibility live in
+  each repository's git config, so `gh … --repo o/r`, a `gh api` path, or
+  `git push <url>` from any other directory resolved to "class unknown,
+  visibility unknown" and passed. New machine-wide destination cache
+  (`$REPO_AEGIS_HOME/destinations.json`, 0600): `<org>/<repo>` → the
+  checkout that declares it, followed live. Written by `classify --apply`,
+  `status`, `doctor`'s sweep (reported as `destinationsRecorded`) and by
+  the guard itself on every command judged from inside a repository.
+  Applies to the agent hook, the `gh` shim **and the git pre-push hook**,
+  which had the same defect a third time: a push to a URL other than the
+  repo's origin was judged by the pushing repo's own class.
+- A destination in `personalOrgs` with nothing cached is now treated as
+  public-facing (rule g asks; the receipt says `VISIBILITY UNCACHED,
+  TREATED AS PUBLIC`) instead of unknown — asking is not blocking, and the
+  personal org is where the public repositories live.
+- `classify --apply` now caches the visibility it already probed, so
+  `classify --apply && status` is one command where the probe resolves.
+- Reasons and receipts say where the class came from: `from --repo`,
+  `from the API path`, `from the checkout at <path>`. `check --remote-url
+  --json` gains `destination.declaredBy` (`origin` | `cache` | `none`).
+
 ### Fixed — docs
 
 - The install path now names the `gh` shim. `init` deliberately does

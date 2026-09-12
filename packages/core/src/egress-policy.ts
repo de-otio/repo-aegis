@@ -27,7 +27,8 @@
 import { basename, isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
 import { readCachedVisibility, type RepoVisibility } from "./egress.js";
-import type { EgressIntent, EgressVerb } from "./egress-intent.js";
+import { parseApiEndpoint, type EgressIntent, type EgressVerb } from "./egress-intent.js";
+import { resolveCachedDestination } from "./destination-cache.js";
 import { parseRemoteUrl } from "./remote-url.js";
 import { readRepoConfig, type RepoClass, type RepoConfig } from "./repo.js";
 import type { Registry } from "./registry.js";
@@ -72,6 +73,28 @@ export interface Destination {
   inferredFromRegistry?: boolean;
   /** The engagement ids the destination is coupled to, when inferred. */
   engagements?: string[];
+  /**
+   * True when class and visibility were read through the machine-wide
+   * destination cache (`destinations.json`): the command ran outside the
+   * destination's checkout, but this machine holds one and its declaration
+   * applies. `workingTree` is that checkout.
+   */
+  fromCache?: boolean;
+  /**
+   * The checkout whose declaration `class` / `visibility` came from — the
+   * command's own directory, or the cached pointer. Absent when the class
+   * is inferred or unknown. Rule e reads the destination's trust boundary
+   * from here; rule f reads its deny set from here.
+   */
+  workingTree?: string;
+  /**
+   * True when nothing on this machine describes the destination but its org
+   * is in `personalOrgs` — the operator's own org, where the public
+   * repositories live. Treated as public-facing so rule g asks rather than
+   * lets an unknown personal-org destination through: asking is not
+   * blocking, and the alternative is the fail-open the cache exists to close.
+   */
+  assumedPublic?: boolean;
 }
 
 export type EgressDecision =
@@ -204,6 +227,31 @@ function withLocalClass(
         engagements,
       };
     }
+    // Not a customer's either. Does this machine hold a checkout of it? The
+    // cache is a pointer first and a snapshot second: read the live config
+    // when the tree is still there, the snapshot when it is not.
+    const cached = target.repo === "*" ? null : resolveCachedDestination(target.org, target.repo);
+    if (cached !== null) {
+      return {
+        ...target,
+        class: cached.class,
+        visibility: cached.visibility,
+        publicFacing: cached.class === "public-eligible" || cached.visibility === "public",
+        classKnown: true,
+        fromCache: true,
+        workingTree: cached.workingTree,
+      };
+    }
+    if ((registry?.personalOrgs ?? []).some(o => o.toLowerCase() === target.org)) {
+      return {
+        ...target,
+        class: "private-strict",
+        visibility: "unknown",
+        publicFacing: true,
+        classKnown: false,
+        assumedPublic: true,
+      };
+    }
     return {
       ...target,
       class: "private-strict",
@@ -227,18 +275,22 @@ function withLocalClass(
     // `public-eligible` counts as public-facing even with no cached value.
     publicFacing: cfg.class === "public-eligible" || visibility === "public",
     classKnown: true,
+    workingTree: base,
   };
 }
 
 /**
  * Default resolver. `git push <remote>` → `remote.<remote>.url` from the
  * command's directory (`git -C` or cwd); a URL given as the remote is parsed
- * directly. `gh … --repo o/r` → direct. Other `gh` → the directory's origin.
- * Class and cached visibility are read from that directory when the target
- * is its own origin; otherwise the class is inferred from the registry when
- * the org belongs to an engagement (`customer-coupled`), and unknown
- * otherwise. Returns `null` when nothing parses — the context rules then do
- * not fire.
+ * directly. `gh … --repo o/r` → direct. `gh api repos/o/r/…` → from the
+ * path (`orgs/o/…` → the org, repo `*`). Other `gh` → the directory's
+ * origin. Class and cached visibility are read from that directory when the
+ * target is its own origin; otherwise the class is inferred from the
+ * registry when the org belongs to an engagement (`customer-coupled`), read
+ * through the machine-wide destination cache when this machine holds a
+ * checkout of the target, assumed public-facing when the org is a personal
+ * org with nothing cached, and unknown otherwise. Returns `null` when
+ * nothing parses — the context rules then do not fire.
  */
 export const resolveDestinationOffline: DestinationResolver = (intent, cwd, registry) => {
   const base = intent.cwdOverride ?? cwd;
@@ -259,6 +311,13 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
   if (intent.repoFlag !== undefined) {
     const target = parseRepoFlag(intent.repoFlag);
     return target ? withLocalClass(target, base, own, registry) : null;
+  }
+  if (intent.apiEndpoint !== undefined) {
+    // The destination is in the path. `{owner}/{repo}` placeholders, `graphql`
+    // and the account-level endpoints carry none, and fall through to the
+    // cwd's origin — for the placeholders that is exactly what gh does.
+    const target = parseApiEndpoint(intent.apiEndpoint);
+    if (target !== null) return withLocalClass({ org: target.org, repo: target.repo ?? "*" }, base, own, registry);
   }
   return own ? withLocalClass(own, base, own, registry) : null;
 };
@@ -282,7 +341,7 @@ export const scanPayloadAgainstDestination: PayloadScanner = (file, destination,
         engagements: destination.engagements ?? [],
       };
     } else if (destination.classKnown) {
-      repo = readRepoConfig(cwd);
+      repo = readRepoConfig(destination.workingTree ?? cwd);
     } else {
       repo = { cwd, isGitRepo: false, class: "private-strict", classExplicit: false, engagements: [] };
     }
@@ -328,8 +387,24 @@ export function describeVerb(verb: EgressVerb): string {
 /** `<org>/<repo> (<visibility>, class <class>)` — the only way a destination is ever printed. */
 export function describeDestination(d: Destination | null | undefined): string {
   if (!d) return "unresolved destination";
-  const vis = d.classKnown ? d.visibility : "visibility unknown";
+  const vis = d.classKnown ? d.visibility : d.assumedPublic ? "visibility uncached, treated as public" : "visibility unknown";
   const cls = d.classKnown ? d.class : "class unknown";
+  return `${d.org}/${d.repo} (${vis}, ${cls})`;
+}
+
+/**
+ * The receipt's rendering of a destination: visibility in capitals, so that
+ * PUBLIC is the word the eye lands on. Shared by the post-hoc receipt and
+ * the `EGRESS FAILED` line.
+ */
+export function describeDestinationForReceipt(d: Destination | null | undefined): string {
+  if (!d) return "(destination not resolved)";
+  const vis = d.classKnown
+    ? d.visibility.toUpperCase()
+    : d.assumedPublic
+      ? "VISIBILITY UNCACHED, TREATED AS PUBLIC"
+      : "VISIBILITY UNKNOWN";
+  const cls = d.classKnown ? `class ${d.class}` : "class unknown";
   return `${d.org}/${d.repo} (${vis}, ${cls})`;
 }
 
@@ -446,7 +521,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       }
     } else if (destination.classKnown) {
       try {
-        for (const o of boundaryOf(base).orgs) destOrgs.add(o);
+        for (const o of boundaryOf(destination.workingTree ?? base).orgs) destOrgs.add(o);
       } catch {
         /* fail open: the destination org alone is the boundary */
       }
@@ -512,7 +587,13 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     const target = intent.verb === "git-push" && intent.refspec ? `${intent.refspec} → ` : "";
     const reason =
       `${verb}: ${what} — ${target}${describeDestination(destination)}` +
-      (intent.repoFlag !== undefined ? ` (from --repo)` : "") +
+      (intent.repoFlag !== undefined
+        ? ` (from --repo)`
+        : destination?.fromCache
+          ? ` (from the checkout at ${destination.workingTree})`
+          : intent.apiEndpoint !== undefined && destination !== null
+            ? ` (from the API path)`
+            : "") +
       `, from a non-interactive shell. A person must approve this` +
       (opts.capabilities.ask
         ? `.`
@@ -551,8 +632,5 @@ export function decideEgress(opts: DecideEgressOptions): EgressDecision {
  * name it did not intend.
  */
 export function formatReceipt(destination: Destination | null, detail: string): string {
-  if (destination === null) return `PUBLISHED → (destination not resolved): ${detail}`;
-  const vis = destination.classKnown ? destination.visibility.toUpperCase() : "VISIBILITY UNKNOWN";
-  const cls = destination.classKnown ? `class ${destination.class}` : "class unknown";
-  return `PUBLISHED → ${destination.org}/${destination.repo} (${vis}, ${cls}): ${detail}`;
+  return `PUBLISHED → ${describeDestinationForReceipt(destination)}: ${detail}`;
 }

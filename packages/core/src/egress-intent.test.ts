@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseEgressIntents, type EgressIntent } from "./egress-intent.js";
+import { parseApiEndpoint, parseEgressIntents, type EgressIntent } from "./egress-intent.js";
 
 function only(command: string): EgressIntent {
   const intents = parseEgressIntents(command);
@@ -290,6 +290,54 @@ describe("parseEgressIntents — gh verbs and payloads", () => {
     it("explicit GET with fields is a read", () => {
       assert.deepEqual(parseEgressIntents("gh api -X GET search/issues -f q=foo"), []);
     });
+
+    it("the endpoint positional is captured verbatim, past value-taking flags", () => {
+      // The 2026-09-12 command: a merge into a public repo, judged from a private cwd.
+      assert.equal(
+        only("gh api -X PUT repos/acme/svc/pulls/103/merge -f merge_method=squash").apiEndpoint,
+        "repos/acme/svc/pulls/103/merge",
+      );
+      assert.equal(
+        only("gh api -H 'Accept: application/vnd.github+json' -X POST repos/acme/svc/issues").apiEndpoint,
+        "repos/acme/svc/issues",
+      );
+      assert.equal(only("gh api --hostname ghe.example.com -X DELETE repos/acme/svc/labels/x").apiEndpoint, "repos/acme/svc/labels/x");
+      assert.equal(only("gh api graphql -f query='mutation { … }'").apiEndpoint, "graphql");
+      assert.equal(only("gh api --method=POST --jq .id repos/acme/svc/issues -f title=x").apiEndpoint, "repos/acme/svc/issues");
+    });
+
+    it("a header value is never mistaken for the endpoint", () => {
+      assert.equal(only("gh api -X POST -H X-GitHub-Api-Version:2022-11-28 orgs/acme/repos -f name=x").apiEndpoint, "orgs/acme/repos");
+    });
+  });
+});
+
+describe("parseApiEndpoint", () => {
+  it("repos/<o>/<r>/… → org and repo, lower-cased, .git stripped", () => {
+    assert.deepEqual(parseApiEndpoint("repos/Acme/Svc/pulls/103/merge"), { org: "acme", repo: "svc" });
+    assert.deepEqual(parseApiEndpoint("repos/acme/svc"), { org: "acme", repo: "svc" });
+    assert.deepEqual(parseApiEndpoint("/repos/acme/svc.git/issues"), { org: "acme", repo: "svc" });
+    assert.deepEqual(parseApiEndpoint("repos/acme/svc/issues?state=open"), { org: "acme", repo: "svc" });
+  });
+
+  it("orgs/<o>/… → the org, no repo", () => {
+    assert.deepEqual(parseApiEndpoint("orgs/acme/repos"), { org: "acme", repo: null });
+    assert.deepEqual(parseApiEndpoint("orgs/acme"), { org: "acme", repo: null });
+  });
+
+  it("full URLs are reduced to their path; a GHE /api/v3 prefix is dropped", () => {
+    assert.deepEqual(parseApiEndpoint("https://api.github.com/repos/acme/svc/pulls"), { org: "acme", repo: "svc" });
+    assert.deepEqual(parseApiEndpoint("https://ghe.example.com/api/v3/repos/acme/svc"), { org: "acme", repo: "svc" });
+  });
+
+  it("placeholders mean gh resolves from the cwd → null", () => {
+    assert.equal(parseApiEndpoint("repos/{owner}/{repo}/pulls"), null);
+  });
+
+  it("everything else → null", () => {
+    for (const e of ["graphql", "user/repos", "gists", "search/issues", "repos/acme", "repos", "", "://bad"]) {
+      assert.equal(parseApiEndpoint(e), null, e);
+    }
   });
 });
 

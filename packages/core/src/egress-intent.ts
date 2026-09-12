@@ -54,6 +54,15 @@ export interface EgressIntent {
   /** `gh … --repo o/r` (or `-R`), verbatim, when present. */
   repoFlag?: string;
   /**
+   * `gh api`: the endpoint positional, verbatim (`repos/o/r/pulls/12/merge`,
+   * `orgs/o/repos`, `graphql`, a full URL). For a REST call the destination
+   * is *in the path* — see {@link parseApiEndpoint} — and must be judged from
+   * there, not from the cwd: `gh api -X PUT repos/o/r/pulls/N/merge` run from
+   * a private checkout reaches `o/r` whatever the cwd is. `{owner}/{repo}`
+   * placeholders are the one case where gh itself resolves from the cwd.
+   */
+  apiEndpoint?: string;
+  /**
    * `--body-file`, `-F`, `--notes-file`, `--input`, `--body @path`,
    * `-F key=@path` (gh api). `-` means stdin and is kept verbatim so the
    * policy can exempt it.
@@ -515,6 +524,53 @@ const GH_VERBS: GhVerbMap = {
 
 const MUTATING_METHODS = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
+// `gh api` flags that take a value as the next token and are not otherwise
+// handled below. Without this list the value of `-H 'Accept: …'` would be
+// mistaken for the endpoint positional.
+const GH_API_FLAGS_WITH_VALUE = new Set([
+  "-H",
+  "--header",
+  "--hostname",
+  "-q",
+  "--jq",
+  "-t",
+  "--template",
+  "-p",
+  "--preview",
+  "--cache",
+]);
+
+/**
+ * The org and repo a `gh api` endpoint addresses, when the path says so:
+ * `repos/<o>/<r>[/…]` → both; `orgs/<o>[/…]` → the org only (`repo: null`,
+ * an org-level write such as `orgs/<o>/repos`). A full URL is reduced to
+ * its path; a GitHub Enterprise `/api/v3/` prefix is dropped. Null for
+ * anything else — `graphql`, `user/repos`, `gists`, `search/…` — and for
+ * a path carrying `{owner}` / `{repo}` placeholders, which gh fills in
+ * from the cwd's repository, so the cwd is then the correct fallback.
+ * Pure; never throws.
+ */
+export function parseApiEndpoint(endpoint: string): { org: string; repo: string | null } | null {
+  let path = endpoint;
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      path = new URL(path).pathname;
+    } catch {
+      return null;
+    }
+  }
+  path = path.replace(/^\/+/, "").replace(/^api\/v3\//, "");
+  if (path.includes("{")) return null;
+  const parts = path.split("?")[0]!.split("/").filter(Boolean);
+  if (parts[0] === "repos" && parts.length >= 3) {
+    return { org: parts[1]!.toLowerCase(), repo: parts[2]!.replace(/\.git$/, "").toLowerCase() };
+  }
+  if (parts[0] === "orgs" && parts.length >= 2) {
+    return { org: parts[1]!.toLowerCase(), repo: null };
+  }
+  return null;
+}
+
 function classifyGh(
   args: string[],
   base: Omit<EgressIntent, "verb" | "payloadFiles">,
@@ -535,6 +591,7 @@ function classifyGh(
   let repoFlag: string | undefined;
   let method: string | undefined;
   let hasFields = false;
+  let apiEndpoint: string | undefined;
 
   const takeValue = (i: number): { value: string | undefined; next: number } => {
     const a = args[i]!;
@@ -605,6 +662,14 @@ function classifyGh(
       i = next;
       continue;
     }
+    if (group === "api") {
+      if (GH_API_FLAGS_WITH_VALUE.has(name)) {
+        i = takeValue(i).next;
+        continue;
+      }
+      // The first bare positional after `api` is the endpoint.
+      if (!a.startsWith("-") && apiEndpoint === undefined) apiEndpoint = a;
+    }
     i++;
   }
 
@@ -619,6 +684,7 @@ function classifyGh(
     verb,
     payloadFiles,
     ...(repoFlag !== undefined && { repoFlag }),
+    ...(apiEndpoint !== undefined && { apiEndpoint }),
   };
 }
 

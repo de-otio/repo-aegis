@@ -155,12 +155,32 @@ never include payload content.
 
 Destination resolution is **offline**: `git push <remote>` →
 `remote.<remote>.url` read from `cwd`'s git config → `parseRemoteUrl`; `gh …
---repo o/r` → direct; other `gh` → `cwd`'s origin. Visibility from the
-`repo-aegis.visibility` cache. Class from `readRepoConfig(cwd)`. An
-unparseable remote or unclassified destination yields `publicFacing: false`
-and rules e–h do not fire — except that `class === "public-eligible"` with an
-uncached visibility is treated as public-facing, because the class is a
-declaration and the cache is only an optimisation.
+--repo o/r` → direct; `gh api repos/o/r/…` → from the API path (`orgs/o/…`
+→ the org, repo `*`; `{owner}`/`{repo}` placeholders → `cwd`'s origin, as
+`gh` itself does); other `gh` → `cwd`'s origin. Visibility from the
+`repo-aegis.visibility` cache. Class from `readRepoConfig(cwd)` when the
+destination is `cwd`'s own origin. When it is not — the command names a
+repository in full from somewhere else — class and visibility come from
+the **machine-wide destination cache** (`$REPO_AEGIS_HOME/destinations.json`):
+`<org>/<repo>` → the checkout on this machine that declares it, read live
+when the checkout still exists and from the snapshot otherwise. It is
+written by `classify --apply`, `status`, `doctor`'s sweep, and the guard
+itself on every command judged from inside a repository, so it fills in
+with use. A destination in `personalOrgs` with nothing cached is treated as
+public-facing: rule g asks. An unparseable remote or an otherwise unknown
+destination yields `publicFacing: false` and rules e–h do not fire —
+except that `class === "public-eligible"` with an uncached visibility is
+treated as public-facing, because the class is a declaration and the cache
+is only an optimisation.
+
+*Added 2026-09-12, after the guard shipped:* the first version resolved
+every `gh api` call and every foreign `--repo` / push URL from `cwd`, so a
+merge into a public repository run from a private checkout was allowed
+unasked and receipted as the private repository — the first incident's
+shape, an explicit destination judged from the wrong place. The API-path
+parse and the destination cache are the fix; the same cache lookup was
+added to the pre-push layer (§2), which had judged a push to a non-origin
+URL by the pushing repository's own class.
 
 Two decisions fixed here so they are not relitigated later:
 

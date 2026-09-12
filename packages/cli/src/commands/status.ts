@@ -9,6 +9,7 @@ import {
   isPublicFacing,
   resolveHookState,
   appendAuditRecord,
+  recordWorkingTree,
   RegistryNotFoundError,
   type RepoJson,
   type EngagementJson,
@@ -150,6 +151,9 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   // "unknown" is not, and is indistinguishable from "no remote" or "no gh".
   const resolved = repo.isGitRepo ? resolveVisibility(repo.cwd) : null;
   const visibility = resolved?.visibility ?? "unknown";
+  // Class and (now refreshed) visibility into the machine-wide destination
+  // cache, for commands that name this repository from another directory.
+  if (repo.isGitRepo) recordWorkingTree(repo.cwd);
   const publicFacing = isPublicFacing(repo, { visibility });
   const visibilityProbe =
     resolved === null ? null : { ...resolved.probe, fromCache: resolved.fromCache };

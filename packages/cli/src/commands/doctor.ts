@@ -33,6 +33,7 @@ import {
   getRemoteOrg,
   readRepoConfig,
   readCachedVisibility,
+  recordWorkingTree,
   loadRegistry,
   type HookState,
   type HookStateCode,
@@ -192,6 +193,9 @@ function checkPushDefault(): DoctorCheck {
 }
 
 /** Machine-level checks: once per run, independent of any repo. */
+/** Checkouts recorded into the destination cache by this run (reset per `doctor()` call). */
+let recordedDestinations = 0;
+
 function machineChecks(claudeHome?: string): DoctorCheck[] {
   return [checkPushDefault(), ...checkShim(), ...checkGuardHook(claudeHome)];
 }
@@ -206,6 +210,11 @@ function repoEgressChecks(wt: string, registry: Registry | null): DoctorCheck[] 
   if (org === null) return [];
 
   const out: DoctorCheck[] = [];
+
+  // The sweep is the bulk writer of the machine-wide destination cache: it
+  // visits every checkout and reads exactly the two values the cache holds.
+  // Best-effort; the count is reported in the summary.
+  if (recordWorkingTree(wt) !== null) recordedDestinations++;
 
   const cfg = readRepoConfig(wt);
   const visibility = readCachedVisibility(wt);
@@ -277,6 +286,7 @@ export function doctor(opts: DoctorOptions): void {
   const results: DoctorRepoResult[] = [];
   let scanned = 0;
   let fixedCount = 0;
+  recordedDestinations = 0;
 
   for (const root of roots) {
     for (const wt of findWorkingTrees(root)) {
@@ -356,10 +366,13 @@ export function doctor(opts: DoctorOptions): void {
       roots,
       machine,
       results,
-      summary: { scanned, failed, fixed: fixedCount },
+      summary: { scanned, failed, fixed: fixedCount, destinationsRecorded: recordedDestinations },
     });
   } else {
     emitText(`doctor: scanned ${scanned} repo(s) under ${roots.join(", ")}`);
+    if (egressChecksOn) {
+      emitText(`doctor: recorded ${recordedDestinations} checkout(s) into the destination cache`);
+    }
     for (const c of machine) {
       if (c.ok) continue;
       emitText(`  FAIL ${c.code} — ${c.detail}`);

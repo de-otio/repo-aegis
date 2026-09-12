@@ -110,6 +110,18 @@ export function resolveGitDir(workingTree: string): string | null {
  * cross-tree write stays inside one trust boundary.
  */
 export function getRemoteOrg(workingTree: string): string | null {
+  const url = getRemoteUrl(workingTree);
+  if (url === null) return null;
+  const parsed = parseRemoteUrl(url);
+  return parsed?.org ?? null;
+}
+
+/**
+ * Read `remote.origin.url` from the working tree's own git config (the
+ * linked-worktree-aware file, not the cwd's), verbatim. `null` when there
+ * is no origin or anything fails. Total: never throws.
+ */
+export function getRemoteUrl(workingTree: string): string | null {
   const gitDir = resolveGitDir(workingTree);
   if (gitDir === null) return null;
   const configPath = resolveConfigPath(gitDir);
@@ -124,9 +136,7 @@ export function getRemoteOrg(workingTree: string): string | null {
   } catch {
     return null;
   }
-  if (url.length === 0) return null;
-  const parsed = parseRemoteUrl(url);
-  return parsed?.org ?? null;
+  return url.length === 0 ? null : url;
 }
 
 /**

@@ -15,12 +15,13 @@ import {
   appendAuditRecord,
   loadRegistry,
   parseRemoteUrl,
+  recordWorkingTree,
   type RepoClass,
   type Registry,
   REPO_CLASSES,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
-import { probeGithubVisibility, type VisibilityProbe } from "../visibility.js";
+import { cacheVisibility, probeGithubVisibility, type VisibilityProbe } from "../visibility.js";
 
 // --------------------------------------------------------------------------
 // Types and schema
@@ -512,6 +513,13 @@ export function classify(opts: ClassifyOptions): void {
   if (match.engagement) {
     addEngagement(match.engagement, cwd);
   }
+
+  // The probe already answered, so cache it here rather than leaving the
+  // second half of `classify --apply && status` to the operator; then record
+  // this checkout in the machine-wide destination cache so a command that
+  // names this repository from elsewhere is judged by the class just set.
+  if (probe !== null) cacheVisibility(cwd, probe.visibility);
+  recordWorkingTree(cwd);
 
   // Audit (best-effort). Records the class change + engagement attach
   // (when present) as a single action so the trail captures the actual

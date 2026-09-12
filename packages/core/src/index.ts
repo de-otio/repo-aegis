@@ -55,6 +55,7 @@ export {
   findEnclosingWorkingTree,
   resolveGitDir,
   getRemoteOrg,
+  getRemoteUrl,
 } from "./working-tree.js";
 
 // ---- trust-boundary (path-aware hook) -----------------------------------
@@ -236,7 +237,7 @@ export type {
 // One decision function behind the pre-push hook, the `gh` shim and the
 // agent pre-command hooks. Shape rules are unconditional; context rules
 // fail open; the decision is never a rewritten command.
-export { parseEgressIntents } from "./egress-intent.js";
+export { parseEgressIntents, parseApiEndpoint } from "./egress-intent.js";
 export type { EgressIntent, EgressVerb, SegmentJoin } from "./egress-intent.js";
 export {
   decideEgress,
@@ -246,10 +247,24 @@ export {
   isModeDependentPath,
   describeVerb,
   describeDestination,
+  describeDestinationForReceipt,
   formatReceipt,
   EGRESS_HUMAN_ENV,
   VERBS_NEEDING_HUMAN,
 } from "./egress-policy.js";
+// Machine-wide `<org>/<repo>` → checkout pointer table, so a destination named
+// in full from a foreign directory is judged by its own declaration.
+export {
+  destinationCachePath,
+  destinationKey,
+  readDestinationCache,
+  lookupDestination,
+  describeWorkingTree,
+  recordWorkingTree,
+  resolveCachedDestination,
+  DESTINATION_CACHE_FILE,
+} from "./destination-cache.js";
+export type { DestinationCache, DestinationCacheEntry } from "./destination-cache.js";
 export type {
   EgressCode,
   EgressDecision,
