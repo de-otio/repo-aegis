@@ -54,12 +54,24 @@ export interface Destination {
   /** `class === "public-eligible" || visibility === "public"`. */
   publicFacing: boolean;
   /**
-   * True when `class` / `visibility` describe *this* destination (it is the
-   * working tree's own origin). False when the command targets another
-   * repository (`--repo o/r`, a foreign remote) whose class this machine
-   * does not hold: the org/repo is still known, the class is not.
+   * True when `class` / `visibility` describe *this* destination: it is the
+   * working tree's own origin, or its org is registered to an engagement (see
+   * `inferredFromRegistry`). False when the command targets a repository this
+   * machine holds nothing about: the org/repo is still known, the class is not.
    */
   classKnown: boolean;
+  /**
+   * True when the class was not read from a working tree but inferred from
+   * the registry: the destination org appears in an engagement's
+   * `githubOrgs`, so the destination is `customer-coupled` to that
+   * engagement whatever the cwd is. This is how `_self_identity` and the
+   * cross-org boundary reach a payload published into a customer's
+   * repository from an unclassified directory — the first incident's shape.
+   * Visibility stays `unknown` (no cache to read).
+   */
+  inferredFromRegistry?: boolean;
+  /** The engagement ids the destination is coupled to, when inferred. */
+  engagements?: string[];
 }
 
 export type EgressDecision =
@@ -95,8 +107,12 @@ export const VERBS_NEEDING_HUMAN: ReadonlySet<EgressVerb> = new Set<EgressVerb>(
   "npm-publish",
 ]);
 
-/** Resolves an intent's destination from local state. Injectable for tests. */
-export type DestinationResolver = (intent: EgressIntent, cwd: string) => Destination | null;
+/** Resolves an intent's destination from local state and the registry. Injectable for tests. */
+export type DestinationResolver = (
+  intent: EgressIntent,
+  cwd: string,
+  registry?: Registry,
+) => Destination | null;
 
 /**
  * Scans one payload file against the destination's deny set and returns the
@@ -155,13 +171,39 @@ function ownOrigin(base: string): { org: string; repo: string } | null {
   return parsed ? { org: parsed.org, repo: parsed.repo } : null;
 }
 
+/** Engagement ids whose `githubOrgs` contain `org` (lowercased). */
+function engagementsForOrg(registry: Registry | undefined, org: string): string[] {
+  if (!registry) return [];
+  const out: string[] = [];
+  for (const e of registry.engagements) {
+    if ((e.githubOrgs ?? []).some(o => o.toLowerCase() === org)) out.push(e.id);
+  }
+  return out;
+}
+
 function withLocalClass(
   target: { org: string; repo: string },
   base: string,
   own: { org: string; repo: string } | null,
+  registry?: Registry,
 ): Destination {
   const isOwn = own !== null && own.org === target.org && own.repo === target.repo;
   if (!isOwn) {
+    // Not this tree's origin. The registry may still know the org: an
+    // engagement's `githubOrgs` makes the destination customer-coupled to that
+    // engagement, whatever directory the command runs from.
+    const engagements = engagementsForOrg(registry, target.org);
+    if (engagements.length > 0) {
+      return {
+        ...target,
+        class: "customer-coupled",
+        visibility: "unknown",
+        publicFacing: false,
+        classKnown: true,
+        inferredFromRegistry: true,
+        engagements,
+      };
+    }
     return {
       ...target,
       class: "private-strict",
@@ -193,41 +235,53 @@ function withLocalClass(
  * command's directory (`git -C` or cwd); a URL given as the remote is parsed
  * directly. `gh … --repo o/r` → direct. Other `gh` → the directory's origin.
  * Class and cached visibility are read from that directory when the target
- * is its own origin; otherwise the org/repo is known but the class is not.
- * Returns `null` when nothing parses — the context rules then do not fire.
+ * is its own origin; otherwise the class is inferred from the registry when
+ * the org belongs to an engagement (`customer-coupled`), and unknown
+ * otherwise. Returns `null` when nothing parses — the context rules then do
+ * not fire.
  */
-export const resolveDestinationOffline: DestinationResolver = (intent, cwd) => {
+export const resolveDestinationOffline: DestinationResolver = (intent, cwd, registry) => {
   const base = intent.cwdOverride ?? cwd;
   const own = ownOrigin(base);
 
   if (intent.verb === "git-push") {
-    if (intent.remote === undefined) return own ? withLocalClass(own, base, own) : null;
+    if (intent.remote === undefined) return own ? withLocalClass(own, base, own, registry) : null;
     const direct = parseRemoteUrl(intent.remote);
-    if (direct) return withLocalClass({ org: direct.org, repo: direct.repo }, base, own);
+    if (direct) return withLocalClass({ org: direct.org, repo: direct.repo }, base, own, registry);
     const url = gitConfigGet(base, `remote.${intent.remote}.url`);
     const parsed = url === null ? null : parseRemoteUrl(url);
     if (!parsed) return null;
-    return withLocalClass({ org: parsed.org, repo: parsed.repo }, base, own);
+    return withLocalClass({ org: parsed.org, repo: parsed.repo }, base, own, registry);
   }
 
   if (intent.verb === "npm-publish") return null; // registry, not a repo
 
   if (intent.repoFlag !== undefined) {
     const target = parseRepoFlag(intent.repoFlag);
-    return target ? withLocalClass(target, base, own) : null;
+    return target ? withLocalClass(target, base, own, registry) : null;
   }
-  return own ? withLocalClass(own, base, own) : null;
+  return own ? withLocalClass(own, base, own, registry) : null;
 };
 
 /**
  * Default payload scanner: the destination's deny set (its own class when
- * known, `_always`-only otherwise) over the file, hits counted, never shown.
+ * known; a synthesised `customer-coupled` config when the class was inferred
+ * from the registry, so `_self_identity` and the other customers' markers
+ * apply; `_always`-only otherwise) over the file, hits counted, never shown.
  * Fails open (`null`) on any error.
  */
 export const scanPayloadAgainstDestination: PayloadScanner = (file, destination, cwd) => {
   try {
     let repo: RepoConfig;
-    if (destination.classKnown) {
+    if (destination.inferredFromRegistry) {
+      repo = {
+        cwd,
+        isGitRepo: false,
+        class: "customer-coupled",
+        classExplicit: true,
+        engagements: destination.engagements ?? [],
+      };
+    } else if (destination.classKnown) {
       repo = readRepoConfig(cwd);
     } else {
       repo = { cwd, isGitRepo: false, class: "private-strict", classExplicit: false, engagements: [] };
@@ -374,7 +428,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   const resolve = opts.resolveDestination ?? resolveDestinationOffline;
   let destination: Destination | null = null;
   try {
-    destination = resolve(intent, opts.cwd);
+    destination = resolve(intent, opts.cwd, opts.registry);
   } catch {
     destination = null;
   }
@@ -384,7 +438,13 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     // ---- e: cross-org egress ---------------------------------------------
     const destOrgs = new Set<string>([destination.org]);
     const base = intent.cwdOverride ?? opts.cwd;
-    if (destination.classKnown) {
+    if (destination.inferredFromRegistry) {
+      // The destination's boundary is its engagements' org set.
+      for (const e of opts.registry.engagements) {
+        if (!(destination.engagements ?? []).includes(e.id)) continue;
+        for (const o of e.githubOrgs ?? []) destOrgs.add(o.toLowerCase());
+      }
+    } else if (destination.classKnown) {
       try {
         for (const o of boundaryOf(base).orgs) destOrgs.add(o);
       } catch {

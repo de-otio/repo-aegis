@@ -14,6 +14,7 @@ import {
   isHumanPresent,
   isModeDependentPath,
   resolveDestinationOffline,
+  scanPayloadAgainstDestination,
   EGRESS_HUMAN_ENV,
   type Destination,
   type DecideEgressOptions,
@@ -470,6 +471,72 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.equal(d?.org, "acme");
     assert.equal(d?.repo, "other");
     assert.equal(d?.classKnown, false);
+  });
+
+  it("gh --repo into an engagement's org → customer-coupled, inferred from the registry", () => {
+    const d = resolveDestinationOffline(
+      intent("gh pr create -t x -b y --repo customer-a-org/thing"),
+      other,
+      REGISTRY,
+    );
+    assert.equal(d?.class, "customer-coupled");
+    assert.equal(d?.classKnown, true);
+    assert.equal(d?.inferredFromRegistry, true);
+    assert.deepEqual(d?.engagements, ["customer-a"]);
+    assert.equal(d?.publicFacing, false);
+  });
+
+  it("without a registry the same destination stays unknown", () => {
+    const d = resolveDestinationOffline(intent("gh pr create -t x -b y --repo customer-a-org/thing"), other);
+    assert.equal(d?.classKnown, false);
+  });
+
+  it("the inferred customer-coupled destination gets _self_identity in its deny set", () => {
+    const home = join(root, "home");
+    mkdirSync(join(home, "markers"), { recursive: true });
+    writeFileSync(join(home, "markers", "_always.txt"), "");
+    writeFileSync(join(home, "markers", "_self_identity.txt"), "internal-project-codename\n");
+    writeFileSync(join(home, "markers", "customer-a.txt"), "customer-a-marker\n");
+    // Not under `other` (which mkdtemp put under /var/folders — rule d would
+    // refuse it before rule f ever ran, which is correct and beside the point).
+    const bodyDir = mkdtempSync("/tmp/egress-policy-body-");
+    const body = join(bodyDir, "pr-body.md");
+    writeFileSync(body, "Ported from internal-project-codename, see the customer-a-marker doc.\n");
+    const prior = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = home;
+    try {
+      const dest = resolveDestinationOffline(
+        intent("gh pr create -t x -b y --repo customer-a-org/thing"),
+        other,
+        REGISTRY,
+      )!;
+      // customer-a's own markers are excluded in customer-a's repo; the
+      // operator's identity is exactly what must not enter it.
+      assert.equal(scanPayloadAgainstDestination(body, dest, other), 1);
+      const d = decideEgress({
+        intents: parseEgressIntents(`gh pr create -t x --body-file ${body} --repo customer-a-org/thing`),
+        cwd: other,
+        registry: REGISTRY,
+        humanPresent: true,
+        capabilities: { ask: true },
+      });
+      assert.equal(d.action === "deny" && d.code, "PAYLOAD_MARKER_HIT");
+    } finally {
+      if (prior === undefined) delete process.env["REPO_AEGIS_HOME"];
+      else process.env["REPO_AEGIS_HOME"] = prior;
+      rmSync(bodyDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a push from the own repo into an engagement's org is CROSS_ORG_EGRESS via the inferred boundary", () => {
+    const d = decideEgress({
+      intents: parseEgressIntents("git push https://github.com/customer-a-org/thing.git main"),
+      cwd: repo,
+      registry: REGISTRY,
+      humanPresent: true,
+      capabilities: { ask: true },
+    });
+    assert.equal(d.action === "deny" && d.code, "CROSS_ORG_EGRESS");
   });
 
   it("gh --repo accepts host/o/r and a URL", () => {

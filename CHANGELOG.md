@@ -106,7 +106,9 @@ in core**, enforced wherever a publishing command must pass:
   business cost. A new registry list renders to the reserved
   `_self_identity` stem and joins the deny set **only** for
   `customer-coupled` repos — and, through the egress guard, customer-
-  coupled destinations — exactly as `_private_infra` joins only for
+  coupled destinations, which the guard infers from the registry when the
+  target org is in an engagement's `githubOrgs`, whatever directory the
+  command runs from — exactly as `_private_infra` joins only for
   public-facing ones; excluded from the flat `markers.txt` for the same
   reason; part of the deny-set cache key. `scan-env --self` offers the
   operator's own org names, package names under the scan root, and the
