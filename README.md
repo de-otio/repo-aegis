@@ -130,8 +130,9 @@ Per-package READMEs:
 
 ## Uninstalling
 
-`repo-aegis uninstall` reverses every `install …` step in one shot
-(dry-run by default; `--yes` to apply). Opt-in `--purge-repos`
+`repo-aegis uninstall` reverses every `install …` step in one shot —
+hooks, gitignore, claude-md, ci, and the `gh` shim — (dry-run by
+default; `--yes` to apply). Opt-in `--purge-repos`
 walks `~/repos` / `~/code` / `~/src` / `~/projects` and unsets
 `repo-aegis.*` git config in every classified repo. Opt-in
 `--purge-home` deletes `~/.config/repo-aegis/` (registry, audit log,

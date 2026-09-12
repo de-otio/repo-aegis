@@ -995,7 +995,15 @@ shape we don't model.
 | `install gitignore --uninstall` | strip managed block | `action`, `target`, `removed`, `reason?` |
 | `install claude-md --uninstall` | strip managed block + hook entries | `action`, `claudeMd`, `settings` |
 | `install ci --uninstall` | remove the workflow file | `action`, `target`, `removed`, `absent?` |
-| `uninstall` (top-level) | reverse all install steps; opt-in flags purge home + per-repo config | `action`, `dryRun`, `steps`, `purgeRepos?`, `purgeHome?` |
+| `install shim [gh]` | write the `gh` egress shim to `<home>/bin` | `action`, `path`, `changed`, `tool`, `binDir`, `pathInstruction`, `reason?` |
+| `install shim --uninstall` | remove the shim (never a file repo-aegis did not write) | `action`, `path`, `changed`, `reason?` |
+| `egress-check -- <gh args…>` | decide a `gh` publish (exit 0 allow / 2 deny) | `action`, `destination?`, `readback?`; deny reason on stderr |
+| `egress-readback --body-file <f> --pr <ref>` | diff the live PR body against the file | `ok`, `bytes` / `PUBLISHED_BODY_MISMATCH` with byte counts / `READBACK_UNAVAILABLE` |
+| `hook guard-egress [--agent <a>]` | (PreToolUse(Bash) entry) allow / ask / deny a publishing command | `hookSpecificOutput.permissionDecision` (+ reason); deny payload on stderr |
+| `hook egress-receipt` | (PostToolUse(Bash) entry) one `PUBLISHED → …` line per publish | `hookSpecificOutput.additionalContext` |
+| `doctor` | hook liveness + egress-guard preconditions | `action`, `dryRun`, `roots`, `machine`, `results[].checks`, `summary` |
+| `scan-env --self [--accept self-identity]` | offer / record `selfIdentity` candidates | `action`, `dryRun`\|`placement`, `candidates`\|`added`, `skippedDuplicates`, `tooShort` |
+| `uninstall` (top-level) | reverse all install steps (hooks, gitignore, claude-md, ci, shim); opt-in flags purge home + per-repo config | `action`, `dryRun`, `steps`, `purgeRepos?`, `purgeHome?` |
 | `uninstall sweep-repos` | walk roots, unset `repo-aegis.*` git config | `action`, `dryRun`, `roots`, `results` |
 
 Always pass `--json` when you want machine-readable output. Without
