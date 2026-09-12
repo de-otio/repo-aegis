@@ -231,6 +231,33 @@ export type {
   RepoVisibility,
 } from "./egress.js";
 
+// ---- egress guard (destination-aware publishing controls) ----------------
+// One decision function behind the pre-push hook, the `gh` shim and the
+// agent pre-command hooks. Shape rules are unconditional; context rules
+// fail open; the decision is never a rewritten command.
+export { parseEgressIntents } from "./egress-intent.js";
+export type { EgressIntent, EgressVerb, SegmentJoin } from "./egress-intent.js";
+export {
+  decideEgress,
+  resolveDestinationOffline,
+  scanPayloadAgainstDestination,
+  isHumanPresent,
+  isModeDependentPath,
+  describeVerb,
+  describeDestination,
+  formatReceipt,
+  EGRESS_HUMAN_ENV,
+  VERBS_NEEDING_HUMAN,
+} from "./egress-policy.js";
+export type {
+  EgressCode,
+  EgressDecision,
+  Destination,
+  DestinationResolver,
+  PayloadScanner,
+  DecideEgressOptions,
+} from "./egress-policy.js";
+
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";
 export type { RenderOptions, RenderedFile, RenderResult } from "./render.js";

@@ -704,3 +704,16 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Egress guard (doc/design/egress-guard.md §4, §7)
+// ---------------------------------------------------------------------------
+
+/**
+ * `doctor` check: `GUARD_HOOK_UNREGISTERED` when the Claude Code
+ * `settings.json` under `claudeHome` has no `PreToolUse(Bash)` entry for
+ * `repo-aegis hook guard-egress`. Returns `[]` until the L3 lane lands.
+ */
+export function checkGuardHook(_claudeHome?: string): import("./doctor-checks.js").DoctorCheck[] {
+  return [];
+}

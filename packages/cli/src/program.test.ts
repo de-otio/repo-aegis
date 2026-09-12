@@ -97,6 +97,8 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "context",
       "deny",
       "doctor",
+      "egress-check",
+      "egress-readback",
       "engagements",
       "hook",
       "init",
@@ -129,6 +131,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "--range",
       "--redact-attribution",
       "--remote",
+      "--remote-url",
       "--require-deny-set",
       "--since",
       "--staged",
@@ -136,7 +139,13 @@ const EXPECTED_SHAPE: CommandShape[] = [
     ],
     subcommands: [],
   },
-  { path: "doctor", flags: ["--fix", "--scan-root", "--yes"], subcommands: [] },
+  { path: "doctor", flags: ["--fix", "--no-egress-checks", "--scan-root", "--yes"], subcommands: [] },
+  { path: "egress-check", flags: [], subcommands: [] },
+  {
+    path: "egress-readback",
+    flags: ["--body-file", "--gh", "--pr", "--repo", "--timeout-ms"],
+    subcommands: [],
+  },
   {
     path: "waive",
     flags: ["--approver", "--blob", "--expires", "--list", "--pattern", "--reason", "--remove"],
@@ -167,7 +176,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   },
   {
     path: "scan-env",
-    flags: ["--accept", "--engagement", "--from", "--scan-home"],
+    flags: ["--accept", "--engagement", "--from", "--scan-home", "--self"],
     subcommands: [],
   },
   {
@@ -244,8 +253,9 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "install",
     flags: [],
-    subcommands: ["ci", "claude-md", "gitignore", "hooks"],
+    subcommands: ["ci", "claude-md", "gitignore", "hooks", "shim"],
   },
+  { path: "install shim", flags: ["--force", "--uninstall"], subcommands: [] },
   {
     path: "install hooks",
     flags: ["--force", "--global", "--local", "--uninstall", "--unset-local"],
@@ -295,10 +305,19 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "hook",
     flags: [],
-    subcommands: ["check-write", "first-touch", "scan-after-write", "scan-bash-output"],
+    subcommands: [
+      "check-write",
+      "egress-receipt",
+      "first-touch",
+      "guard-egress",
+      "scan-after-write",
+      "scan-bash-output",
+    ],
   },
   { path: "hook scan-after-write", flags: [], subcommands: [] },
   { path: "hook check-write", flags: [], subcommands: [] },
+  { path: "hook guard-egress", flags: ["--agent"], subcommands: [] },
+  { path: "hook egress-receipt", flags: [], subcommands: [] },
   { path: "hook first-touch", flags: [], subcommands: [] },
   { path: "hook scan-bash-output", flags: ["--advisory"], subcommands: [] },
 

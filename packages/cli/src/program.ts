@@ -87,6 +87,10 @@ export async function buildProgram(): Promise<Command> {
     .option("--range <revspec>", "scan additions in a git range, e.g. <remote>..<local> (used by pre-push hook)")
     .option("--push-ref <ref>", "scan a ref the remote does not have yet, relative to refs/remotes/<remote>/* (used by pre-push hook for new branches and tags)")
     .option("--remote <name>", "with --push-ref: remote whose tracking refs bound the scan (default: origin)")
+    .option(
+      "--remote-url <url>",
+      "with --push-ref/--range: the destination remote URL (git passes it to pre-push as $2); enables the destination checks CROSS_ORG_PUSH and PUBLIC_PUSH_NEEDS_HUMAN and prints the push receipt",
+    )
     .option("--history", "scan full git history with `git log -G` per pattern (slow)")
     .option("--since <revspec>", "with --history: lower-bound revspec (only commits reachable forward of this point)")
     .option("--max-file-bytes <n>", "skip files larger than this (default 1 MiB)", v => parseInt(v, 10))
@@ -234,6 +238,10 @@ export async function buildProgram(): Promise<Command> {
       "persist discovered hosts: private-infra (public-facing repos only) | always-block (everywhere) | engagement",
     )
     .option("--engagement <id>", "engagement id, required with --accept engagement")
+    .option(
+      "--self",
+      "offer the operator's own identity (personalOrgs, package names under the scan roots, the agent session-link shape) as selfIdentity candidates — the strings that must never reach a customer-coupled destination",
+    )
     .option("--from <path>", "also scan project-level configs under this dir (default: cwd)")
     .option(
       "--scan-home <dir>",
@@ -308,6 +316,40 @@ export async function buildProgram(): Promise<Command> {
       };
       if (merged.printOnly) merged.dryRun = true;
       installClaudeMd(merged);
+    });
+
+  // The `gh` shim: the tool-agnostic egress enforcement point for everything
+  // that publishes through `gh` (doc/design/egress-guard.md §3).
+  install
+    .command("shim [tool]")
+    .description("write <home>/bin/<tool> (default: gh), a wrapper that runs `repo-aegis egress-check` before any publishing verb and passes reads through untouched; put that directory first on PATH")
+    .option("--uninstall", "remove the shim (idempotent)")
+    .option("--force", "overwrite a file at the shim path that repo-aegis did not write")
+    .action(async (tool: string | undefined, opts, cmd) => {
+      const { installShim } = await import("./commands/install-shim.js");
+      installShim(tool, withGlobals(opts, cmd));
+    });
+
+  program
+    .command("egress-check")
+    .description("decide allow/deny for a `gh` invocation about to run (called by the shim): exit 0 allow, 2 deny with a structured reason on stderr; never rewrites the command")
+    .argument("[args...]", "the gh arguments, verbatim (use `--` before them)")
+    .action(async (args: string[], opts, cmd) => {
+      const { egressCheck } = await import("./commands/egress-check.js");
+      egressCheck(args, withGlobals(opts, cmd));
+    });
+
+  program
+    .command("egress-readback")
+    .description("after `gh pr create|edit` with a body file: read the live PR body back and diff it against the file; PUBLISHED_BODY_MISMATCH on difference (byte counts only, never content)")
+    .option("--body-file <path>", "the body file that was published")
+    .option("--pr <ref>", "PR number or URL (from gh's output)")
+    .option("--repo <org/repo>", "destination repository (default: the cwd's origin)")
+    .option("--gh <path>", "path to the real gh binary (the shim passes its own resolution)")
+    .option("--timeout-ms <n>", "read-back timeout (default 10000)", v => parseInt(v, 10))
+    .action(async (opts, cmd) => {
+      const { egressReadback } = await import("./commands/egress-check.js");
+      egressReadback(withGlobals(opts, cmd));
     });
 
   const markers = program.command("markers").description("inspect and probe the marker deny set");
@@ -397,6 +439,26 @@ export async function buildProgram(): Promise<Command> {
     .action(async (opts, cmd) => {
       const { hookScanBashOutput } = await import("./commands/hook-scan-bash-output.js");
       hookScanBashOutput(withGlobals(opts, cmd));
+    });
+
+  // Egress guard (doc/design/egress-guard.md §4, §5): the pre-command hook
+  // that sees the whole compound command before it runs, and the
+  // post-command receipt. Decision-only: neither ever rewrites a command.
+  hook
+    .command("guard-egress")
+    .description("PreToolUse(Bash): read the pending shell command on stdin and allow / ask / deny its publishing operations (git push, gh pr|issue|release|repo|api, npm publish); exit 2 blocks")
+    .option("--agent <name>", "hook framework shape: claude (default; supports ask) | codex | gemini (ask degrades to deny)")
+    .action(async (opts, cmd) => {
+      const { hookGuardEgress } = await import("./commands/hook-guard-egress.js");
+      await hookGuardEgress(withGlobals(opts, cmd));
+    });
+
+  hook
+    .command("egress-receipt")
+    .description("PostToolUse(Bash): after a command that published, return one line naming the destination (org/repo, visibility, class) as additionalContext")
+    .action(async (_opts, _cmd) => {
+      const { hookEgressReceipt } = await import("./commands/hook-egress-receipt.js");
+      await hookEgressReceipt();
     });
 
   hook
@@ -513,6 +575,10 @@ export async function buildProgram(): Promise<Command> {
     )
     .option("--fix", "report (or, with --yes, unset) repo-local core.hooksPath overrides")
     .option("--yes", "apply --fix changes (default: dry-run report only)")
+    .option(
+      "--no-egress-checks",
+      "skip the egress-guard checks (push.default, gh shim on PATH, guard hook registered, class + visibility resolved per repo)",
+    )
     .action((opts, cmd) => doctor(withGlobals(opts, cmd)));
 
   return program;
