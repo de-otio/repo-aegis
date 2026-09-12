@@ -62,6 +62,7 @@ function decide(command: string, over: Partial<DecideEgressOptions> = {}) {
     resolveDestination: () => dest(),
     scanPayload: () => 0,
     trustBoundaryOf: () => boundary(["acme"]),
+    findApproval: () => null,
     ...over,
   });
 }
@@ -296,6 +297,74 @@ describe("decideEgress — context rules", () => {
       const d = decide(cmd, { resolveDestination: () => dest() });
       assert.equal(d.action, "ask", cmd);
     }
+  });
+
+  it("g: a live human approval for the destination stands in for a person — rule g only", () => {
+    const approval = {
+      id: "deadbeef",
+      org: "acme",
+      repo: "svc",
+      createdAt: "2026-09-12T18:00:00.000Z",
+      expiresAt: "2026-09-12T18:15:00.000Z",
+      by: "op",
+    };
+    const seen: Array<{ org: string; repo: string; ref: string | undefined }> = [];
+    const d = decide("git push origin main", {
+      resolveDestination: () => PUBLIC,
+      findApproval: (dest, ref) => {
+        seen.push({ org: dest!.org, repo: dest!.repo, ref });
+        return approval;
+      },
+    });
+    assert.equal(d.action, "allow");
+    assert.equal(d.action === "allow" && d.approval?.id, "deadbeef");
+    assert.deepEqual(seen, [{ org: "acme", repo: "svc", ref: "main" }]);
+    // The shape rules still win: an approval does not launder a bare push…
+    assert.equal(decide("git push", { findApproval: () => approval }).action, "deny");
+    // …nor a cross-org boundary, nor a payload marker hit (rules e/f run first).
+    const cross = decide("git push origin main", {
+      resolveDestination: () => dest({ org: "customer-a-org", repo: "thing", classKnown: false }),
+      trustBoundaryOf: () => boundary(["acme"]),
+      findApproval: () => approval,
+    });
+    assert.equal(cross.action === "deny" && cross.code, "CROSS_ORG_EGRESS");
+    const hit = decide("gh pr create -t x --body-file /abs/b.md", {
+      resolveDestination: () => PUBLIC,
+      scanPayload: () => 1,
+      findApproval: () => approval,
+    });
+    assert.equal(hit.action === "deny" && hit.code, "PAYLOAD_MARKER_HIT");
+  });
+
+  it("g: no approval → still asks; a throwing finder is no approval", () => {
+    assert.equal(decide("git push origin main", { resolveDestination: () => PUBLIC, findApproval: () => null }).action, "ask");
+    assert.equal(
+      decide("git push origin main", {
+        resolveDestination: () => PUBLIC,
+        findApproval: () => {
+          throw new Error("boom");
+        },
+      }).action,
+      "ask",
+    );
+  });
+
+  it("g: an irreversible verb with no destination consults the finder with null", () => {
+    let got: unknown = "unset";
+    const d = decide("npm publish", {
+      resolveDestination: () => null,
+      findApproval: dest => {
+        got = dest;
+        return { id: "aaaaaaaa", org: "*", repo: "*", createdAt: "", expiresAt: "", by: "op" };
+      },
+    });
+    assert.equal(got, null);
+    assert.equal(d.action, "allow");
+  });
+
+  it("g: the ask reason tells the human how to mint an approval", () => {
+    const d = decide("git push origin main", { resolveDestination: () => PUBLIC, findApproval: () => null });
+    assert.ok(d.action === "ask" && d.reason.includes("repo-aegis approve acme/svc"), d.action === "ask" ? d.reason : "");
   });
 
   it("g: irreversible verb fires even with no resolved destination", () => {

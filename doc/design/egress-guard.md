@@ -290,6 +290,55 @@ the generalised `mergeHookOnEvent("PreToolUse", "Bash", …)`; it coexists with
 any user-authored hook on the same matcher. Equivalent snippets for the other
 two agents go in `doc/agent-install.md`.
 
+### 4a. Human approvals — the person declares themselves in advance
+
+*Added 2026-09-12, after the first day of running the guard.* Rule g needs
+a person, and the guard's only test for one is a TTY on stderr. The
+consequence on a machine where agents do the work: every publish to a
+public repository — the push, the PR, the merge, the tag, the release —
+must be typed by the operator, because the instruction they actually give
+("push it") lives in a chat the guard cannot see; and the one escape,
+`REPO_AEGIS_EGRESS_HUMAN=1`, is exactly what an agent must never set. On
+the first release cut under the guard that was four terminal round-trips,
+and on Claude Code in auto mode the hook's `ask` never reached the human
+at all: the auto-mode classifier answered it (with a refusal).
+
+An **approval** moves the human signal to where every layer can read it:
+
+```
+repo-aegis approve <org>/<repo> [--ref <ref>] [--ttl 15m] [--note …]
+repo-aegis approve --list | --revoke <id|all>
+```
+
+- **Minting needs a TTY on stderr, and does not honour the env escape.**
+  An agent's shell has neither, so an agent cannot mint its own approval —
+  the property the env-var rule protected, now enforced rather than
+  instructed. `--list` and `--revoke` publish nothing and need no TTY.
+- **Scoped and short-lived.** `<org>/<repo>`, `<org>/*`, or `*`;
+  optionally one ref (`refs/heads/x` and `x` are the same). Default 15
+  minutes, never more than 24 hours. Stored at
+  `$REPO_AEGIS_HOME/egress-approvals.json` (0600). Not consumed on use: a
+  push passes the agent hook and then the pre-push hook, and a single-use
+  token consumed by the first would refuse at the second — the TTL is the
+  bound.
+- **Rule g only.** Every layer (agent hook, `gh` shim, git pre-push)
+  treats a matching live approval as "human present" for rule g and for
+  nothing else: the shape rules, the cross-org boundary and the payload
+  scan run first and still refuse. A destination-less irreversible verb
+  (`npm publish`) is covered only by `*`.
+- **Audited both ways.** The mint (`egress-approval-mint`), every use
+  (`egress-approval-use`, with the layer), and every revoke are audit
+  records; the agent hook returns an explicit `allow` whose reason names
+  the approval, so a framework that shows decision reasons shows it.
+- **Refusals say how.** Rule g's reason now ends with `repo-aegis approve
+  <org>/<repo>`, so the person reading a refusal in a tool result knows
+  the one command to type.
+
+What this does not change: `REPO_AEGIS_EGRESS_HUMAN` keeps its contract
+(one invocation, a human's hand on the keyboard); the agent-side rule
+stays "never set it, never work around a refusal" — the recovery is now
+"ask the human for an approval" instead of "ask the human to run it".
+
 ### 5. Receipts
 
 After a permitted egress, one line to the agent: `PUBLISHED → <org>/<repo>

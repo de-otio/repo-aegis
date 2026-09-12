@@ -34,6 +34,7 @@
 //      carries no egress intent at all; that path must exit 0 with no
 //      output and no registry read.
 import {
+  appendAuditRecord,
   decideEgress,
   recordWorkingTree,
   describeVerb,
@@ -197,6 +198,41 @@ function destinationDetails(
   };
 }
 
+/**
+ * An approval stood in for a person (rule g). Best-effort audit record —
+ * the mint was recorded; so is every use — and the decision goes out on
+ * the JSON channel as an explicit `allow` with the approval named, so a
+ * framework that shows decision reasons shows this one.
+ */
+function recordApprovalUse(decision: Extract<EgressDecision, { action: "allow" }>, layer: string): void {
+  const a = decision.approval!;
+  try {
+    appendAuditRecord({
+      action: "egress-approval-use",
+      cwd: process.cwd(),
+      details: {
+        id: a.id,
+        layer,
+        ...(decision.intent && { verb: describeVerb(decision.intent.verb) }),
+        ...(decision.destination && { destination: `${decision.destination.org}/${decision.destination.repo}` }),
+      },
+    });
+  } catch {
+    /* audit must not block the allow */
+  }
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        permissionDecisionReason:
+          `repo-aegis: human approval ${a.id} (${a.org}/${a.repo}${a.ref !== undefined ? `, ref ${a.ref}` : ""}, ` +
+          `until ${a.expiresAt}) stands in for a person on this publish.`,
+      },
+    }) + "\n",
+  );
+}
+
 function writeDecisionJson(decision: "ask" | "deny", reason: string): void {
   // The frameworks' own JSON channel. `permissionDecision` is the entire
   // vocabulary this hook uses: there is deliberately no `updatedInput`.
@@ -276,7 +312,10 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     process.exit(EXIT_INTERNAL_ERROR);
   }
 
-  if (decision.action === "allow") process.exit(0);
+  if (decision.action === "allow") {
+    if (decision.approval !== undefined) recordApprovalUse(decision, "hook guard-egress");
+    process.exit(0);
+  }
 
   const reason = registryNote === undefined ? decision.reason : `${decision.reason} (${registryNote})`;
 

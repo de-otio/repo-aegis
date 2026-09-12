@@ -90,6 +90,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
     flags: ["--cwd", "--home", "--json", "--no-color", "--registry-path", "--version"],
     subcommands: [
       "allow",
+      "approve",
       "audit",
       "audit-log",
       "check",
@@ -116,6 +117,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
 
   // ---- top-level leaf commands ----
   { path: "allow", flags: [], subcommands: [] },
+  { path: "approve", flags: ["--list", "--note", "--ref", "--revoke", "--ttl"], subcommands: [] },
   { path: "deny", flags: [], subcommands: [] },
   { path: "status", flags: [], subcommands: [] },
   {

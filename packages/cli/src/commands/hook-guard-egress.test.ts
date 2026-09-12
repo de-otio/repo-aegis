@@ -8,10 +8,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
+import { approvalsPath, mintApproval, revokeApprovals } from "@de-otio/repo-aegis-core";
 
 let tmp: string;
 
@@ -341,6 +342,41 @@ describe("hook guard-egress — public destination needs a human", { skip: !SUBP
     assert.equal(r.code, 0, `expected allow; got ${r.code} ${r.stderr}`);
     assert.equal(r.stdout, "", "an allow is silent");
     assert.equal(r.stderr, "");
+  });
+
+  it("allows on a live human approval for the destination, saying so on the JSON channel, and records the use", () => {
+    const approvalsHome = aegisHome("approved", EMPTY_REGISTRY);
+    writeFileSync(join(approvalsHome, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    const a = mintApproval({ target: { org: "acme", repo: "svc" }, path: approvalsPath(approvalsHome), by: "op" });
+    const r = runGuard(claudePayload("git push origin main", repo), { home: approvalsHome, cwd: repo });
+    assert.equal(r.code, 0, `expected allow; got ${r.code} ${r.stderr}`);
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecision, "allow");
+    assert.match(j.hookSpecificOutput.permissionDecisionReason, new RegExp(`human approval ${a.id}`));
+    assert.match(j.hookSpecificOutput.permissionDecisionReason, /acme\/svc/);
+    // Audit trail: the use is recorded with the id and the layer.
+    const log = readFileSync(join(approvalsHome, "state", "audit.log"), "utf8");
+    assert.match(log, /"egress-approval-use"/);
+    assert.match(log, new RegExp(`"id":"${a.id}"`));
+    assert.match(log, /"layer":"hook guard-egress"/);
+    // A ref-scoped approval for another branch does not cover this push.
+    revokeApprovals("all", approvalsPath(approvalsHome));
+    mintApproval({ target: { org: "acme", repo: "svc" }, ref: "release", path: approvalsPath(approvalsHome) });
+    const r2 = runGuard(claudePayload("git push origin main", repo), { home: approvalsHome, cwd: repo });
+    assert.equal((JSON.parse(r2.stdout) as DecisionJson).hookSpecificOutput.permissionDecision, "ask");
+    // An expired one neither.
+    revokeApprovals("all", approvalsPath(approvalsHome));
+    mintApproval({ target: { org: "acme", repo: "svc" }, ttlMs: 1, path: approvalsPath(approvalsHome), now: new Date(Date.now() - 60_000) });
+    const r3 = runGuard(claudePayload("git push origin main", repo), { home: approvalsHome, cwd: repo });
+    assert.equal((JSON.parse(r3.stdout) as DecisionJson).hookSpecificOutput.permissionDecision, "ask");
+  });
+
+  it("an approval does not launder a shape violation", () => {
+    const approvalsHome = aegisHome("approved-shape", EMPTY_REGISTRY);
+    mintApproval({ target: { org: "*", repo: "*" }, path: approvalsPath(approvalsHome) });
+    const r = runGuard(claudePayload("cd /elsewhere && git push origin main", repo), { home: approvalsHome, cwd: repo });
+    assert.equal(r.code, 2);
+    assert.equal((JSON.parse(r.stderr) as DenyPayload).code, "EGRESS_AFTER_CD");
   });
 
   it("allows an explicit push to a non-public destination with no human", () => {

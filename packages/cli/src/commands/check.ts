@@ -26,6 +26,7 @@ import {
   recordWorkingTree,
   resolveCachedDestination,
   getRemoteUrl,
+  findApproval,
   isHumanPresent,
   EGRESS_HUMAN_ENV,
   loadRegistry,
@@ -411,8 +412,23 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
 
   // --- PUBLIC_PUSH_NEEDS_HUMAN --------------------------------------------
   // `isHumanPresent` tests stderr's TTY. stdin is git's ref list on this path
-  // and is never the signal.
-  if (dest.publicFacing && !isHumanPresent()) {
+  // and is never the signal. A live approval minted at a terminal for this
+  // destination (and ref, when scoped) stands in for the person.
+  const approval = dest.publicFacing && !isHumanPresent() ? findApproval(parsed, opts.pushRef) : null;
+  if (approval !== null) {
+    try {
+      appendAuditRecord({
+        action: "egress-approval-use",
+        cwd: repo.cwd,
+        repo: repo.cwd,
+        details: { id: approval.id, layer: "git pre-push", destination: `${parsed.org}/${parsed.repo}`, ref },
+      });
+    } catch {
+      /* audit must not block the push */
+    }
+    process.stderr.write(`repo-aegis: human approval ${approval.id} stands in for a person on this push\n`);
+  }
+  if (dest.publicFacing && !isHumanPresent() && approval === null) {
     auditRefusal("PUBLIC_PUSH_NEEDS_HUMAN", repo, dest, ref);
     emitError(
       {
@@ -420,8 +436,8 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
         error:
           `refusing to push ${ref} to ${parsed.org}/${parsed.repo} ` +
           `(${visibility}, ${cls}) with no human present: ` +
-          `run it from a terminal, or a human sets ${EGRESS_HUMAN_ENV}=1 for this one ` +
-          `invocation (an agent never sets it).`,
+          `run it from a terminal, mint an approval first (\`repo-aegis approve ${parsed.org}/${parsed.repo}\`), ` +
+          `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).`,
         details: {
           destination: `${parsed.org}/${parsed.repo}`,
           ref,

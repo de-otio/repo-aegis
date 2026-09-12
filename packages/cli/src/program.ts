@@ -563,6 +563,22 @@ export async function buildProgram(): Promise<Command> {
     .option("--remove", "remove a waiver instead of adding one (requires --pattern and --blob)")
     .action((opts, cmd) => waive(withGlobals(opts, cmd)));
 
+  // The human's side of rule g: a time-limited, destination-scoped approval
+  // minted at a terminal, so an agent can publish on the operator's say-so
+  // without the operator running the command — and without the env escape.
+  program
+    .command("approve [target]")
+    .description("mint (from a terminal), list, or revoke a time-limited human approval for publishing to <org>/<repo>, <org>/*, or *")
+    .option("--ref <ref>", "approve only this branch or tag")
+    .option("--ttl <duration>", "how long the approval lives: 15m (default), 2h, 90s, 1d — never more than 24h")
+    .option("--note <text>", "why (audit trail only)")
+    .option("--list", "list live approvals instead of minting one")
+    .option("--revoke <id|all>", "revoke one approval by id, or every one")
+    .action(async (target: string | undefined, opts, cmd) => {
+      const { approve } = await import("./commands/approve.js");
+      approve(target, withGlobals(opts, cmd));
+    });
+
   // A client-side gate that is installed but disconnected looks exactly like
   // one that is clean — both are silent. `doctor` is the fleet-wide sweep that
   // makes that state findable on purpose rather than by luck.

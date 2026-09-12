@@ -48,7 +48,10 @@ marker list when working on customer-A's own code.
   public destination or an irreversible verb (`merge`, `release`,
   `publish`), refuse a cross-org destination, and scan a PR body
   against the *destination's* deny set. Decision-only: the guard never
-  rewrites a command. `selfIdentity` markers cover the inverse
+  rewrites a command. When the human wants an agent to publish anyway,
+  `repo-aegis approve <org>/<repo>` from a terminal mints a scoped,
+  15-minute approval every layer honours — an agent's shell has no TTY
+  and cannot mint one. `selfIdentity` markers cover the inverse
   direction — the operator's own project names and session links
   entering a customer's repository.
 - **Engagement-scoped CLI verbs.** `allow`, `deny`, `status`,
