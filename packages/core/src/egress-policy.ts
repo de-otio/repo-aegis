@@ -45,7 +45,8 @@ export type EgressCode =
   | "PAYLOAD_MODE_DEPENDENT_PATH"
   | "CROSS_ORG_EGRESS"
   | "PAYLOAD_MARKER_HIT"
-  | "PUBLIC_EGRESS_NEEDS_HUMAN";
+  | "PUBLIC_EGRESS_NEEDS_HUMAN"
+  | "SHIM_UNREACHABLE_NEEDS_HUMAN";
 
 export interface Destination {
   org: string;
@@ -169,8 +170,23 @@ export interface DecideEgressOptions {
   registry: Registry;
   /** From {@link isHumanPresent}. */
   humanPresent: boolean;
-  /** Does the enforcing framework have an "ask"? A shell does not. */
-  capabilities: { ask: boolean };
+  capabilities: {
+    /** Does the enforcing framework have an "ask"? A shell does not. */
+    ask: boolean;
+    /**
+     * Is the `gh` shim the first `gh` on the PATH the command will run with?
+     *
+     * Only a caller that can answer this honestly should set it — in
+     * practice the agent hook, which inherits the same environment its
+     * host will hand the shell. It exists because `ask` is only a real
+     * refusal when a layer *below* the asker can hold the command if the
+     * ask is not answered by a person; for a `gh` verb that layer is the
+     * shim, and a `false` here says it is not there. `undefined` means
+     * "not asked" and changes nothing: a caller that cannot determine it,
+     * or whose lookup threw, must leave it unset rather than guess.
+     */
+    ghShimOnPath?: boolean;
+  };
   resolveDestination?: DestinationResolver;
   scanPayload?: PayloadScanner;
   /** Injectable for tests; defaults to `computeTrustBoundary`. */
@@ -621,7 +637,10 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       ? `PUBLIC destination`
       : `an operation that is hard to undo`;
     const target = intent.verb === "git-push" && intent.refspec ? `${intent.refspec} → ` : "";
-    const reason =
+    const approveCommand = `repo-aegis approve ${destination ? `${destination.org}/${destination.repo}` : "*"}`;
+    // Everything up to and including "A person must approve this"; the three
+    // branches below differ only in what a person can do about it here.
+    const head =
       `${verb}: ${what} — ${target}${describeDestination(destination)}` +
       (intent.repoFlag !== undefined
         ? ` (from --repo)`
@@ -630,15 +649,38 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           : intent.apiEndpoint !== undefined && destination !== null
             ? ` (from the API path)`
             : "") +
-      `, from a non-interactive shell. A person must approve this` +
-      (opts.capabilities.ask
-        ? `, or mint an approval first: \`repo-aegis approve ${destination ? `${destination.org}/${destination.repo}` : "*"}\` from a terminal.`
-        : `: re-run it from a terminal, mint an approval first (\`repo-aegis approve ${destination ? `${destination.org}/${destination.repo}` : "*"}\`), ` +
-          `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).`);
+      `, from a non-interactive shell. A person must approve this`;
     if (opts.capabilities.ask) {
+      // An `ask` is a refusal only if something can still hold the command
+      // when the ask is not answered by a person — and on at least one agent
+      // host an unanswered `ask` is resolved by a classifier, not a human.
+      // For a `gh` verb the layer that holds it is the shim; when the caller
+      // reports the shim is not the first `gh` on the PATH this command will
+      // run with, nothing below this decision can refuse, so asking would be
+      // theatre. Deny instead, with its own code: the operator's fix is a
+      // PATH, not a prompt. Scoped to `gh` deliberately — `git push` still
+      // has the pre-push hook, which is PATH-independent, and `npm publish`
+      // has no shim to be unreachable, so for neither does this PATH fact
+      // change what can refuse them.
+      if (opts.capabilities.ghShimOnPath === false && intent.verb.startsWith("gh-")) {
+        return deny(
+          "SHIM_UNREACHABLE_NEEDS_HUMAN",
+          `${head}, and in this shell nothing below this hook can hold the command: the \`gh\` shim is not ` +
+            `the first \`gh\` on PATH, so an unanswered prompt would let it run. Mint an approval from a ` +
+            `terminal (\`${approveCommand}\`) and re-run, or start the agent from a shell where the shim ` +
+            `comes first (\`repo-aegis doctor\` says which).`,
+          destination ?? undefined,
+        );
+      }
+      const reason = `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.`;
       return { action: "ask", code: "PUBLIC_EGRESS_NEEDS_HUMAN", reason, ...(destination && { destination }), intent };
     }
-    return deny("PUBLIC_EGRESS_NEEDS_HUMAN", reason, destination ?? undefined);
+    return deny(
+      "PUBLIC_EGRESS_NEEDS_HUMAN",
+      `${head}: re-run it from a terminal, mint an approval first (\`${approveCommand}\`), ` +
+        `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).`,
+      destination ?? undefined,
+    );
   }
 
   // ---- h: scratch, and everything else ---------------------------------------

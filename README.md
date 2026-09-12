@@ -89,7 +89,9 @@ Prefer a manual install? The minimum is:
 npm install -g @de-otio/repo-aegis
 repo-aegis init                                  # bootstrap registry, hooks, Claude Code wiring
 repo-aegis install shim                          # gh wrapper for the egress guard; then put
-                                                 # ~/.config/repo-aegis/bin FIRST on PATH (it prints the line)
+                                                 # ~/.config/repo-aegis/bin FIRST on PATH (it prints the line),
+                                                 # and restart the shell AND any agent host — PATH is per-process,
+                                                 # so a window opened before the line never sees the shim
 repo-aegis engagements add customer-a \
   --github-org acme-corp                         # attach a GitHub org so future repos auto-classify
 cd /path/to/customer-a-repo

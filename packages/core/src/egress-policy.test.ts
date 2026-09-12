@@ -367,6 +367,78 @@ describe("decideEgress — context rules", () => {
     assert.ok(d.action === "ask" && d.reason.includes("repo-aegis approve acme/svc"), d.action === "ask" ? d.reason : "");
   });
 
+  it("g: a `gh` verb asks when the shim can run, and denies when it cannot", () => {
+    const opts = { resolveDestination: () => PUBLIC, findApproval: () => null };
+    // The shim is first on PATH: something below the hook can still refuse,
+    // so the ask is a real refusal and the decision is unchanged.
+    const asked = decide("gh pr create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: true } });
+    assert.equal(asked.action, "ask");
+    assert.equal(asked.action === "ask" && asked.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    // The shim is not first: nothing below this decision can hold the
+    // command, so asking would be theatre.
+    const denied = decide("gh pr create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: false } });
+    assert.equal(denied.action, "deny");
+    assert.equal(denied.action === "deny" && denied.code, "SHIM_UNREACHABLE_NEEDS_HUMAN");
+    assert.ok(denied.action === "deny" && denied.reason.includes("not the first `gh` on PATH"));
+    // The fix is named, both halves of it.
+    assert.ok(denied.action === "deny" && denied.reason.includes("repo-aegis approve acme/svc"));
+    assert.ok(denied.action === "deny" && denied.reason.includes("repo-aegis doctor"));
+    // …and the destination is still named, as every rule-g reason names it.
+    assert.ok(denied.action === "deny" && denied.reason.includes("acme/svc (public, public-eligible)"));
+  });
+
+  it("g: an unanswerable PATH lookup changes nothing — the capability is left unset", () => {
+    const d = decide("gh pr create -t x -b y", {
+      resolveDestination: () => PUBLIC,
+      findApproval: () => null,
+      capabilities: { ask: true },
+    });
+    assert.equal(d.action, "ask");
+    assert.equal(d.action === "ask" && d.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+  });
+
+  it("g: an unreachable shim does not touch `git push` or `npm publish`", () => {
+    const capabilities = { ask: true, ghShimOnPath: false };
+    // `git push` has the pre-push hook, which is PATH-independent.
+    const push = decide("git push origin main", { resolveDestination: () => PUBLIC, findApproval: () => null, capabilities });
+    assert.equal(push.action, "ask");
+    assert.equal(push.action === "ask" && push.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    // `npm publish` has no shim at all, so the shim's absence says nothing
+    // about it that was not already true.
+    const publish = decide("npm publish", { resolveDestination: () => null, findApproval: () => null, capabilities });
+    assert.equal(publish.action, "ask");
+  });
+
+  it("g: an unreachable shim never overrides an approval, nor an earlier deny", () => {
+    const capabilities = { ask: true, ghShimOnPath: false };
+    const approval = {
+      id: "deadbeef",
+      org: "acme",
+      repo: "svc",
+      createdAt: "2026-09-12T18:00:00.000Z",
+      expiresAt: "2026-09-12T18:15:00.000Z",
+      by: "op",
+    };
+    // A human declared themselves in advance; rule g is satisfied before the
+    // ask/deny split is reached at all.
+    const allowed = decide("gh pr merge 12 --squash", {
+      resolveDestination: () => PUBLIC,
+      findApproval: () => approval,
+      capabilities,
+    });
+    assert.equal(allowed.action, "allow");
+    assert.equal(allowed.action === "allow" && allowed.approval?.id, "deadbeef");
+    // A command already denied by an earlier rule keeps that rule's code.
+    const shaped = decide("cd /elsewhere && gh pr merge 12 --squash", {
+      resolveDestination: () => PUBLIC,
+      findApproval: () => null,
+      capabilities,
+    });
+    assert.equal(shaped.action === "deny" && shaped.code, "EGRESS_AFTER_CD");
+    // And a private, reversible `gh` verb is still allowed: rule g never fired.
+    assert.equal(decide("gh pr create -t x -b y", { capabilities }).action, "allow");
+  });
+
   it("g: irreversible verb fires even with no resolved destination", () => {
     const d = decide("npm publish", { resolveDestination: () => null });
     assert.equal(d.action, "ask");

@@ -730,7 +730,10 @@ the pushed repo sits in a trust boundary disjoint from the destination's),
 `PAYLOAD_MARKER_HIT` (the body file matches the destination's deny set —
 including `selfIdentity` when the destination is customer-coupled), and
 `PUBLIC_EGRESS_NEEDS_HUMAN` (public destination, or `merge` / `release` /
-`publish` / `repo edit` / `workflow run`, and no person present).
+`publish` / `repo edit` / `workflow run`, and no person present) — which on a
+`gh` verb becomes `SHIM_UNREACHABLE_NEEDS_HUMAN`, an outright refusal, when
+the `gh` shim is not first on `PATH` and nothing below the hook could hold
+the command.
 
 How to recover — the same three moves every time:
 
@@ -814,13 +817,14 @@ Codes you should recognise and act on:
 | `CROSS_ORG_EGRESS` / `CROSS_ORG_PUSH` | egress guard: the pushed repo (or the payload's tree) belongs to a trust boundary disjoint from the destination's | this is the boundary both incidents crossed. Stop; name the destination to the user. Do NOT widen `personalOrgs` / `githubOrgs` to make it pass. |
 | `PAYLOAD_MARKER_HIT` | egress guard: the body file matches the destination's deny set (`selfIdentity` included for a customer-coupled destination) | run `repo-aegis check --path <file>` from the destination repo to see which stems (never `--verbose` from a hook); redact; re-run. The reason carries a hit count only. |
 | `PUBLIC_EGRESS_NEEDS_HUMAN` / `PUBLIC_PUSH_NEEDS_HUMAN` | egress guard: public destination, or `merge` / `release` / `publish` / `repo edit` / `workflow run`, and no human present | on Claude Code this arrives as a permission prompt — the user's decision. Elsewhere: tell the user what would be published where and stop. Never set `REPO_AEGIS_EGRESS_HUMAN`; never re-shape the command to dodge the rule. |
+| `SHIM_UNREACHABLE_NEEDS_HUMAN` | egress guard: the same condition as above on a `gh` verb, in a shell where the `gh` shim is **not** the first `gh` on `PATH` — so no layer below the hook could hold the command if the prompt went unanswered | a refusal, not a prompt. Ask the user for `repo-aegis approve <org>/<repo>` from a terminal and re-issue the identical command; or tell them the agent was started from a shell that predates `repo-aegis install shim` (`repo-aegis doctor` reports `SHIM_NOT_FIRST` there). Never set `REPO_AEGIS_EGRESS_HUMAN`; never edit `PATH` to make this pass. |
 | `PUBLISHED_BODY_MISMATCH` | `gh` shim read-back: the live PR body differs from the file that was passed (byte counts in `details`, never content) | the wrong document is published. Surface immediately; propose `gh pr edit --body-file <right file>` for the user to run; do not guess which file was meant. |
 | `READBACK_UNAVAILABLE` (warning) | the read-back could not run (no PR identified, `gh` failed, timeout) | the publish itself succeeded; tell the user the body was not verified and offer to view it |
 | `SHIM_PATH_OCCUPIED` | `install shim` found a file at `<home>/bin/gh` that repo-aegis did not write | surface the path; the user decides on `--force` |
 | `PUSH_DEFAULT_IMPLICIT` (`doctor`) | global `push.default` is unset or not `nothing` | suggest `git config --global push.default nothing` — one line, every shell, every agent |
 | `CLASS_VISIBILITY_UNRESOLVED` (`doctor`) | a repo with a GitHub remote has no explicit class or no cached visibility, so the destination rules are blind there | suggest `repo-aegis classify --apply && repo-aegis status` in that repo; do not run it yourself (see `VISIBILITY_UNRESOLVED`) |
 | `PERSONAL_ORG_UNREGISTERED` (`doctor`) | the repo's remote org is in no engagement and not in `personalOrgs` | surface the `fix` line; which org is "ours" is the user's compliance decision |
-| `SHIM_MISSING` / `SHIM_NOT_FIRST` / `GUARD_HOOK_UNREGISTERED` (`doctor`) | the `gh` shim is absent or shadowed on `PATH`; the guard hook is not in `settings.json` | suggest `repo-aegis install shim` / fixing `PATH` order / `repo-aegis install claude-md` |
+| `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` / `GUARD_HOOK_UNREGISTERED` (`doctor`) | the `gh` shim is absent, shadowed on `PATH`, or left over from an earlier release; the guard hook is not in `settings.json` | suggest `repo-aegis install shim` / fixing `PATH` order / `repo-aegis install claude-md`. A shadowed shim is also why a `gh` verb can be refused with `SHIM_UNREACHABLE_NEEDS_HUMAN`. |
 
 `audit` also emits per-finding diagnostic codes inside its
 `checks[].findings[].detail.code` field (NOT top-level error codes —

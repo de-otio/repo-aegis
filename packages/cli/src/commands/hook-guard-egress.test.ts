@@ -36,6 +36,13 @@ interface GuardOptions {
   /** Set `REPO_AEGIS_EGRESS_HUMAN=1` for this invocation (the documented human-only escape). */
   human?: boolean;
   agent?: string;
+  /**
+   * Install a `gh` shim under the fixture home and put it first on `PATH`,
+   * so the hook sees the layer below it as able to refuse. Default: no shim
+   * anywhere on `PATH` — the state of an agent shell whose host snapshotted
+   * `PATH` before `install shim` ran.
+   */
+  shimOnPath?: boolean;
 }
 
 /**
@@ -49,6 +56,13 @@ function runGuard(input: string, opts: GuardOptions): GuardResult {
   delete env["REPO_AEGIS_EGRESS_HUMAN"];
   delete env["REPO_AEGIS_ASSUME_PUBLIC"];
   if (opts.human) env["REPO_AEGIS_EGRESS_HUMAN"] = "1";
+  if (opts.shimOnPath === true) {
+    const binDir = join(opts.home, "bin");
+    mkdirSync(binDir, { recursive: true });
+    // Never executed: the hook only resolves it. Its content is irrelevant.
+    writeFileSync(join(binDir, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    env["PATH"] = `${binDir}:${env["PATH"] ?? ""}`;
+  }
   const args = ["hook", "guard-egress", ...(opts.agent ? ["--agent", opts.agent] : [])];
   const r = spawnSync(process.execPath, [cliPath, ...args], {
     cwd: opts.cwd ?? tmp,
@@ -304,6 +318,50 @@ describe("hook guard-egress — public destination needs a human", { skip: !SUBP
     assert.equal(j.hookSpecificOutput.permissionDecision, "ask");
     assert.match(j.hookSpecificOutput.permissionDecisionReason, /PUBLIC destination/);
     assert.match(j.hookSpecificOutput.permissionDecisionReason, /acme\/svc/);
+  });
+
+  it("asks on a `gh` verb when the shim is first on PATH — the layer below can still refuse", () => {
+    const r = runGuard(claudePayload("gh pr create -t x -b y", repo), { home, cwd: repo, shimOnPath: true });
+    assert.equal(r.code, 0, `expected ask (exit 0); got ${r.code} ${r.stderr}`);
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecision, "ask");
+    assert.match(j.hookSpecificOutput.permissionDecisionReason, /acme\/svc/);
+  });
+
+  it("denies a `gh` verb when the shim is not on PATH, because nothing below the hook could refuse", () => {
+    // An agent host that snapshotted PATH before `install shim` ran hands
+    // its shell a PATH with no shim on it. The hook reads its own
+    // environment, which is that same PATH.
+    const r = runGuard(claudePayload("gh pr create -t x -b y", repo), { home, cwd: repo });
+    assert.equal(r.code, 2, `expected deny; got ${r.code} ${r.stdout}`);
+    const payload = JSON.parse(r.stderr) as DenyPayload;
+    assert.equal(payload.code, "SHIM_UNREACHABLE_NEEDS_HUMAN");
+    assert.equal(payload.details.destination?.org, "acme");
+    assert.match(payload.error, /not the first `gh` on PATH/);
+    assert.match(payload.error, /repo-aegis approve acme\/svc/);
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecision, "deny");
+  });
+
+  it("a missing shim does not turn a `git push` ask into a deny", () => {
+    // The pre-push hook is PATH-independent and refuses this push on its
+    // own; denying here would be a behaviour change with no safety argument.
+    const r = runGuard(claudePayload("git push origin main", repo), { home, cwd: repo });
+    assert.equal(r.code, 0, `expected ask; got ${r.code} ${r.stderr}`);
+    assert.equal((JSON.parse(r.stdout) as DecisionJson).hookSpecificOutput.permissionDecision, "ask");
+  });
+
+  it("a missing shim never overrides an approval: the owner's `push it` still publishes", () => {
+    const approvalsHome = aegisHome("approved-no-shim", EMPTY_REGISTRY);
+    const a = mintApproval({ target: { org: "acme", repo: "svc" }, path: approvalsPath(approvalsHome), by: "op" });
+    const r = runGuard(claudePayload("gh pr merge 12 --squash --repo acme/svc", repo), {
+      home: approvalsHome,
+      cwd: repo,
+    });
+    assert.equal(r.code, 0, `expected allow; got ${r.code} ${r.stderr}`);
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecision, "allow");
+    assert.match(j.hookSpecificOutput.permissionDecisionReason, new RegExp(`human approval ${a.id}`));
   });
 
   it("denies on Codex, where ask degrades to deny rather than to allow", () => {

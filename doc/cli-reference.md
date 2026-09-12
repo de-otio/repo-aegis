@@ -952,6 +952,7 @@ context rules fail open, and no layer ever rewrites a command:
 | e | the pushed repo's (or the payload file's tree's) trust boundary is positively disjoint from the destination's | `CROSS_ORG_EGRESS` | deny |
 | f | payload content matches the destination's deny set (its own class when the destination is the tree's origin; `customer-coupled` to the matching engagement when the destination org is in an engagement's `githubOrgs`, whatever the cwd; `_always` only otherwise; `_self_identity` joins for customer-coupled) | `PAYLOAD_MARKER_HIT` | deny (hit count only) |
 | g | destination public-facing, or verb ∈ {`gh pr merge`, `gh release *`, `gh repo create\|edit`, `gh gist create`, `gh workflow run`, `npm publish`}, and no human present — and no live approval (`repo-aegis approve`) for the destination | `PUBLIC_EGRESS_NEEDS_HUMAN` | `ask` where the framework has it; `deny` otherwise — never `allow` |
+| g′ | rule g on a **`gh`** verb, where the caller reports the `gh` shim is not the first `gh` on its `PATH` (only the agent hook reports this) | `SHIM_UNREACHABLE_NEEDS_HUMAN` | deny — there is no layer below the hook left to hold the command |
 | h | otherwise (including class `scratch`) | — | allow |
 
 "Human present" is a TTY on stderr — stdin is often a pipe even for a
@@ -1029,6 +1030,19 @@ unreadable does not disable the shape rules. Registered by
 `install claude-md` on `PreToolUse` matcher `Bash`; Codex CLI and Gemini
 CLI snippets are in [agent-install.md](agent-install.md) (there `ask`
 degrades to `deny`).
+
+The hook also reads its **own** `PATH` — the one its host will hand the
+shell it is about to permit — and tells the policy whether the `gh` shim
+is the first `gh` on it. When it is not, a `gh` verb that would have been
+`ask` is denied with `SHIM_UNREACHABLE_NEEDS_HUMAN` instead (rule g′
+above): an `ask` is only a refusal while something below it can hold the
+command, and on at least one agent host an unanswered `ask` is resolved
+by a classifier rather than a person. `git push` is untouched by this —
+the pre-push hook is PATH-independent — and so is `npm publish`, which
+has no shim to be unreachable. A `PATH` lookup that throws leaves the
+capability unset and changes nothing: this hook fails open on its own
+defects, but a lookup that succeeds and says the shim is absent is a
+fact, not a defect.
 
 `command` may be a string or an argv array. An array is flattened
 before parsing: if it carries a `-c` / `-lc`-style flag the element
