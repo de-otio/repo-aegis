@@ -471,7 +471,10 @@ PUBLISHED → acme/svc (PUBLIC, class public-eligible): main -> main
 Read it. If the destination named there is not the one you intended, stop
 and tell the user immediately — that is the whole point of the line. If the
 command did not actually publish, the line reads `EGRESS FAILED → …`
-instead; a receipt never claims a publish that did not happen.
+instead; a receipt never claims a publish that did not happen. And when
+the output proves neither — a push that died in transport, a `gh` verb
+that printed no URL — it reads `EGRESS UNCONFIRMED → …`: treat that as
+"find out", not as "it worked".
 
 ### The three enforcement points
 

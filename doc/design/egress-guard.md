@@ -420,6 +420,32 @@ stderr elsewhere; via the pre-push stderr line for git. A model that has just
 pushed to the wrong repository will skim past twenty lines of git output; it
 will not skim past one line that says **PUBLIC** and a name it did not intend.
 
+**A publish is confirmed, not assumed.** The shim and the pre-push hook have
+the real thing to key on — the command's exit code — and use it. The
+PostToolUse hook has only the tool's captured output, and it originally
+read that output for *failure* and called everything else a publish. That is
+the same silent-skip shape as #97 one layer out: absence of evidence became
+evidence. It broke in the obvious way on 2026-09-12, when a push that died as
+`ssh_dispatch_run_fatal: … Broken pipe` (no boundary before `fatal`, so
+`\bfatal:` missed it) beside a German `Schwerwiegend:` (no English pattern
+covers it) was receipted `PUBLISHED →` with zero refs to name.
+
+So the hook now requires positive evidence wherever the tool emits any:
+
+| Verb | Evidence of a publish |
+|---|---|
+| `git push` | a `<src> -> <dst>` ref line not flagged `!`, or `Everything up-to-date` |
+| `gh pr create` / `gh pr edit` | the pull-request URL |
+| `gh release create` | the release URL |
+| everything else | — no distinctive success output; failure scan only |
+
+Locale is the reason this must be evidence and not text: git's flag column
+(`!` refused, `=` already current, `*` created) and the `->` arrow carry no
+translation, while every word beside them does. With no evidence and no
+failure signal the line reads `EGRESS UNCONFIRMED → …`, which is what is
+actually known; a partly refused push still says `PUBLISHED` — bytes reached
+the remote — and names how many refs were refused.
+
 ### 6. `selfIdentity` — the inverse direction
 
 Engagement markers stop *customer* strings entering *our* repos. The first
