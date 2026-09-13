@@ -269,5 +269,30 @@ if (!harness) {
       // The agent must be told explicitly that this is not a pass.
       assert.match(parsed.error, /NOT a clean result/);
     });
+
+    // A directory used to reach the file scanner, fail with EISDIR, and come
+    // back as PATH_NOT_SCANNED "(unreadable)" — fail-closed with the wrong
+    // cause, and no way for the agent to scan the folder it meant.
+    it("walks a directory instead of calling it unreadable", async () => {
+      const r = await callCheckPath({ path: "sub", cwd: scopedRepo });
+      assert.equal(r.isError, undefined, `unexpected error: ${r.text}`);
+      const parsed = JSON.parse(r.text) as {
+        hits: unknown[];
+        filesScanned?: number;
+        skippedDirs?: string[];
+      };
+      assert.equal(parsed.hits.length, 1, `hits: ${r.text}`);
+      assert.equal(parsed.filesScanned, 1);
+    });
+
+    it("an empty directory is still an ERROR — nothing was scanned", async () => {
+      mkdirSync(join(scopedRepo, "hollow"), { recursive: true });
+      const r = await callCheckPath({ path: "hollow", cwd: scopedRepo });
+      assert.equal(r.isError, true, `expected an error result, got: ${r.text}`);
+      const parsed = JSON.parse(r.text) as { code?: string; error: string };
+      assert.equal(parsed.code, "PATH_NOT_SCANNED");
+      assert.match(parsed.error, /NOT a clean result/);
+      assert.doesNotMatch(parsed.error, /unreadable/);
+    });
   });
 }

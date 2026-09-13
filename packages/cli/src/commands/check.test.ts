@@ -317,6 +317,148 @@ describe("check — no-deny-set short-circuit", () => {
   });
 });
 
+describe("check — --path on a directory", () => {
+  type DirJson = {
+    hits: { path?: string }[];
+    skipped: { path: string; reason: string }[];
+    filesScanned?: number;
+    skippedDirs?: string[];
+    egress?: { host: string; file: string }[];
+  };
+
+  /** `<repo>/tree` with a nested marker, a clean file, and a `.git` decoy. */
+  function withTree(repo: string): string {
+    const dir = join(repo, "tree");
+    mkdirSync(join(dir, "nested"), { recursive: true });
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    writeFileSync(join(dir, "clean.txt"), "nothing here\n");
+    writeFileSync(join(dir, "nested", "marked.md"), "a line\nand leak-token\n");
+    writeFileSync(join(dir, ".git", "COMMIT_EDITMSG"), "leak-token\n");
+    return dir;
+  }
+
+  // The bug: a directory reached scanFile, failed readFileSync with EISDIR,
+  // and came back as `PATH_NOT_SCANNED … (unreadable)` — fail-closed with a
+  // cause that sent the operator to look at file permissions.
+  it("scans the tree instead of calling a readable directory unreadable", () => {
+    const home = setupHome("path-dir-hit", { _always: ["leak-token"] });
+    const repo = makeRepo("path-dir-hit-repo", { class: "private-strict" });
+    withTree(repo);
+    process.chdir(repo);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ path: "tree", json: true })),
+    );
+    assert.equal(result.exitCode, 1); // a hit, not a usage refusal
+    const j = JSON.parse(result.stdout) as DirJson;
+    assert.equal(j.hits.length, 1);
+    assert.match(j.hits[0]!.path ?? "", /nested\/marked\.md$/);
+    assert.equal(j.filesScanned, 2);
+    assert.equal(j.skipped.length, 0);
+  });
+
+  it("does not walk .git, and says which directories it left out", () => {
+    const home = setupHome("path-dir-git", { _always: ["leak-token"] });
+    const repo = makeRepo("path-dir-git-repo", { class: "private-strict" });
+    const dir = withTree(repo);
+    rmSync(join(dir, "nested"), { recursive: true, force: true });
+    process.chdir(repo);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ path: "tree", json: true })),
+    );
+    // Only the `.git` copy of the marker is left, and it is not scanned.
+    assert.equal(result.exitCode, undefined);
+    const j = JSON.parse(result.stdout) as DirJson;
+    assert.deepEqual(j.hits, []);
+    assert.equal(j.filesScanned, 1);
+    assert.equal(j.skippedDirs?.length, 1);
+    assert.match(j.skippedDirs![0]!, /\.git$/);
+  });
+
+  // Fail-closed is the rule for --path mode; for a directory the test is
+  // "no file was read", not "some file was skipped".
+  it("exits 2 with PATH_NOT_SCANNED on an empty directory", () => {
+    const home = setupHome("path-dir-empty", { _always: ["leak-token"] });
+    const repo = makeRepo("path-dir-empty-repo", { class: "private-strict" });
+    mkdirSync(join(repo, "hollow"), { recursive: true });
+    process.chdir(repo);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ path: "hollow", json: true })),
+    );
+    assert.equal(result.exitCode, 2);
+    const j = JSON.parse(result.stderr) as { code: string; error: string };
+    assert.equal(j.code, "PATH_NOT_SCANNED");
+    assert.doesNotMatch(j.error, /unreadable/);
+  });
+
+  it("keeps scanning a tree whose individual files are skipped, and reports them", () => {
+    const home = setupHome("path-dir-skips", { _always: ["leak-token"] });
+    const repo = makeRepo("path-dir-skips-repo", { class: "private-strict" });
+    const dir = withTree(repo);
+    writeFileSync(join(dir, "big.txt"), "a".repeat(200));
+    process.chdir(repo);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ path: "tree", maxFileBytes: 50, json: true })),
+    );
+    assert.equal(result.exitCode, 1); // the nested marker still blocks
+    const j = JSON.parse(result.stdout) as DirJson;
+    assert.equal(j.hits.length, 1);
+    assert.equal(j.skipped.filter(s => s.reason === "too-large").length, 1);
+    assert.equal(j.filesScanned, 2);
+  });
+
+  // A truncated scan reported as a result is the failure this tool exists to
+  // prevent, so the cap refuses instead of answering short.
+  it("exits 2 with PATH_TOO_MANY_FILES rather than scanning part of the tree", () => {
+    const home = setupHome("path-dir-cap", { _always: ["leak-token"] });
+    const repo = makeRepo("path-dir-cap-repo", { class: "private-strict" });
+    withTree(repo);
+    process.chdir(repo);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ path: "tree", maxFiles: 1, json: true })),
+    );
+    assert.equal(result.exitCode, 2);
+    const j = JSON.parse(result.stderr) as { code: string; error: string };
+    assert.equal(j.code, "PATH_TOO_MANY_FILES");
+    assert.match(j.error, /truncated scan/);
+  });
+
+  it("sweeps a nested lockfile for private-registry egress too", () => {
+    const home = setupHome("path-dir-egress"); // no markers → no deny set
+    const repo = makeRepo("path-dir-egress-repo", { class: "public-eligible" });
+    mkdirSync(join(repo, "tree", "app"), { recursive: true });
+    writeFileSync(
+      join(repo, "tree", "app", "package-lock.json"),
+      JSON.stringify({
+        packages: {
+          "node_modules/foo": { resolved: "https://npm.private-registry.example.com/foo/-/foo-1.0.0.tgz" },
+        },
+      }),
+    );
+    process.chdir(repo);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ path: "tree", json: true })),
+    );
+    assert.equal(result.exitCode, 1);
+    const j = JSON.parse(result.stdout) as DirJson;
+    assert.ok(j.egress?.some(e => e.host === "npm.private-registry.example.com"));
+  });
+
+  it("leaves the single-file form exactly as it was", () => {
+    const home = setupHome("path-dir-file", { _always: ["leak-token"] });
+    const repo = makeRepo("path-dir-file-repo", { class: "private-strict" });
+    writeFileSync(join(repo, "fine.txt"), "nothing interesting\n");
+    process.chdir(repo);
+    const result = withEnv("REPO_AEGIS_HOME", home, () =>
+      captureOutput(() => check({ path: "fine.txt", json: true })),
+    );
+    assert.equal(result.exitCode, undefined);
+    const j = JSON.parse(result.stdout) as DirJson;
+    assert.equal(j.filesScanned, undefined); // envelope unchanged for a file
+    assert.equal(j.skippedDirs, undefined);
+    assert.deepEqual(j.hits, []);
+  });
+});
+
 describe("check — egress (private-registry in a public-facing repo)", () => {
   const PRIVATE = "https://npm.private-registry.example.com/foo/-/foo-1.0.0.tgz";
   const PUBLIC = "https://registry.npmjs.org/foo/-/foo-1.0.0.tgz";

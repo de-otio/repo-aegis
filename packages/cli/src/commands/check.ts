@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   readRepoConfig,
   computeDenySet,
   scanFile,
+  scanDirectory,
+  walkScanFiles,
+  DEFAULT_MAX_SCAN_FILES,
   resolveScanTarget,
   scanStagedDiff,
   scanRange,
@@ -55,6 +58,7 @@ import {
   type HistoryHit,
   type RegistryFinding,
   type RepoConfig,
+  type DirectoryScanResult,
   type NewRefBase,
   type Waiver,
   EXIT_HIT,
@@ -73,6 +77,12 @@ interface CheckOptions extends DenySetFloorOptions {
   cwd?: string;
   staged?: boolean;
   path?: string;
+  /**
+   * With a directory `--path`: cap on how many files one run will read.
+   * Hitting it is a refusal, never a truncated scan — see
+   * `DEFAULT_MAX_SCAN_FILES`.
+   */
+  maxFiles?: number;
   range?: string;
   history?: boolean;
   /**
@@ -126,6 +136,23 @@ function git(cwd: string, args: string[]): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Is `path` a directory? False for anything that cannot be stat'ed — a
+ * missing path stays `scanFile`'s to report, unchanged.
+ */
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Scan options plus the directory-only file cap, when one was given. */
+function dirScanOpts<T extends object>(scanOpts: T, opts: CheckOptions): T & { maxFiles?: number } {
+  return { ...scanOpts, ...(opts.maxFiles !== undefined && { maxFiles: opts.maxFiles }) };
 }
 
 /**
@@ -217,9 +244,29 @@ function gatherEgressInputs(
   const out: { path: string; text: string }[] = [];
 
   if (opts.path) {
-    if (!isEgressRelevant(opts.path)) return out;
     const abs = resolveScanTarget(opts.path, repo.cwd);
     if (!existsSync(abs)) return out;
+    // A directory --path sweeps the tree for lockfiles and .npmrc the same
+    // way it sweeps for markers; leaving it out would make the directory
+    // form quietly weaker than the file form it replaces. The walk runs
+    // twice over the tree (here and in `scanDirectory`), which is two
+    // readdir passes against one pass of reading every file — not worth a
+    // shared cache that would have to be threaded through both callers.
+    if (isDirectory(abs)) {
+      const walk = walkScanFiles(abs, opts.maxFiles !== undefined ? { maxFiles: opts.maxFiles } : {});
+      for (const file of walk.files) {
+        const rel = relative(repo.cwd, file);
+        const label = rel === "" || rel.startsWith("..") ? file : rel;
+        if (!isEgressRelevant(label)) continue;
+        try {
+          out.push({ path: label, text: readFileSync(file, "utf8") });
+        } catch {
+          /* unreadable: nothing to scan */
+        }
+      }
+      return out;
+    }
+    if (!isEgressRelevant(opts.path)) return out;
     try {
       out.push({ path: opts.path, text: readFileSync(abs, "utf8") });
     } catch {
@@ -567,6 +614,8 @@ export function check(opts: CheckOptions): void {
   let hits: ScanHit[] = [];
   let skipped: SkippedFile[] = [];
   let historyHits: HistoryHit[] = [];
+  /** Set only when `--path` named a directory; drives the reporting below. */
+  let dirScan: { filesScanned: number; skippedDirs: string[] } | undefined;
 
   if (hasDenySet) {
     if (opts.staged) {
@@ -589,25 +638,73 @@ export function check(opts: CheckOptions): void {
       // against wherever the process happened to be, missed, and reported the
       // miss as a skip inside an otherwise clean-looking result.
       const target = resolveScanTarget(opts.path, repo.cwd);
-      try {
-        const r = scanFile(target, denySet, scanOpts, repo.isGitRepo ? repo.cwd : undefined);
+      const workingTree = repo.isGitRepo ? repo.cwd : undefined;
+      if (isDirectory(target)) {
+        // A directory used to reach `scanFile`, fail `readFileSync` with
+        // EISDIR, and be reported as `unreadable` — fail-closed with the
+        // wrong diagnosis, which sends the operator to check permissions on
+        // something that was never a file. Walking it is what the operator
+        // meant, and it costs nothing this command was not already doing
+        // per file.
+        // The refusal below sits OUTSIDE the try on purpose: `emitError`
+        // exits, and under the test harness that exit is an exception — a
+        // refusal raised inside the try would be caught by this very catch
+        // and re-reported as an I/O failure.
+        let walked: DirectoryScanResult | undefined;
+        try {
+          walked = scanDirectory(target, denySet, dirScanOpts(scanOpts, opts), workingTree);
+        } catch (err) {
+          emitError({ error: (err as Error).message }, opts);
+        }
+        const r = walked!;
         hits = r.hits;
         skipped = r.skipped;
-      } catch (err) {
-        emitError({ error: (err as Error).message }, opts);
+        dirScan = { filesScanned: r.filesScanned, skippedDirs: r.skippedDirs };
+        if (r.limitExceeded) {
+          // An incomplete scan must never be reported as a result. Same rule
+          // as every other fail-closed path here: say what did not happen,
+          // exit 2, and let the operator narrow the scope.
+          emitError(
+            {
+              code: "PATH_TOO_MANY_FILES",
+              error:
+                `nothing was reported: the directory --path holds more than ` +
+                `${opts.maxFiles ?? DEFAULT_MAX_SCAN_FILES} file(s), and a truncated scan would read as a clean one`,
+              details:
+                `path: ${target}\n` +
+                `  Scan a narrower path, or raise the cap with --max-files <n>.`,
+            },
+            opts,
+          );
+        }
+      } else {
+        try {
+          const r = scanFile(target, denySet, scanOpts, workingTree);
+          hits = r.hits;
+          skipped = r.skipped;
+        } catch (err) {
+          emitError({ error: (err as Error).message }, opts);
+        }
       }
-      // The requested path IS the entire scope of --path mode, so if it was
-      // skipped, nothing was scanned. Reporting that as `hits: []` + exit 0 is
-      // the failure this tool exists to prevent: a leak check that quietly did
-      // not run, indistinguishable from one that ran and found nothing. Every
-      // other git-backed mode already fails closed with exit 2; so does this.
-      if (skipped.length > 0) {
+      // The requested path IS the entire scope of --path mode, so if nothing
+      // in it was scanned, nothing was scanned. Reporting that as `hits: []`
+      // + exit 0 is the failure this tool exists to prevent: a leak check
+      // that quietly did not run, indistinguishable from one that ran and
+      // found nothing. Every other git-backed mode already fails closed with
+      // exit 2; so does this. For a directory the test is "no file was read"
+      // — a tree where some files were skipped for size or binary content
+      // still scanned the rest, and those skips are reported below.
+      const scannedNothing = dirScan !== undefined ? dirScan.filesScanned === 0 : skipped.length > 0;
+      if (scannedNothing) {
+        const why = [...new Set(skipped.map(s => s.reason))].join(", ");
         emitError(
           {
             code: "PATH_NOT_SCANNED",
             error:
-              `nothing was scanned: the requested --path was skipped ` +
-              `(${skipped.map(s => s.reason).join(", ")})`,
+              dirScan !== undefined
+                ? `nothing was scanned: no file under the requested --path directory was read` +
+                  (why === "" ? " (it holds none)" : ` (${why})`)
+                : `nothing was scanned: the requested --path was skipped (${why})`,
             details: `path: ${target}`,
           },
           opts,
@@ -757,6 +854,13 @@ export function check(opts: CheckOptions): void {
       rangeMode: newRef.mode,
       ...(newRef.base !== undefined && { base: newRef.base }),
     }),
+    // Present only for a directory `--path`, so the envelope of every other
+    // mode (and of the file form) stays byte-identical. `filesScanned` is the
+    // number a reader needs to tell a clean tree from a tree nothing read.
+    ...(dirScan !== undefined && {
+      filesScanned: dirScan.filesScanned,
+      skippedDirs: dirScan.skippedDirs,
+    }),
     hits: redactAttribution ? redactHits(hits) : hits,
     // Not redacted: a HistoryHit carries no attribution. Its `pattern` field
     // is already run through the same `formatMatch` redaction as
@@ -809,6 +913,16 @@ export function check(opts: CheckOptions): void {
     }
     if (expired.length > 0) {
       emitText(`  warning: ${expired.length} waiver(s) have expired and no longer apply`);
+    }
+
+    // Directory mode says how much it read, always — "clean" over a tree
+    // means nothing without the count of files behind it.
+    if (dirScan !== undefined) {
+      const dirs =
+        dirScan.skippedDirs.length > 0
+          ? `; ${dirScan.skippedDirs.length} director${dirScan.skippedDirs.length === 1 ? "y" : "ies"} not walked`
+          : "";
+      emitText(`repo-aegis: scanned ${dirScan.filesScanned} file(s) under ${opts.path}${dirs}`);
     }
 
     if (newRef?.mode === "nothing-new" && totalHits === 0 && egress.length === 0) {

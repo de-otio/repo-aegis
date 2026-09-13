@@ -237,13 +237,14 @@ calls it via `hook scan-after-write`.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--staged` | — | scan the staged diff |
-| `--path <path>` | — | scan a single file. A relative path resolves against `--cwd` (the repo under test), **not** the process cwd. Canonicalised; symlinks resolved; rejected if outside the working tree. If the file cannot be scanned at all, exit **2** with `PATH_NOT_SCANNED` — see step 5 below |
+| `--path <path>` | — | scan a single **file**, or every file under a **directory** (recursively). A relative path resolves against `--cwd` (the repo under test), **not** the process cwd. Canonicalised; symlinks resolved; rejected if outside the working tree. If nothing could be scanned at all, exit **2** with `PATH_NOT_SCANNED` — see step 5 below |
 | `--range <revspec>` | — | scan added lines in a commit range, e.g. `<remote>..<local>` |
 | `--push-ref <ref>` | — | scan a ref the remote does not have yet, relative to `refs/remotes/<remote>/*` (used by pre-push for new branches and tags) |
 | `--remote <name>` | `origin` | with `--push-ref`: remote whose tracking refs bound the scan |
 | `--history` | — | scan full git history with `git log -G <pattern>` per pattern |
 | `--since <revspec>` | — | with `--history`: lower-bound revspec |
 | `--max-file-bytes <n>` | 1048576 (1 MiB) | per-file size cap; larger files reported as `skipped: too-large` |
+| `--max-files <n>` | 10000 | with a directory `--path`: exit **2** with `PATH_TOO_MANY_FILES` rather than scan more than `<n>` files. A truncated scan would read as a clean one |
 | `--ignore-allowlist-comments` | off | do not respect `repo-aegis: allow` comments (audit-grade strict) |
 | `--ignore-waivers` | off | do not apply waivers from `.repo-aegis.yml`; report every `_always` finding even if a reviewed-benign waiver exists (audit-grade strict) |
 | `--min-patterns <n>` | 0 | exit **2** if the computed deny set has fewer than `<n>` patterns. Fail-closed: a scan that had nothing to match is not a clean scan. Env: `REPO_AEGIS_MIN_PATTERNS` |
@@ -274,6 +275,30 @@ Behaviour:
    reporting `hits: []`. Same fail-closed rule as the git-backed modes in
    step 3 — a scan that could not run is not a clean scan. (In the other
    modes a skipped file is one of many, so it stays a reported skip.)
+
+   **A directory `--path`** is walked recursively and every regular file
+   in it is scanned through the same path as the single-file form, so
+   canonicalisation, the working-tree check, path exemptions, the size cap
+   and binary detection behave identically. What it does *not* do is hide
+   anything:
+
+   - `.git` is the only directory not walked — its contents are compressed
+     objects no line scan can read, and history has its own mode
+     (`--history`). Skipped directories are listed in `skippedDirs`.
+   - Symlinks are not followed, in either shape, and each one is reported
+     in `skipped` with reason `symlink`. Content that lives inside the
+     tree is still reached at its real path.
+   - Per-file skips (`binary`, `too-large`) are reported as usual and do
+     **not** fail the run — the rest of the tree was still scanned. The
+     all-or-nothing test for a directory is "no file was read at all".
+   - More than `--max-files` files exits **2** with `PATH_TOO_MANY_FILES`.
+     Stopping early and reporting what was found would be a truncated scan
+     presented as a result.
+
+   `--json` for a directory carries two extra keys, `filesScanned` and
+   `skippedDirs`; the file form's envelope is unchanged. A directory
+   handed to the **file** scanner reports `skipped` reason `directory`
+   (this was `unreadable` until the directory form landed, which named the wrong cause).
 6. Waivers (see [`repo-aegis waive`](#repo-aegis-waive)) are applied
    next: a hit matching an unexpired `(patternId, blob)` waiver in
    `.repo-aegis.yml` is removed from `hits` and counted in `waived`
