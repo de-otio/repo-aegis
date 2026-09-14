@@ -30,7 +30,7 @@
   "dependencies": {
     "proper-lockfile": "^4.1.2",
     "yaml": "^2.9.0",
-    "zod": "^4.5.4"
+    "zod": "^4.6.2"
   },
   "optionalDependencies": {
     "re2": "^1.26.1"
