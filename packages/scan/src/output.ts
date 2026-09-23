@@ -22,7 +22,10 @@ export function renderMarkdown(
   lines.push("| Query | OK | New | Total | Truncated | Error |");
   lines.push("|---|---|---:|---:|---|---|");
   for (const q of summary.queries) {
-    const error = q.error ? "`" + q.error.replace(/\|/g, "\\|") + "`" : "";
+    // Error text comes from the API/network, so treat it as untrusted: escape
+    // it like any other cell (backslashes included, so a trailing `\` cannot
+    // eat the cell's closing pipe) and fold newlines, which would end the row.
+    const error = q.error ? escapeMd(q.error.replace(/\s+/g, " ")) : "";
     lines.push(
       `| ${escapeMd(q.name)} | ${q.ok ? "✅" : "❌"} | ${q.newResults} | ${q.totalResults} | ${q.truncated ? "yes" : ""} | ${error} |`,
     );
