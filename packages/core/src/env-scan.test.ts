@@ -111,6 +111,35 @@ describe("scanEnvText — maven settings.xml / cargo config.toml / yarnrc", () =
   });
 });
 
+describe("scanEnvText — pathological input stays linear", () => {
+  // These inputs used to trigger polynomial backtracking (CodeQL
+  // js/polynomial-redos); the maven one did not finish in minutes at this size.
+  const N = 50_000;
+  const BUDGET_MS = 500;
+  const timed = (fn: () => void): number => {
+    const start = performance.now();
+    fn();
+    return performance.now() - start;
+  };
+
+  it("maven: an unterminated <url> followed by a long space run", () => {
+    const ms = timed(() => scanEnvText("maven-settings", "settings.xml", "<url>" + " ".repeat(N)));
+    assert.ok(ms < BUDGET_MS, `took ${ms.toFixed(0)} ms`);
+  });
+
+  it("maven: still trims whitespace around the url and skips an empty tag", () => {
+    const xml = "<url></url><url>\n  https://maven.internal.example.com/r \n</url>";
+    const f = scanEnvText("maven-settings", "settings.xml", xml);
+    assert.deepEqual(f.map(x => x.host), ["maven.internal.example.com"]);
+  });
+
+  it("pip.conf: a long space run before a lone carriage return", () => {
+    const text = "index-url =" + " ".repeat(N) + "\rx";
+    const ms = timed(() => scanEnvText("pip-conf", "pip.conf", text));
+    assert.ok(ms < BUDGET_MS, `took ${ms.toFixed(0)} ms`);
+  });
+});
+
 describe("scanEnvSources", () => {
   const sources: EnvSource[] = [
     { path: "/fake/.npmrc", kind: "npmrc", label: "~/.npmrc" },
