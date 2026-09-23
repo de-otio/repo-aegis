@@ -585,11 +585,8 @@ export async function extractProse(
   const resultFiles: ProseFile[] = [];
   const skippedAfterResolve: SkippedAfterResolveEntry[] = [];
   let totalBytesUsed = 0;
-  let totalCapHit = false;
 
   for (const candidate of state.candidates) {
-    if (totalCapHit) break;
-
     // [SEC H-4] Re-resolve before reading
     let realFile: string;
     try {
@@ -661,7 +658,6 @@ export async function extractProse(
         `[repo-aegis prose-extraction] [SEC M-2] total payload cap ` +
           `${totalCapBytes} bytes reached; stopping.\n`,
       );
-      totalCapHit = true;
       break;
     }
 

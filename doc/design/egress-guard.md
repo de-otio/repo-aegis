@@ -161,7 +161,9 @@ Destination resolution is **offline**: `git push <remote>` →
 `remote.<remote>.url` read from `cwd`'s git config → `parseRemoteUrl`; `gh …
 --repo o/r` → direct; `gh api repos/o/r/…` → from the API path (`orgs/o/…`
 → the org, repo `*`; `{owner}`/`{repo}` placeholders → `cwd`'s origin, as
-`gh` itself does); other `gh` → `cwd`'s origin. Visibility from the
+`gh` itself does); `gh api graphql` → `cwd`'s origin for a read-only
+query, but **UNKNOWN** for a mutation (or a document the guard cannot
+read), see below; other `gh` → `cwd`'s origin. Visibility from the
 `repo-aegis.visibility` cache. Class from `readRepoConfig(cwd)` when the
 destination is `cwd`'s own origin. When it is not — the command names a
 repository in full from somewhere else — class and visibility come from
@@ -170,12 +172,27 @@ the **machine-wide destination cache** (`$REPO_AEGIS_HOME/destinations.json`):
 when the checkout still exists and from the snapshot otherwise. It is
 written by `classify --apply`, `status`, `doctor`'s sweep, and the guard
 itself on every command judged from inside a repository, so it fills in
-with use. A destination in `personalOrgs` with nothing cached is treated as
-public-facing: rule g asks. An unparseable remote or an otherwise unknown
-destination yields `publicFacing: false` and rules e–h do not fire —
-except that `class === "public-eligible"` with an uncached visibility is
-treated as public-facing, because the class is a declaration and the cache
-is only an optimisation.
+with use. An unparseable remote yields no destination and rules e–h do
+not fire. A parsed destination is public-facing unless its visibility is a
+recorded `private` (`treatAsPublicDestination`, shared by all three
+enforcement points): `public-eligible` is public-facing whatever the cache
+says, because the class is a declaration and the cache is only an
+optimisation, and an **unknown** visibility — nothing cached, in any org —
+is treated as public, so rule g asks.
+
+*Added 2026-09-13 (issue #114):* until v0.10.2 an unknown visibility was
+treated as public only in `personalOrgs`; everywhere else, and in the
+pre-push layer always, it was let through, and on 2026-09-12 a push to a
+public repository went through under an `UNKNOWN` receipt. Now, when a
+destination's visibility is unknown (and its class is not
+`public-eligible`), the guard makes one live lookup — `gh repo view
+<org>/<repo> --json visibility`, 5-second timeout, stderr never shown —
+and records an answer in the destination checkout's `repo-aegis.visibility`
+(and the destination cache), so the next call is offline. A lookup that
+cannot answer leaves the destination unknown, i.e. refused without a
+person: the network can only lift the refusal, never impose or skip it.
+`REPO_AEGIS_VISIBILITY_LOOKUP=0` disables the lookup (the test suite sets
+it).
 
 *Added 2026-09-12, after the guard shipped:* the first version resolved
 every `gh api` call and every foreign `--repo` / push URL from `cwd`, so a
@@ -185,6 +202,27 @@ shape, an explicit destination judged from the wrong place. The API-path
 parse and the destination cache are the fix; the same cache lookup was
 added to the pre-push layer (§2), which had judged a push to a non-origin
 URL by the pushing repository's own class.
+
+*Added after issue #113:* a GraphQL mutation (`gh api graphql` with
+`enqueuePullRequest(input: {pullRequestId: $id})`, say) has the same
+defect with no path to parse: its target is a node id, so the fallback to
+`cwd` attributed a mutation against a public repository, issued from a
+private checkout, to the private one. The resolver now reads the GraphQL
+document (inline `query` field, `-F query=@file`, or the `query` member of
+an `--input` body) with a small lexer that ignores strings and comments
+and only counts a `mutation` keyword at the top level. A mutation's
+destination is `UNKNOWN` (`org`/`repo` `*`, `unresolved:
+"graphql-mutation"`): treated as public-facing, the same fail-closed
+stance as `visibility uncached, treated as public`, so rule g asks the
+agent's human and the shim refuses from a shell with none; only a `*`
+approval covers it; rule e is skipped (a `*` has no boundary to compare);
+receipts print `UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS
+PUBLIC)`. A document that cannot be read here (stdin, a missing file, a
+non-JSON body, an unexpanded `$(…)` as the hook sees it) counts as a
+mutation. Read-only queries are unchanged. Resolving the node id with a
+live `node(id:)` query was considered and left out: it would put a network
+call on the decision path for a gain (skipping one prompt for a known
+private target) that does not justify it.
 
 Two decisions fixed here so they are not relitigated later:
 
@@ -210,10 +248,12 @@ repo-aegis check --range "$range" --remote-url "$2"
 
 - **`CROSS_ORG_PUSH`** — the URL's org is positively disjoint from the repo's
   own trust boundary → exit 2. Deterministic, offline, no TTY involved.
-- **`PUBLIC_PUSH_NEEDS_HUMAN`** — destination `publicFacing` and no TTY on
-  stderr (`isatty(2)`; stdin is always git's ref list, so it is never the
-  signal) and `REPO_AEGIS_EGRESS_HUMAN` unset → exit 2 with a reason naming the
-  destination and the escape.
+- **`PUBLIC_PUSH_NEEDS_HUMAN`** — destination `publicFacing` (by the same
+  `treatAsPublicDestination` rule as §1, so an unknown visibility counts as
+  public after one live lookup fails) and no TTY on stderr (`isatty(2)`;
+  stdin is always git's ref list, so it is never the signal) and
+  `REPO_AEGIS_EGRESS_HUMAN` unset and no live approval → exit 2 with a reason
+  naming the destination and the escapes (`repo-aegis approve <org>/<repo>`).
 - otherwise one stderr line: `repo-aegis: pushing <ref> → <org>/<repo>
   (<visibility>)`.
 
@@ -513,7 +553,7 @@ every agent and every human, with no repo-aegis involvement at all.
 | Agent self-approving a public egress | `ask` on frameworks that have it; TTY gate elsewhere; escape variable is human-only by contract and a visible act |
 | Agent "fixing" a refused command by rewriting it silently | Hook is decision-only; `updatedInput` is never emitted |
 | Own-project material entering a customer repository | `selfIdentity` stem, deny-set-included only for `customer-coupled` destinations; payload scan against the destination's rules |
-| Destination controls silently inert on an unclassified public repo | `doctor` `CLASS_VISIBILITY_UNRESOLVED` / `PERSONAL_ORG_UNREGISTERED`; `public-eligible` treated as public-facing even with no cache |
+| Destination controls silently inert on an unclassified public repo | `doctor` `CLASS_VISIBILITY_UNRESOLVED` / `PERSONAL_ORG_UNREGISTERED`; `public-eligible` treated as public-facing even with no cache; an unknown visibility treated as public at every enforcement point (issue #114) |
 
 | Topic | Decision |
 |---|---|
@@ -522,7 +562,7 @@ every agent and every human, with no repo-aegis involvement at all.
 | An `ask` needs a layer beneath it | Rule g′: on a `gh` verb, where the enforcing framework reports the `gh` shim is not first on its `PATH`, `ask` becomes `deny` (`SHIM_UNREACHABLE_NEEDS_HUMAN`) — an unanswered `ask` with nothing below it is not a refusal. `git push` (pre-push hook) and `npm publish` (no shim) are out of scope; an unknown `PATH` changes nothing. §4b. |
 | Shape rules are unconditional; context rules fail open | Rules that need no registry/class/visibility (`PUSH_IMPLICIT_TARGET`, `EGRESS_AFTER_CD`, `EGRESS_UNGUARDED_CHAIN`, `PAYLOAD_MODE_DEPENDENT_PATH`) always apply. Rules that need context never block on missing context, but may still `ask`. |
 | Human-presence test | `isatty(2)` on stderr, or `REPO_AEGIS_EGRESS_HUMAN=1`. Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`: documented human-only; agents are instructed never to set it. |
-| One network call, post-publish only | The `gh pr create/edit` read-back is the only network call on an enforcement path; it runs after the verb has published, cannot block, is best-effort with a timeout, and affects exit status only on a confirmed mismatch. |
+| Two network calls, neither a condition for refusing | The `gh pr create/edit` read-back runs after the verb has published, cannot block, is best-effort with a timeout, and affects exit status only on a confirmed mismatch. The pre-decision visibility lookup (issue #114) runs only when a destination's visibility is unknown, is best-effort with a 5-second timeout, and can only turn `unknown` into an answer; when it fails the destination stays unknown and is refused without a person. |
 | `_self_identity` scoping | Included in the deny set only when the repo or egress destination is `customer-coupled`; excluded from flat `markers.txt`; part of the deny-set cache key. Mirror of `_private_infra`. |
 
 ## Test plan
@@ -538,8 +578,9 @@ every agent and every human, with no repo-aegis involvement at all.
   `gh pr create --body-file "$TMPDIR/pr-body.md" --repo acme/svc` must yield a
   `PAYLOAD_MODE_DEPENDENT_PATH` decision.
 - **`egress-policy.test.ts`** — every rule in isolation; evaluation order;
-  fail-open on unparseable remote / unclassified destination; `public-eligible`
-  with uncached visibility ⇒ public-facing; `ask`→`deny` degradation when
+  fail-open on unparseable remote; `public-eligible` with uncached visibility
+  ⇒ public-facing; any other uncached visibility ⇒ public-facing after a
+  stubbed lookup fails, allowed after it answers `private` (and cached); `ask`→`deny` degradation when
   `capabilities.ask` is false; `humanPresent` from both TTY and env. Rule g′:
   a `gh` verb asks with `ghShimOnPath: true` and denies with `false`; an unset
   capability changes nothing; `git push` and `npm publish` are unaffected by

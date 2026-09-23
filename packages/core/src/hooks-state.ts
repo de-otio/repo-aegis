@@ -17,7 +17,7 @@
 // missing/foreign/stale hooks setup IS the result, not an error) and it
 // never calls process.exit or prints. The only throws are genuine
 // programming errors (e.g. an unreachable code path).
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -128,16 +128,26 @@ function isExecutable(mode: number): boolean {
 
 function inspectScript(dir: string, name: HookName): HookScriptState {
   const path = join(dir, name);
+  let fd: number;
   try {
-    const st = statSync(path);
+    fd = openSync(path, "r");
+  } catch {
+    return { present: false, executable: false, current: false };
+  }
+  // Mode and contents come from the same descriptor, so they describe the
+  // same file even if the path is replaced mid-inspection.
+  try {
+    const st = fstatSync(fd);
     if (!st.isFile()) return { present: false, executable: false, current: false };
     const executable = isExecutable(st.mode);
-    const contents = readFileSync(path, "utf8");
+    const contents = readFileSync(fd, "utf8");
     const digest = createHash("sha256").update(contents).digest("hex");
     const current = digest === hookScriptDigest(name);
     return { present: true, executable, current };
   } catch {
     return { present: false, executable: false, current: false };
+  } finally {
+    closeSync(fd);
   }
 }
 

@@ -40,8 +40,6 @@ const LOOPBACK_IPV4_RE = /^127\./;
  */
 const LOOPBACK_IPV6_RE = /^(?:::1|::ffff:127\.|0*:0*:0*:0*:0*:0*:0*:1)$/i;
 
-const DEFAULT_TIMEOUT_MS = 30_000;
-
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /** Configuration for the Ollama client. */
@@ -50,7 +48,7 @@ export interface OllamaConfig {
   endpoint: string;
   /** Model identifier. Default: "llama3.2:3b". */
   model: string;
-  /** Request timeout in milliseconds. Default: 30_000. */
+  /** Request timeout in milliseconds. Required: there is no built-in default. */
   timeoutMs: number;
   /**
    * Set to true to allow non-loopback endpoints.

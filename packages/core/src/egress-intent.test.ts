@@ -2,7 +2,13 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseApiEndpoint, parseEgressIntents, type EgressIntent } from "./egress-intent.js";
+import {
+  graphqlOperationKind,
+  isGraphqlEndpoint,
+  parseApiEndpoint,
+  parseEgressIntents,
+  type EgressIntent,
+} from "./egress-intent.js";
 
 function only(command: string): EgressIntent {
   const intents = parseEgressIntents(command);
@@ -338,6 +344,125 @@ describe("parseApiEndpoint", () => {
     for (const e of ["graphql", "user/repos", "gists", "search/issues", "repos/acme", "repos", "", "://bad"]) {
       assert.equal(parseApiEndpoint(e), null, e);
     }
+  });
+});
+
+describe("gh api graphql — the document source is captured (issue #113)", () => {
+  it("-f query=… / -F query=… / --raw-field=query=… → inline text", () => {
+    assert.deepEqual(only("gh api graphql -f query='mutation { x }'").graphql, { query: "mutation { x }" });
+    assert.deepEqual(only("gh api graphql -F query='query { viewer { login } }'").graphql, {
+      query: "query { viewer { login } }",
+    });
+    assert.deepEqual(only("gh api graphql --raw-field=query='mutation { x }' -F id=PR_1").graphql, {
+      query: "mutation { x }",
+    });
+  });
+
+  it("-F query=@path → a query file (and a payload file); -f query=@path is literal text", () => {
+    const i = only("gh api graphql -F query=@/abs/m.graphql -F id=PR_1");
+    assert.deepEqual(i.graphql, { queryFile: "/abs/m.graphql" });
+    assert.deepEqual(i.payloadFiles, ["/abs/m.graphql"]);
+    assert.deepEqual(only("gh api graphql -f query=@/abs/m.graphql").graphql, { query: "@/abs/m.graphql" });
+    assert.deepEqual(only("gh api graphql -F query=@-").graphql, { queryFile: "-" });
+  });
+
+  it("--input path → an input file", () => {
+    assert.deepEqual(only("gh api graphql --input /abs/body.json").graphql, { inputFile: "/abs/body.json" });
+  });
+
+  it("the endpoint may follow the fields, and a full URL counts", () => {
+    assert.deepEqual(only("gh api -f query='mutation { x }' graphql").graphql, { query: "mutation { x }" });
+    assert.deepEqual(only("gh api https://api.github.com/graphql -f query='mutation { x }'").graphql, {
+      query: "mutation { x }",
+    });
+  });
+
+  it("a query field on a REST endpoint is not GraphQL", () => {
+    assert.equal(only("gh api -X POST repos/acme/svc/issues -f query=mutation").graphql, undefined);
+  });
+
+  it("a GraphQL call with no fields is still not an intent (unchanged)", () => {
+    assert.deepEqual(parseEgressIntents("gh api graphql"), []);
+  });
+});
+
+describe("isGraphqlEndpoint", () => {
+  it("recognises the GraphQL endpoint in its spellings", () => {
+    for (const e of ["graphql", "/graphql", "graphql/", "https://api.github.com/graphql", "https://ghe.example.com/api/graphql"]) {
+      assert.equal(isGraphqlEndpoint(e), true, e);
+    }
+  });
+  it("and nothing else", () => {
+    for (const e of ["repos/acme/svc/issues", "graphqlx", "repos/acme/graphql", "", "https://%zz"]) {
+      assert.equal(isGraphqlEndpoint(e), false, e);
+    }
+  });
+  it("stays linear on a long run of slashes", () => {
+    const hostile = "/".repeat(100_000) + "x";
+    const t0 = performance.now();
+    assert.equal(isGraphqlEndpoint(hostile), false);
+    assert.equal(isGraphqlEndpoint("//graphql//"), true);
+    assert.ok(performance.now() - t0 < 500, "slash trimming must not backtrack");
+  });
+});
+
+describe("graphqlOperationKind", () => {
+  it("a mutation is a mutation — named, anonymous, with variables", () => {
+    assert.equal(graphqlOperationKind("mutation { addStar(input: {starrableId: $id}) { clientMutationId } }"), "mutation");
+    assert.equal(
+      graphqlOperationKind("mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { clientMutationId } }"),
+      "mutation",
+    );
+    assert.equal(graphqlOperationKind("mutation Enqueue { x }"), "mutation");
+  });
+
+  it("leading whitespace, commas, a BOM and comments do not hide a mutation", () => {
+    assert.equal(graphqlOperationKind("\n\t  ,mutation { x }"), "mutation");
+    assert.equal(graphqlOperationKind("﻿mutation { x }"), "mutation");
+    assert.equal(graphqlOperationKind("# enqueue the PR\n  # really\nmutation M { x }"), "mutation");
+  });
+
+  it("a mutation after a query in the same document is found", () => {
+    assert.equal(graphqlOperationKind('query A { viewer { login } }\nfragment F on User { login }\nmutation B { x }'), "mutation");
+  });
+
+  it("queries, shorthand selections, subscriptions and fragments are reads", () => {
+    assert.equal(graphqlOperationKind("query { viewer { login } }"), "query");
+    assert.equal(graphqlOperationKind("{ viewer { login } }"), "query");
+    assert.equal(graphqlOperationKind("subscription { x }"), "query");
+    assert.equal(graphqlOperationKind("query($owner: String!) { repository(owner: $owner, name: \"x\") { id } }"), "query");
+  });
+
+  it("the word `mutation` in a string, a block string, a comment, a nested field or a variable is not a mutation", () => {
+    assert.equal(graphqlOperationKind('query { search(query: "mutation", type: ISSUE) { issueCount } }'), "query");
+    assert.equal(graphqlOperationKind('"mutation" query { viewer { login } }'), "query");
+    assert.equal(graphqlOperationKind('"""\nmutation { x }\n""" query { viewer { login } }'), "query");
+    assert.equal(graphqlOperationKind('"""a \\""" mutation"""\nquery { viewer { login } }'), "query");
+    assert.equal(graphqlOperationKind('"esc \\" mutation" query { a }'), "query");
+    assert.equal(graphqlOperationKind("# mutation { x }\nquery { viewer { login } }"), "query");
+    assert.equal(graphqlOperationKind("query { repository { mutation: id } }"), "query");
+    assert.equal(graphqlOperationKind("query Q($mutation: String) { a }"), "query");
+  });
+
+  it("keyword matching is exact and case-sensitive", () => {
+    assert.equal(graphqlOperationKind("Mutation { x }"), "query");
+    assert.equal(graphqlOperationKind("mutations { x }"), "query");
+  });
+
+  it("text that is not the document (unexpanded shell) is opaque", () => {
+    for (const t of ["$(cat /abs/m.graphql)", "`cat m.graphql`", "${Q}", "$Q", "  $QUERY  "]) {
+      assert.equal(graphqlOperationKind(t), "opaque", t);
+    }
+  });
+
+  it("an unterminated string is opaque", () => {
+    assert.equal(graphqlOperationKind('query { a(x: "oops) }'), "opaque");
+    assert.equal(graphqlOperationKind('query { a(x: """oops) }'), "opaque");
+  });
+
+  it("junk that cannot be a mutation is a read", () => {
+    assert.equal(graphqlOperationKind("x"), "query");
+    assert.equal(graphqlOperationKind(""), "query");
   });
 });
 

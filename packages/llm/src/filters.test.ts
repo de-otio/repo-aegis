@@ -43,14 +43,6 @@ after(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-function writeFixture(filename: string, content: string, subdir?: string): string {
-  const dir = subdir ? join(tmp, subdir) : tmp;
-  mkdirSync(dir, { recursive: true });
-  const p = join(dir, filename);
-  writeFileSync(p, content);
-  return p;
-}
-
 function makeRepoDir(name: string): string {
   const dir = join(tmp, name);
   mkdirSync(dir, { recursive: true });

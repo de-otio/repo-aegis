@@ -10,7 +10,7 @@
 // different engagements) cannot lose updates or leave the rendered
 // markers stale relative to the registry.
 
-import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { parseDocument, YAMLSeq, YAMLMap, Scalar, isMap } from "yaml";
 import { registryPath as defaultRegistryPath } from "./paths.js";
 import { loadRegistry } from "./registry.js";
@@ -22,6 +22,22 @@ import {
   EngagementNotFoundError,
   PatternValidationError,
 } from "./exceptions.js";
+
+/**
+ * Read the registry, mapping a missing file to a clear error. Reading and
+ * catching ENOENT (rather than `existsSync` first) leaves no window between
+ * the check and the read; the caller holds the registry lock for the write.
+ */
+function readRegistryText(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`registry not found at ${path}`);
+    }
+    throw err;
+  }
+}
 
 export interface AddMarkerPatternOptions {
   /** Override the registry path (defaults to ~/.config/repo-aegis/engagements.yaml). */
@@ -99,11 +115,7 @@ export function addMarkerPatterns(
 
   // [SEC M-3] Lock spans the entire read-modify-write-render cycle.
   const result = withLockSync(() => {
-    if (!existsSync(path)) {
-      throw new Error(`registry not found at ${path}`);
-    }
-    const raw = readFileSync(path, "utf8");
-    const doc = parseDocument(raw);
+    const doc = parseDocument(readRegistryText(path));
 
     const node = findEngagementNode(doc, engagementId);
     if (node === null) {
@@ -204,10 +216,7 @@ export function addTopLevelPatterns(
   }
 
   const result = withLockSync(() => {
-    if (!existsSync(path)) {
-      throw new Error(`registry not found at ${path}`);
-    }
-    const doc = parseDocument(readFileSync(path, "utf8"));
+    const doc = parseDocument(readRegistryText(path));
 
     let seq = doc.get(field) as YAMLSeq | null;
     if (!seq || !(seq instanceof YAMLSeq)) {

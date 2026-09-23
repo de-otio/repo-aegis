@@ -30,6 +30,19 @@ describe("renderMarkdown", () => {
     assert.match(md, /rate limit/);
   });
 
+  it("escapes an untrusted error message so it cannot break the table row", () => {
+    const md = renderMarkdown({
+      ...baseSummary,
+      queries: [
+        { name: "q3", ok: false, error: "bad \\| pipe `tick`\nnext \\", totalResults: 0, newResults: 0, truncated: false },
+      ],
+    }, []);
+    const row = md.split("\n").find(l => l.startsWith("| q3 "));
+    assert.ok(row, "row present on a single line");
+    // Every backslash, pipe and backtick is escaped; the newline is folded.
+    assert.ok(row.endsWith(String.raw`| bad \\\| pipe \`tick\` next \\ |`), row);
+  });
+
   it("renders 'no new hits' when hits empty", () => {
     const md = renderMarkdown(baseSummary, []);
     assert.match(md, /_No new hits._/);

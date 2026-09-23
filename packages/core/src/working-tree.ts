@@ -13,7 +13,7 @@
 // resolved gitdir/config). Total — never throws.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseRemoteUrl } from "./remote-url.js";
 
@@ -82,16 +82,23 @@ function realpathExisting(p: string): string {
  */
 export function resolveGitDir(workingTree: string): string | null {
   const dotGit = join(workingTree, ".git");
-  if (!existsSync(dotGit)) return null;
-  const st = statSync(dotGit);
-  if (st.isDirectory()) return dotGit;
-  if (!st.isFile()) return null;
-
-  let body: string;
+  // Type check and read go through one descriptor (no stat-then-read window).
+  let fd: number;
   try {
-    body = readFileSync(dotGit, "utf8");
+    fd = openSync(dotGit, "r");
   } catch {
     return null;
+  }
+  let body: string;
+  try {
+    const st = fstatSync(fd);
+    if (st.isDirectory()) return dotGit;
+    if (!st.isFile()) return null;
+    body = readFileSync(fd, "utf8");
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
   }
   // Format: `gitdir: <path>\n`. The path may be relative to the .git
   // file's directory.

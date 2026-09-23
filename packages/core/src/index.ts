@@ -231,7 +231,19 @@ export {
   DEFAULT_ALLOWED_REGISTRY_HOSTS,
   readCachedVisibility,
   isPublicFacing,
+  treatAsPublicDestination,
 } from "./egress.js";
+// Issue #114: an unknown destination visibility is looked up once at egress
+// time and cached; a failed lookup leaves it unknown, i.e. treated as public.
+export {
+  lookupVisibilityViaGh,
+  effectiveVisibilityLookup,
+  refreshUnknownVisibility,
+  VISIBILITY_LOOKUP_ENV,
+  VISIBILITY_LOOKUP_TIMEOUT_MS,
+  UNKNOWN_VISIBILITY_HINT,
+} from "./visibility-lookup.js";
+export type { VisibilityLookup } from "./visibility-lookup.js";
 export type {
   RegistryFinding,
   EgressPolicy,
@@ -243,11 +255,12 @@ export type {
 // One decision function behind the pre-push hook, the `gh` shim and the
 // agent pre-command hooks. Shape rules are unconditional; context rules
 // fail open; the decision is never a rewritten command.
-export { parseEgressIntents, parseApiEndpoint } from "./egress-intent.js";
-export type { EgressIntent, EgressVerb, SegmentJoin } from "./egress-intent.js";
+export { parseEgressIntents, parseApiEndpoint, isGraphqlEndpoint, graphqlOperationKind } from "./egress-intent.js";
+export type { EgressIntent, EgressVerb, GraphqlOperationKind, SegmentJoin } from "./egress-intent.js";
 export {
   decideEgress,
   resolveDestinationOffline,
+  refreshDestinationVisibility,
   scanPayloadAgainstDestination,
   isHumanPresent,
   isModeDependentPath,

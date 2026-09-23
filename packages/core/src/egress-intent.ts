@@ -63,6 +63,18 @@ export interface EgressIntent {
    */
   apiEndpoint?: string;
   /**
+   * `gh api graphql` only: where the GraphQL document comes from, so the
+   * policy can tell a mutation from a read. A GraphQL mutation names its
+   * target by node id (`pullRequestId`, `repositoryId`, …), which carries no
+   * `<org>/<repo>` this guard can read offline — so, unlike a REST path, the
+   * cwd is NOT a valid fallback for it (issue #113). Exactly one source is
+   * normally set: `query` (`-f query=…` / `-F query=…`, verbatim),
+   * `queryFile` (`-F query=@path`; `-` is stdin) or `inputFile` (`--input
+   * path`, a JSON body with a `query` member; `-` is stdin). Reading the
+   * files is the policy's job — this module stays pure.
+   */
+  graphql?: { query?: string; queryFile?: string; inputFile?: string };
+  /**
    * `--body-file`, `-F`, `--notes-file`, `--input`, `--body @path`,
    * `-F key=@path` (gh api). `-` means stdin and is kept verbatim so the
    * policy can exempt it.
@@ -571,6 +583,110 @@ export function parseApiEndpoint(endpoint: string): { org: string; repo: string 
   return null;
 }
 
+/**
+ * True when a `gh api` endpoint is the GraphQL endpoint: `graphql`, or a
+ * full URL whose path is `/graphql` (github.com) or `/api/graphql` (GitHub
+ * Enterprise). Pure; never throws.
+ */
+export function isGraphqlEndpoint(endpoint: string): boolean {
+  let path = endpoint;
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      path = new URL(path).pathname;
+    } catch {
+      return false;
+    }
+  }
+  // Slashes trimmed by index, not `/\/+$/`: that pattern backtracks
+  // quadratically on a long run of slashes (js/polynomial-redos), and the
+  // endpoint is copied straight from an agent's command line.
+  path = path.split("?")[0]!;
+  let start = 0;
+  let end = path.length;
+  while (start < end && path[start] === "/") start++;
+  while (end > start && path[end - 1] === "/") end--;
+  path = path.slice(start, end);
+  return path === "graphql" || path === "api/graphql";
+}
+
+/** See {@link graphqlOperationKind}. */
+export type GraphqlOperationKind = "mutation" | "query" | "opaque";
+
+/**
+ * What a GraphQL document would do, as far as the egress policy cares:
+ *
+ * - `mutation` — it contains a top-level `mutation` operation;
+ * - `query` — it contains none (queries, subscriptions, fragments, or text
+ *   the server would reject as unparseable — none of which can write);
+ * - `opaque` — the text is not the document: an unexpanded shell
+ *   substitution (`$(cat q.graphql)`, backticks, `${VAR}`, a lone `$VAR`) as
+ *   the hook sees it before the shell runs, or an unterminated string. The
+ *   caller must treat this like a mutation — it cannot rule one out.
+ *
+ * A small GraphQL lexer, not a regex: `#` comments, `"…"` strings and
+ * `"""…"""` block strings are skipped, so the word `mutation` inside
+ * any of them — or nested inside a selection set, argument list or variable
+ * default — is not an operation keyword. Only a `mutation` name at nesting
+ * depth 0 is. Leading whitespace, commas and a BOM are insignificant, as the
+ * GraphQL grammar says. Pure; never throws.
+ */
+export function graphqlOperationKind(text: string): GraphqlOperationKind {
+  try {
+    const n = text.length;
+    let depth = 0;
+    let i = 0;
+    while (i < n) {
+      const c = text[i]!;
+      if (c === "#") {
+        while (i < n && text[i] !== "\n" && text[i] !== "\r") i++;
+        continue;
+      }
+      if (c === '"') {
+        if (text.startsWith('"""', i)) {
+          // Block string: the only escape is \""".
+          let j = text.indexOf('"""', i + 3);
+          while (j !== -1 && text[j - 1] === "\\") j = text.indexOf('"""', j + 3);
+          if (j === -1) return "opaque";
+          i = j + 3;
+          continue;
+        }
+        let j = i + 1;
+        while (j < n && text[j] !== '"' && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+        if (j >= n || text[j] !== '"') return "opaque";
+        i = j + 1;
+        continue;
+      }
+      if (c === "{" || c === "(" || c === "[") {
+        depth++;
+        i++;
+        continue;
+      }
+      if (c === "}" || c === ")" || c === "]") {
+        if (depth > 0) depth--;
+        i++;
+        continue;
+      }
+      if (/[_A-Za-z]/.test(c)) {
+        let j = i + 1;
+        while (j < n && /[_A-Za-z0-9]/.test(text[j]!)) j++;
+        const name = text.slice(i, j);
+        // `$mutation` is a variable, not a keyword.
+        const isVariable = i > 0 && text[i - 1] === "$";
+        if (depth === 0 && !isVariable && name === "mutation") return "mutation";
+        i = j;
+        continue;
+      }
+      i++;
+    }
+    // No mutation in the text as given. If the text is really a shell
+    // expression the hook saw before expansion, the document is elsewhere.
+    if (/\$\(|`|\$\{/.test(text) || /^\s*\$[A-Za-z_][A-Za-z0-9_]*\s*$/.test(text)) return "opaque";
+    return "query";
+  } catch {
+    return "opaque";
+  }
+}
+
 function classifyGh(
   args: string[],
   base: Omit<EgressIntent, "verb" | "payloadFiles">,
@@ -592,6 +708,11 @@ function classifyGh(
   let method: string | undefined;
   let hasFields = false;
   let apiEndpoint: string | undefined;
+  // `gh api graphql` document sources; only attached to the intent when the
+  // endpoint turns out to be the GraphQL one (it may come after the flags).
+  let gqlQuery: string | undefined;
+  let gqlQueryFile: string | undefined;
+  let gqlInputFile: string | undefined;
 
   const takeValue = (i: number): { value: string | undefined; next: number } => {
     const a = args[i]!;
@@ -622,7 +743,10 @@ function classifyGh(
     }
     if (GH_BODY_FILE_FLAGS.has(name)) {
       const { value, next } = takeValue(i);
-      if (value !== undefined) payloadFiles.push(value);
+      if (value !== undefined) {
+        payloadFiles.push(value);
+        if (group === "api" && name === "--input") gqlInputFile = value;
+      }
       i = next;
       continue;
     }
@@ -631,9 +755,15 @@ function classifyGh(
         // `-F key=@path` reads the value from a file; `-f` never does.
         hasFields = true;
         const { value, next } = takeValue(i);
-        if ((name === "-F" || name === "--field") && value !== undefined) {
+        const typed = name === "-F" || name === "--field";
+        if (typed && value !== undefined) {
           const at = value.indexOf("=@");
           if (at !== -1) payloadFiles.push(value.slice(at + 2));
+        }
+        if (value !== undefined && value.startsWith("query=")) {
+          const v = value.slice("query=".length);
+          if (typed && v.startsWith("@")) gqlQueryFile = v.slice(1);
+          else gqlQuery = v;
         }
         i = next;
         continue;
@@ -679,12 +809,22 @@ function classifyGh(
     if (!mutating) return null;
   }
 
+  const graphql =
+    group === "api" && apiEndpoint !== undefined && isGraphqlEndpoint(apiEndpoint)
+      ? {
+          ...(gqlQuery !== undefined && { query: gqlQuery }),
+          ...(gqlQueryFile !== undefined && { queryFile: gqlQueryFile }),
+          ...(gqlInputFile !== undefined && { inputFile: gqlInputFile }),
+        }
+      : undefined;
+
   return {
     ...base,
     verb,
     payloadFiles,
     ...(repoFlag !== undefined && { repoFlag }),
     ...(apiEndpoint !== undefined && { apiEndpoint }),
+    ...(graphql !== undefined && { graphql }),
   };
 }
 

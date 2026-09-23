@@ -83,7 +83,7 @@ function aegisHome(name: string, registry?: string): string {
 
 const EMPTY_REGISTRY = "schemaVersion: 2\nengagements: []\n";
 
-function makeRepo(name: string, opts: { remote?: string; class?: string } = {}): string {
+function makeRepo(name: string, opts: { remote?: string; class?: string; visibility?: string } = {}): string {
   const dir = join(tmp, name);
   mkdirSync(dir, { recursive: true });
   execFileSync("git", ["init", "-q", "--initial-branch=main", dir], { stdio: "ignore" });
@@ -92,6 +92,9 @@ function makeRepo(name: string, opts: { remote?: string; class?: string } = {}):
   }
   if (opts.class) {
     execFileSync("git", ["-C", dir, "config", "repo-aegis.class", opts.class], { stdio: "ignore" });
+  }
+  if (opts.visibility) {
+    execFileSync("git", ["-C", dir, "config", "repo-aegis.visibility", opts.visibility], { stdio: "ignore" });
   }
   return dir;
 }
@@ -441,6 +444,8 @@ describe("hook guard-egress — public destination needs a human", { skip: !SUBP
     const privateRepo = makeRepo("private-repo", {
       remote: "git@github.com:acme/internal.git",
       class: "private-strict",
+      // A recorded `private`: an UNKNOWN visibility is treated as public (#114).
+      visibility: "private",
     });
     const r = runGuard(claudePayload("git push origin main", privateRepo), {
       home,
@@ -448,6 +453,28 @@ describe("hook guard-egress — public destination needs a human", { skip: !SUBP
     });
     assert.equal(r.code, 0, `expected allow; got ${r.code} ${r.stderr}`);
     assert.equal(r.stdout, "");
+  });
+
+  it("asks for a GraphQL mutation run from a private checkout, naming UNKNOWN rather than the checkout (#113)", () => {
+    const priv = makeRepo("graphql-private", { remote: "git@github.com:acme/notes.git", class: "private-strict" });
+    execFileSync("git", ["-C", priv, "config", "repo-aegis.visibility", "private"], { stdio: "ignore" });
+    const cmd =
+      "gh api graphql -F id=PR_kwDOAAAAAA -f query='mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'";
+    const r = runGuard(claudePayload(cmd, priv), { home, cwd: priv, shimOnPath: true });
+    assert.equal(r.code, 0, `expected ask; got ${r.code} ${r.stderr}`);
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecision, "ask");
+    assert.match(j.hookSpecificOutput.permissionDecisionReason, /UNRESOLVED destination/);
+    assert.match(j.hookSpecificOutput.permissionDecisionReason, /UNKNOWN repository/);
+    assert.ok(!j.hookSpecificOutput.permissionDecisionReason.includes("acme/notes"));
+    // The same command as a read is not asked about.
+    const read = runGuard(claudePayload("gh api graphql -f query='query { viewer { login } }'", priv), {
+      home,
+      cwd: priv,
+      shimOnPath: true,
+    });
+    assert.equal(read.code, 0);
+    assert.equal(read.stdout, "");
   });
 
   it("reads the cwd from the payload, not from where the hook was spawned", () => {
@@ -536,6 +563,7 @@ describe("hook guard-egress — decision-only oracle", { skip: !SUBPROCESS_TESTS
     const privateRepo = makeRepo("oracle-private", {
       remote: "git@github.com:acme/internal.git",
       class: "private-strict",
+      visibility: "private",
     });
 
     const scenarios: { name: string; input: string; opts: GuardOptions }[] = [

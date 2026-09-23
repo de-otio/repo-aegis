@@ -3,7 +3,6 @@
 import {
   existsSync,
   mkdirSync,
-  readFileSync,
   writeFileSync,
   appendFileSync,
 } from "node:fs";
@@ -11,6 +10,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { leakContextFlagPath, appendAuditRecord } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { readIfExists } from "../fs-utils.js";
 
 const CLAUDE_MD_BEGIN = "<!-- repo-aegis: managed block — do not edit between markers -->";
 const CLAUDE_MD_END = "<!-- repo-aegis: end managed block -->";
@@ -166,9 +166,12 @@ function defaultClaudeHome(): string {
 }
 
 function readSettings(path: string): SettingsJson {
-  if (!existsSync(path)) return {};
-  const raw = readFileSync(path, "utf8");
-  if (raw.trim() === "") return {};
+  return parseSettings(readIfExists(path), path);
+}
+
+/** Parse settings.json text; null (absent) and blank both mean `{}`. */
+function parseSettings(raw: string | null, path: string): SettingsJson {
+  if (raw === null || raw.trim() === "") return {};
   try {
     return JSON.parse(raw) as SettingsJson;
   } catch (err) {
@@ -294,8 +297,7 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   // 1. CLAUDE.md snippet (idempotent via marker comment)
   let claudeMdAppended = false;
   let claudeMdAlreadyPresent = false;
-  let existingClaudeMd = "";
-  if (existsSync(claudeMdPath)) existingClaudeMd = readFileSync(claudeMdPath, "utf8");
+  const existingClaudeMd = readIfExists(claudeMdPath) ?? "";
 
   if (existingClaudeMd.includes(CLAUDE_MD_BEGIN)) {
     claudeMdAlreadyPresent = true;
@@ -303,11 +305,8 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     const needsLeadingNewline =
       existingClaudeMd.length > 0 && !existingClaudeMd.endsWith("\n");
     const prefix = existingClaudeMd.length === 0 ? "" : (needsLeadingNewline ? "\n\n" : "\n");
-    if (existsSync(claudeMdPath)) {
-      appendFileSync(claudeMdPath, prefix + CLAUDE_MD_BLOCK);
-    } else {
-      writeFileSync(claudeMdPath, CLAUDE_MD_BLOCK);
-    }
+    // Append mode creates a missing file; `prefix` is "" in that case.
+    appendFileSync(claudeMdPath, prefix + CLAUDE_MD_BLOCK);
     claudeMdAppended = true;
   }
 
@@ -469,8 +468,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   const { claudeHome, claudeMdPath, settingsPath, opts } = ctx;
 
   // 1. CLAUDE.md — compute would-be additions without writing.
-  let existingClaudeMd = "";
-  if (existsSync(claudeMdPath)) existingClaudeMd = readFileSync(claudeMdPath, "utf8");
+  const existingClaudeMd = readIfExists(claudeMdPath) ?? "";
 
   const claudeMdAlreadyPresent = existingClaudeMd.includes(CLAUDE_MD_BEGIN);
   let claudeMdAddition = "";
@@ -694,9 +692,9 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
 
   // 1. Strip the managed block from CLAUDE.md (if present).
   let claudeMdStripped = false;
-  let claudeMdAbsent = !existsSync(claudeMdPath);
-  if (!claudeMdAbsent) {
-    const body = readFileSync(claudeMdPath, "utf8");
+  const body = readIfExists(claudeMdPath);
+  const claudeMdAbsent = body === null;
+  if (body !== null) {
     const beginIdx = body.indexOf(CLAUDE_MD_BEGIN);
     const endIdx = body.indexOf(CLAUDE_MD_END);
     if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
@@ -724,11 +722,12 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
     guardEgressRemoved: 0,
     egressReceiptRemoved: 0,
   };
-  let settingsAbsent = !existsSync(settingsPath);
-  if (!settingsAbsent) {
+  const settingsRaw = readIfExists(settingsPath);
+  const settingsAbsent = settingsRaw === null;
+  if (settingsRaw !== null) {
     let settings: SettingsJson;
     try {
-      settings = readSettings(settingsPath);
+      settings = parseSettings(settingsRaw, settingsPath);
     } catch (err) {
       emitError(
         { code: "SETTINGS_PARSE_ERROR", error: (err as Error).message },

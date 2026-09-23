@@ -368,4 +368,27 @@ describe("hook egress-receipt — gh verbs", { skip: !SUBPROCESS_TESTS_AVAILABLE
     );
     assert.match(contextOf(r), /^PUBLISHED → acme\/svc \(.*\): gh api \(mutating\)$/);
   });
+
+  it("gh api graphql: a mutation's receipt says UNKNOWN, not the cwd's repository (#113)", () => {
+    // The mutation names its target by node id; nothing offline can say
+    // which repository that is, and the cwd is certainly not the answer.
+    const elsewhere = makeRepo("receipt-gh-graphql-cwd", {
+      remote: "git@github.com:acme/notes.git",
+      class: "private-strict",
+    });
+    const r = runReceipt(
+      payload(
+        "gh api graphql -F id=PR_kwDOAAAAAA -f query='mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'",
+        '{"data":{"enqueuePullRequest":{"clientMutationId":null}}}\n',
+        elsewhere,
+      ),
+      elsewhere,
+    );
+    const ctx = contextOf(r);
+    assert.equal(
+      ctx,
+      "PUBLISHED → UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC): gh api (mutating)",
+    );
+    assert.ok(!ctx.includes("acme/notes"), ctx);
+  });
 });

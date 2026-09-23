@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureOutput, withEnv } from "../_test-utils.js";
+import { captureOutput } from "../_test-utils.js";
 import { installHooks } from "./install-hooks.js";
 
 let root: string;
