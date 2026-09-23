@@ -66,6 +66,14 @@ URL-credential redaction are all linear, with timing tests on each.
   backtick, a backslash or a newline could break the Markdown table row;
   the error cell is now escaped.
 
+### Fixed — a false `PUBLISHED_BODY_MISMATCH` on every newline-terminated body
+
+The PR-body read-back stripped exactly one trailing newline from each side,
+on the assumption that GitHub drops the file's final newline. It does not
+always: `gh pr create --body-file` stored it, `--jq .body` appended another,
+and a byte-identical body was reported as a one-byte mismatch. Trailing
+newlines are now ignored on both sides.
+
 ### Security — dependencies
 
 - `@hono/node-server` 2.1.1 (transitive, via the MCP SDK):

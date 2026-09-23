@@ -424,6 +424,26 @@ describe("egress-readback", () => {
     assert.ok(!all.includes("THE-FILE-WE-MEANT-TO-PUBLISH"));
   });
 
+  it("matches when GitHub kept the file's final newline and --jq added another", () => {
+    // Observed on a real `gh pr create --body-file`: the stored body ends in
+    // the file's newline, and `gh pr view --jq .body` prints one more.
+    const file = join(root, "readback-kept-newline.md");
+    writeFileSync(file, SEEDED);
+    const seed = join(root, "readback-kept-newline-seed.txt");
+    writeFileSync(seed, SEEDED + "\n");
+
+    const out = captureOutput(() =>
+      egressReadback({
+        cwd: publicRepo,
+        bodyFile: file,
+        pr: "https://github.com/acme/svc/pull/7",
+        gh: ghStub("kept-newline", seed),
+      }),
+    );
+    assert.equal(out.exitCode, undefined);
+    assert.equal((JSON.parse(out.stdout) as { ok: boolean }).ok, true);
+  });
+
   it("treats CRLF and one trailing newline as equal", () => {
     const file = join(root, "readback-crlf.md");
     writeFileSync(file, "line one\r\nline two\r\n");

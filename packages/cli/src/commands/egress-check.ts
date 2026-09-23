@@ -267,14 +267,17 @@ function originRepo(cwd: string): string | null {
 }
 
 /**
- * CRLF→LF, then exactly ONE trailing newline off each side. GitHub stores
- * the body without the file's final newline, so a file that ends in one
- * would mismatch on every single publish — and a check that cries wolf every
- * time is a check nobody reads.
+ * CRLF→LF, then every trailing newline off each side. Whether GitHub keeps
+ * the file's final newline is not something to rely on — `gh pr create
+ * --body-file` has been seen storing it — and `--jq .body` appends one more
+ * of its own. Stripping exactly one per side (0.10.2 and earlier) turned
+ * "GitHub kept it" into a one-byte PUBLISHED_BODY_MISMATCH on every publish of
+ * a newline-terminated file, and a check that cries wolf every time is a
+ * check nobody reads. A difference in trailing newlines alone is not a
+ * difference anyone needs to be told about.
  */
 function normaliseBody(text: string): string {
-  const lf = text.replace(/\r\n/g, "\n");
-  return lf.endsWith("\n") ? lf.slice(0, -1) : lf;
+  return text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
 }
 
 /** Exit 0 and say why: the read-back is best-effort and never fails a publish. */
