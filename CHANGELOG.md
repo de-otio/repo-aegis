@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — an `UNKNOWN` destination visibility let a push through
+
+The pre-push hook counted a destination as public only when the visibility
+cache said `public`, so a repository the cache had never seen went through
+labelled `(unknown)` — on 2026-09-12 that included a public one. A push to a
+URL other than the checkout's own origin also borrowed the *pushing* repo's
+visibility. The `gh` shim already failed closed on an uncached repo, but only
+for personal orgs (#114).
+
+- **One rule, every layer.** The pre-push hook, the `gh` shim and the agent
+  hooks share `treatAsPublicDestination`: only a recorded `private` passes
+  without a person. `unknown` fails closed exactly like `public` — from a
+  shell with no TTY and no live `repo-aegis approve`, it is refused.
+- **The cache refreshes itself.** An unknown destination gets one
+  `gh repo view <org>/<repo> --json visibility` lookup (5 s timeout); the
+  answer is recorded, so the next call is offline again. A failed lookup
+  leaves the refusal standing — the network can lift a refusal, never cause
+  or skip one. `REPO_AEGIS_VISIBILITY_LOOKUP=0` disables it.
+- **Expect more asks** for destinations this machine knows nothing about,
+  including `gh --repo` into orgs outside `personalOrgs` and org-level
+  `gh api orgs/<org>/…` calls. Those destinations now also get the
+  `_private_infra` payload scan that public ones get.
+
+### Fixed — a GraphQL mutation was receipted as the cwd's repository
+
+`gh api graphql` mutations (`enqueuePullRequest(input: {pullRequestId: …})`
+and the like) name their target by node id, and the guard fell back to the
+cwd's origin — so a mutation against a public repository, issued from a
+private checkout, was judged and receipted as the private one (#113).
+
+- A mutation, or a GraphQL document the guard cannot read (stdin, a missing
+  file, an unexpanded `$(…)`), resolves to an **UNKNOWN destination**:
+  treated as public, so the agent hook asks and the `gh` shim refuses from a
+  non-interactive shell. Only a `*` approval covers it, and receipts print
+  `UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC)`.
+- Mutations are found by a small GraphQL lexer, not a regex: comments,
+  strings and block strings are skipped. Read-only queries are unchanged.
+- The suggested `repo-aegis approve '*'` is now quoted; unquoted, the shell
+  glob-expands it before repo-aegis sees it.
+
+### Fixed — regular expressions that backtracked on hostile repo content
+
+CodeQL `js/polynomial-redos`. The registry-host scan reads lockfiles,
+`.npmrc`, `pip.conf` and Maven settings — repository content, so an
+attacker's pull request can shape it. An unterminated `<url>` followed by
+50 000 spaces ran for over two minutes before it was stopped. The `#`-comment strip, the pip value capture, the Maven `<url>` pattern and
+URL-credential redaction are all linear, with timing tests on each.
+
+### Fixed — smaller hardening
+
+- **File races.** Twenty check-then-act sequences (`existsSync` then
+  read or write) are gone: files are opened once and `fstat`ed on the same
+  descriptor, created with `wx` where "don't overwrite" matters (the
+  registry scaffold, the encryption marker), and appended to where
+  "create if missing" is all that was meant (the audit log, the lock file).
+- **`repo-aegis-scan` report.** An error message containing `|`, a
+  backtick, a backslash or a newline could break the Markdown table row;
+  the error cell is now escaped.
+
+### Security — dependencies
+
+- `@hono/node-server` 2.1.1 (transitive, via the MCP SDK):
+  GHSA-frvp-7c67-39w9, path traversal in `serve-static` on Windows.
+- `brace-expansion` 5.0.12 (development only): GHSA-mh99-v99m-4gvg and
+  GHSA-rgw5-rvv9-x895, unbounded-expansion denial of service.
+
 ## [0.10.2] - 2026-09-13
 
 ### Fixed — a failed push got a `PUBLISHED →` receipt
