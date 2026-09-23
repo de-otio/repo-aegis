@@ -397,6 +397,13 @@ describe("isGraphqlEndpoint", () => {
       assert.equal(isGraphqlEndpoint(e), false, e);
     }
   });
+  it("stays linear on a long run of slashes", () => {
+    const hostile = "/".repeat(100_000) + "x";
+    const t0 = performance.now();
+    assert.equal(isGraphqlEndpoint(hostile), false);
+    assert.equal(isGraphqlEndpoint("//graphql//"), true);
+    assert.ok(performance.now() - t0 < 500, "slash trimming must not backtrack");
+  });
 });
 
 describe("graphqlOperationKind", () => {

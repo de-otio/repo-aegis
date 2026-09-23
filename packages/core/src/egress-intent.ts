@@ -597,7 +597,15 @@ export function isGraphqlEndpoint(endpoint: string): boolean {
       return false;
     }
   }
-  path = path.split("?")[0]!.replace(/^\/+/, "").replace(/\/+$/, "");
+  // Slashes trimmed by index, not `/\/+$/`: that pattern backtracks
+  // quadratically on a long run of slashes (js/polynomial-redos), and the
+  // endpoint is copied straight from an agent's command line.
+  path = path.split("?")[0]!;
+  let start = 0;
+  let end = path.length;
+  while (start < end && path[start] === "/") start++;
+  while (end > start && path[end - 1] === "/") end--;
+  path = path.slice(start, end);
   return path === "graphql" || path === "api/graphql";
 }
 
