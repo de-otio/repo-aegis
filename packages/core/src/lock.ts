@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 import { lockFilePath } from "./paths.js";
@@ -14,6 +14,16 @@ export interface LockOptions {
 }
 
 /**
+ * proper-lockfile locks the *file*, so it must exist. Create it without a
+ * check-then-write: `recursive` mkdir is idempotent, and append mode creates
+ * the file when missing but never truncates one another process just made.
+ */
+function ensureLockTarget(path: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "", { flag: "a" });
+}
+
+/**
  * Run `fn` while holding the registry lock. Synchronous-friendly: `fn`
  * may be sync or async; returns the function's return value. The lock
  * is released even if `fn` throws.
@@ -23,10 +33,7 @@ export interface LockOptions {
  */
 export async function withLock<T>(fn: () => T | Promise<T>, opts: LockOptions = {}): Promise<T> {
   const path = opts.lockPath ?? lockFilePath();
-  const dir = dirname(path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  // proper-lockfile locks the *file* — needs to exist.
-  if (!existsSync(path)) writeFileSync(path, "");
+  ensureLockTarget(path);
 
   const timeout = opts.timeoutMs ?? 5000;
   let release: () => Promise<void>;
@@ -61,9 +68,7 @@ export async function withLock<T>(fn: () => T | Promise<T>, opts: LockOptions = 
  */
 export function withLockSync<T>(fn: () => T, opts: LockOptions = {}): T {
   const path = opts.lockPath ?? lockFilePath();
-  const dir = dirname(path);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  if (!existsSync(path)) writeFileSync(path, "");
+  ensureLockTarget(path);
 
   let release: () => void;
   try {

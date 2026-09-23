@@ -3,14 +3,13 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   closeSync,
+  fstatSync,
   mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
   readSync,
   rmSync,
-  existsSync,
-  statSync,
   realpathSync,
   type Dirent,
 } from "node:fs";
@@ -432,12 +431,9 @@ export function scanFile(
 ): ScanResult {
   const skipped: SkippedFile[] = [];
   const empty = (): ScanResult => ({ hits: [], skipped, suppressedKnownNonSecrets: 0 });
-  if (!existsSync(path)) {
-    skipped.push({ path, reason: "unreadable" });
-    return empty();
-  }
   let real: string;
   try {
+    // Throws for a missing path, which is reported the same way.
     real = realpathSync(path);
   } catch {
     skipped.push({ path, reason: "unreadable" });
@@ -456,27 +452,41 @@ export function scanFile(
     // `opts` never silently overrides the argument form.
     scanOpts = { ...opts, workingTree: wtReal };
   }
-  const stat = statSync(real);
-  // A directory is not an unreadable file, and saying so was the bug: the
-  // read below throws EISDIR, the catch calls it `unreadable`, and the
-  // operator goes looking at permissions. `scanFile` still scans exactly one
-  // file — walking a tree is {@link scanDirectory}'s job — but it now says
-  // which of the two it was handed.
-  if (stat.isDirectory()) {
-    skipped.push({ path: real, reason: "directory" });
-    return empty();
-  }
-  const max = opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
-  if (stat.size > max) {
-    skipped.push({ path: real, reason: "too-large", bytes: stat.size });
-    return empty();
-  }
-  let buf: Buffer;
+  // Stat and read through one descriptor, so the size/type checks describe
+  // the same file that is read (no stat-then-open window for a swap).
+  let fd: number;
   try {
-    buf = readFileSync(real);
+    fd = openSync(real, "r");
   } catch {
     skipped.push({ path: real, reason: "unreadable" });
     return empty();
+  }
+  let stat: ReturnType<typeof fstatSync>;
+  let buf: Buffer;
+  try {
+    stat = fstatSync(fd);
+    // A directory is not an unreadable file, and saying so was the bug: the
+    // read below throws EISDIR, the catch calls it `unreadable`, and the
+    // operator goes looking at permissions. `scanFile` still scans exactly one
+    // file — walking a tree is {@link scanDirectory}'s job — but it now says
+    // which of the two it was handed.
+    if (stat.isDirectory()) {
+      skipped.push({ path: real, reason: "directory" });
+      return empty();
+    }
+    const max = opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
+    if (stat.size > max) {
+      skipped.push({ path: real, reason: "too-large", bytes: stat.size });
+      return empty();
+    }
+    try {
+      buf = readFileSync(fd);
+    } catch {
+      skipped.push({ path: real, reason: "unreadable" });
+      return empty();
+    }
+  } finally {
+    closeSync(fd);
   }
   if (looksBinary(buf)) {
     skipped.push({ path: real, reason: "binary", bytes: stat.size });
