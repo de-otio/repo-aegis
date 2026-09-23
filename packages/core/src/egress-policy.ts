@@ -24,10 +24,17 @@
 // ref or PR — the receipt-before-the-fact a human sees when asked. They
 // never carry payload content, matched substrings, or registry entries.
 
-import { basename, isAbsolute } from "node:path";
+import { basename, isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
+import { closeSync, openSync, readSync } from "node:fs";
 import { readCachedVisibility, type RepoVisibility } from "./egress.js";
-import { parseApiEndpoint, type EgressIntent, type EgressVerb } from "./egress-intent.js";
+import {
+  graphqlOperationKind,
+  parseApiEndpoint,
+  type EgressIntent,
+  type EgressVerb,
+  type GraphqlOperationKind,
+} from "./egress-intent.js";
 import { resolveCachedDestination } from "./destination-cache.js";
 import { findApproval, type EgressApproval } from "./egress-approval.js";
 import { parseRemoteUrl } from "./remote-url.js";
@@ -97,6 +104,18 @@ export interface Destination {
    * blocking, and the alternative is the fail-open the cache exists to close.
    */
   assumedPublic?: boolean;
+  /**
+   * Set when the command HAS a destination but nothing offline can say which
+   * repository it is. Today one producer: a `gh api graphql` mutation, which
+   * names its target by node id (`pullRequestId: "PR_…"`) — the cwd is not
+   * its destination, however it is invoked (issue #113). `org`/`repo` are
+   * then `*` (so only a wildcard approval can cover it), and the destination
+   * is treated as public-facing — the same fail-closed stance as
+   * `assumedPublic`: rule g asks a person, or refuses from a shell with none.
+   * Rule e is skipped (there is no boundary to compare against); rule f
+   * still scans the payload against a public-facing deny set.
+   */
+  unresolved?: "graphql-mutation";
 }
 
 export type EgressDecision =
@@ -319,6 +338,65 @@ function withLocalClass(
   };
 }
 
+/** Upper bound on a GraphQL document file read to classify it. */
+const GRAPHQL_FILE_MAX = 1024 * 1024;
+
+/** A file's text, or null when it is absent, unreadable or too large. */
+function readSmallFile(path: string, base: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(isAbsolute(path) ? path : resolvePath(base, path), "r");
+    const buf = Buffer.alloc(GRAPHQL_FILE_MAX + 1);
+    let len = 0;
+    for (;;) {
+      const got = readSync(fd, buf, len, buf.length - len, null);
+      if (got === 0) break;
+      len += got;
+      if (len > GRAPHQL_FILE_MAX) return null;
+    }
+    return buf.subarray(0, len).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* nothing to do */
+      }
+    }
+  }
+}
+
+/**
+ * What a `gh api graphql` call would do. The document is read from wherever
+ * the command takes it — the inline `query` field, a `-F query=@file`, or the
+ * `query` member of an `--input` JSON body. Anything that cannot be read here
+ * (stdin, a missing file, a body that is not JSON, no `query` at all) is
+ * `opaque`: the caller cannot rule a mutation out, so it must not assume a
+ * read. `query` for an intent that is not a GraphQL call. Never throws.
+ */
+export function graphqlIntentKind(intent: EgressIntent, base: string): GraphqlOperationKind {
+  const g = intent.graphql;
+  if (g === undefined) return "query";
+  let text: string | null = null;
+  if (g.queryFile !== undefined) {
+    text = g.queryFile === "-" ? null : readSmallFile(g.queryFile, base);
+  } else if (g.query !== undefined) {
+    text = g.query;
+  } else if (g.inputFile !== undefined && g.inputFile !== "-") {
+    const body = readSmallFile(g.inputFile, base);
+    try {
+      const parsed: unknown = body === null ? null : JSON.parse(body);
+      const q = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>)["query"] : undefined;
+      text = typeof q === "string" ? q : null;
+    } catch {
+      text = null;
+    }
+  }
+  return text === null ? "opaque" : graphqlOperationKind(text);
+}
+
 /**
  * Default resolver. `git push <remote>` → `remote.<remote>.url` from the
  * command's directory (`git -C` or cwd); a URL given as the remote is parsed
@@ -358,6 +436,21 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
     // cwd's origin — for the placeholders that is exactly what gh does.
     const target = parseApiEndpoint(intent.apiEndpoint);
     if (target !== null) return withLocalClass({ org: target.org, repo: target.repo ?? "*" }, base, own, registry);
+    // A GraphQL mutation's target is a node id, not a path, and not the cwd:
+    // an `enqueuePullRequest` run from a private checkout reaches whichever
+    // repository owns that PR (issue #113). A read keeps the cwd fallback.
+    if (intent.graphql !== undefined && graphqlIntentKind(intent, base) !== "query") {
+      return {
+        org: "*",
+        repo: "*",
+        class: "private-strict",
+        visibility: "unknown",
+        publicFacing: true,
+        classKnown: false,
+        assumedPublic: true,
+        unresolved: "graphql-mutation",
+      };
+    }
   }
   return own ? withLocalClass(own, base, own, registry) : null;
 };
@@ -427,6 +520,9 @@ export function describeVerb(verb: EgressVerb): string {
 /** `<org>/<repo> (<visibility>, class <class>)` — the only way a destination is ever printed. */
 export function describeDestination(d: Destination | null | undefined): string {
   if (!d) return "unresolved destination";
+  if (d.unresolved === "graphql-mutation") {
+    return "UNKNOWN repository (GraphQL mutation: the target is a node id, not resolvable offline; treated as public)";
+  }
   const vis = d.classKnown ? d.visibility : d.assumedPublic ? "visibility uncached, treated as public" : "visibility unknown";
   const cls = d.classKnown ? d.class : "class unknown";
   return `${d.org}/${d.repo} (${vis}, ${cls})`;
@@ -439,6 +535,7 @@ export function describeDestination(d: Destination | null | undefined): string {
  */
 export function describeDestinationForReceipt(d: Destination | null | undefined): string {
   if (!d) return "(destination not resolved)";
+  if (d.unresolved === "graphql-mutation") return "UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC)";
   const vis = d.classKnown
     ? d.visibility.toUpperCase()
     : d.assumedPublic
@@ -567,7 +664,10 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       }
     }
     const sourceTrees: string[] = [];
-    if (intent.verb === "git-push") {
+    if (destination.unresolved !== undefined) {
+      // No org to compare: its `*` would be "disjoint" from every boundary.
+      // Rule f still scans the payload (as public-facing) and rule g asks.
+    } else if (intent.verb === "git-push") {
       sourceTrees.push(base);
     } else {
       for (const file of intent.payloadFiles) {
@@ -633,22 +733,29 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     if (approval !== null) {
       return { action: "allow", approval, intent, ...(destination && { destination }) };
     }
-    const what = publicFacing
-      ? `PUBLIC destination`
-      : `an operation that is hard to undo`;
+    const what =
+      destination?.unresolved !== undefined
+        ? `UNRESOLVED destination`
+        : publicFacing
+          ? `PUBLIC destination`
+          : `an operation that is hard to undo`;
     const target = intent.verb === "git-push" && intent.refspec ? `${intent.refspec} → ` : "";
-    const approveCommand = `repo-aegis approve ${destination ? `${destination.org}/${destination.repo}` : "*"}`;
+    const approveCommand = `repo-aegis approve ${
+      destination && destination.unresolved === undefined ? `${destination.org}/${destination.repo}` : "*"
+    }`;
     // Everything up to and including "A person must approve this"; the three
     // branches below differ only in what a person can do about it here.
     const head =
       `${verb}: ${what} — ${target}${describeDestination(destination)}` +
-      (intent.repoFlag !== undefined
-        ? ` (from --repo)`
-        : destination?.fromCache
-          ? ` (from the checkout at ${destination.workingTree})`
-          : intent.apiEndpoint !== undefined && destination !== null
-            ? ` (from the API path)`
-            : "") +
+      (destination?.unresolved !== undefined
+        ? ` — the cwd's repository is not its destination`
+        : intent.repoFlag !== undefined
+          ? ` (from --repo)`
+          : destination?.fromCache
+            ? ` (from the checkout at ${destination.workingTree})`
+            : intent.apiEndpoint !== undefined && destination !== null
+              ? ` (from the API path)`
+              : "") +
       `, from a non-interactive shell. A person must approve this`;
     if (opts.capabilities.ask) {
       // An `ask` is a refusal only if something can still hold the command

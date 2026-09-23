@@ -85,9 +85,14 @@ interface DestinationJson {
   repo: string;
   visibility: string;
   class: string;
+  /** Present when the command has a destination nothing offline can name (a GraphQL mutation). */
+  unresolved?: string;
 }
 
 function destinationJson(d: Destination): DestinationJson {
+  if (d.unresolved !== undefined) {
+    return { org: d.org, repo: d.repo, visibility: "unknown", class: "unknown", unresolved: d.unresolved };
+  }
   return { org: d.org, repo: d.repo, visibility: d.visibility, class: d.class };
 }
 

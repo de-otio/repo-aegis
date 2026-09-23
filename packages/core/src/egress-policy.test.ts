@@ -771,6 +771,142 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.equal(resolveDestinationOffline(intent("gh api graphql -f query=x"), other), null);
   });
 
+  // ---- gh api graphql: a mutation's target is a node id, not the cwd (#113)
+
+  const ENQUEUE =
+    "gh api graphql -F id=PR_kwDOAAAAAA -f query='mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'";
+  const VIEWER = "gh api graphql -f query='query { viewer { login } }'";
+
+  it("a GraphQL mutation from a private checkout is NOT attributed to that checkout", () => {
+    const d = resolveDestinationOffline(intent(ENQUEUE), priv, REGISTRY);
+    assert.equal(d?.unresolved, "graphql-mutation");
+    assert.equal(d?.org, "*");
+    assert.equal(d?.repo, "*");
+    assert.equal(d?.publicFacing, true);
+    assert.equal(d?.classKnown, false);
+    assert.equal(
+      formatReceipt(d!, "gh api (mutating)"),
+      "PUBLISHED → UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC): gh api (mutating)",
+    );
+    assert.ok(!describeDestination(d).includes("notes"), describeDestination(d));
+  });
+
+  it("the issue's test: that mutation, no approval, non-interactive shell → refused", () => {
+    let askedFor: { org: string; repo: string } | null = null;
+    const opts = {
+      intents: parseEgressIntents(ENQUEUE),
+      cwd: priv,
+      registry: REGISTRY,
+      humanPresent: false,
+      findApproval: (dst: Destination | null) => {
+        askedFor = dst && { org: dst.org, repo: dst.repo };
+        return null;
+      },
+    };
+    const shell = decideEgress({ ...opts, capabilities: { ask: false } });
+    assert.equal(shell.action, "deny");
+    assert.equal(shell.action === "deny" && shell.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    assert.equal(shell.action === "deny" && shell.destination?.unresolved, "graphql-mutation");
+    assert.ok(shell.action === "deny" && shell.reason.includes("UNKNOWN repository"), shell.action === "deny" ? shell.reason : "");
+    assert.ok(shell.action === "deny" && !shell.reason.includes("acme/notes"));
+    // Only a wildcard approval could cover a destination nobody can name.
+    assert.ok(shell.action === "deny" && shell.reason.includes("`repo-aegis approve *`"));
+    assert.deepEqual(askedFor, { org: "*", repo: "*" });
+
+    const agent = decideEgress({ ...opts, capabilities: { ask: true } });
+    assert.equal(agent.action, "ask");
+  });
+
+  it("… an approval for the cwd's repository does not cover it; a wildcard one does", () => {
+    const base = {
+      intents: parseEgressIntents(ENQUEUE),
+      cwd: priv,
+      registry: REGISTRY,
+      humanPresent: false,
+      capabilities: { ask: false },
+    };
+    const approval = (org: string, repo: string) => ({
+      id: "a1",
+      org,
+      repo,
+      createdAt: "2026-09-12T00:00:00.000Z",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      by: "op",
+    });
+    const cwdOnly = decideEgress({
+      ...base,
+      findApproval: dst => (dst?.org === "acme" && dst.repo === "notes" ? approval("acme", "notes") : null),
+    });
+    assert.equal(cwdOnly.action, "deny");
+    const wildcard = decideEgress({ ...base, findApproval: () => approval("*", "*") });
+    assert.equal(wildcard.action, "allow");
+  });
+
+  it("… and a person at the terminal is allowed through, with no cross-org verdict on the `*`", () => {
+    const d = decideEgress({
+      intents: parseEgressIntents(ENQUEUE),
+      cwd: priv,
+      registry: REGISTRY,
+      humanPresent: true,
+      capabilities: { ask: false },
+      trustBoundaryOf: () => boundary(["acme"]),
+    });
+    assert.equal(d.action, "allow");
+  });
+
+  it("a read-only GraphQL query keeps the cwd attribution and is allowed from a private checkout", () => {
+    const d = resolveDestinationOffline(intent(VIEWER), priv, REGISTRY);
+    assert.equal(d?.unresolved, undefined);
+    assert.equal(d?.org, "acme");
+    assert.equal(d?.repo, "notes");
+    const decision = decideEgress({
+      intents: parseEgressIntents(VIEWER),
+      cwd: priv,
+      registry: REGISTRY,
+      humanPresent: false,
+      capabilities: { ask: false },
+    });
+    assert.equal(decision.action, "allow");
+  });
+
+  it("a mutation read from a query file, or an --input body, is unresolved; a query there is not", () => {
+    const mfile = join(root, "enqueue.graphql");
+    const qfile = join(root, "viewer.graphql");
+    const mbody = join(root, "enqueue.json");
+    const qbody = join(root, "viewer.json");
+    writeFileSync(mfile, "# enqueue\n  mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { clientMutationId } }\n");
+    writeFileSync(qfile, "query { viewer { login } }\n");
+    writeFileSync(mbody, JSON.stringify({ query: "mutation { x }", variables: {} }));
+    writeFileSync(qbody, JSON.stringify({ query: "{ viewer { login } }" }));
+    const u = (cmd: string) => resolveDestinationOffline(intent(cmd), priv, REGISTRY)?.unresolved;
+    assert.equal(u(`gh api graphql -F query=@${mfile} -F id=PR_x`), "graphql-mutation");
+    assert.equal(u(`gh api graphql -F query=@${qfile}`), undefined);
+    assert.equal(u(`gh api graphql --input ${mbody}`), "graphql-mutation");
+    assert.equal(u(`gh api graphql --input ${qbody}`), undefined);
+    // A relative query file resolves against the command's directory.
+    writeFileSync(join(priv, "rel.graphql"), "mutation { x }");
+    assert.equal(u("gh api graphql -F query=@rel.graphql"), "graphql-mutation");
+  });
+
+  it("a document this guard cannot read is treated like a mutation, never like a read", () => {
+    const u = (cmd: string) => resolveDestinationOffline(intent(cmd), priv, REGISTRY)?.unresolved;
+    assert.equal(u("gh api graphql -F query=@-"), "graphql-mutation");
+    assert.equal(u("gh api graphql --input -"), "graphql-mutation");
+    assert.equal(u(`gh api graphql -F query=@${join(root, "missing.graphql")}`), "graphql-mutation");
+    const notJson = join(root, "not-json.json");
+    writeFileSync(notJson, "mutation { x }");
+    assert.equal(u(`gh api graphql --input ${notJson}`), "graphql-mutation");
+    assert.equal(u(`gh api graphql -f query="$(cat ${join(root, "viewer.graphql")})"`), "graphql-mutation");
+    assert.equal(u("gh api graphql -F id=PR_x"), "graphql-mutation"); // no query at all
+  });
+
+  it("REST writes stay attributed to the path's repository, not the cwd (same bug class)", () => {
+    const d = resolveDestinationOffline(intent("gh api -X POST repos/acme/svc/issues -f title=x"), priv, REGISTRY);
+    assert.equal(d?.org, "acme");
+    assert.equal(d?.repo, "svc");
+    assert.equal(d?.unresolved, undefined);
+  });
+
   // ---- an uncached personal-org destination is treated as public --------
 
   it("an uncached destination in a personal org is assumed public-facing (with a registry)", () => {

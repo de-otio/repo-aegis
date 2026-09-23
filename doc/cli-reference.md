@@ -988,9 +988,22 @@ is a visible act in any transcript. Destination resolution is offline:
 `git push <remote>` reads `remote.<remote>.url` from the `git -C`
 directory or the cwd; `gh … --repo o/r` is direct; `gh api repos/o/r/…`
 reads the org and repo from the API path (`orgs/o/…` gives the org with
-repo `*`; a path with `{owner}`/`{repo}` placeholders, `graphql`, and the
+repo `*`; a path with `{owner}`/`{repo}` placeholders and the
 account-level endpoints fall back to the cwd's origin, which for the
 placeholders is what `gh` itself does); other `gh` uses the cwd's origin.
+`gh api graphql` is judged by its document (`-f`/`-F query=…`,
+`-F query=@file`, or the `query` member of an `--input` JSON body): a
+read-only query falls back to the cwd's origin as before, but a
+**mutation** names its target by node id (`pullRequestId`,
+`repositoryId`, …), which nothing offline can map to a repository, so its
+destination is **UNKNOWN** — never the cwd's repository. An UNKNOWN
+destination is treated as public-facing (rule g asks, or refuses from a
+shell), only a `*` approval covers it, and reasons and receipts print it
+as `UNKNOWN repository …` / `UNKNOWN (GRAPHQL MUTATION TARGET NOT
+RESOLVED, TREATED AS PUBLIC)`. A document the guard cannot read — stdin,
+a missing file, a body that is not JSON, an unexpanded `$(…)` in the
+agent hook — is treated as a mutation. No network lookup of the node id
+is made.
 Class and cached visibility apply when the destination is the tree's own
 origin, **or when this machine holds another checkout of it**: the
 machine-wide destination cache (`$REPO_AEGIS_HOME/destinations.json`) maps
