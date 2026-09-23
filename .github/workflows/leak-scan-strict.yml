@@ -54,7 +54,7 @@ jobs:
         # registry stated explicitly. See doc/github-action.md.
         working-directory: ${{ runner.temp }}
         env:
-          REPO_AEGIS_VERSION: '0.8.2'
+          REPO_AEGIS_VERSION: '0.10.2'
         run: | # zizmor: ignore[adhoc-packages]
           npm install -g --ignore-scripts --registry=https://registry.npmjs.org \
             "@de-otio/repo-aegis@${REPO_AEGIS_VERSION}"
