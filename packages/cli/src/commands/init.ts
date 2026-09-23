@@ -8,8 +8,7 @@ import {
   chmodSync,
   renameSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { parse as parseYaml, parseDocument, YAMLSeq, YAMLMap, Scalar, isMap } from "yaml";
 import {
   repoAegisHome,
@@ -486,17 +485,25 @@ export async function init(opts: InitOptions): Promise<void> {
 
   try {
     withLockSync(() => {
-      if (!existsSync(registry) || opts.force) {
-        registryAlreadyExisted = existsSync(registry) && !!opts.force;
+      // Exclusive create first: whether the registry already existed is
+      // decided by the create itself, not by a separate existsSync probe.
+      try {
+        writeFileSync(registry, REGISTRY_STUB, { mode: 0o600, flag: "wx" });
+        registryScaffolded = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        registryAlreadyExisted = true;
+      }
+      if (registryAlreadyExisted && opts.force) {
         writeFileSync(registry, REGISTRY_STUB, { mode: 0o600 });
+        registryScaffolded = true;
+      }
+      if (registryScaffolded) {
         try {
           chmodSync(registry, 0o600);
         } catch {
           /* platform-restricted */
         }
-        registryScaffolded = true;
-      } else {
-        registryAlreadyExisted = true;
       }
     });
   } catch (err) {

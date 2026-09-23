@@ -2,8 +2,11 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { execFileSync, spawnSync } from "node:child_process";
 import {
+  closeSync,
   existsSync,
+  fstatSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -185,36 +188,41 @@ class FileCache {
       }
     }
 
-    let st;
+    // Stat and read through one descriptor, so the type/size checks describe
+    // the same file that is read.
+    let fd: number;
     try {
-      st = statSync(real);
+      fd = openSync(real, "r");
     } catch {
       return this.recordResult(queryPath, real, {
         kind: "unreadable",
         inFixtureDir: false,
       });
     }
-    if (!st.isFile()) {
-      return this.recordResult(queryPath, real, {
-        kind: "unreadable",
-        inFixtureDir: false,
-      });
-    }
-    if (st.size > this.maxBytes) {
-      return this.recordResult(queryPath, real, {
-        kind: "too-large",
-        inFixtureDir: false,
-      });
-    }
     let buf: Buffer;
     try {
-      buf = readFileSync(real);
+      const st = fstatSync(fd);
+      if (!st.isFile()) {
+        return this.recordResult(queryPath, real, {
+          kind: "unreadable",
+          inFixtureDir: false,
+        });
+      }
+      if (st.size > this.maxBytes) {
+        return this.recordResult(queryPath, real, {
+          kind: "too-large",
+          inFixtureDir: false,
+        });
+      }
+      buf = readFileSync(fd);
       this.readCount += 1;
     } catch {
       return this.recordResult(queryPath, real, {
         kind: "unreadable",
         inFixtureDir: false,
       });
+    } finally {
+      closeSync(fd);
     }
     if (looksBinary(buf)) {
       return this.recordResult(queryPath, real, {

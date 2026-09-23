@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendAuditRecord } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { readIfExists } from "../fs-utils.js";
 
 const BEGIN_MARKER = "# repo-aegis: managed gitignore block — do not edit between markers";
 const END_MARKER = "# repo-aegis: end managed block";
@@ -86,10 +87,7 @@ export function installGitignore(opts: InstallGitignoreOptions): void {
 
   mkdirSync(dirname(target), { recursive: true });
 
-  let existing = "";
-  if (existsSync(target)) {
-    existing = readFileSync(target, "utf8");
-  }
+  const existing = readIfExists(target) ?? "";
 
   const alreadyPresent = existing.includes(BEGIN_MARKER);
 
@@ -107,12 +105,9 @@ export function installGitignore(opts: InstallGitignoreOptions): void {
     return;
   }
 
-  if (existsSync(target)) {
-    const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
-    appendFileSync(target, (needsLeadingNewline ? "\n" : "") + MANAGED_BLOCK);
-  } else {
-    writeFileSync(target, MANAGED_BLOCK);
-  }
+  // Append mode creates a missing file, so no exists-then-write branch.
+  const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
+  appendFileSync(target, (needsLeadingNewline ? "\n" : "") + MANAGED_BLOCK);
 
   // Audit (best-effort). Emit AFTER the file has been written.
   try {
@@ -137,7 +132,8 @@ export function installGitignore(opts: InstallGitignoreOptions): void {
 }
 
 function uninstallGitignore(target: string, opts: InstallGitignoreOptions): void {
-  if (!existsSync(target)) {
+  const existing = readIfExists(target);
+  if (existing === null) {
     if (opts.silent) return;
     if (opts.json) {
       emitJson({
@@ -152,7 +148,6 @@ function uninstallGitignore(target: string, opts: InstallGitignoreOptions): void
     return;
   }
 
-  const existing = readFileSync(target, "utf8");
   const next = stripManagedBlock(existing);
 
   if (next === null) {
