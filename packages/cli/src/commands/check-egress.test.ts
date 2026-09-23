@@ -519,3 +519,220 @@ describe("check --remote-url — a destination that is not this repo's origin", 
     assert.match(j.error, /acme\/pub \(public, public-eligible\)/);
   });
 });
+
+describe("check --remote-url — an UNKNOWN visibility fails closed (issue #114)", () => {
+  // The pre-push hook used to read an empty `repo-aegis.visibility` cache as
+  // "not public" and let the push through under an `(unknown)` receipt. The
+  // `gh` shim already treated the same repository as public. Now both share
+  // `treatAsPublicDestination`: only a recorded `private` passes unattended.
+  //
+  // Every test here injects `lookupVisibility`, so none reaches the network.
+
+  const noAnswer = (): null => null;
+
+  it("a repo absent from every cache, pushed from a non-interactive shell with no approval, is refused", () => {
+    const ctx = setup("unknown-refused");
+    const repo = makeRepo("unknown-refused-repo", {
+      class: "private-strict",
+      originUrl: "git@github.com:example/unlisted.git",
+    });
+
+    const result = run(ctx, {
+      cwd: repo,
+      pushRef: "refs/heads/main",
+      remoteUrl: "git@github.com:example/unlisted.git",
+      json: true,
+      lookupVisibility: noAnswer,
+    });
+
+    assert.equal(result.exitCode, 2);
+    const j = lastJsonLine<{ code: string; error: string; details: { visibility: string } }>(result.stderr);
+    assert.equal(j.code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    assert.match(j.error, /example\/unlisted \(visibility uncached, treated as public, private-strict\)/);
+    // The refusal says how a person proceeds.
+    assert.match(j.error, /repo-aegis approve example\/unlisted/);
+    assert.match(j.error, /repo-aegis status/);
+    assert.equal(j.details.visibility, "unknown");
+    assert.doesNotMatch(result.stderr, /repo-aegis: pushing/);
+  });
+
+  it("is refused with the live lookup disabled too — the refusal never depends on the network", () => {
+    const ctx = setup("unknown-no-lookup");
+    const repo = makeRepo("unknown-no-lookup-repo", {
+      class: "private-strict",
+      originUrl: "git@github.com:example/unlisted.git",
+    });
+
+    const result = withEnv("REPO_AEGIS_VISIBILITY_LOOKUP", "0", () =>
+      run(ctx, {
+        cwd: repo,
+        range: "HEAD~1..HEAD",
+        remoteUrl: "git@github.com:example/unlisted.git",
+        json: true,
+      }),
+    );
+
+    assert.equal(result.exitCode, 2);
+    assert.equal(lastJsonLine<{ code: string }>(result.stderr).code, "PUBLIC_PUSH_NEEDS_HUMAN");
+  });
+
+  it("a live approval for the destination lets the unknown-visibility push through", () => {
+    const ctx = setup("unknown-approved");
+    const repo = makeRepo("unknown-approved-repo", {
+      class: "private-strict",
+      originUrl: "git@github.com:example/unlisted.git",
+    });
+    const a = mintApproval({ target: { org: "example", repo: "unlisted" }, path: approvalsPath(ctx.home) });
+
+    const result = run(ctx, {
+      cwd: repo,
+      pushRef: "refs/heads/main",
+      remoteUrl: "git@github.com:example/unlisted.git",
+      json: true,
+      lookupVisibility: noAnswer,
+    });
+
+    assert.equal(result.exitCode, undefined, result.stderr);
+    assert.match(result.stderr, new RegExp(`human approval ${a.id} stands in`));
+    assert.match(
+      result.stderr,
+      /repo-aegis: pushing refs\/heads\/main → example\/unlisted \(visibility uncached, treated as public\)/,
+    );
+    const parsed = JSON.parse(result.stdout) as { destination: { publicFacing: boolean; assumedPublic?: boolean } };
+    assert.equal(parsed.destination.publicFacing, true);
+    assert.equal(parsed.destination.assumedPublic, true);
+  });
+
+  it("a human at a TTY gets the public treatment (allowed, with a receipt that says so), not a silent pass", () => {
+    const ctx = setup("unknown-tty");
+    const repo = makeRepo("unknown-tty-repo", {
+      class: "private-strict",
+      originUrl: "git@github.com:example/unlisted.git",
+    });
+
+    const result = run(
+      ctx,
+      { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: "git@github.com:example/unlisted.git", lookupVisibility: noAnswer },
+      { tty: true },
+    );
+
+    assert.equal(result.exitCode, undefined, result.stderr);
+    assert.match(result.stderr, /→ example\/unlisted \(visibility uncached, treated as public\)/);
+  });
+
+  it("a cached private destination is allowed and never looked up", () => {
+    const ctx = setup("cached-private");
+    const repo = makeRepo("cached-private-repo", {
+      class: "private-strict",
+      visibility: "private",
+      originUrl: "git@github.com:example/unlisted.git",
+    });
+    let calls = 0;
+
+    const result = run(ctx, {
+      cwd: repo,
+      pushRef: "refs/heads/main",
+      remoteUrl: "git@github.com:example/unlisted.git",
+      json: true,
+      lookupVisibility: () => {
+        calls++;
+        return "public";
+      },
+    });
+
+    assert.equal(result.exitCode, undefined, result.stderr);
+    assert.equal(calls, 0);
+    assert.match(result.stderr, /→ example\/unlisted \(private\)/);
+  });
+
+  it("refreshes the cache: a lookup that answers `private` lets the push through and is recorded for the next call", () => {
+    const ctx = setup("refresh-private");
+    const repo = makeRepo("refresh-private-repo", {
+      class: "private-strict",
+      originUrl: "git@github.com:example/unlisted.git",
+    });
+    const asked: string[] = [];
+    const lookup = (org: string, name: string): "private" => {
+      asked.push(`${org}/${name}`);
+      return "private";
+    };
+
+    const first = run(ctx, {
+      cwd: repo,
+      pushRef: "refs/heads/main",
+      remoteUrl: "git@github.com:example/unlisted.git",
+      json: true,
+      lookupVisibility: lookup,
+    });
+    assert.equal(first.exitCode, undefined, first.stderr);
+    assert.deepEqual(asked, ["example/unlisted"]);
+    assert.match(first.stderr, /→ example\/unlisted \(private\)/);
+    const cached = execFileSync("git", ["config", "--get", "repo-aegis.visibility"], { cwd: repo, encoding: "utf8" });
+    assert.equal(cached.trim(), "private");
+
+    // The next call reads the cache and does not ask again.
+    const second = run(ctx, {
+      cwd: repo,
+      pushRef: "refs/heads/main",
+      remoteUrl: "git@github.com:example/unlisted.git",
+      json: true,
+      lookupVisibility: lookup,
+    });
+    assert.equal(second.exitCode, undefined, second.stderr);
+    assert.deepEqual(asked, ["example/unlisted"]);
+  });
+
+  it("a lookup that answers `public` refuses the push and records `public`", () => {
+    const ctx = setup("refresh-public");
+    const repo = makeRepo("refresh-public-repo", {
+      class: "private-strict",
+      originUrl: "git@github.com:example/unlisted.git",
+    });
+
+    const result = run(ctx, {
+      cwd: repo,
+      pushRef: "refs/heads/main",
+      remoteUrl: "git@github.com:example/unlisted.git",
+      json: true,
+      lookupVisibility: () => "public",
+    });
+
+    assert.equal(result.exitCode, 2);
+    const j = lastJsonLine<{ code: string; error: string }>(result.stderr);
+    assert.equal(j.code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    assert.match(j.error, /example\/unlisted \(public, private-strict\)/);
+    assert.doesNotMatch(j.error, /repo-aegis status/);
+    const cached = execFileSync("git", ["config", "--get", "repo-aegis.visibility"], { cwd: repo, encoding: "utf8" });
+    assert.equal(cached.trim(), "public");
+  });
+
+  it("a foreign URL in no personal org is judged unknown, not by the pushing repo's own `private`", () => {
+    const ctx = setup("foreign-unknown");
+    const repo = makeRepo("foreign-unknown-repo", {
+      class: "private-strict",
+      visibility: "private",
+      originUrl: "git@github.com:example/src.git",
+    });
+    const asked: string[] = [];
+
+    const result = run(ctx, {
+      cwd: repo,
+      range: "HEAD~1..HEAD",
+      remoteUrl: "git@github.com:example/elsewhere.git",
+      json: true,
+      lookupVisibility: (org, name) => {
+        asked.push(`${org}/${name}`);
+        return null;
+      },
+    });
+
+    assert.deepEqual(asked, ["example/elsewhere"]);
+    assert.equal(result.exitCode, 2);
+    const j = lastJsonLine<{ code: string; error: string }>(result.stderr);
+    assert.equal(j.code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    assert.match(j.error, /example\/elsewhere \(visibility uncached, treated as public/);
+    // The source repo's own cache is untouched: it describes the source.
+    const cached = execFileSync("git", ["config", "--get", "repo-aegis.visibility"], { cwd: repo, encoding: "utf8" });
+    assert.equal(cached.trim(), "private");
+  });
+});

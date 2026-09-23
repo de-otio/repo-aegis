@@ -51,7 +51,9 @@ that isolation, a developer who has repo-aegis installed (its global
 because the tool correctly detects a conflicting `core.hooksPath`, and `audit`
 tests fail because the real pre-commit hook blocks the temp repos' commits.
 Tests set their own local `user.email` / `user.name`, so nulling the global
-config is safe.
+config is safe. The scripts also set `REPO_AEGIS_VISIBILITY_LOOKUP=0`, so the
+egress guard never runs a live `gh repo view` from a test; tests of the
+lookup inject a stub (`lookupVisibility`) instead.
 
 Tests must never depend on the developer's environment. If you add a test that
 runs `git`, assume no global config exists.

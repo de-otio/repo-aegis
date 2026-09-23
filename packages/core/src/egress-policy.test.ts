@@ -23,6 +23,7 @@ import {
 import type { Registry } from "./registry.js";
 import type { TrustBoundary } from "./trust-boundary.js";
 import { recordWorkingTree } from "./destination-cache.js";
+import type { EgressApproval } from "./egress-approval.js";
 
 const REGISTRY: Registry = {
   engagements: [
@@ -595,7 +596,11 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.equal(d?.org, "customer-a-org");
     assert.equal(d?.repo, "thing");
     assert.equal(d?.classKnown, false);
-    assert.equal(d?.publicFacing, false);
+    // Nothing describes it, so its visibility is unknown — and unknown is
+    // treated as public (#114), not let through as it was until v0.10.2.
+    assert.equal(d?.visibility, "unknown");
+    assert.equal(d?.publicFacing, true);
+    assert.equal(d?.assumedPublic, true);
   });
 
   it("git push <url> parses the URL directly", () => {
@@ -641,7 +646,9 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.equal(d?.classKnown, true);
     assert.equal(d?.inferredFromRegistry, true);
     assert.deepEqual(d?.engagements, ["customer-a"]);
-    assert.equal(d?.publicFacing, false);
+    // No cache to read: the visibility is unknown, so treated as public (#114).
+    assert.equal(d?.visibility, "unknown");
+    assert.equal(d?.publicFacing, true);
   });
 
   it("without a registry the same destination stays unknown", () => {
@@ -864,5 +871,135 @@ describe("resolveDestinationOffline — real git config", () => {
     const d = resolveDestinationOffline(intent("git push origin main"), repo, REGISTRY);
     assert.equal(d?.fromCache, undefined);
     assert.equal(d?.workingTree, repo);
+  });
+});
+
+describe("decideEgress — an UNKNOWN visibility is treated as public (issue #114)", () => {
+  // One rule for the pre-push hook, the `gh` shim and the agent hooks. Every
+  // test injects `lookupVisibility`; none reaches the network.
+  let root: string;
+  let repo: string;
+  let priorHome: string | undefined;
+
+  function git(cwd: string, args: string[]): string {
+    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  }
+
+  /** A private-strict checkout in a NON-personal org, with no cached visibility. */
+  function freshRepo(name: string): string {
+    const dir = join(root, name);
+    mkdirSync(dir);
+    git(dir, ["init", "-q"]);
+    git(dir, ["remote", "add", "origin", `git@github.com:example/${name}.git`]);
+    git(dir, ["config", "repo-aegis.class", "private-strict"]);
+    return dir;
+  }
+
+  function decideIn(cwd: string, over: Partial<DecideEgressOptions> = {}) {
+    return decideEgress({
+      intents: parseEgressIntents("git push origin main"),
+      cwd,
+      registry: REGISTRY,
+      humanPresent: false,
+      capabilities: { ask: true },
+      scanPayload: () => 0,
+      trustBoundaryOf: () => boundary(["example"]),
+      findApproval: () => null,
+      ...over,
+    });
+  }
+
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), "egress-policy-unknown-"));
+    repo = freshRepo("unlisted");
+    priorHome = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = join(root, "home");
+  });
+
+  after(() => {
+    if (priorHome === undefined) delete process.env["REPO_AEGIS_HOME"];
+    else process.env["REPO_AEGIS_HOME"] = priorHome;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("uncached, lookup cannot answer → the agent hook asks, with a reason that says why and how to proceed", () => {
+    const d = decideIn(repo, { lookupVisibility: () => null });
+    assert.equal(d.action, "ask");
+    assert.ok(d.action === "ask");
+    assert.equal(d.destination?.assumedPublic, true);
+    assert.match(d.reason, /example\/unlisted \(visibility uncached, treated as public, private-strict\)/);
+    assert.match(d.reason, /repo-aegis approve example\/unlisted/);
+    assert.match(d.reason, /repo-aegis status/);
+  });
+
+  it("… and a shell (no ask: the `gh` shim) denies it", () => {
+    const d = decideIn(repo, { lookupVisibility: () => null, capabilities: { ask: false } });
+    assert.equal(d.action, "deny");
+    assert.equal(d.action === "deny" && d.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+  });
+
+  it("… and a live approval stands in for the person", () => {
+    const approval: EgressApproval = {
+      id: "a1",
+      org: "example",
+      repo: "unlisted",
+      createdAt: "2026-09-13T00:00:00.000Z",
+      expiresAt: "2026-09-13T01:00:00.000Z",
+      by: "op",
+    };
+    const d = decideIn(repo, { lookupVisibility: () => null, findApproval: () => approval });
+    assert.equal(d.action, "allow");
+    assert.ok(d.action === "allow" && d.approval !== undefined);
+  });
+
+  it("… and a human present is allowed", () => {
+    assert.equal(decideIn(repo, { lookupVisibility: () => null, humanPresent: true }).action, "allow");
+  });
+
+  it("a lookup answering `private` allows it and caches the answer in the checkout", () => {
+    const dir = freshRepo("looked-up-private");
+    const asked: string[] = [];
+    const lookup = (org: string, name: string): "private" => {
+      asked.push(`${org}/${name}`);
+      return "private";
+    };
+    assert.equal(decideIn(dir, { lookupVisibility: lookup }).action, "allow");
+    assert.deepEqual(asked, ["example/looked-up-private"]);
+    assert.equal(git(dir, ["config", "--get", "repo-aegis.visibility"]).trim(), "private");
+    // Cached now: the next call does not ask.
+    assert.equal(decideIn(dir, { lookupVisibility: lookup }).action, "allow");
+    assert.deepEqual(asked, ["example/looked-up-private"]);
+  });
+
+  it("a lookup answering `public` asks, and the reason carries no uncached hint", () => {
+    const dir = freshRepo("looked-up-public");
+    const d = decideIn(dir, { lookupVisibility: () => "public" });
+    assert.equal(d.action, "ask");
+    assert.ok(d.action === "ask" && !d.reason.includes("repo-aegis status"));
+    assert.equal(git(dir, ["config", "--get", "repo-aegis.visibility"]).trim(), "public");
+  });
+
+  it("a cached private destination is allowed without a lookup", () => {
+    const dir = freshRepo("cached-private");
+    git(dir, ["config", "repo-aegis.visibility", "private"]);
+    let calls = 0;
+    const d = decideIn(dir, {
+      lookupVisibility: () => {
+        calls++;
+        return "public";
+      },
+    });
+    assert.equal(d.action, "allow");
+    assert.equal(calls, 0);
+  });
+
+  it("a throwing lookup leaves it unknown — refused, never allowed", () => {
+    const d = decideIn(repo, {
+      lookupVisibility: () => {
+        throw new Error("network down");
+      },
+      capabilities: { ask: false },
+    });
+    assert.equal(d.action, "deny");
   });
 });

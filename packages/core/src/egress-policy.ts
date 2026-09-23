@@ -26,7 +26,13 @@
 
 import { basename, isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
-import { readCachedVisibility, type RepoVisibility } from "./egress.js";
+import { readCachedVisibility, treatAsPublicDestination, type RepoVisibility } from "./egress.js";
+import {
+  effectiveVisibilityLookup,
+  refreshUnknownVisibility,
+  UNKNOWN_VISIBILITY_HINT,
+  type VisibilityLookup,
+} from "./visibility-lookup.js";
 import { parseApiEndpoint, type EgressIntent, type EgressVerb } from "./egress-intent.js";
 import { resolveCachedDestination } from "./destination-cache.js";
 import { findApproval, type EgressApproval } from "./egress-approval.js";
@@ -52,9 +58,16 @@ export interface Destination {
   org: string;
   repo: string;
   class: RepoClass;
-  /** From the `repo-aegis.visibility` cache only — never a live probe on this path. */
+  /**
+   * From the `repo-aegis.visibility` cache. The resolver never probes; when
+   * it yields `unknown`, `decideEgress` may refresh it once with a live
+   * lookup (see `visibility-lookup.ts`).
+   */
   visibility: RepoVisibility;
-  /** `class === "public-eligible" || visibility === "public"`. */
+  /**
+   * `treatAsPublicDestination`: `class === "public-eligible" ||
+   * visibility !== "private"`. An unknown visibility counts as public.
+   */
   publicFacing: boolean;
   /**
    * True when `class` / `visibility` describe *this* destination: it is the
@@ -90,11 +103,11 @@ export interface Destination {
    */
   workingTree?: string;
   /**
-   * True when nothing on this machine describes the destination but its org
-   * is in `personalOrgs` — the operator's own org, where the public
-   * repositories live. Treated as public-facing so rule g asks rather than
-   * lets an unknown personal-org destination through: asking is not
-   * blocking, and the alternative is the fail-open the cache exists to close.
+   * True when the destination is public-facing ONLY because its visibility
+   * is unknown (issue #114): nothing cached says `private`, so rule g treats
+   * it as public rather than let an unknown destination through. Asking is
+   * not blocking, and the alternative is the fail-open that let a push to a
+   * public repository through under an `UNKNOWN` label.
    */
   assumedPublic?: boolean;
 }
@@ -193,6 +206,12 @@ export interface DecideEgressOptions {
   trustBoundaryOf?: (workingTree: string) => TrustBoundary;
   /** Injectable for tests; defaults to the approvals store. */
   findApproval?: ApprovalFinder;
+  /**
+   * Live lookup for a destination whose visibility is unknown. Injectable
+   * for tests; defaults to `gh repo view` unless
+   * `REPO_AEGIS_VISIBILITY_LOOKUP=0`.
+   */
+  lookupVisibility?: VisibilityLookup;
 }
 
 /** Default {@link ApprovalFinder}: a destination-less command is covered only by a `*` approval. */
@@ -244,6 +263,29 @@ function engagementsForOrg(registry: Registry | undefined, org: string): string[
   return out;
 }
 
+/** `publicFacing` (and `assumedPublic` when only the unknown visibility makes it so), by the one shared rule. */
+function gateFields(cls: RepoClass, visibility: RepoVisibility): { publicFacing: boolean; assumedPublic?: true } {
+  const publicFacing = treatAsPublicDestination(cls, visibility);
+  return publicFacing && cls !== "public-eligible" && visibility === "unknown"
+    ? { publicFacing, assumedPublic: true }
+    : { publicFacing };
+}
+
+/**
+ * Issue #114: a destination whose visibility is unknown gets ONE live lookup
+ * (cached into its checkout when there is one). A positive answer replaces
+ * `unknown`; anything else leaves it, and it stays treated as public. Only
+ * run when the answer could change the gate — a `public-eligible` class is
+ * public-facing whatever GitHub says.
+ */
+export function refreshDestinationVisibility(destination: Destination, lookup: VisibilityLookup | null): Destination {
+  if (destination.visibility !== "unknown" || destination.class === "public-eligible") return destination;
+  const visibility = refreshUnknownVisibility(destination, lookup);
+  if (visibility === "unknown") return destination;
+  const { assumedPublic: _dropped, ...rest } = destination;
+  return { ...rest, visibility, ...gateFields(destination.class, visibility) };
+}
+
 function withLocalClass(
   target: { org: string; repo: string },
   base: string,
@@ -261,7 +303,7 @@ function withLocalClass(
         ...target,
         class: "customer-coupled",
         visibility: "unknown",
-        publicFacing: false,
+        ...gateFields("customer-coupled", "unknown"),
         classKnown: true,
         inferredFromRegistry: true,
         engagements,
@@ -276,27 +318,21 @@ function withLocalClass(
         ...target,
         class: cached.class,
         visibility: cached.visibility,
-        publicFacing: cached.class === "public-eligible" || cached.visibility === "public",
+        ...gateFields(cached.class, cached.visibility),
         classKnown: true,
         fromCache: true,
         workingTree: cached.workingTree,
       };
     }
-    if ((registry?.personalOrgs ?? []).some(o => o.toLowerCase() === target.org)) {
-      return {
-        ...target,
-        class: "private-strict",
-        visibility: "unknown",
-        publicFacing: true,
-        classKnown: false,
-        assumedPublic: true,
-      };
-    }
+    // Nothing on this machine describes it — in a personal org or not, the
+    // visibility is unknown, and unknown is treated as public (issue #114).
+    // Before that fix only `personalOrgs` got this treatment and every other
+    // unknown destination was let through.
     return {
       ...target,
       class: "private-strict",
       visibility: "unknown",
-      publicFacing: false,
+      ...gateFields("private-strict", "unknown"),
       classKnown: false,
     };
   }
@@ -304,7 +340,13 @@ function withLocalClass(
   try {
     cfg = readRepoConfig(base);
   } catch {
-    return { ...target, class: "private-strict", visibility: "unknown", publicFacing: false, classKnown: false };
+    return {
+      ...target,
+      class: "private-strict",
+      visibility: "unknown",
+      ...gateFields("private-strict", "unknown"),
+      classKnown: false,
+    };
   }
   const visibility = readCachedVisibility(base);
   return {
@@ -312,8 +354,10 @@ function withLocalClass(
     class: cfg.class,
     visibility,
     // The class is a declaration and the cache is only an optimisation:
-    // `public-eligible` counts as public-facing even with no cached value.
-    publicFacing: cfg.class === "public-eligible" || visibility === "public",
+    // `public-eligible` counts as public-facing even with no cached value,
+    // and an uncached `private-strict` repo counts too, until something
+    // (a lookup, `status`, `classify`) records that it is private.
+    ...gateFields(cfg.class, visibility),
     classKnown: true,
     workingTree: base,
   };
@@ -427,7 +471,7 @@ export function describeVerb(verb: EgressVerb): string {
 /** `<org>/<repo> (<visibility>, class <class>)` — the only way a destination is ever printed. */
 export function describeDestination(d: Destination | null | undefined): string {
   if (!d) return "unresolved destination";
-  const vis = d.classKnown ? d.visibility : d.assumedPublic ? "visibility uncached, treated as public" : "visibility unknown";
+  const vis = d.assumedPublic ? "visibility uncached, treated as public" : d.classKnown ? d.visibility : "visibility unknown";
   const cls = d.classKnown ? d.class : "class unknown";
   return `${d.org}/${d.repo} (${vis}, ${cls})`;
 }
@@ -439,10 +483,10 @@ export function describeDestination(d: Destination | null | undefined): string {
  */
 export function describeDestinationForReceipt(d: Destination | null | undefined): string {
   if (!d) return "(destination not resolved)";
-  const vis = d.classKnown
-    ? d.visibility.toUpperCase()
-    : d.assumedPublic
-      ? "VISIBILITY UNCACHED, TREATED AS PUBLIC"
+  const vis = d.assumedPublic
+    ? "VISIBILITY UNCACHED, TREATED AS PUBLIC"
+    : d.classKnown
+      ? d.visibility.toUpperCase()
       : "VISIBILITY UNKNOWN";
   const cls = d.classKnown ? `class ${d.class}` : "class unknown";
   return `${d.org}/${d.repo} (${vis}, ${cls})`;
@@ -547,6 +591,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   } catch {
     destination = null;
   }
+  if (destination !== null) {
+    destination = refreshDestinationVisibility(destination, effectiveVisibilityLookup(opts.lookupVisibility));
+  }
   const boundaryOf = opts.trustBoundaryOf ?? ((wt: string) => computeTrustBoundary(wt, opts.registry));
 
   if (destination !== null) {
@@ -638,6 +685,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       : `an operation that is hard to undo`;
     const target = intent.verb === "git-push" && intent.refspec ? `${intent.refspec} → ` : "";
     const approveCommand = `repo-aegis approve ${destination ? `${destination.org}/${destination.repo}` : "*"}`;
+    // Public only because nothing says private (issue #114): say so, and say
+    // how the visibility gets recorded, so the refusal is not a dead end.
+    const hint = publicFacing && destination?.assumedPublic === true ? UNKNOWN_VISIBILITY_HINT : "";
     // Everything up to and including "A person must approve this"; the three
     // branches below differ only in what a person can do about it here.
     const head =
@@ -668,17 +718,19 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           `${head}, and in this shell nothing below this hook can hold the command: the \`gh\` shim is not ` +
             `the first \`gh\` on PATH, so an unanswered prompt would let it run. Mint an approval from a ` +
             `terminal (\`${approveCommand}\`) and re-run, or start the agent from a shell where the shim ` +
-            `comes first (\`repo-aegis doctor\` says which).`,
+            `comes first (\`repo-aegis doctor\` says which).` +
+            hint,
           destination ?? undefined,
         );
       }
-      const reason = `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.`;
+      const reason = `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.${hint}`;
       return { action: "ask", code: "PUBLIC_EGRESS_NEEDS_HUMAN", reason, ...(destination && { destination }), intent };
     }
     return deny(
       "PUBLIC_EGRESS_NEEDS_HUMAN",
       `${head}: re-run it from a terminal, mint an approval first (\`${approveCommand}\`), ` +
-        `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).`,
+        `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).` +
+        hint,
       destination ?? undefined,
     );
   }

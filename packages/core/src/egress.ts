@@ -563,6 +563,27 @@ export function readCachedVisibility(cwd: string, env: NodeJS.ProcessEnv = proce
 }
 
 /**
+ * The ONE rule for whether a publishing DESTINATION is treated as public by
+ * the human-presence gate — shared by the git pre-push hook (`check
+ * --remote-url`), the `gh` shim and the agent hooks (`decideEgress` rule g),
+ * so the layers cannot disagree about the same repository.
+ *
+ * Only a positive `private` answer lets a destination through unattended.
+ * `unknown` fails closed exactly like `public` (issue #114): an empty
+ * visibility cache is the absence of evidence, and until v0.10.2 the pre-push
+ * hook read it as "private" and let a push to a public repository through.
+ * A `public-eligible` declaration is public-facing whatever the cache says.
+ *
+ * Deliberately NOT the same predicate as {@link isPublicFacing}, which gates
+ * the private-registry *content* check and must keep treating an unknown
+ * visibility as private: there, a false positive blocks a correct lockfile in
+ * a private repo; here, a false negative publishes to the world.
+ */
+export function treatAsPublicDestination(cls: RepoConfig["class"], visibility: RepoVisibility): boolean {
+  return cls === "public-eligible" || visibility !== "private";
+}
+
+/**
  * Whether egress enforcement applies to this repo. True when the repo is
  * declared `public-eligible`, OR its cached GitHub visibility is `public`
  * (the misclassification safety net: a repo left at the `private-strict`

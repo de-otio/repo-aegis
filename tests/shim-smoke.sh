@@ -245,6 +245,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# f) an UNKNOWN visibility is refused without a person (issue #114)
+# ---------------------------------------------------------------------------
+# REPO declares private-strict but has no cached visibility. The live lookup
+# the guard attempts reaches the fake gh, which cannot answer, so the
+# destination stays unknown — and unknown is treated as public. No human, no
+# approval: exit 2, and the real gh never runs.
+f_rc=0
+(
+  cd "${REPO}" && run_with_timeout 30 gh pr comment 7 --body hello
+) >"${WORK}/f.out" 2>"${WORK}/f.err" || f_rc=$?
+if [ "${f_rc}" -eq 2 ]; then
+  pass "f) an uncached destination with no human exits 2"
+else
+  fail "f) expected exit 2 for an uncached destination, got ${f_rc}: $(cat "${WORK}/f.err")"
+fi
+if grep -q "treated as public" "${WORK}/f.err" && grep -q "repo-aegis approve acme/svc" "${WORK}/f.err"; then
+  pass "f) the refusal says why and how to proceed"
+else
+  fail "f) the refusal is missing its reason or the approve command: $(cat "${WORK}/f.err")"
+fi
+if grep -q "gh argv: pr comment" "${WORK}/f.out"; then
+  fail "f) the real gh RAN despite the deny"
+else
+  pass "f) the real gh never ran"
+fi
+
+# ---------------------------------------------------------------------------
 # d) the shim never resolves to itself
 # ---------------------------------------------------------------------------
 d_rc=0
