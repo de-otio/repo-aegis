@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-09-23
+
 ### Fixed — an `UNKNOWN` destination visibility let a push through
 
 The pre-push hook counted a destination as public only when the visibility
@@ -1444,7 +1446,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.10.3...HEAD
+[0.10.3]: https://github.com/de-otio/repo-aegis/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/de-otio/repo-aegis/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/de-otio/repo-aegis/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/de-otio/repo-aegis/compare/v0.9.1...v0.10.0
