@@ -249,6 +249,87 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
     assert.match(r2.stderr, /repo-aegis approve acme\/svc/);
   });
 
+  // Issue #113: a GraphQL mutation names its target by node id; the cwd is
+  // not its destination. The shim must neither judge nor receipt it as the
+  // (private) checkout it happens to run from.
+  const ENQUEUE_ARGS = [
+    "api",
+    "graphql",
+    "-F",
+    "id=PR_kwDOAAAAAA",
+    "-f",
+    "query=mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { clientMutationId } }",
+  ];
+
+  let declared: string | undefined;
+  function declaredPrivateRepo(): string {
+    if (declared === undefined) {
+      declared = makeRepo("declared-private", "git@github.com:acme/notes.git", "private-strict");
+      git(declared, ["config", "repo-aegis.visibility", "private"]);
+    }
+    return declared;
+  }
+
+  it("refuses a GraphQL mutation from a private checkout with no approval, naming no repository", () => {
+    const priv = declaredPrivateRepo();
+    const r = runCli(home, priv, ["egress-check", "--cwd", priv, "--", ...ENQUEUE_ARGS]);
+    assert.equal(r.code, 2, r.stdout);
+    const payload = JSON.parse(r.stderr.trim()) as {
+      code: string;
+      error: string;
+      details: { verb: string; destination?: { org: string; repo: string; visibility: string; class: string; unresolved?: string } };
+    };
+    assert.equal(payload.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    assert.equal(payload.details.verb, "gh api (mutating)");
+    assert.deepEqual(payload.details.destination, {
+      org: "*",
+      repo: "*",
+      visibility: "unknown",
+      class: "unknown",
+      unresolved: "graphql-mutation",
+    });
+    assert.match(payload.error, /UNKNOWN repository/);
+    assert.ok(!r.stderr.includes("acme/notes"), r.stderr);
+  });
+
+  it("a person present lets the mutation through, and the receipt says UNKNOWN, not the cwd's repository", () => {
+    const priv = declaredPrivateRepo();
+    const r = withEnv("REPO_AEGIS_EGRESS_HUMAN", "1", () =>
+      runCli(home, priv, ["egress-check", "--cwd", priv, "--", ...ENQUEUE_ARGS]),
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const payload = JSON.parse(r.stdout) as { action: string; receipt?: string; failedReceipt?: string };
+    assert.equal(payload.action, "allow");
+    assert.equal(
+      payload.receipt,
+      "PUBLISHED → UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC): gh api (mutating)",
+    );
+    assert.equal(
+      payload.failedReceipt,
+      "EGRESS FAILED → UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC): gh api (mutating)",
+    );
+  });
+
+  it("a read-only GraphQL query from the same checkout is unchanged: allowed, attributed to the cwd", () => {
+    const priv = declaredPrivateRepo();
+    const r = runCli(home, priv, ["egress-check", "--cwd", priv, "--", "api", "graphql", "-f", "query=query { viewer { login } }"]);
+    assert.equal(r.code, 0, r.stderr);
+    const payload = JSON.parse(r.stdout) as { action: string; destination?: { org: string; repo: string } };
+    assert.equal(payload.action, "allow");
+    assert.equal(payload.destination?.org, "acme");
+    assert.equal(payload.destination?.repo, "notes");
+  });
+
+  it("a REST write names the path's repository, not the cwd's", () => {
+    const priv = declaredPrivateRepo();
+    const r = runCli(home, priv, ["egress-check", "--cwd", priv, "--", "api", "-X", "POST", "repos/acme/svc/issues", "-f", "title=x"]);
+    // acme/svc is unknown to this machine's cache here, so the verdict may
+    // be either; what matters is that it is about acme/svc.
+    const text = r.code === 0 ? r.stdout : r.stderr;
+    assert.match(text, /"repo":"svc"/);
+    assert.ok(!text.includes('"repo":"notes"'), text);
+  });
+
   it("allows a read with no read-back and no receipt", () => {
     const r = runCli(home, publicRepo, ["egress-check", "--cwd", publicRepo, "--", "pr", "view", "1"]);
     assert.equal(r.code, 0);

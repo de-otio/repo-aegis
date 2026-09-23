@@ -161,7 +161,9 @@ Destination resolution is **offline**: `git push <remote>` →
 `remote.<remote>.url` read from `cwd`'s git config → `parseRemoteUrl`; `gh …
 --repo o/r` → direct; `gh api repos/o/r/…` → from the API path (`orgs/o/…`
 → the org, repo `*`; `{owner}`/`{repo}` placeholders → `cwd`'s origin, as
-`gh` itself does); other `gh` → `cwd`'s origin. Visibility from the
+`gh` itself does); `gh api graphql` → `cwd`'s origin for a read-only
+query, but **UNKNOWN** for a mutation (or a document the guard cannot
+read), see below; other `gh` → `cwd`'s origin. Visibility from the
 `repo-aegis.visibility` cache. Class from `readRepoConfig(cwd)` when the
 destination is `cwd`'s own origin. When it is not — the command names a
 repository in full from somewhere else — class and visibility come from
@@ -185,6 +187,27 @@ shape, an explicit destination judged from the wrong place. The API-path
 parse and the destination cache are the fix; the same cache lookup was
 added to the pre-push layer (§2), which had judged a push to a non-origin
 URL by the pushing repository's own class.
+
+*Added after issue #113:* a GraphQL mutation (`gh api graphql` with
+`enqueuePullRequest(input: {pullRequestId: $id})`, say) has the same
+defect with no path to parse: its target is a node id, so the fallback to
+`cwd` attributed a mutation against a public repository, issued from a
+private checkout, to the private one. The resolver now reads the GraphQL
+document (inline `query` field, `-F query=@file`, or the `query` member of
+an `--input` body) with a small lexer that ignores strings and comments
+and only counts a `mutation` keyword at the top level. A mutation's
+destination is `UNKNOWN` (`org`/`repo` `*`, `unresolved:
+"graphql-mutation"`): treated as public-facing, the same fail-closed
+stance as `visibility uncached, treated as public`, so rule g asks the
+agent's human and the shim refuses from a shell with none; only a `*`
+approval covers it; rule e is skipped (a `*` has no boundary to compare);
+receipts print `UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS
+PUBLIC)`. A document that cannot be read here (stdin, a missing file, a
+non-JSON body, an unexpanded `$(…)` as the hook sees it) counts as a
+mutation. Read-only queries are unchanged. Resolving the node id with a
+live `node(id:)` query was considered and left out: it would put a network
+call on the decision path for a gain (skipping one prompt for a known
+private target) that does not justify it.
 
 Two decisions fixed here so they are not relitigated later:
 

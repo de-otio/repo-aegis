@@ -450,6 +450,28 @@ describe("hook guard-egress — public destination needs a human", { skip: !SUBP
     assert.equal(r.stdout, "");
   });
 
+  it("asks for a GraphQL mutation run from a private checkout, naming UNKNOWN rather than the checkout (#113)", () => {
+    const priv = makeRepo("graphql-private", { remote: "git@github.com:acme/notes.git", class: "private-strict" });
+    execFileSync("git", ["-C", priv, "config", "repo-aegis.visibility", "private"], { stdio: "ignore" });
+    const cmd =
+      "gh api graphql -F id=PR_kwDOAAAAAA -f query='mutation($id: ID!) { enqueuePullRequest(input: {pullRequestId: $id}) { clientMutationId } }'";
+    const r = runGuard(claudePayload(cmd, priv), { home, cwd: priv, shimOnPath: true });
+    assert.equal(r.code, 0, `expected ask; got ${r.code} ${r.stderr}`);
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecision, "ask");
+    assert.match(j.hookSpecificOutput.permissionDecisionReason, /UNRESOLVED destination/);
+    assert.match(j.hookSpecificOutput.permissionDecisionReason, /UNKNOWN repository/);
+    assert.ok(!j.hookSpecificOutput.permissionDecisionReason.includes("acme/notes"));
+    // The same command as a read is not asked about.
+    const read = runGuard(claudePayload("gh api graphql -f query='query { viewer { login } }'", priv), {
+      home,
+      cwd: priv,
+      shimOnPath: true,
+    });
+    assert.equal(read.code, 0);
+    assert.equal(read.stdout, "");
+  });
+
   it("reads the cwd from the payload, not from where the hook was spawned", () => {
     // Same reason as `hook check-write`: the hook process is spawned in
     // whatever directory the agent happened to be in. The command will run

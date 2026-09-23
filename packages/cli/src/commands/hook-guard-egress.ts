@@ -210,13 +210,14 @@ function loadRegistryOrEmpty(): { registry: Registry; note?: string } {
  */
 function destinationDetails(
   d: Destination | undefined,
-): { org: string; repo: string; visibility: string; class: string } | undefined {
+): { org: string; repo: string; visibility: string; class: string; unresolved?: string } | undefined {
   if (!d) return undefined;
   return {
     org: d.org,
     repo: d.repo,
     visibility: d.classKnown ? d.visibility : "unknown",
     class: d.classKnown ? d.class : "unknown",
+    ...(d.unresolved !== undefined && { unresolved: d.unresolved }),
   };
 }
 

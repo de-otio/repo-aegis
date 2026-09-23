@@ -243,8 +243,8 @@ export type {
 // One decision function behind the pre-push hook, the `gh` shim and the
 // agent pre-command hooks. Shape rules are unconditional; context rules
 // fail open; the decision is never a rewritten command.
-export { parseEgressIntents, parseApiEndpoint } from "./egress-intent.js";
-export type { EgressIntent, EgressVerb, SegmentJoin } from "./egress-intent.js";
+export { parseEgressIntents, parseApiEndpoint, isGraphqlEndpoint, graphqlOperationKind } from "./egress-intent.js";
+export type { EgressIntent, EgressVerb, GraphqlOperationKind, SegmentJoin } from "./egress-intent.js";
 export {
   decideEgress,
   resolveDestinationOffline,
