@@ -810,7 +810,7 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.ok(shell.action === "deny" && shell.reason.includes("UNKNOWN repository"), shell.action === "deny" ? shell.reason : "");
     assert.ok(shell.action === "deny" && !shell.reason.includes("acme/notes"));
     // Only a wildcard approval could cover a destination nobody can name.
-    assert.ok(shell.action === "deny" && shell.reason.includes("`repo-aegis approve *`"));
+    assert.ok(shell.action === "deny" && shell.reason.includes("`repo-aegis approve '*'`"));
     assert.deepEqual(askedFor, { org: "*", repo: "*" });
 
     const agent = decideEgress({ ...opts, capabilities: { ask: true } });

@@ -741,7 +741,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           : `an operation that is hard to undo`;
     const target = intent.verb === "git-push" && intent.refspec ? `${intent.refspec} → ` : "";
     const approveCommand = `repo-aegis approve ${
-      destination && destination.unresolved === undefined ? `${destination.org}/${destination.repo}` : "*"
+      destination && destination.unresolved === undefined ? `${destination.org}/${destination.repo}` : "'*'"
     }`;
     // Everything up to and including "A person must approve this"; the three
     // branches below differ only in what a person can do about it here.
