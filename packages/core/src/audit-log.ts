@@ -23,7 +23,6 @@
 import {
   appendFileSync,
   chmodSync,
-  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -81,9 +80,9 @@ function auditLogConfigPath(): string {
  */
 function readConfig(): AuditLogConfig {
   const path = auditLogConfigPath();
-  if (!existsSync(path)) return { enabled: false, rotateBytes: DEFAULT_ROTATE_BYTES };
   let parsed: unknown;
   try {
+    // A missing file throws ENOENT here and falls into the default below.
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return { enabled: false, rotateBytes: DEFAULT_ROTATE_BYTES };
@@ -107,8 +106,8 @@ function readConfig(): AuditLogConfig {
 export function setAuditLogEnabled(enabled: boolean): void {
   const path = auditLogConfigPath();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  let prev: AuditLogConfig = { enabled: false, rotateBytes: DEFAULT_ROTATE_BYTES };
-  if (existsSync(path)) prev = readConfig();
+  // readConfig already maps an absent file to the defaults.
+  const prev = readConfig();
   const next = { enabled, rotateBytes: prev.rotateBytes };
   writeFileSync(path, JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
   try {
@@ -144,12 +143,11 @@ export function activeAuditLogPath(): string {
  * active log and is racy without it.
  */
 function maybeRotate(activePath: string, rotateBytes: number): void {
-  if (!existsSync(activePath)) return;
   let size = 0;
   try {
     size = statSync(activePath).size;
   } catch {
-    return;
+    return; // no active log yet
   }
   if (size < rotateBytes) return;
   // Filename-safe ISO: 2026-05-02T12-34-56.789Z
@@ -201,11 +199,9 @@ export function appendAuditRecord(rec: Omit<AuditRecord, "ts" | "actor">): void 
   withLockSync(() => {
     maybeRotate(path, cfg.rotateBytes);
     const line = JSON.stringify(full) + "\n";
-    if (!existsSync(path)) {
-      writeFileSync(path, line, { mode: 0o600 });
-    } else {
-      appendFileSync(path, line);
-    }
+    // Append mode creates the file (with `mode`) when missing, so there is
+    // no exists-then-write window.
+    appendFileSync(path, line, { mode: 0o600 });
     try {
       chmodSync(path, 0o600);
     } catch {

@@ -6,7 +6,6 @@ import {
   mkdtempSync,
   mkdirSync,
   rmSync,
-  readFileSync,
   writeFileSync,
   existsSync,
   statSync,

@@ -196,7 +196,11 @@ function scanYarnLock(
     const m = /^\s+resolution:?\s+"?([^"\s]+)"?/.exec(lines[i] ?? "")
       ?? /^\s+resolved\s+"?([^"\s]+)"?/.exec(lines[i] ?? "");
     if (!m) continue;
-    const raw = (m[1] ?? "").replace(/#.*$/, "");
+    // Drop the `#<hash>` suffix. `indexOf` rather than `/#.*$/`: linear by
+    // construction, and the capture cannot hold a newline anyway.
+    const captured = m[1] ?? "";
+    const hashAt = captured.indexOf("#");
+    const raw = hashAt === -1 ? captured : captured.slice(0, hashAt);
     // berry resolutions look like `@scope/pkg@npm:1.2.3` — only URL-shaped
     // values carry a host worth checking.
     const host = hostOf(raw);
@@ -313,7 +317,12 @@ function redactUrlCredentials(url: string): string {
   // Unanchored and global on purpose: callers pass whole config *lines*
   // (`--index-url https://user:tok@host/…`), not bare URLs, so an anchored
   // match would silently fail to redact and echo the credential.
-  return url.replace(/([a-z0-9+.-]+:\/\/)[^/@\s]*@/gi, "$1<redacted>@");
+  //
+  // The scheme run is bounded ({1,32}) so the unanchored match stays linear: an
+  // unbounded `+` rescans a long `[a-z0-9+.-]` run from every start offset
+  // (quadratic on a hostile line). A longer scheme is still redacted — the
+  // match simply starts at its last 32 characters.
+  return url.replace(/([a-z0-9+.-]{1,32}:\/\/)[^/@\s]*@/gi, "$1<redacted>@");
 }
 
 /** `name = "foo"` → `foo`; null when the line is not a name assignment. */

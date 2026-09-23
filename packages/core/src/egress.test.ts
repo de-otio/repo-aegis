@@ -290,6 +290,41 @@ describe("scanRegistryEgress — requirements.txt", () => {
   });
 });
 
+describe("regex hardening — pathological input stays linear", () => {
+  // Each input used to trigger polynomial backtracking (CodeQL
+  // js/polynomial-redos). 50k chars made the old patterns take seconds; the
+  // budget is generous so a slow CI runner cannot flake it.
+  const N = 50_000;
+  const BUDGET_MS = 500;
+  const timed = (fn: () => void): number => {
+    const start = performance.now();
+    fn();
+    return performance.now() - start;
+  };
+
+  it("credential redaction: a long scheme-character run", () => {
+    const text = `--index-url https://${CA}/simple ` + "a".repeat(N);
+    const ms = timed(() => scanRegistryEgress([{ path: "requirements.txt", text }]));
+    assert.ok(ms < BUDGET_MS, `took ${ms.toFixed(0)} ms`);
+  });
+
+  it("credential redaction still covers a scheme longer than the bound", () => {
+    const scheme = "x".repeat(40);
+    const text = `--index-url ${scheme}://ci-user:s3cr3t@${CA}/simple -i https://${CA}/`;
+    const f = scanRegistryEgress([{ path: "requirements.txt", text }]);
+    assert.equal(f.length, 1);
+    assert.ok(!f[0]?.value.includes("s3cr3t"), "credential must not be echoed");
+  });
+
+  it("yarn.lock: a resolved URL with a long run of #", () => {
+    const text = `  resolved "https://${CA}/a.tgz` + "#".repeat(N) + '"';
+    let f: ReturnType<typeof scanRegistryEgress> = [];
+    const ms = timed(() => { f = scanRegistryEgress([{ path: "yarn.lock", text }]); });
+    assert.ok(ms < BUDGET_MS, `took ${ms.toFixed(0)} ms`);
+    assert.equal(f[0]?.value, `https://${CA}/a.tgz`);
+  });
+});
+
 describe("parser dispatch", () => {
   it("selects parsers by basename and ignores irrelevant files", () => {
     assert.ok(egressParserFor("a/b/package-lock.json"));

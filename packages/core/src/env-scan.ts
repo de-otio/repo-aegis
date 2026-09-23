@@ -97,7 +97,10 @@ function parsePipConf(text: string): Array<{ host: string; field: string }> {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
-    const m = /^(index-url|extra-index-url|find-links|trusted-host)\s*=\s*(.+)$/i.exec(line);
+    // `(\S.*)` rather than `(.+)`: the value must start where the `\s*` run
+    // ends, so the two cannot trade whitespace (polynomial backtracking on a
+    // line with a long space run and a lone `\r`).
+    const m = /^(index-url|extra-index-url|find-links|trusted-host)\s*=\s*(\S.*)$/i.exec(line);
     if (!m) continue;
     const field = (m[1] ?? "").toLowerCase();
     // A value may hold several whitespace-separated URLs.
@@ -141,10 +144,13 @@ function parseMavenSettings(text: string): Array<{ host: string; field: string }
   // Deliberately regex rather than a full XML parse: we want `<url>` values and
   // nothing else, and adding an XML dependency to read one tag is not worth the
   // supply-chain surface (same reasoning as the TOML lockfiles in egress.ts).
-  const re = /<url>\s*([^<]+?)\s*<\/url>/gi;
+  // The body is captured whole and trimmed in code: `\s*([^<]+?)\s*` lets
+  // three quantifiers share the same whitespace, which is cubic on an
+  // unterminated `<url>` followed by a long space run.
+  const re = /<url>([^<]*)<\/url>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
-    const host = hostOf(m[1] ?? "");
+    const host = hostOf((m[1] ?? "").trim());
     if (host !== "") out.push({ host, field: "url" });
   }
   return out;

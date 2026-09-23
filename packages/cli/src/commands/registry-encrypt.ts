@@ -118,7 +118,24 @@ export function registryEncrypt(opts: EncryptOptions): void {
     null,
     2,
   );
-  writeFileSync(marker, markerBody, { mode: 0o600 });
+  // `wx`: the existsSync guard above is for a friendly early exit; the
+  // exclusive create is what actually refuses to overwrite a marker that
+  // appeared in between (a concurrent encrypt).
+  try {
+    writeFileSync(marker, markerBody, { mode: 0o600, flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+      emitError(
+        {
+          code: "REGISTRY_ALREADY_ENCRYPTED",
+          error: "registry is already marked encrypted",
+          details: `marker file appeared at ${marker} during encryption`,
+        },
+        opts,
+      );
+    }
+    throw err;
+  }
 
   // Audit (best-effort). Emit AFTER the marker is written so the trail
   // reflects persisted state. The recipient is recorded — it's an
