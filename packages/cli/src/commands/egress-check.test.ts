@@ -25,13 +25,14 @@ function git(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: ["ignore", "ignore", "ignore"] });
 }
 
-/** A git repo with a GitHub origin and an optional explicit class. */
-function makeRepo(name: string, origin: string, cls?: string): string {
+/** A git repo with a GitHub origin, an optional explicit class and an optional cached visibility. */
+function makeRepo(name: string, origin: string, cls?: string, visibility?: string): string {
   const dir = join(root, name);
   mkdirSync(dir, { recursive: true });
   git(dir, ["init", "-q", "-b", "main"]);
   git(dir, ["remote", "add", "origin", origin]);
   if (cls !== undefined) git(dir, ["config", "repo-aegis.class", cls]);
+  if (visibility !== undefined) git(dir, ["config", "repo-aegis.visibility", visibility]);
   return dir;
 }
 
@@ -43,7 +44,8 @@ before(() => {
   root = mkdtempSync(join(homedir(), ".repo-aegis-egress-check-test-"));
   home = mkdtempSync(join(tmpdir(), "repo-aegis-egress-check-home-"));
   publicRepo = makeRepo("svc", "git@github.com:acme/svc.git", "public-eligible");
-  privateRepo = makeRepo("internal", "git@github.com:acme/internal.git");
+  // Recorded private: an uncached visibility is treated as public (#114).
+  privateRepo = makeRepo("internal", "git@github.com:acme/internal.git", undefined, "private");
   bodyFile = join(root, "pr-body.md");
   writeFileSync(bodyFile, "A perfectly ordinary pull-request body.\n");
 });

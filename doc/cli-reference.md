@@ -1012,13 +1012,20 @@ that checkout's live config (its snapshot, if the checkout is gone). The
 cache is written by everything that visits a repository and reads its
 class — `classify --apply`, `status`, `doctor`'s sweep, and the guard
 itself on every command it judges from inside a repository — so it needs
-no maintenance of its own; `doctor` is the way to fill it in one go. A
-destination that is in `personalOrgs` but nowhere in the cache is
-**treated as public-facing** (printed as `visibility uncached, treated as
-public`), so rule g asks rather than lets an unknown personal-org
-destination through. `public-eligible` with no cached visibility is
-public-facing, because the class is a declaration and the cache only an
-optimisation. Reasons name `<org>/<repo>`, visibility, class and ref —
+no maintenance of its own; `doctor` is the way to fill it in one go.
+**Only a recorded `private` lets a destination through unattended**: a
+destination whose visibility is unknown — nothing cached for it, in any org
+— is **treated as public-facing** (printed as `visibility uncached, treated
+as public`), so rule g asks, and a shell with no TTY and no live approval
+refuses. Before that, the guard makes one live lookup (`gh repo view
+<org>/<repo> --json visibility`, 5-second timeout) and, when it answers,
+records the result in the destination checkout's `repo-aegis.visibility` so
+the next call is offline again. A lookup that fails for any reason (no `gh`,
+wrong account, no network) leaves the destination unknown and refused: the
+network is only ever a way out of the refusal, never a condition for it.
+Set `REPO_AEGIS_VISIBILITY_LOOKUP=0` to skip the lookup. `public-eligible`
+is public-facing whatever the cache says, because the class is a
+declaration and the cache only an optimisation. Reasons name `<org>/<repo>`, visibility, class and ref —
 never payload content, matched substrings, or registry entries — and say
 where the class came from (`from --repo`, `from the API path`, `from the
 checkout at <path>`).
@@ -1035,18 +1042,26 @@ The generated pre-push hook passes git's `$2` (the remote URL) to both
    positively disjoint from the repo's trust boundary — deterministic,
    offline, no TTY involved;
 3. refuses with **`PUBLIC_PUSH_NEEDS_HUMAN`** (exit 2) when the destination
-   is public-facing and no human is present. The destination's class and
+   is public-facing and no human is present (a live `repo-aegis approve`
+   for it stands in for the person). The destination's class and
    visibility are this repository's own when the URL is its origin; when
    the URL names another repository, they come from that repository's
-   checkout via the destination cache (see above), or — in a personal org
-   with nothing cached — the destination is treated as public-facing;
+   checkout via the destination cache (see above). A visibility that is
+   still unknown after the one live lookup described above is treated as
+   public — the same rule the `gh` shim and the agent hooks apply — and
+   the refusal says so and names `repo-aegis approve <org>/<repo>` and
+   `repo-aegis status` (which records a private repository's visibility);
 4. otherwise prints one stderr line, the git-native receipt:
-   `repo-aegis: pushing <ref-or-range> → <org>/<repo> (<visibility>)`.
+   `repo-aegis: pushing <ref-or-range> → <org>/<repo> (<visibility>)`,
+   where an unknown visibility reads `visibility uncached, treated as
+   public`.
 
 With `--json`, the output object carries `destination: { org, repo,
 visibility, class, publicFacing, declaredBy }`, where `declaredBy` is
-`origin`, `cache`, or `none` (the values are this repository's and may not
-describe the destination). Either refusal is recorded in the audit log
+`origin`, `cache`, or `none` (the class is this repository's and may not
+describe the destination; the visibility is `unknown`), plus
+`assumedPublic: true` when the destination is public-facing only because
+its visibility is unknown. Either refusal is recorded in the audit log
 when it is on. The template change bumps the hook digest: installed copies
 report `HOOKS_SCRIPT_STALE` until `install hooks` runs again.
 

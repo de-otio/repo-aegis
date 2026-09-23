@@ -231,7 +231,19 @@ export {
   DEFAULT_ALLOWED_REGISTRY_HOSTS,
   readCachedVisibility,
   isPublicFacing,
+  treatAsPublicDestination,
 } from "./egress.js";
+// Issue #114: an unknown destination visibility is looked up once at egress
+// time and cached; a failed lookup leaves it unknown, i.e. treated as public.
+export {
+  lookupVisibilityViaGh,
+  effectiveVisibilityLookup,
+  refreshUnknownVisibility,
+  VISIBILITY_LOOKUP_ENV,
+  VISIBILITY_LOOKUP_TIMEOUT_MS,
+  UNKNOWN_VISIBILITY_HINT,
+} from "./visibility-lookup.js";
+export type { VisibilityLookup } from "./visibility-lookup.js";
 export type {
   RegistryFinding,
   EgressPolicy,
@@ -248,6 +260,7 @@ export type { EgressIntent, EgressVerb, GraphqlOperationKind, SegmentJoin } from
 export {
   decideEgress,
   resolveDestinationOffline,
+  refreshDestinationVisibility,
   scanPayloadAgainstDestination,
   isHumanPresent,
   isModeDependentPath,

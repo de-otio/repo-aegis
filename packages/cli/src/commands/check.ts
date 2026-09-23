@@ -26,6 +26,11 @@ import {
   parseRemoteUrl,
   computeTrustBoundary,
   readCachedVisibility,
+  treatAsPublicDestination,
+  refreshUnknownVisibility,
+  effectiveVisibilityLookup,
+  UNKNOWN_VISIBILITY_HINT,
+  type VisibilityLookup,
   recordWorkingTree,
   resolveCachedDestination,
   getRemoteUrl,
@@ -104,6 +109,12 @@ interface CheckOptions extends DenySetFloorOptions {
    * because refusing it elsewhere would only invite callers to drop it.
    */
   remoteUrl?: string;
+  /**
+   * Live lookup for a destination whose visibility is unknown (issue #114).
+   * Not a CLI flag: injectable for tests. Defaults to `gh repo view` unless
+   * `REPO_AEGIS_VISIBILITY_LOOKUP=0`.
+   */
+  lookupVisibility?: VisibilityLookup;
   /** With --history, only scan commits reachable from this revspec. */
   since?: string;
   maxFileBytes?: number;
@@ -328,6 +339,12 @@ export interface CheckDestination {
    * wrong for it.
    */
   declaredBy: "origin" | "cache" | "none";
+  /**
+   * Present (true) when the destination is public-facing only because its
+   * visibility is unknown — nothing cached, and the live lookup could not
+   * answer (issue #114).
+   */
+  assumedPublic?: true;
 }
 
 /** The ref or range this run is about, for reasons and the receipt line. */
@@ -395,28 +412,42 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   const ownUrl = getRemoteUrl(repo.cwd);
   const own = ownUrl === null ? null : parseRemoteUrl(ownUrl);
   const isOwn = own !== null && own.org === parsed.org && own.repo === parsed.repo;
-  let visibility = readCachedVisibility(repo.cwd);
+  // The pushing repository's cached visibility describes the destination only
+  // when the destination IS its origin. For any other URL it is "unknown"
+  // until the destination's own checkout (the cache) or GitHub says otherwise
+  // — reading this repo's value there is how a push to a foreign public
+  // repository was once judged by a private repository's cache.
+  // (`REPO_AEGIS_ASSUME_PUBLIC=1` still applies: `readCachedVisibility` honours it.)
+  let visibility: RepoVisibility = readCachedVisibility(repo.cwd);
+  if (!isOwn && visibility !== "public") visibility = "unknown";
   let cls = repo.class;
-  let publicFacing = isPublicFacing(repo, { visibility });
   let declaredBy: CheckDestination["declaredBy"] = isOwn ? "origin" : "none";
+  let workingTree: string | undefined = isOwn ? repo.cwd : undefined;
   const registry = registryForBoundary();
   if (!isOwn) {
     const cached = resolveCachedDestination(parsed.org, parsed.repo);
     if (cached !== null) {
       visibility = cached.visibility;
       cls = cached.class;
-      publicFacing = cached.class === "public-eligible" || cached.visibility === "public";
       declaredBy = "cache";
-    } else if ((registry?.personalOrgs ?? []).some(o => o.toLowerCase() === parsed.org)) {
-      // Nothing describes it, but it is in the operator's own org — where the
-      // public repositories live. Same rule as the egress policy: treated as
-      // public-facing, so the human-presence gate below applies rather than
-      // an unknown destination slipping through.
-      visibility = "unknown";
-      cls = "private-strict";
-      publicFacing = true;
+      if (cached.live) workingTree = cached.workingTree;
     }
   }
+  // Issue #114: an unknown visibility is looked up once (and cached into the
+  // destination's checkout when there is one). A lookup that fails leaves it
+  // unknown, and unknown is treated as public below — the network is only
+  // ever a way OUT of the refusal, never a condition for it.
+  if (visibility === "unknown" && cls !== "public-eligible") {
+    visibility = refreshUnknownVisibility(
+      { org: parsed.org, repo: parsed.repo, ...(workingTree !== undefined && { workingTree }) },
+      effectiveVisibilityLookup(opts.lookupVisibility),
+    );
+  }
+  // The one rule shared with the `gh` shim and the agent hooks.
+  const publicFacing = treatAsPublicDestination(cls, visibility);
+  const assumedPublic = publicFacing && cls !== "public-eligible" && visibility === "unknown";
+  // How the visibility is printed: the same words the egress policy uses.
+  const visLabel = assumedPublic ? "visibility uncached, treated as public" : visibility;
   const dest: CheckDestination = {
     org: parsed.org,
     repo: parsed.repo,
@@ -424,6 +455,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
     class: cls,
     publicFacing,
     declaredBy,
+    ...(assumedPublic && { assumedPublic: true as const }),
   };
 
   // --- CROSS_ORG_PUSH ------------------------------------------------------
@@ -482,9 +514,10 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
         code: "PUBLIC_PUSH_NEEDS_HUMAN",
         error:
           `refusing to push ${ref} to ${parsed.org}/${parsed.repo} ` +
-          `(${visibility}, ${cls}) with no human present: ` +
+          `(${visLabel}, ${cls}) with no human present: ` +
           `run it from a terminal, mint an approval first (\`repo-aegis approve ${parsed.org}/${parsed.repo}\`), ` +
-          `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).`,
+          `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).` +
+          (assumedPublic ? UNKNOWN_VISIBILITY_HINT : ""),
         details: {
           destination: `${parsed.org}/${parsed.repo}`,
           ref,
@@ -501,7 +534,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   // the agent's tool result. A model skims twenty lines of git output; it does
   // not skim one line naming a repository it did not intend.
   process.stderr.write(
-    `repo-aegis: pushing ${ref} → ${parsed.org}/${parsed.repo} (${visibility})\n`,
+    `repo-aegis: pushing ${ref} → ${parsed.org}/${parsed.repo} (${visLabel})\n`,
   );
 
   return dest;
