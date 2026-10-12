@@ -77,7 +77,7 @@ jobs:
           # widens what a later step (or an uploaded artifact) could expose.
           persist-credentials: false
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0  # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.0.0  # zizmor: ignore[cache-poisoning]
         with:
           node-version: '24'
       - name: Install repo-aegis
@@ -128,7 +128,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0  # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.0.0  # zizmor: ignore[cache-poisoning]
         with:
           node-version: '24'
       - name: Install repo-aegis
@@ -189,7 +189,7 @@ jobs:
           fi
       - name: Set up Node.js
         if: steps.detect.outputs.touched == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0  # zizmor: ignore[cache-poisoning]
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.0.0  # zizmor: ignore[cache-poisoning]
         with:
           node-version: '24'
       - name: Install repo-aegis
