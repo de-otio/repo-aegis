@@ -31,6 +31,6 @@
   "dependencies": {
     "@de-otio/repo-aegis-core": "^0.10.3",
     "@modelcontextprotocol/sdk": "^1.32.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   }
 }
