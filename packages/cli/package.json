@@ -27,6 +27,6 @@
     "@de-otio/repo-aegis-llm": "^0.10.3",
     "@de-otio/repo-aegis-scan": "^0.10.3",
     "commander": "^15.0.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   }
 }
