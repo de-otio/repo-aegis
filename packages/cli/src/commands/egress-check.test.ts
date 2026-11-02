@@ -479,8 +479,11 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     assert.equal(r.code, 2, r.stdout);
     const p = JSON.parse(r.stderr.trim()) as Refusal;
     assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.equal(p.details.destination, undefined);
-    assert.match(p.error, /not a valid GitHub owner\/repo/);
+    // PR 2a: a repository that is not a literal owner/repo is an UNRESOLVED destination (`*`), never a named one.
+    assert.equal(p.details.destination?.org, "*");
+    // The hostile string contains `| sh` inside a substitution: since the backstop, a shell reading a pipe is itself
+    // unresolved, and its intent is reported first. Either unresolved text is the right outcome; what matters is that nothing leaks.
+    assert.match(p.error, /not a literal <owner>\/<repo>|could not take this command line apart/);
     for (const frag of ["evil.example", "$(", "engagements add", "repo-aegis approve"]) {
       assert.ok(!r.stderr.includes(frag), `must not contain "${frag}"`);
     }
@@ -560,24 +563,47 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
   });
 
   describe("a destination name that is not a GitHub name never reaches the JSON (re-review)", () => {
-    const hostileArgs = (repo: string) => ["egress-check", "--", "issue", "create", "--repo", repo, "--body", "x"];
+    // Since PR 2a, `--repo` / URL values that are not literal owner/repo names are UNRESOLVED destinations
+    // (see the next two tests). A hostile name that DOES resolve still has to be handled by rules e-g:
+    // a `gh api` path names its repository literally, whatever characters the segment holds, so it is the
+    // route that carries one past the parser to rule g with a registered owner.
+    const apiArgs = (repo: string) => ["egress-check", "--", "api", "-X", "POST", `repos/acme/${repo}/issues`, "-f", "body=x"];
 
-    it("a registered owner with a hostile repo: the rule g deny drops the destination and the approve hint", () => {
+    for (const [label, repo, leaked] of [
+      ["a bidi override", "r\u202Egpj", ["\u202E", "\\u202e"]],
+      ["a zero-width space", "r\u200Bx", ["\u200B", "\\u200b"]],
+      ["a bell character", "r\u0007x", ["\u0007", "\\u0007"]],
+    ] as const) {
+      it(`a registered owner with ${label} in the repo: the rule g deny drops the destination and the approve hint`, () => {
+        const h = registryHome(`h-api-hostile-${label.replaceAll(" ", "-")}`, OWNERS_REGISTRY);
+        const r = runCli(h, privateRepo, apiArgs(repo));
+        assert.equal(r.code, 2, r.stdout);
+        const p = JSON.parse(r.stderr.trim()) as { code: string; error: string; details: { destination?: unknown } };
+        assert.equal(p.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+        assert.equal(p.details.destination, undefined);
+        assert.ok(!r.stderr.includes("repo-aegis approve"), r.stderr);
+        for (const frag of leaked) assert.ok(!r.stderr.includes(frag), `${JSON.stringify(frag)} in ${JSON.stringify(r.stderr)}`);
+      });
+    }
+
+    it("a --repo value with a shell substitution is refused as unresolved: no name, no approve hint", () => {
       const h = registryHome("h-hostile-repo", OWNERS_REGISTRY);
-      const r = runCli(h, privateRepo, hostileArgs("acme/r$(id)"));
+      const r = runCli(h, privateRepo, ["egress-check", "--", "issue", "create", "--repo", "acme/r$(id)", "--body", "x"]);
       assert.equal(r.code, 2, r.stdout);
-      const p = JSON.parse(r.stderr.trim()) as { code: string; error: string; details: { destination?: unknown } };
-      assert.equal(p.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
-      assert.equal(p.details.destination, undefined);
+      const p = JSON.parse(r.stderr.trim()) as { code: string; error: string; details: { destination?: { org: string } } };
+      assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+      assert.equal(p.details.destination?.org, "*");
       assert.ok(!r.stderr.includes("$(id)") && !r.stderr.includes("repo-aegis approve"), r.stderr);
     });
 
-    it("a bidi control character in the repo is dropped the same way", () => {
+    it("a --repo value with a bidi control character is refused the same way", () => {
       const h = registryHome("h-bidi-repo", OWNERS_REGISTRY);
-      const r = runCli(h, privateRepo, hostileArgs("acme/r\u202Egpj"));
+      const r = runCli(h, privateRepo, ["egress-check", "--", "issue", "create", "--repo", "acme/r\u202Egpj", "--body", "x"]);
       assert.equal(r.code, 2, r.stdout);
       assert.ok(!r.stderr.includes("\u202E") && !r.stderr.includes("\\u202e"), JSON.stringify(r.stderr));
-      assert.equal((JSON.parse(r.stderr.trim()) as { details: { destination?: unknown } }).details.destination, undefined);
+      const p = JSON.parse(r.stderr.trim()) as { code: string; details: { destination?: { org: string } } };
+      assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+      assert.equal(p.details.destination?.org, "*");
     });
   });
 

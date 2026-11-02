@@ -38,6 +38,7 @@ import {
   decideEgress,
   recordWorkingTree,
   describeVerb,
+  egressParseOptions,
   isHumanPresent,
   isPrintableDestination,
   loadRegistry,
@@ -318,7 +319,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     if (toolName !== undefined && !SHELL_TOOL_NAMES.has(toolName.toLowerCase())) process.exit(0);
     if (command === undefined) process.exit(0);
 
-    const intents = parseEgressIntents(command);
+    const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit
     // before touching the registry or the filesystem.
     if (intents.length === 0) process.exit(0);
