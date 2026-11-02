@@ -57,10 +57,10 @@ export {
 } from "./remote-url.js";
 // The pure ssh-config reader behind alias resolution (never `ssh -G`), and the
 // URL(s) a `git push <remote>` writes to (pushurl, insteadOf, pushInsteadOf).
-export { lookupSshHost, defaultSshDir, setDefaultSshDirForTests, SSH_INCLUDE_MAX_DEPTH } from "./ssh-config.js";
+export { lookupSshHost, defaultSshDir, SSH_INCLUDE_MAX_DEPTH } from "./ssh-config.js";
 export type { SshHostLookup, SshConfigOptions } from "./ssh-config.js";
-export { resolvePushUrls, detectSshOverride } from "./push-urls.js";
-export type { ParsedRemote, RemoteUrlClass, RemoteTarget, RemoteTransport } from "./remote-url.js";
+export { resolvePushUrls, detectSshOverride, isSshPreservingCommand } from "./push-urls.js";
+export type { ParsedRemote, RemoteUrlClass, RemoteTarget, RemoteTransport, SshOverrideKind } from "./remote-url.js";
 
 // ---- working-tree resolution (path-aware hook) --------------------------
 export {

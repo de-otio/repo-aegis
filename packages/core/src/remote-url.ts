@@ -283,6 +283,13 @@ export function parseRemoteUrl(raw: unknown): ParsedRemote | null {
   return null;
 }
 
+/**
+ * The ssh override in effect where a push runs (`detectSshOverride`, push-urls.ts):
+ * `none`; `preserving` (only moves the connection, git still sends the path in
+ * the URL); `other` (a program that can send a DIFFERENT path than the URL names).
+ */
+export type SshOverrideKind = "none" | "preserving" | "other";
+
 /** Where a push URL goes, for rule h. */
 export type RemoteTarget =
   | { kind: "github"; org: string; repo: string }
@@ -305,8 +312,12 @@ function aliasUnresolved(why: string): RemoteTarget {
  *
  * - A host that resolves to GitHub (literal github.com / ssh.github.com, or an
  *   alias whose ssh-config `HostName` is one of those) is GitHub: the owner in
- *   the path is judged, override or not. If an override really sends the bytes
- *   to another server, they leave GitHub, which is outside the guard's model.
+ *   the path is judged, under a `preserving` override or none. If the override
+ *   really sends the bytes to another server, they leave GitHub, which is
+ *   outside the guard's model.
+ * - Under an `other` override (a program git runs instead of plain ssh, which
+ *   can rewrite the repository path in `git-receive-pack '<path>'`), EVERY ssh
+ *   URL is unresolved, literal github.com included.
  * - Any OTHER ssh host (a plain non-GitHub name, an alias the config does not
  *   mention, an alias mapped to another host) is "not GitHub" only when no
  *   override is present. Under an override `ctx.sshOverride`, or a proxy in the
@@ -329,18 +340,25 @@ function aliasUnresolved(why: string): RemoteTarget {
 export function resolveRemoteUrl(
   raw: unknown,
   lookup: (host: string) => SshHostLookup = lookupSshHost,
-  ctx: { sshOverride?: boolean; unknownDotlessUnresolved?: boolean } = {},
+  ctx: { sshOverride?: SshOverrideKind; unknownDotlessUnresolved?: boolean } = {},
 ): RemoteTarget {
   try {
     const c = classifyRemoteUrl(raw);
+    const override = ctx.sshOverride ?? "none";
+    const programOverride = (): RemoteTarget => ({
+      kind: "unresolved",
+      why: "an ssh override program (GIT_SSH, or a GIT_SSH_COMMAND or core.sshCommand that is not plain ssh) can send a different repository path than the URL names",
+    });
     switch (c.kind) {
       case "github":
+        if (c.transport === "ssh" && override === "other") return programOverride();
         return { kind: "github", org: c.org, repo: c.repo };
       case "non-github":
         return { kind: "non-github" };
       case "opaque":
         return { kind: "unresolved", why: c.why };
       case "alias": {
+        if (override === "other") return programOverride();
         const found = lookup(c.host);
         const asGithub = (): RemoteTarget => {
           const g = githubOrOpaque(c.path, "ssh");
@@ -349,7 +367,7 @@ export function resolveRemoteUrl(
             : { kind: "unresolved", why: NOT_CLEAN };
         };
         if (found.kind === "unresolved") return aliasUnresolved(found.why);
-        const redirected = ctx.sshOverride === true || found.proxied === true;
+        const redirected = override !== "none" || found.proxied === true;
         const notGithub = (): RemoteTarget =>
           redirected
             ? aliasUnresolved("an ssh override or proxy is in effect, and a host that does not look like GitHub is what a redirect to GitHub looks like")

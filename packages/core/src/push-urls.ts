@@ -19,7 +19,7 @@
 // The pre-push hook needs none of this: git hands it the URL after all
 // rewriting, once per push URL.
 import { execFileSync } from "node:child_process";
-import { looksLikeRemoteUrl } from "./remote-url.js";
+import { looksLikeRemoteUrl, type SshOverrideKind } from "./remote-url.js";
 
 function gitOut(cwd: string, args: string[]): string | null {
   try {
@@ -85,35 +85,118 @@ export function resolvePushUrls(cwd: string, remote: string): string[] | null {
   return [rewriteForPush(cwd, remote.trim())];
 }
 
+/**
+ * Tokenise `cmd` the way the shell git runs it through would, far enough to
+ * answer one question: is it plain `ssh ...` (first word `ssh` or `/usr/bin/ssh`)
+ * with nothing that runs a second command? Quotes and backslash escapes are
+ * honoured, so a `;` or `$(` inside a quoted `-o ProxyCommand="..."` value (the
+ * shape of Claude Code's own sandbox template) is inert, but an unquoted
+ * `; | & < > ( )`, backtick, newline, `$(` or `${` (also inside double quotes
+ * unless escaped) is not. An unterminated quote is not plain ssh.
+ */
+function isPlainSshCommand(cmd: string): boolean {
+  let word = "";
+  let started = false;
+  let done = false;
+  let mode: "u" | "s" | "d" = "u";
+  const add = (s: string): void => {
+    started = true;
+    if (!done) word += s;
+  };
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    const next = cmd[i + 1];
+    if (mode === "s") {
+      if (c === "'") mode = "u";
+      else add(c);
+    } else if (mode === "d") {
+      if (c === "\\" && next !== undefined && "$`\"\\\n".includes(next)) {
+        add(next);
+        i++;
+      } else if (c === '"') {
+        mode = "u";
+      } else if (c === "`" || (c === "$" && (next === "(" || next === "{"))) {
+        return false;
+      } else {
+        add(c);
+      }
+    } else if (c === "\\") {
+      if (next === undefined) return false;
+      if (next !== "\n") add(next);
+      i++;
+    } else if (c === "'") {
+      mode = "s";
+      started = true;
+    } else if (c === '"') {
+      mode = "d";
+      started = true;
+    } else if (";|&<>`()\n\r".includes(c) || (c === "$" && (next === "(" || next === "{"))) {
+      return false;
+    } else if (c === " " || c === "\t") {
+      if (started) done = true;
+    } else {
+      add(c);
+    }
+  }
+  return mode === "u" && (word === "ssh" || word === "/usr/bin/ssh");
+}
+
+/** `RemoteCommand` anywhere (`-o RemoteCommand=...`, `-oRemoteCommand ...`): rejected to be safe. */
+const REMOTE_COMMAND_RE = /remote\s*command/i;
+
+/** A `GIT_SSH_COMMAND` / `core.sshCommand` value that is plain ssh and leaves the command git sends alone. */
+export function isSshPreservingCommand(cmd: string): boolean {
+  return isPlainSshCommand(cmd) && !REMOTE_COMMAND_RE.test(cmd);
+}
 
 /**
- * Whether ANY ssh override is in effect where a push runs: `GIT_SSH_COMMAND`,
- * `GIT_SSH` or `GIT_SSH_VARIANT` in `env`, or `core.sshCommand` in the git
- * config seen from `cwd` (which includes `git -c`, passed down to hooks).
- * Callers pass the environment the push will run with.
+ * Which ssh override, if any, is in effect where a push runs, in three classes
+ * (`SshOverrideKind`):
  *
- * Why there is no list of "harmless" overrides (and no trust in Claude Code's
- * own sandbox `GIT_SSH_COMMAND`): an ssh redirect changes which SERVER receives
- * the push, never the repository path sent to `git-receive-pack`. So:
+ *   - `none`: no override.
+ *   - `preserving`: an override that can only move the CONNECTION, never change
+ *     what git sends. `GIT_SSH` is unset, `GIT_SSH_VARIANT` is unset or `ssh`,
+ *     and every `GIT_SSH_COMMAND` / `core.sshCommand` value is plain `ssh ...`
+ *     ({@link isSshPreservingCommand}: first word `ssh` or `/usr/bin/ssh`, no
+ *     unquoted shell metacharacters, no RemoteCommand). A name-resolution
+ *     override in the environment (`HOSTALIASES`, `LOCALDOMAIN`, `RES_OPTIONS`)
+ *     also counts: it redirects a host name, nothing more.
+ *   - `other`: anything else (`GIT_SSH` set, a program that is not `ssh`, shell
+ *     metacharacters). git runs the override as `<override> user@host
+ *     "git-receive-pack '<path>'"`, so such a program can send a DIFFERENT
+ *     repository path than the URL names.
  *
- *   - a host the guard resolves to GitHub (literal github.com / ssh.github.com,
- *     or an alias whose ssh-config HostName is one of those) is judged by the
- *     owner in the path, override or not. If an override actually sends the
- *     bytes to another server, they leave GitHub's world, which is outside the
- *     guard's model;
- *   - any OTHER host is only believed to be "not GitHub" when no override is
- *     present. Under an override, a non-GitHub-looking host is exactly what a
- *     redirect to GitHub looks like, so it is unresolved (`resolveRemoteUrl`).
+ * Callers pass the environment the push will run with; `core.sshCommand` is
+ * read from the git config seen from `cwd` (which includes `git -c`).
  *
- * With that rule nothing needs to be proved about what an override does, so
- * the sandbox template, the proxy script it evals and the shell that runs it
- * (SHELL, BASH_FUNC_*, ZDOTDIR, loader variables...) are all irrelevant: the
- * sandbox's own override is simply an override, and the operator's usual
- * remotes (literal github.com, or an alias with HostName github.com) are
- * judged by owner as always.
+ * Why no list of "harmless" overrides, and no trust in Claude Code's own
+ * sandbox `GIT_SSH_COMMAND` (its metacharacters sit inside a quoted
+ * `-o ProxyCommand` value, so it classifies as `preserving` like any ssh): an
+ * ssh redirect or proxy changes which SERVER receives the push, never the
+ * repository path, which travels inside the ssh channel. So:
+ *
+ *   - under `preserving`, a host the guard resolves to GitHub (literal
+ *     github.com / ssh.github.com, or an alias whose ssh-config HostName is one
+ *     of those) is judged by the owner in the path. If the override actually
+ *     sends the bytes to another server, they leave GitHub's world, which is
+ *     outside the guard's model. Any OTHER host is only believed to be "not
+ *     GitHub" with no override; under one it is unresolved (`resolveRemoteUrl`);
+ *   - under `other`, EVERY ssh URL is unresolved, literal github.com included.
+ *
+ * The sandbox template's proxy script, the shell that runs it (SHELL,
+ * BASH_FUNC_*, ZDOTDIR, loader variables...) are all irrelevant to this.
  */
-export function detectSshOverride(cwd: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  const set = (name: string): boolean => (env[name] ?? "").trim() !== "";
-  if (set("GIT_SSH_COMMAND") || set("GIT_SSH") || set("GIT_SSH_VARIANT")) return true;
-  return (gitOut(cwd, ["config", "--get", "core.sshCommand"]) ?? "").trim() !== "";
+export function detectSshOverride(cwd: string, env: NodeJS.ProcessEnv = process.env): SshOverrideKind {
+  const val = (name: string): string => (env[name] ?? "").trim();
+  if (val("GIT_SSH") !== "") return "other";
+  const variant = val("GIT_SSH_VARIANT");
+  if (variant !== "" && variant !== "ssh") return "other";
+  const commands = [val("GIT_SSH_COMMAND"), (gitOut(cwd, ["config", "--get", "core.sshCommand"]) ?? "").trim()].filter(
+    c => c !== "",
+  );
+  if (commands.some(c => !isSshPreservingCommand(c))) return "other";
+  if (variant !== "" || commands.length > 0) return "preserving";
+  // These change how a host NAME resolves, so a non-GitHub-looking host may be GitHub.
+  if (["HOSTALIASES", "LOCALDOMAIN", "RES_OPTIONS"].some(n => val(n) !== "")) return "preserving";
+  return "none";
 }

@@ -488,10 +488,69 @@ describe("an ssh override: GitHub-resolving hosts are judged by owner, every oth
   const OVERRIDES: Array<[string, Record<string, string>, Array<[string, string]>]> = [
     ["the sandbox GIT_SSH_COMMAND template", { GIT_SSH_COMMAND: SANDBOX_STYLE, SRT_SSH_PROXY_COMMAND: FAKE_SRT }, []],
     ["a plain GIT_SSH_COMMAND", { GIT_SSH_COMMAND: "ssh -i /nowhere/key" }, []],
-    ["GIT_SSH", { GIT_SSH: "/nowhere/wrapper" }, []],
-    ["GIT_SSH_VARIANT", { GIT_SSH_VARIANT: "ssh" }, []],
+    ["GIT_SSH_VARIANT=ssh", { GIT_SSH_VARIANT: "ssh" }, []],
     ["core.sshCommand", {}, [["core.sshCommand", "ssh -i /nowhere/key"]]],
+    ["/usr/bin/ssh with a quoted ProxyCommand", { GIT_SSH_COMMAND: "/usr/bin/ssh -o ProxyCommand='nc %h %p; true'" }, []],
+    ["HOSTALIASES", { HOSTALIASES: "/nowhere/aliases" }, []],
+    ["LOCALDOMAIN", { LOCALDOMAIN: "example.org" }, []],
+    ["RES_OPTIONS", { RES_OPTIONS: "ndots:3" }, []],
   ];
+
+  // Overrides that can send a DIFFERENT repository path than the URL names (P1).
+  const PROGRAM_OVERRIDES: Array<[string, Record<string, string>, Array<[string, string]>]> = [
+    ["GIT_SSH", { GIT_SSH: "/nowhere/wrapper" }, []],
+    ["a wrapper program as GIT_SSH_COMMAND", { GIT_SSH_COMMAND: "/nowhere/wrapper" }, []],
+    ["a wrapper program as core.sshCommand", {}, [["core.sshCommand", "/nowhere/wrapper"]]],
+    ["ssh followed by a second command", { GIT_SSH_COMMAND: "ssh; /nowhere/wrapper" }, []],
+    ["ssh piped to a program", { GIT_SSH_COMMAND: "ssh | /nowhere/wrapper" }, []],
+    ["a command substitution", { GIT_SSH_COMMAND: "ssh $(/nowhere/wrapper)" }, []],
+    ["a prefix assignment", { GIT_SSH_COMMAND: "FOO=1 ssh" }, []],
+    ["ssh with RemoteCommand", { GIT_SSH_COMMAND: "ssh -o RemoteCommand=/nowhere/x" }, []],
+    ["GIT_SSH_VARIANT=simple", { GIT_SSH_VARIANT: "simple" }, []],
+    ["the sandbox template AND a GIT_SSH", { GIT_SSH_COMMAND: SANDBOX_STYLE, GIT_SSH: "/nowhere/wrapper" }, []],
+  ];
+
+  for (const [label, env, config] of PROGRAM_OVERRIDES) {
+    describe(`with ${label}`, () => {
+      it("EVERY ssh URL is unresolved: github.com, an alias to GitHub, an unknown host", () => {
+        useSshConfig();
+        for (const url of [
+          "git@github.com:acme/x.git",
+          "ssh://git@github.com/acme/x.git",
+          "git@gh-work:acme/x.git",
+          "git@github.com-personal:acme/x.git",
+          "git@zz:acme/x.git",
+        ]) {
+          const d = withProcessEnv(env, () => dest(url, config));
+          assert.equal(d?.unresolved, "opaque-url", url);
+          assert.match(d?.unresolvedWhy ?? "", /different repository path/, url);
+        }
+      });
+
+      it("rule h refuses even a REGISTERED owner (the wrapper could send another repository)", () => {
+        const registry = { engagements: [], alwaysBlock: [], personalOrgs: ["acme"], schemaVersion: 2 } as unknown as Registry;
+        const repo = makeRepo([["remote.origin.url", "git@github.com:acme/x.git"], ...config]);
+        const d = withProcessEnv(env, () =>
+          decideEgress({
+            intents: parseEgressIntents("git push origin main"),
+            cwd: repo,
+            registry,
+            registryState: "loaded",
+            humanPresent: false,
+            capabilities: { ask: false },
+            lookupVisibility: () => null,
+            findApproval: () => null,
+          }),
+        );
+        assert.equal(d.action === "deny" && d.code, "UNREGISTERED_OWNER_EGRESS");
+      });
+
+      it("https is untouched", () => {
+        const d = withProcessEnv(env, () => dest("https://github.com/acme/x.git", config));
+        assert.equal(d?.org, "acme");
+      });
+    });
+  }
 
   for (const [label, env, config] of OVERRIDES) {
     describe(`with ${label}`, () => {
@@ -577,12 +636,67 @@ describe("an ssh override: GitHub-resolving hosts are judged by owner, every oth
 
   it("detectSshOverride: any of GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT or core.sshCommand, and nothing else", () => {
     const repo = makeRepo();
-    assert.equal(detectSshOverride(repo, {}), false);
-    assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: "  " }), false);
-    for (const name of ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]) {
-      assert.equal(detectSshOverride(repo, { [name]: "ssh" }), true, name);
+    assert.equal(detectSshOverride(repo, {}), "none");
+    assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: "  " }), "none");
+    assert.equal(detectSshOverride(repo, { GIT_SSH_VARIANT: "ssh" }), "preserving");
+    assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: "ssh" }), "preserving");
+    assert.equal(detectSshOverride(makeRepo([["core.sshCommand", "ssh -i k"]]), {}), "preserving");
+    // Name-resolution overrides, when non-empty, may redirect a host name.
+    for (const name of ["HOSTALIASES", "LOCALDOMAIN", "RES_OPTIONS"]) {
+      assert.equal(detectSshOverride(repo, { [name]: "x" }), "preserving", name);
+      assert.equal(detectSshOverride(repo, { [name]: " " }), "none", name);
     }
-    assert.equal(detectSshOverride(makeRepo([["core.sshCommand", "ssh -i k"]]), {}), true);
+  });
+
+  it("P1: ssh-preserving means plain ssh as the first word, with no second command (the sandbox template included, fake credential)", () => {
+    const repo = makeRepo();
+    const preserving = [
+      "ssh",
+      "/usr/bin/ssh",
+      "ssh -i key",
+      "ssh -o StrictHostKeyChecking=no -p 22",
+      "ssh -o ProxyCommand='nc %h %p'",
+      `ssh -o ProxyCommand="nc %h %p; true"`,
+      "'ssh' -i key",
+      SANDBOX_STYLE,
+      // The same template with the (fake) proxy script inlined instead of read from the environment.
+      `ssh -o ProxyCommand="/bin/sh -c 'echo fake-not-a-real-credential | nc 127.0.0.1 1' sh '%h' %p"`,
+    ];
+    for (const c of preserving) assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: c }), "preserving", c);
+    const other = [
+      "ssh; /tmp/w",
+      "ssh && /tmp/w",
+      "ssh | /tmp/w",
+      "ssh > /tmp/w",
+      "ssh < /tmp/w",
+      "ssh `/tmp/w`",
+      "ssh $(/tmp/w)",
+      "ssh ${X}",
+      'ssh "$(/tmp/w)"',
+      "ssh\n/tmp/w",
+      "ssh\r/tmp/w",
+      "/tmp/w",
+      "./ssh",
+      "sshx",
+      "/usr/local/bin/ssh",
+      "env ssh",
+      "FOO=1 ssh",
+      "ssh -o RemoteCommand=/tmp/w",
+      "ssh -oRemoteCommand=/tmp/w",
+      "ssh -o 'Remote Command=x'",
+      "ssh -o ProxyCommand='nc",
+      'ssh "unterminated',
+      "ssh &",
+      "ssh (x)",
+      "",
+    ].filter(c => c !== "");
+    for (const c of other) assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: c }), "other", JSON.stringify(c));
+    // The same classification applies to core.sshCommand, and ANY non-preserving source wins.
+    assert.equal(detectSshOverride(makeRepo([["core.sshCommand", "/tmp/w"]]), {}), "other");
+    assert.equal(detectSshOverride(makeRepo([["core.sshCommand", "/tmp/w"]]), { GIT_SSH_COMMAND: "ssh" }), "other");
+    assert.equal(detectSshOverride(repo, { GIT_SSH: "/tmp/w" }), "other");
+    assert.equal(detectSshOverride(repo, { GIT_SSH_VARIANT: "simple" }), "other");
+    assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: "ssh", GIT_SSH: "/tmp/w" }), "other");
   });
 
   it("Q2: the default ssh directory is the passwd home's, whatever HOME says", () => {

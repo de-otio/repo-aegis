@@ -25,10 +25,14 @@ import {
   approvalsPath,
   mintApproval,
   HOOK_SCRIPTS,
-  setDefaultSshDirForTests,
   parseEgressIntents,
   resolveDestinationOffline,
 } from "@de-otio/repo-aegis-core";
+
+// A test seam, deliberately not exported from the core package's public index.
+const { setDefaultSshDirForTests } = (await import(
+  new URL("../../../core/dist/ssh-config.js", import.meta.url).href
+)) as { setDefaultSshDirForTests(dir: string | undefined): void };
 
 let tmp: string;
 let originalCwd: string;
@@ -638,8 +642,8 @@ describe("pre-push rule h — an ssh override: GitHub-resolving hosts are judged
   const OVERRIDES: Array<[string, Record<string, string>, Array<[string, string]>]> = [
     ["the sandbox GIT_SSH_COMMAND template", { GIT_SSH_COMMAND: SANDBOX_STYLE, SRT_SSH_PROXY_COMMAND: "fake-not-a-real-proxy-command" }, []],
     ["a plain GIT_SSH_COMMAND", { GIT_SSH_COMMAND: "ssh -i /nowhere/key" }, []],
-    ["GIT_SSH", { GIT_SSH: "/nowhere/wrapper" }, []],
-    ["GIT_SSH_VARIANT", { GIT_SSH_VARIANT: "ssh" }, []],
+    ["GIT_SSH_VARIANT=ssh", { GIT_SSH_VARIANT: "ssh" }, []],
+    ["HOSTALIASES", { HOSTALIASES: "/nowhere/aliases" }, []],
     ["core.sshCommand", {}, [["core.sshCommand", "ssh -i /nowhere/key"]]],
   ];
   const withVars = <R>(vars: Record<string, string>, fn: () => R): R => {
@@ -686,6 +690,27 @@ describe("pre-push rule h — an ssh override: GitHub-resolving hosts are judged
           assert.equal(ok.exitCode, undefined, `${alias}: ${ok.stderr}`);
         }
       });
+    });
+  }
+
+  // Overrides that can send a DIFFERENT repository path than the URL names (P1).
+  const PROGRAM_OVERRIDES: Array<[string, Record<string, string>, Array<[string, string]>]> = [
+    ["GIT_SSH", { GIT_SSH: "/nowhere/wrapper" }, []],
+    ["a wrapper program as GIT_SSH_COMMAND", { GIT_SSH_COMMAND: "/nowhere/wrapper" }, []],
+    ["a wrapper program as core.sshCommand", {}, [["core.sshCommand", "/nowhere/wrapper"]]],
+    ["ssh followed by a second command", { GIT_SSH_COMMAND: "ssh; /nowhere/wrapper" }, []],
+  ];
+  for (const [label, vars, config] of PROGRAM_OVERRIDES) {
+    it(`with ${label}: a REGISTERED owner on literal github.com is unresolved and refused`, () => {
+      const ctx = setup(`h2-prog-${n++}`);
+      const repo = makeRepo(`h2-prog-repo-${n}`, "git@github.com:acme/x.git", config);
+      const r = refusalOf(withVars(vars, () => pushCheck(ctx, repo, "git@github.com:acme/x.git")));
+      assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
+      assert.equal(r.details.destination, "(unresolved)");
+      assert.match(r.error, /different repository path/);
+      // https is untouched.
+      const ok = withVars(vars, () => pushCheck(ctx, repo, "https://github.com/acme/x.git"));
+      assert.equal(ok.exitCode, undefined, ok.stderr);
     });
   }
 
@@ -791,25 +816,44 @@ describe("pre-push rule h — the shipped pre-push hook script, end to end (L4)"
       `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(cli)} "$@"\n`,
     );
     chmodSync(join(binDir, "repo-aegis"), 0o755);
+    // A plain `ssh` first on PATH that serves the local bare repo, and records any path git sent it.
+    writeFileSync(
+      join(binDir, "ssh"),
+      `#!/bin/sh\nfor a in "$@"; do last="$a"; done\necho "$last" >> ${JSON.stringify(join(tmp, "ssh-paths.log"))}\nexec git receive-pack ${JSON.stringify(bare)}\n`,
+    );
+    chmodSync(join(binDir, "ssh"), 0o755);
+    // A WRAPPER program (not ssh): git hands it the path, and it could send another one.
+    writeFileSync(
+      join(tmp, "wrapper.sh"),
+      `#!/bin/sh\necho wrapper-ran >> ${JSON.stringify(join(tmp, "wrapper.log"))}\nexec git receive-pack ${JSON.stringify(bare)}\n`,
+    );
+    chmodSync(join(tmp, "wrapper.sh"), 0o755);
     mkdirSync(join(tmp, "shipped-hooks"));
     writeFileSync(join(tmp, "shipped-hooks", "pre-push"), HOOK_SCRIPTS["pre-push"]);
     chmodSync(join(tmp, "shipped-hooks", "pre-push"), 0o755);
   });
 
   /** Run the REAL `git push` with the shipped hook; returns the exit status and stderr. */
-  function realPush(ctx: Ctx, repo: string, remote: string): { status: number; stderr: string } {
+  function realPush(
+    ctx: Ctx,
+    repo: string,
+    remote: string,
+    extraEnv: NodeJS.ProcessEnv = {},
+    dest = "main",
+  ): { status: number; stderr: string } {
     try {
-      execFileSync("git", ["-c", `core.hooksPath=${join(tmp, "shipped-hooks")}`, "push", remote, "main"], {
+      execFileSync("git", ["-c", `core.hooksPath=${join(tmp, "shipped-hooks")}`, "push", remote, `main:refs/heads/${dest}`], {
         cwd: repo,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
         env: hermeticGitEnv({
           PATH: `${binDir}:${process.env["PATH"] ?? ""}`,
-          GIT_SSH_COMMAND: fakeSsh,
+          GIT_SSH_COMMAND: "ssh",
           HOME: ctx.userHome,
           REPO_AEGIS_HOME: ctx.home,
           REPO_AEGIS_REGISTRY: ctx.registry,
           REPO_AEGIS_VISIBILITY_LOOKUP: "0",
+          ...extraEnv,
         }),
       });
       return { status: 0, stderr: "" };
@@ -835,6 +879,35 @@ describe("pre-push rule h — the shipped pre-push hook script, end to end (L4)"
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /UNREGISTERED_OWNER_EGRESS/);
     assert.match(r.stderr, /stranger\/x/);
+  });
+
+  it("P1: a wrapper set as core.sshCommand in an earlier call makes even a registered github.com URL refused, and the wrapper never runs", () => {
+    const ctx = setup("e2e-wrap-config");
+    const repo = makeRepo("e2e-wrap-config-repo", "git@github.com:acme/x.git");
+    git(repo, ["config", "core.sshCommand", join(tmp, "wrapper.sh")]);
+    const r = realPush(ctx, repo, "origin", { GIT_SSH_COMMAND: undefined });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /UNREGISTERED_OWNER_EGRESS/);
+    assert.match(r.stderr, /different repository path/);
+    // (git opens the connection to read the remote's refs BEFORE the pre-push hook runs, so the wrapper may run once for that; what matters is that the push itself is refused.)
+  });
+
+  it("P1: a wrapper as GIT_SSH_COMMAND or GIT_SSH is refused the same way", () => {
+    for (const extra of [{ GIT_SSH_COMMAND: join(tmp, "wrapper.sh") }, { GIT_SSH: join(tmp, "wrapper.sh") }]) {
+      const ctx = setup(`e2e-wrap-env-${n++}`);
+      const repo = makeRepo(`e2e-wrap-env-repo-${n}`, "git@github.com:acme/x.git");
+      const r = realPush(ctx, repo, "origin", extra);
+      assert.notEqual(r.status, 0, JSON.stringify(extra));
+      assert.match(r.stderr, /UNREGISTERED_OWNER_EGRESS/);
+    }
+  });
+
+  it("P1 control: core.sshCommand = a plain `ssh -i key` stays ssh-preserving, so a registered owner is pushed", () => {
+    const ctx = setup("e2e-wrap-ok");
+    const repo = makeRepo("e2e-wrap-ok-repo", "git@github.com:acme/x.git");
+    git(repo, ["config", "core.sshCommand", "ssh -i /nowhere/key"]);
+    const r = realPush(ctx, repo, "origin", { GIT_SSH_COMMAND: undefined }, "ctl-branch");
+    assert.equal(r.status, 0, r.stderr);
   });
 
   it("a push through a bracketed URL is refused by the hook (C1)", () => {

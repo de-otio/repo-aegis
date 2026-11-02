@@ -299,7 +299,7 @@ describe("only the guard being SURE makes a push non-GitHub (M2, M4, L1)", () =>
   it("under any ssh override, GitHub-resolving hosts are judged by owner and every other ssh host is unresolved (H2)", () => {
     const toGithub = ssh("github.com");
     const toOther = ssh("git.example.org");
-    const O = { sshOverride: true };
+    const O = { sshOverride: "preserving" as const };
     // Resolves to GitHub: the owner in the path is judged (a redirect changes the server, not the path).
     assert.deepEqual(resolveRemoteUrl("git@github.com:stranger/r.git", NO_SSH_CONFIG, O), { kind: "github", org: "stranger", repo: "r" });
     assert.deepEqual(resolveRemoteUrl("git@ssh.github.com:stranger/r.git", NO_SSH_CONFIG, O), { kind: "github", org: "stranger", repo: "r" });
@@ -319,6 +319,29 @@ describe("only the guard being SURE makes a push non-GitHub (M2, M4, L1)", () =>
     // An override changes nothing for a non-ssh transport.
     assert.equal(resolveRemoteUrl("https://github.com/stranger/r.git", toGithub, O).kind, "github");
     assert.equal(resolveRemoteUrl("https://gitlab.example/stranger/r.git", toGithub, O).kind, "non-github");
+  });
+
+  it("under an `other` override (a program that can rewrite the repository path) EVERY ssh URL is unresolved, github.com included (P1)", () => {
+    const X = { sshOverride: "other" as const };
+    const toGithub = ssh("github.com");
+    for (const u of [
+      "git@github.com:acme/x.git",
+      "ssh://git@github.com/acme/x.git",
+      "[github.com]:acme/x.git",
+      "git@ssh.github.com:acme/x.git",
+      "git@gh-work:acme/x.git",
+      "git@github.com-personal:acme/x.git",
+      "git@zz:acme/x.git",
+    ]) {
+      assert.equal(resolveRemoteUrl(u, toGithub, X).kind, "unresolved", u);
+    }
+    // Only ssh transports are affected.
+    assert.equal(resolveRemoteUrl("https://github.com/acme/x.git", toGithub, X).kind, "github");
+    assert.equal(resolveRemoteUrl("https://gitlab.example/x/y.git", toGithub, X).kind, "non-github");
+    assert.match(
+      (resolveRemoteUrl("git@github.com:acme/x.git", toGithub, X) as { why: string }).why,
+      /different repository path/,
+    );
   });
 
   it("a proxy in the applying ssh config acts as an override for that host only (proxied)", () => {
