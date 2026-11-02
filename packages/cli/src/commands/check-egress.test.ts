@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureOutput, withEnv, lastJsonLine, scrubGitEnv } from "../_test-utils.js";
+import { captureOutput, withEnv, lastJsonLine, scrubGitEnv, PERSON_ANCESTRY } from "../_test-utils.js";
 import { check } from "./check.js";
 import { approvalsPath, mintApproval, setAncestryReaderForTests } from "@de-otio/repo-aegis-core";
 
@@ -113,7 +113,7 @@ function withStderrTty<T>(isTty: boolean, fn: () => T): T {
     configurable: true,
     writable: true,
   });
-  setAncestryReaderForTests(() => []);
+  setAncestryReaderForTests(() => PERSON_ANCESTRY);
   try {
     return fn();
   } finally {

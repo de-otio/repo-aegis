@@ -14,36 +14,47 @@
 // The TTY test is a speed bump, not proof of a person (issue #151, PR 2b): a
 // pty wrapper (`script`, `unbuffer`, `expect`, `python -c 'import pty…'`,
 // `ssh -tt localhost`) gives an agent's child a terminal. So `isHumanTerminal()`
-// below also walks the process ancestry (core/process-ancestry.ts) and says no
-// when an agent host (`claude`, `codex`, `gemini`) or a pty wrapper sits above
-// this process. Every caller picks it up at once; do not add a second check at a
-// call site.
+// below also reads the process chain (core/process-ancestry.ts) and says no when
+//   - an agent host (`claude`, `codex`, `gemini`) or a pty wrapper sits above
+//     this process, or the Claude Code environment (`CLAUDECODE=1`) is set; or
+//   - the chain does not reach a POSITIVE ROOT (a login session, sshd, a terminal
+//     emulator, an attached tmux/screen): a pty re-parented to launchd by a
+//     double fork + `setsid` ends at init through a bare interpreter; or
+//   - the chain cannot be read at all.
+// Every caller picks it up at once; do not add a second check at a call site.
 //
 // Policy for these gates, which differs from rules g/h on purpose: if the
 // ancestry CANNOT be read (no `/proc`, `ps` unavailable or blocked, as inside an
-// agent's sandbox), the answer is "not a person". Minting an approval or
-// registering an owner is the thing an agent must never do for itself, and a
-// person at a normal terminal always has a readable process table. (Rules g/h
-// make the opposite choice, because refusing a person's own publish is the
-// worse failure there.)
+// agent's sandbox) or has no positive root, the answer is "not a person".
+// Minting an approval or registering an owner is the thing an agent must never
+// do for itself, and a person at a normal terminal always has a readable process
+// table with a login or emulator at its root. (Rules g/h make the opposite
+// choice, because refusing a person's own publish is the worse failure there.)
+//
+// `stderrIsTTY` / `ancestry` are TEST-ONLY seams, ignored outside the Node test
+// runner (core `testSeamsEnabled`): no production call can skip the check.
 //
 // RESIDUAL: an agent with code execution can still `osascript` / AppleScript
 // `do script` a command into the user's own terminal window, or start a
 // detached process outside its own tree (`launchctl submit`, `at`, cron) that
-// owns a pty with no agent ancestor. `tmux new -d` / `screen -dm` reparent under
-// a server whose parent is init. The agent hook's text-level refusals
-// (`AGENT_RAN_HUMAN_COMMAND`, `EGRESS_PTY_WRAPPER`) cover the shapes it can read;
-// the rest needs a presence signal an agent cannot forge (a Keychain item with a
-// user-presence ACL / Touch ID), which is tracked as a follow-up.
+// owns a pty; `ssh -tt localhost` has an sshd root. The agent hook's text-level
+// refusals (`AGENT_RAN_HUMAN_COMMAND`, `EGRESS_PTY_WRAPPER`,
+// `AGENT_DETACHED_SESSION`) cover the shapes it can read; the rest needs a
+// presence signal an agent cannot forge (a Keychain item with a user-presence
+// ACL / Touch ID), which is tracked as a follow-up.
 import { readSync } from "node:fs";
-import { defaultAncestryReader, judgeAncestry, type AncestryReader } from "@de-otio/repo-aegis-core";
+import { checkTerminal, type AncestryReader, type MultiplexerProbe } from "@de-otio/repo-aegis-core";
 import { emitError, type OutputOptions } from "./format.js";
 
 export interface HumanTerminalOptions {
-  /** Test seam: defaults to `process.stderr.isTTY`. Injecting it injects the whole answer (no ancestry read) unless `ancestry` is given too. */
+  /** TEST-ONLY (ignored outside the test runner): defaults to `process.stderr.isTTY`. Injecting it without `ancestry` skips the chain, as the existing seam tests expect. */
   stderrIsTTY?: boolean;
-  /** Test seam: reads the process chain, nearest parent first, or `null` when it cannot be read. Defaults to the real process tree. */
+  /** TEST-ONLY: a synthetic process chain (nearest parent first). Defaults to the real process tree. */
   ancestry?: AncestryReader;
+  /** TEST-ONLY: environment for the Claude Code signal (default `{}` for a synthetic chain, else `process.env`). */
+  env?: NodeJS.ProcessEnv;
+  /** TEST-ONLY: tmux/screen attached-client probe. */
+  probe?: MultiplexerProbe;
 }
 
 export interface RequireTerminalOptions extends OutputOptions, HumanTerminalOptions {}
@@ -52,28 +63,36 @@ export type TerminalVerdict =
   | { human: true }
   | { human: false; why: "no-tty" }
   | { human: false; why: "agent-ancestor"; ancestor: string }
+  | { human: false; why: "no-positive-root" }
   | { human: false; why: "ancestry-undeterminable" };
 
 /** Why this process is, or is not, behind a person's terminal. */
 export function terminalVerdict(opts: HumanTerminalOptions = {}): TerminalVerdict {
-  const tty = opts.stderrIsTTY ?? !!process.stderr.isTTY;
-  if (!tty) return { human: false, why: "no-tty" };
-  const reader = opts.ancestry ?? (opts.stderrIsTTY === undefined ? defaultAncestryReader : undefined);
-  if (reader === undefined) return { human: true };
-  let verdict;
-  try {
-    verdict = judgeAncestry(reader());
-  } catch {
-    return { human: false, why: "ancestry-undeterminable" };
+  const check = checkTerminal({
+    ...(opts.stderrIsTTY !== undefined && { stderrIsTTY: opts.stderrIsTTY }),
+    ...(opts.ancestry !== undefined && { ancestry: opts.ancestry }),
+    ...(opts.env !== undefined && { env: opts.env }),
+    ...(opts.probe !== undefined && { probe: opts.probe }),
+  });
+  switch (check.kind) {
+    case "no-tty":
+      return { human: false, why: "no-tty" };
+    case "skipped":
+    case "clear":
+      return { human: true };
+    case "agent":
+      return { human: false, why: "agent-ancestor", ancestor: check.ancestor };
+    case "unrooted":
+      return { human: false, why: "no-positive-root" };
+    case "undeterminable":
+      return { human: false, why: "ancestry-undeterminable" };
   }
-  if (verdict.kind === "agent") return { human: false, why: "agent-ancestor", ancestor: verdict.ancestor };
-  if (verdict.kind === "undeterminable") return { human: false, why: "ancestry-undeterminable" };
-  return { human: true };
 }
 
 /**
- * True when this process is attached to a person's terminal: stderr is a TTY
- * and no agent host or pty wrapper is an ancestor. The one place to harden.
+ * True when this process is attached to a person's terminal: stderr is a TTY,
+ * no agent host or pty wrapper is an ancestor, and the chain reaches a login
+ * session, terminal emulator or attached multiplexer. The one place to harden.
  */
 export function isHumanTerminal(opts: HumanTerminalOptions = {}): boolean {
   return terminalVerdict(opts).human;
@@ -86,6 +105,13 @@ function ancestryNote(v: TerminalVerdict): string {
     return (
       ` A terminal is attached, but it runs under ${v.ancestor}, an agent host or terminal wrapper, so it is not ` +
       `treated as a person's. Run this in your own terminal window.`
+    );
+  }
+  if (v.why === "no-positive-root") {
+    return (
+      " A terminal is attached, but its process chain ends at the system's init process without passing through a " +
+      "login session, a terminal emulator or an attached tmux/screen, which is what a detached or double-forked " +
+      "pty looks like, so it is not treated as a person's. Run this in your own terminal window."
     );
   }
   return (

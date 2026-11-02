@@ -9,8 +9,11 @@ import assert from "node:assert/strict";
 import {
   AGENT_RAN_HUMAN_COMMAND,
   commandRegions,
+  detachedStartRefusal,
+  findDetachedStart,
   findHumanOnlyCommand,
   humanCommandRefusal,
+  type DetachedKind,
   type HumanOnlyKind,
 } from "./human-commands.js";
 
@@ -65,6 +68,10 @@ const HITS: ReadonlyArray<readonly [command: string, kind: HumanOnlyKind]> = [
   // quoting and escapes
   ["\"repo-\"\"aegis\" app\\rove '*'", "approve"],
   ["repo-aegis 'approve' '*'", "approve"],
+  ["repo-aegis approve --list", "approve"],
+  ["repo-aegis approve --revoke all --list", "approve"],
+  ["npx repo-aegis@0.11.0 approve '*'", "approve"],
+  ["grep -r x . --pager 'repo-aegis approve *'", "approve"],
   ["repo-aegis --home \"a;b\" approve '*'", "approve"],
   // a substitution inside a commit message runs
   ["git commit -m \"$(repo-aegis approve '*')\"", "approve"],
@@ -91,6 +98,22 @@ const MISSES: ReadonlyArray<string> = [
   "git commit -m \"$(cat <<'EOF'\nrefuse repo-aegis approve and repo-aegis upstreams add\nEOF\n)\"",
   "gh issue create --title 'repo-aegis approve gate' --body 'repo-aegis engagements add --github-org'",
   "grep -r approve packages/",
+  "repo-aegis approve --revoke all",
+  "repo-aegis --json approve --revoke ab12cd34",
+  "git -C /Users/me/repos/dot/repo-aegis log --grep approve",
+  "git -C/Users/me/repos/dot/repo-aegis log approve",
+  "git --git-dir=/x/repo-aegis/.git log approve",
+  `grep -rn "repo-aegis approve" doc/`,
+  "grep -rn 'repo-aegis engagements add --personal-org' README.md",
+  "rg -n repo-aegis approve packages/",
+  "cd /Users/me/repos/dot/repo-aegis && git status",
+  "cd /Users/me/repos/dot/repo-aegis approve",
+  "ls /Users/me/repos/dot/repo-aegis/doc approve",
+  "cat /Users/me/repos/dot/repo-aegis/doc/approve.md",
+  "gh pr view 5 --repo de-otio/repo-aegis --json title",
+  "gh -R de-otio/repo-aegis pr review 5 --approve",
+  "git remote add upstream git@github.com:de-otio/repo-aegis.git",
+  "man repo-aegis approve",
   "repo-aegis status && echo approve",
   "x=$(repo-aegis status); echo approve",
   "x=$(repo-aegis status) && echo approve",
@@ -120,6 +143,59 @@ describe("findHumanOnlyCommand — leaves ordinary commands alone", () => {
   it("an unquoted heredoc in a message is expanded by the shell, so it is read", () => {
     const expanded = "git commit -m \"$(cat <<EOF\n$(repo-aegis approve '*')\nEOF\n)\"";
     assert.deepEqual(findHumanOnlyCommand(expanded), { kind: "approve" });
+  });
+});
+
+describe("findDetachedStart — a detached session start is refused (H2b)", () => {
+  const HITS: ReadonlyArray<readonly [string, DetachedKind]> = [
+    ["tmux new -d", "tmux-detached"],
+    ["tmux new-session -d -s x 'cmd'", "tmux-detached"],
+    ["tmux new-session -Ads x", "tmux-detached"],
+    ["tmux -L w new -d", "tmux-detached"],
+    ["screen -dm cmd", "screen-detached"],
+    ["screen -dmS x cmd", "screen-detached"],
+    ["screen -d -m cmd", "screen-detached"],
+    ["setsid cmd", "setsid"],
+    ["/usr/bin/setsid cmd", "setsid"],
+    ["python3 -c 'import os; os.setsid()'", "setsid"],
+    ["perl -MPOSIX -e 'POSIX::setsid()'", "setsid"],
+    ["daemonize cmd", "daemonize"],
+    ["nohup cmd > /dev/null 2>&1 & disown", "nohup-disown"],
+    ["nohup cmd &\ndisown %1", "nohup-disown"],
+    ["bash -c 'setsid cmd'", "setsid"],
+    ["sudo setsid cmd", "setsid"],
+  ];
+  for (const [command, kind] of HITS) {
+    it(JSON.stringify(command), () => assert.deepEqual(findDetachedStart(command), { kind }));
+  }
+
+  const MISSES = [
+    "nohup npm run dev > out.log 2>&1 &",
+    "tmux ls",
+    "tmux attach -t x",
+    "tmux new -s x",
+    "tmux send-keys -t 0 ls Enter",
+    "screen -ls",
+    "screen -r x",
+    "disown",
+    "grep -rn setsid src/",
+    "man setsid",
+    "git commit -m 'drop setsid'",
+    "echo hello",
+    "",
+  ];
+  for (const command of MISSES) {
+    it(`leaves ${JSON.stringify(command)} alone`, () => assert.equal(findDetachedStart(command), null));
+  }
+
+  it("is a five-part message with fixed text", () => {
+    const text = detachedStartRefusal({ kind: "setsid" });
+    assert.match(text, /^setsid \(.*\): refused\./);
+    assert.match(text, /re-parented to the system's init process/);
+    assert.match(text, /No approval covers this/);
+    assert.match(text, /Re-issue as: run the command in the foreground/);
+    assert.match(text, /a person starts it in their own terminal/);
+    assert.match(text, /\[AGENT_DETACHED_SESSION, see doc\/agent-guide\.md#agent_detached_session\]/);
   });
 });
 

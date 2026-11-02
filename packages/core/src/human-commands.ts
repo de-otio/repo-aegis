@@ -82,15 +82,62 @@ function isDataToken(tok: string): boolean {
   return !tok.includes("$(") && !tok.includes("`");
 }
 
-/** The words of one region's tokens, leaving out the message values of a `git` / `gh` command. */
+function tokenBase(t: string): string {
+  return t.slice(t.lastIndexOf("/") + 1).toLowerCase();
+}
+
+/** Search commands: the pattern and the paths are text to look for, never a command. */
+const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack"]);
+/** Search flags whose value runs a command. */
+const SEARCH_RUN_FLAGS = new Set(["--pager", "--pre"]);
+/** Commands whose arguments are only text or paths to look at, never a program. */
+const LOOKUP_COMMANDS = new Set(["man", "apropos"]);
+/** `git` options whose value is a directory. */
+const GIT_DIR_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--namespace"]);
+/** `gh` options whose value is a repository. */
+const GH_REPO_FLAGS = new Set(["-R", "--repo"]);
+
+/**
+ * The words of one region's tokens, leaving out what is data and not a program:
+ *   - the message values of a `git` / `gh` command;
+ *   - the value of `git -C <dir>` / `--git-dir` / `--work-tree` and of `gh -R` / `--repo`
+ *     (a directory or repository that may be named `repo-aegis`);
+ *   - everything after `cd` / `pushd` (a directory), and the pattern and paths of a search
+ *     (`grep -rn "repo-aegis approve" doc/`).
+ * A flag that RUNS something (`grep --pager`, `git -c`, `--exec`) is still read.
+ */
 function regionWords(tokens: readonly string[]): string[] {
-  const isGitOrGh = tokens.some(t => {
-    const b = t.slice(t.lastIndexOf("/") + 1);
-    return b === "git" || b === "gh";
-  });
+  const bases = tokens.map(tokenBase);
+  const first = bases[0] ?? "";
+  const isGit = bases.includes("git");
+  const isGh = bases.includes("gh");
+  const isGitOrGh = isGit || isGh;
   const words: string[] = [];
+  if (first === "cd" || first === "pushd" || first === "popd" || LOOKUP_COMMANDS.has(first)) {
+    return tokens.slice(0, 1).flatMap(t => t.split(WORD_SPLIT).filter(w => w !== ""));
+  }
+  const searching = SEARCH_COMMANDS.has(first);
   for (let k = 0; k < tokens.length; k++) {
     const tok = tokens[k]!;
+    if (searching) {
+      if (k === 0) {
+        words.push(...tok.split(WORD_SPLIT).filter(w => w !== ""));
+      } else if (tok.startsWith("-")) {
+        words.push(...tok.split(WORD_SPLIT).filter(w => w !== ""));
+        if (SEARCH_RUN_FLAGS.has(tok) && tokens[k + 1] !== undefined) {
+          words.push(...tokens[++k]!.split(WORD_SPLIT).filter(w => w !== ""));
+        }
+      }
+      continue;
+    }
+    if (isGit && (GIT_DIR_FLAGS.has(tok) || /^(?:-C.|--git-dir=|--work-tree=|--namespace=)/.test(tok))) {
+      if (GIT_DIR_FLAGS.has(tok)) k++; // the value is the next token
+      continue;
+    }
+    if (isGh && (GH_REPO_FLAGS.has(tok) || /^(?:-R.|--repo=)/.test(tok))) {
+      if (GH_REPO_FLAGS.has(tok)) k++;
+      continue;
+    }
     if (isGitOrGh && tok.startsWith("-")) {
       const kind = messageFlagKind(tok);
       if (kind === "attached" && isDataToken(tok)) continue;
@@ -188,10 +235,19 @@ const MAX_WORDS = 64;
 
 /** True for a word that names the repo-aegis program, given the aliases this command line defines. */
 function isProgramWord(w: string, names: ReadonlySet<string>): boolean {
-  const lower = w.toLowerCase();
-  if (lower.includes("aegis")) return true;
-  if (/(?:^|\/)dist\/index\.js$/.test(lower)) return true;
+  // The LAST path component is the program: `/opt/bin/repo-aegis`, `@de-otio/repo-aegis`,
+  // `repo-aegis@0.11.0`, `repo-aegis.js`. A directory (`…/repo-aegis/docs/x.md`) is not.
+  const last = w.slice(Math.max(w.lastIndexOf("/"), w.lastIndexOf(":")) + 1); // `EXEC:repo-aegis` (socat), `a/b/repo-aegis`
+  if (/^repo-aegis(?:@[\w.-]+)?(?:\.[cm]?js)?$/i.test(last)) return true;
+  if (/(?:^|\/)dist\/index\.js$/i.test(w)) return true;
   return names.has(w) || (w.startsWith("$") && names.has(w.slice(1)));
+}
+
+/** True when a definition's text holds a repo-aegis program word. */
+function mentionsProgram(text: string): boolean {
+  return text
+    .split(WORD_SPLIT)
+    .some(w => w !== "" && isProgramWord(w, new Set()));
 }
 
 /**
@@ -203,11 +259,11 @@ function definedNames(text: string): Set<string> {
   const names = new Set<string>();
   const assign = /(?:^|[\s;&|(])([A-Za-z_][\w.-]*)=((?:'[^']*'|"[^"]*"|[^\s;&|]*))/g;
   for (let m = assign.exec(text); m !== null; m = assign.exec(text)) {
-    if (m[2]!.toLowerCase().includes("aegis") || /dist\/index\.js/.test(m[2]!)) names.add(m[1]!);
+    if (mentionsProgram(m[2]!)) names.add(m[1]!);
   }
   const fn = /(?:function\s+([A-Za-z_][\w.-]*)|([A-Za-z_][\w.-]*)\s*\(\s*\))\s*\{([^}]*)\}/g;
   for (let m = fn.exec(text); m !== null; m = fn.exec(text)) {
-    if (m[3]!.toLowerCase().includes("aegis") || /dist\/index\.js/.test(m[3]!)) names.add((m[1] ?? m[2])!);
+    if (mentionsProgram(m[3]!)) names.add((m[1] ?? m[2])!);
   }
   return names;
 }
@@ -232,7 +288,10 @@ function followingWords(words: readonly string[], from: number): string[] {
 }
 
 function classify(win: readonly string[]): HumanOnlyKind | null {
-  if (win.includes("approve")) return "approve";
+  // `approve --revoke <id|all>` only removes approvals: it tightens, so an agent may run it (and revoke
+  // never mints). `--list` stays refused: its output names org scopes, which can be customer names.
+  const revokeOnly = win.includes("--revoke") && !win.includes("--list");
+  if (win.includes("approve") && !revokeOnly) return "approve";
   const at = (word: string): number => win.indexOf(word);
   const eng = at("engagements");
   if (eng !== -1 && win.indexOf("add", eng) !== -1 && (win.includes("--personal-org") || win.includes("--github-org"))) {
@@ -318,5 +377,106 @@ export function humanCommandRefusal(hit: HumanOnlyHit): string {
       "run it; an agent that ran it would be vouching for itself, with or without a terminal attached",
     approval: "No approval covers this, and a terminal, wrapper or alias does not change who runs it",
     fixes: [{ by: "person", step: `runs it in their own terminal: ${d.fix}` }],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Detached session starts (issue #151, PR 2b; the reviewer's H2b)
+// ---------------------------------------------------------------------------
+//
+// A process that double-forks, calls `setsid`, or lives in a `tmux`/`screen`
+// server started with `-d` outlives the agent's command and is re-parented to
+// init. Its process chain then shows NO agent ancestor, and a pty it opens looks
+// like a person's terminal to every gate that tests the chain. Refusing the
+// START, in any agent command (egress or not), is the other half of the
+// positive-root check in process-ancestry.ts. A plain `nohup cmd &` stays
+// allowed: dev servers use it. Only `nohup … & disown` (which also drops the job
+// from the shell) counts.
+
+export const AGENT_DETACHED_SESSION = "AGENT_DETACHED_SESSION";
+
+export type DetachedKind = "tmux-detached" | "screen-detached" | "setsid" | "daemonize" | "nohup-disown";
+
+export interface DetachedHit {
+  kind: DetachedKind;
+}
+
+/** The last path component, lower-cased. (Searches and `man`/`which` arguments are already dropped by {@link regionWords}.) */
+const detachBase = (w: string): string => w.slice(w.lastIndexOf("/") + 1).toLowerCase();
+
+/** The detached-start kind a region's words contain, or null. `all` is every region's words (for `nohup` + `disown`). */
+function detachedKindOf(words: readonly string[]): DetachedKind | null {
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    const b = detachBase(w);
+    if (b === "setsid" || b.endsWith(".setsid") || b.endsWith("::setsid")) return "setsid";
+    if (b === "daemonize" || b.endsWith(".daemonize")) return "daemonize";
+    if (b === "tmux") {
+      const win = followingWords(words, i);
+      const sub = win.find(x => x === "new" || x === "new-session");
+      if (sub !== undefined && win.some(x => /^-[A-Za-z]*d[A-Za-z]*$/.test(x))) return "tmux-detached";
+    }
+    if (b === "screen") {
+      const letters = followingWords(words, i)
+        .filter(x => /^-[A-Za-z]+$/.test(x))
+        .join("");
+      if (letters.includes("d") && letters.includes("m")) return "screen-detached";
+    }
+  }
+  return null;
+}
+
+/**
+ * The first detached-session start in this command line, or null: `tmux new -d`,
+ * `tmux new-session -d`, `screen -dm` / `-d -m`, `setsid` (also `os.setsid()` in
+ * interpreter text), `daemonize`, and `nohup` combined with `disown`.
+ */
+export function findDetachedStart(command: string): DetachedHit | null {
+  if (typeof command !== "string" || command === "") return null;
+  const lower = command.toLowerCase();
+  if (!/tmux|screen|setsid|daemonize|disown/.test(lower)) return null;
+  try {
+    let nohup = false;
+    let disown = false;
+    for (const { words } of splitRegions(command)) {
+      const kind = detachedKindOf(words);
+      if (kind !== null) return { kind };
+      for (const w of words) {
+        const b = detachBase(w);
+        if (b === "nohup") nohup = true;
+        if (b === "disown") disown = true;
+      }
+    }
+    if (nohup && disown) return { kind: "nohup-disown" };
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+const DETACHED_WHAT: Readonly<Record<DetachedKind, string>> = {
+  "tmux-detached": "tmux new -d (a detached tmux session)",
+  "screen-detached": "screen -dm (a detached screen session)",
+  setsid: "setsid (a new session, detached from this command)",
+  daemonize: "daemonize (a detached background process)",
+  "nohup-disown": "nohup … & disown (a background job dropped from the shell)",
+};
+
+/** The five-part refusal (§3.9). Fixed text per kind. */
+export function detachedStartRefusal(hit: DetachedHit): string {
+  return refusal({
+    code: AGENT_DETACHED_SESSION,
+    what: DETACHED_WHAT[hit.kind],
+    why:
+      "A detached session outlives this command and is re-parented to the system's init process, and a terminal it " +
+      "opens would look like a person's to repo-aegis, which is how an agent could approve its own publishes",
+    approval: "No approval covers this",
+    fixes: [
+      {
+        by: "agent",
+        command: "run the command in the foreground, or as a plain `nohup <command> &` for a dev server (without disown, setsid or a detached tmux/screen)",
+      },
+      { by: "person", when: "If a long-lived terminal session is really needed", step: "starts it in their own terminal" },
+    ],
   });
 }

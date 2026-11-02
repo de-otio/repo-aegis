@@ -149,6 +149,28 @@ describe("hook guard-egress — AGENT_RAN_HUMAN_COMMAND", { skip: !cliBuilt() },
     }
   });
 
+  it("L2: `approve --revoke` only tightens, so it passes; `approve --list` names org scopes, so it is refused", () => {
+    const home = aegisHome("human-revoke", REGISTRY);
+    for (const command of ["repo-aegis approve --revoke all", "repo-aegis --json approve --revoke ab12cd34"]) {
+      const r = runGuard(command, home);
+      assert.equal(r.code, 0, `${command}\n${r.stderr}`);
+    }
+    assert.equal(runGuard("repo-aegis approve --list", home).code, 2);
+  });
+
+  it("L2: a directory, a git -C value or a search pattern that says repo-aegis is not the program", () => {
+    const home = aegisHome("human-l2", REGISTRY);
+    for (const command of [
+      "git -C /Users/me/repos/dot/repo-aegis log --grep approve",
+      `grep -rn "repo-aegis approve" doc/`,
+      "cd /Users/me/repos/dot/repo-aegis && git status",
+      "gh pr view 5 --repo de-otio/repo-aegis --json title",
+    ]) {
+      const r = runGuard(command, home);
+      assert.equal(r.code, 0, `${command}\n${r.stderr}`);
+    }
+  });
+
   it("leaves ordinary repo-aegis and git commands alone", () => {
     const home = aegisHome("human-ok", REGISTRY);
     for (const command of [
@@ -176,9 +198,16 @@ describe("hook guard-egress — EGRESS_PTY_WRAPPER", { skip: !cliBuilt() }, () =
     ["faketty", "faketty git push origin main"],
     ["socat", "socat - EXEC:'gh issue create --repo acme/svc',pty"],
     ["ssh -tt", "ssh -tt localhost gh issue create --repo acme/svc"],
-    ["tmux new-session", "tmux new-session -d 'gh issue create --repo acme/svc --title x'"],
     ["tmux send-keys", "tmux send-keys -t 0 'gh issue create --repo acme/svc' Enter"],
-    ["screen -dm", "screen -dm gh issue create --repo acme/svc --title x"],
+    ["screen (attached)", "screen gh issue create --repo acme/svc --title x"],
+    ["sshpass", "sshpass -p x git push origin main"],
+    ["rlwrap", "rlwrap gh issue create --repo acme/svc --title x"],
+    ["alias to script", "alias s=script; s -q /dev/null git push origin main"],
+    ["function around script", `s() { script "$@"; }; s -q /dev/null git push origin main`],
+    ["variable holding script", "S=script; $S -q /dev/null git push origin main"],
+    ["$(which script)", "$(which script) -q /dev/null git push origin main"],
+    ["command script", "command script -q /dev/null git push origin main"],
+    ["copied script binary", "cp /usr/bin/script /tmp/s; /tmp/s -q /dev/null git push origin main"],
     ["python pty.spawn", `python3 -c 'import pty; pty.spawn(["gh","issue","create","--repo","acme/svc"])'`],
     ["perl IO::Pty", "perl -MIO::Pty -e 'system(q(gh issue create --repo acme/svc))'"],
     ["ruby PTY", `ruby -rpty -e 'PTY.spawn("gh issue create --repo acme/svc")'`],
@@ -218,5 +247,63 @@ describe("hook guard-egress — EGRESS_PTY_WRAPPER", { skip: !cliBuilt() }, () =
     const home = aegisHome("pty-plain", REGISTRY);
     const r = runGuard("gh issue create --repo acme/svc --title script --body 'tmux and screen'", home, { human: true });
     assert.equal(r.code, 0, r.stderr);
+  });
+});
+
+describe("hook guard-egress — AGENT_DETACHED_SESSION (H2b)", { skip: !cliBuilt() }, () => {
+  const DETACHED: ReadonlyArray<readonly [label: string, command: string]> = [
+    ["tmux new -d", "tmux new -d 'sleep 100'"],
+    ["tmux new-session -d", "tmux new-session -d -s dev 'npm run dev'"],
+    ["tmux new-session -Ad", "tmux new-session -Ads dev"],
+    ["tmux with a socket", "tmux -L work new -d"],
+    ["screen -dm", "screen -dm sleep 100"],
+    ["screen -dmS", "screen -dmS dev npm run dev"],
+    ["screen -d -m", "screen -d -m sleep 100"],
+    ["setsid", "setsid npm run dev"],
+    ["setsid by path", "/usr/bin/setsid ./server"],
+    ["daemonize", "daemonize /usr/bin/node server.js"],
+    ["nohup + disown", "nohup npm run dev > out.log 2>&1 & disown"],
+    ["python double fork", `python3 -c 'import os; os.fork() or os.setsid()'`],
+    ["inside bash -c", `bash -c "setsid sleep 100"`],
+    ["a non-egress command", "ls && setsid true"],
+  ];
+
+  for (const [label, command] of DETACHED) {
+    it(`refuses: ${label}`, () => {
+      const home = aegisHome("detached", REGISTRY);
+      const r = runGuard(command, home);
+      assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+      const body = JSON.parse(r.stderr) as { code: string; error: string };
+      assert.equal(body.code, "AGENT_DETACHED_SESSION");
+      assert.match(body.error, /^[^:]+: refused\./); // what
+      assert.match(body.error, /re-parented to the system's init process/); // why
+      assert.match(body.error, /No approval covers this/); // approval
+      assert.match(body.error, /Re-issue as: run the command in the foreground/); // fix, agent
+      assert.match(body.error, /a person starts it in their own terminal/); // fix, person
+      assert.match(body.error, /\[AGENT_DETACHED_SESSION, see doc\/agent-guide\.md#agent_detached_session\]/); // where
+    });
+  }
+
+  it("is not lifted by REPO_AEGIS_EGRESS_HUMAN=1", () => {
+    const home = aegisHome("detached-human", REGISTRY);
+    assert.equal(runGuard("setsid true", home, { human: true }).code, 2);
+  });
+
+  it("a plain `nohup cmd &` stays allowed (dev servers), and so do attached or unrelated uses", () => {
+    const home = aegisHome("detached-ok", REGISTRY);
+    for (const command of [
+      "nohup npm run dev > out.log 2>&1 &",
+      "tmux ls",
+      "tmux attach -t dev",
+      "tmux new -s dev",
+      "screen -ls",
+      "grep -rn setsid src/",
+      "man setsid",
+      "git commit -m 'document the setsid refusal'",
+      "echo disown",
+    ]) {
+      const r = runGuard(command, home);
+      assert.equal(r.code, 0, `${command}\n${r.stderr}`);
+    }
   });
 });

@@ -42,6 +42,9 @@ import {
   findHumanOnlyCommand,
   humanCommandRefusal,
   AGENT_RAN_HUMAN_COMMAND,
+  AGENT_DETACHED_SESSION,
+  findDetachedStart,
+  detachedStartRefusal,
   isPrintableDestination,
   loadRegistry,
   parseEgressIntents,
@@ -51,6 +54,7 @@ import {
   RegistryEncryptedError,
   RegistryNotFoundError,
   type Destination,
+  type DetachedHit,
   type EgressDecision,
   type HumanOnlyKind,
   type Registry,
@@ -298,6 +302,14 @@ function denyHumanOnlyCommand(kind: HumanOnlyKind): never {
   process.exit(EXIT_BLOCK);
 }
 
+/** Refuse a command line that starts a detached session. Same channels as every other deny. */
+function denyDetachedStart(hit: DetachedHit): never {
+  const reason = detachedStartRefusal(hit);
+  process.stderr.write(JSON.stringify({ code: AGENT_DETACHED_SESSION, error: reason, details: { start: hit.kind } }, null, 2) + "\n");
+  writeDecisionJson("deny", reason);
+  process.exit(EXIT_BLOCK);
+}
+
 /**
  * `repo-aegis hook guard-egress` — PreToolUse(Bash) egress guard.
  *
@@ -338,6 +350,10 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     // text is the second lock (issue #151, PR 2b).
     const humanOnly = findHumanOnlyCommand(command);
     if (humanOnly !== null) denyHumanOnlyCommand(humanOnly.kind);
+    // A detached session start (`tmux new -d`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`)
+    // re-parents a pty to init, where no gate sees an agent above it: refused in any command, egress or not.
+    const detached = findDetachedStart(command);
+    if (detached !== null) denyDetachedStart(detached);
 
     const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit

@@ -359,20 +359,38 @@ export {
   readProcessAncestry,
   judgeAncestry,
   classifyAncestor,
-  parsePsLine,
+  positiveRoot,
+  agentEnvSignal,
+  checkTerminal,
+  parsePsSnapshotLine,
   parseProcEntry,
-  defaultAncestryReader,
+  snapshotViaPs,
+  trustedPsPath,
+  makeDefaultLookup,
   setAncestryReaderForTests,
+  testSeamsEnabled,
   MAX_ANCESTRY_DEPTH,
 } from "./process-ancestry.js";
-export type { AncestorInfo, AncestryReader, AncestryVerdict, ProcessLookup } from "./process-ancestry.js";
+export type {
+  AncestorInfo,
+  AncestryChain,
+  AncestryReader,
+  AncestryVerdict,
+  MultiplexerProbe,
+  ProcessLookup,
+  TerminalCheck,
+  TerminalCheckOptions,
+} from "./process-ancestry.js";
 // Commands only a person may run, refused in agent Bash text (issue #151, PR 2b).
 export {
   AGENT_RAN_HUMAN_COMMAND,
+  AGENT_DETACHED_SESSION,
   findHumanOnlyCommand,
   humanCommandRefusal,
+  findDetachedStart,
+  detachedStartRefusal,
 } from "./human-commands.js";
-export type { HumanOnlyHit, HumanOnlyKind } from "./human-commands.js";
+export type { HumanOnlyHit, HumanOnlyKind, DetachedHit, DetachedKind } from "./human-commands.js";
 // Human-minted, time-limited, destination-scoped approvals that satisfy
 // rule g from a shell with no TTY (`repo-aegis approve`).
 export {

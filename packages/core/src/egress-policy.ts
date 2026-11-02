@@ -74,12 +74,7 @@ import {
   type RefusalFix,
 } from "./refusal.js";
 import { registryPath } from "./paths.js";
-import {
-  defaultAncestryReader,
-  judgeAncestry,
-  type AncestryReader,
-  type AncestryVerdict,
-} from "./process-ancestry.js";
+import { checkTerminal, type AncestryReader } from "./process-ancestry.js";
 import { homedir } from "node:os";
 import { parseRemoteUrl, parseRemoteUrlResolved, resolveRemoteUrl } from "./remote-url.js";
 import { resolvePushUrls, detectSshOverride } from "./push-urls.js";
@@ -243,36 +238,39 @@ export interface HumanPresence {
  *
  * The TTY alone is a speed bump (issue #151, PR 2b, S10): `script -q /dev/null
  * gh …` gives an agent's child a pty. So with a TTY the process ancestry is
- * also read ({@link judgeAncestry}). Policy here, for rules g and h: an agent
- * or pty-wrapper ancestor means NOT a person; an ancestry that cannot be read
- * keeps today's TTY result (`undeterminable`, reported by the caller), because
- * refusing a person's own publish is the worse failure. (`approve` and owner
- * adds make the opposite choice: unreadable means refuse.)
+ * also read ({@link checkTerminal}): the Claude Code environment signal
+ * (`CLAUDECODE=1`) and the process chain. Policy here, for rules g and h: an
+ * agent or pty-wrapper ancestor, or that environment, means NOT a person. A
+ * chain that cannot be read, or that reaches init without a positive root
+ * (login, sshd, a terminal emulator, an attached tmux/screen), keeps today's TTY
+ * result (`undeterminable`, reported by the caller), because refusing a person's
+ * own publish is the worse failure. (`approve` and owner adds refuse instead.)
  *
- * The ancestry belongs to the real process. A caller that injects
- * `stderrIsTTY` has injected the whole answer, so no ancestry is read unless it
- * also injects `ancestry`; tests that pin `process.stderr.isTTY` use
- * `setAncestryReaderForTests`.
+ * `stderrIsTTY` and `ancestry` are TEST-ONLY seams: outside the Node test runner
+ * they are ignored (see `testSeamsEnabled`), so no production path can skip the
+ * check. Tests that pin `process.stderr.isTTY` use `setAncestryReaderForTests`.
  */
 export function humanPresence(
-  env: NodeJS.ProcessEnv = process.env,
+  env?: NodeJS.ProcessEnv,
   stderrIsTTY?: boolean,
   ancestry?: AncestryReader,
 ): HumanPresence {
-  if (env[EGRESS_HUMAN_ENV] === "1") return { present: true, ancestry: "skipped" };
-  const tty = stderrIsTTY ?? !!process.stderr.isTTY;
-  if (!tty) return { present: false, ancestry: "skipped" };
-  const reader = ancestry ?? (stderrIsTTY === undefined ? defaultAncestryReader : undefined);
-  if (reader === undefined) return { present: true, ancestry: "skipped" };
-  let verdict: AncestryVerdict;
-  try {
-    verdict = judgeAncestry(reader());
-  } catch {
-    verdict = { kind: "undeterminable", why: "the ancestry reader failed" };
-  }
-  switch (verdict.kind) {
+  if ((env ?? process.env)[EGRESS_HUMAN_ENV] === "1") return { present: true, ancestry: "skipped" };
+  const check = checkTerminal({
+    // Left unset when the caller gave none, so a synthetic (test) chain is judged against an empty
+    // environment rather than the developer's own (which, under Claude Code, says CLAUDECODE=1).
+    ...(env !== undefined && { env }),
+    ...(stderrIsTTY !== undefined && { stderrIsTTY }),
+    ...(ancestry !== undefined && { ancestry }),
+  });
+  switch (check.kind) {
+    case "no-tty":
+      return { present: false, ancestry: "skipped" };
+    case "skipped":
+      return { present: true, ancestry: "skipped" };
     case "agent":
-      return { present: false, ancestry: "agent", ancestor: verdict.ancestor };
+      return { present: false, ancestry: "agent", ancestor: check.ancestor };
+    case "unrooted":
     case "undeterminable":
       return { present: true, ancestry: "undeterminable" };
     case "clear":
@@ -281,7 +279,7 @@ export function humanPresence(
 }
 
 export function isHumanPresent(
-  env: NodeJS.ProcessEnv = process.env,
+  env?: NodeJS.ProcessEnv,
   stderrIsTTY?: boolean,
   ancestry?: AncestryReader,
 ): boolean {

@@ -79,6 +79,24 @@ const PTY_FORMS: ReadonlyArray<readonly [label: string, command: string, wrapper
   ["python heredoc", "python3 <<EOF\nimport pty\npty.spawn(['gh','issue','create','--repo','acme/svc'])\nEOF", /pty module/],
   ["inside bash -c", `bash -c "script -q /dev/null gh issue create --repo acme/svc"`, /script/],
   ["find -exec", "find . -exec script -q /dev/null gh issue create --repo acme/svc \\;", /script/],
+  // L1: the alias / function / variable / substitution resolution, and three more wrappers
+  ["sshpass", "sshpass -p x gh issue create --repo acme/svc --title x", /sshpass/],
+  ["rlwrap", "rlwrap gh issue create --repo acme/svc --title x", /rlwrap/],
+  ["zsh zpty", `zsh -c 'zpty p gh issue create --repo acme/svc --title x'`, /zpty/],
+  ["alias to script", "alias s=script; s -q /dev/null git push origin main", /script/],
+  ["function around script", `s() { script "$@"; }; s -q /dev/null git push origin main`, /script/],
+  ["variable holding script", "S=script; $S -q /dev/null git push origin main", /script/],
+  ["braced variable", "S=script; ${S} -q /dev/null git push origin main", /script/],
+  ["$(which script)", "$(which script) -q /dev/null git push origin main", /script/],
+  ["backtick which", "`which unbuffer` gh issue create --repo acme/svc", /unbuffer/],
+  ["command script", "command script -q /dev/null git push origin main", /script/],
+  ["exec script", "exec script -q /dev/null git push origin main", /script/],
+  ["quoted name", `"scr"ipt -q /dev/null git push origin main`, /script/],
+  ["backslashed name", "\\script -q /dev/null git push origin main", /script/],
+  ["absolute path", "/usr/bin/script -q /dev/null git push origin main", /script/],
+  ["copied binary", "cp /usr/bin/script /tmp/s; /tmp/s -q /dev/null git push origin main", /script/],
+  ["alias to unbuffer path", "alias u=/usr/bin/unbuffer; u gh issue create --repo acme/svc", /unbuffer/],
+  ["alias inside bash -c", `bash -c "alias s=script; s -q /dev/null git push origin main"`, /script/],
 ];
 
 describe("EGRESS_PTY_WRAPPER — every pty form is refused", () => {
