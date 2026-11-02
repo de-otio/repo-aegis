@@ -108,7 +108,17 @@ the scope it now has: "personalOrgs owners only".
 
 Rule h is only as good as the resolver. Today these reach a different owner
 than the resolver reports (§8, S2–S6). Each fix lands in
-`egress-intent.ts` / `resolveDestinationOffline`:
+`egress-intent.ts` / `resolveDestinationOffline`.
+
+*Governing principle (added after the PR 2a review).* A parser that lists
+the shapes it understands will always miss some. So any shell segment that
+invokes `gh` (directly, through a wrapper or interpreter, or through an
+alias) or `git push`, and whose verb or target the parser cannot fully
+determine, yields an **unresolved** intent, never "no intent". That covers an
+unknown command word or group, an alias the guard cannot expand, `sh -c` or
+`eval` text it cannot tokenise, and a parse or expansion error. Rule h then
+refuses it for a caller with no person present (D5). Only an explicit
+read-only allowlist of gh groups yields no intent.
 
 1. **`GH_REPO`.** Leading `GH_REPO=…` assignments and `env GH_REPO=…` are
    currently skipped as "wrappers" (`egress-intent.ts:362`). Capture the value
@@ -227,7 +237,9 @@ any of these:
 - `XDG_CONFIG_HOME`, `GH_CONFIG_DIR`, `GH_HOST`;
 - `GIT_CONFIG*` (`GIT_CONFIG_COUNT/KEY/VALUE` rewrites the push URL; verified
   by the review), `GIT_SSH*`;
-- `BASH_ENV`;
+- `GIT_DIR`, `GIT_WORK_TREE` (and the `--git-dir`/`--work-tree` flags on a
+  push), which move the repository the remote is read from (PR 2a review);
+- `BASH_ENV`, `ENV`, `ZDOTDIR`;
 - or uses `env -i` or `env -u` (§8.4, F3).
 
 It also refuses `git -c` keys under `remote.*`, `url.*`, `core.sshCommand` and
@@ -636,6 +648,7 @@ chosen and ships in PR 2 (§2, D10). It closes S5 for `gh pr create`. Other
 | R5 | The fork-parent case (S5) for `gh` write verbs other than `gh pr create`, such as `gh issue create` without `--repo` in a fork with no `upstream` remote. gh's issue and comment commands resolve through remotes, not the fork parent, so the exposure is small, but it is not proven. | Stated in the design doc's resolution paragraph so nobody assumes it is covered. Add a test pinning gh's behaviour for `issue create` in a fork. If gh does pick the parent, extend D10 to that verb. |
 
 | R6 | Paths outside `git`/`gh` entirely: `curl -X POST https://api.github.com/… -H "Authorization: token $(gh auth token)"`, `git credential fill`, and `gh extension install` running arbitrary code. | Out of the guard's verb model. Cheap mitigation in PR 2: a hook rule refusing `curl`/`wget` against `api.github.com` with `-X POST\|PUT\|PATCH\|DELETE` or `-d`/`--data*`, and `gh auth token` in a command that also makes a network call. This is named so nobody assumes coverage. |
+| R8 | **The hook guesses the command's `GH_REPO`.** The agent hook judges with its own environment, but the Bash tool's shell can get `GH_REPO` from startup files the hook never reads: `~/.zshenv` is agent-writable and sourced by every `zsh -c`. A gh write with no explicit target is then judged against the cwd while gh writes to `GH_REPO`. Only the shim sees the real environment (PR 2a review). | With the shim on PATH, the shim catches it. Hook-only installs are weaker here; say so in the design doc. `doctor` should flag `GH_REPO` exported from shell startup files. A stricter option, treating a targetless gh write as unresolved whenever the shim is not on PATH, is deferred: it would refuse every plain `gh issue create` on hook-only installs. |
 | R7 | **Registration oracle**: whether a refusal says rule h or rule g reveals whether an owner is registered. | Inherent to giving clear refusals (§3.9). The destination is in the agent's own command, so the oracle answers only "is this one owner registered", never "which owners are". Accepted. |
 
 ### 8.4 Independent review (Fable, 2026-11-02)
