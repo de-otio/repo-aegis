@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `doctor` owner checks, and a registry write-protection rule
+
+- **`doctor` checks the registered owners** (issue #151): `OWNERS_UNDECLARED`
+  and `REGISTRY_UNREADABLE` (both failures), `GH_LOGIN_UNREGISTERED`,
+  `GH_MEMBER_ORG_UNREGISTERED` and `REGISTERED_ORG_NOT_MEMBER` for **every**
+  `gh` account logged in for github.com (each account's token reaches the child
+  `gh` through its environment only; doctor never switches accounts and never
+  prints a token). Organisation names appear only in `fix` and `--json`.
+  `warn` and `info` findings never change the exit code. Also new:
+  `PREPUSH_HOOK_MISSING`, `SHELL_STARTUP_OVERRIDES` and `SSH_GITHUB_REDIRECT`.
+- **`install claude-md` adds `permissions.deny` for `Edit` and `Write` under the
+  registry directory**, so the agent's file tools cannot register an owner by
+  editing `engagements.yaml`. `install claude-md --uninstall` removes exactly
+  those entries. Add the directory to `sandbox.filesystem.denyWrite` yourself
+  to stop a Bash `sed -i` as well. To recover from a rule you do not want:
+  `repo-aegis install claude-md --uninstall`.
+- The `PERSONAL_ORG_UNREGISTERED` fix now says a person runs the owner add from
+  their own terminal.
+
 ## [0.10.3] - 2026-09-23
 
 ### Fixed — an `UNKNOWN` destination visibility let a push through

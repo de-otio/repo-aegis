@@ -429,6 +429,15 @@ user-authored hook in the same entry.
 written without touching disk. `repo-aegis install claude-md --uninstall`
 removes both again.
 
+It also adds two `permissions.deny` entries, `Edit(//<dir>/**)` and
+`Write(//<dir>/**)`, for the registry directory (default
+`~/.config/repo-aegis`), so the agent's Edit/Write tools cannot register an
+owner by editing `engagements.yaml`. `--uninstall` removes exactly those two.
+They do not stop a Bash `sed -i`; for that, the **user** adds the directory to
+`sandbox.filesystem.denyWrite` in `settings.json` (repo-aegis does not edit
+sandbox settings). `doctor` warns `REGISTRY_AGENT_WRITABLE` until the rules are
+present.
+
 **The guard:** reads the pending shell command on stdin before anything
 runs, extracts every publishing operation it carries (`git push`, the
 mutating `gh` verbs, `npm publish`), and returns `allow` / `ask` / `deny`.

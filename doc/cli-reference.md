@@ -662,6 +662,20 @@ neither replaces the other, and both coexist with any user-authored hook
 already in that entry. `--uninstall` removes every repo-aegis entry and
 reports the count per event.
 
+3. Adds two `permissions.deny` entries to `settings.json`, `Edit(//<dir>/**)`
+   and `Write(//<dir>/**)`, where `<dir>` is the directory holding the
+   registry file (`REPO_AEGIS_HOME`, default `~/.config/repo-aegis`). Without
+   them the agent's own Edit/Write tools can add an owner to
+   `engagements.yaml` with no terminal, which undoes the unregistered-owner
+   check. They stop only those tools: a Bash `sed -i` is not an Edit call.
+   To stop that too, add the directory to `sandbox.filesystem.denyWrite` in
+   the same `settings.json` yourself. repo-aegis prints the line to add but
+   does not edit sandbox settings. `--uninstall` removes exactly the two
+   `permissions.deny` entries (computed from the current `REPO_AEGIS_HOME` /
+   `REPO_AEGIS_REGISTRY`) and leaves your other rules and any sandbox entry
+   you added. `doctor` reports `REGISTRY_AGENT_WRITABLE` (warn) while they are
+   absent.
+
 No file is written under `~/.claude/hooks/` — the bin command parses
 stdin JSON natively, so `jq` is no longer required.
 
@@ -1215,10 +1229,35 @@ now reports, unless `--no-egress-checks`:
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` | no shim; another `gh` precedes it on `PATH`; the shim on `PATH` is an earlier release's script | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
 | `GUARD_HOOK_UNREGISTERED` | Claude Code `settings.json` has no `guard-egress` entry | `repo-aegis install claude-md` |
 | `CLASS_VISIBILITY_UNRESOLVED` (per repo) | a repo with a GitHub remote has no explicit class or no cached visibility | `repo-aegis classify --apply && repo-aegis status` in that repo |
-| `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`) |
+| `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
+| `REGISTRY_UNREADABLE` (**fail**) | the registry exists but is encrypted at rest or does not parse, so rule h refuses every non-interactive egress that has a destination | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal), or repair the file |
+| `OWNERS_UNDECLARED` (**fail**) | the registry loads but declares no owners, so rule h is inert | `repo-aegis engagements add --personal-org <login>` (a person, at a terminal) |
+| `GH_LOGIN_UNREGISTERED` | a logged-in `gh` account's login is not a registered owner | `--personal-org <login>` (a person, at a terminal) |
+| `GH_MEMBER_ORG_UNREGISTERED` | an organisation a logged-in `gh` account belongs to is not registered | `--personal-org` or `--github-org`, or leave it and let rule h refuse it |
+| `REGISTERED_ORG_NOT_MEMBER` (info) | a registered owner is no checked account's login or organisation (normal for archived engagements) | none required |
+| `REGISTRY_AGENT_WRITABLE` (warn) | Claude Code `settings.json` has no `permissions.deny` for `Edit` and `Write` under the registry directory | `repo-aegis install claude-md`; add the directory to `sandbox.filesystem.denyWrite` |
+| `PREPUSH_HOOK_MISSING` (warn, per repo) | a repo with a GitHub remote has no active repo-aegis `pre-push` hook, the only layer that sees the environment git and ssh really run with | `repo-aegis install hooks` |
+| `SHELL_STARTUP_OVERRIDES` (warn) | `~/.zshenv`, `~/.zshrc`, `~/.bashrc`, `~/.bash_profile` or `~/.profile` sets `GH_REPO`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `SRT_*` or `REPO_AEGIS_*`; reported by name and file, never value | remove the export |
+| `SSH_GITHUB_REDIRECT` (info) | `~/.ssh/config` has a `Host github.com` block whose `HostName` is not GitHub | none if intended |
+
+The `gh`-backed checks (`GH_LOGIN_UNREGISTERED`, `GH_MEMBER_ORG_UNREGISTERED`,
+`REGISTERED_ORG_NOT_MEMBER`) cover **every account logged in for
+github.com**, not just the active one: for each, doctor runs `gh api user`
+and `gh api user/orgs` with that account's token (`gh auth token --user`)
+handed to the child `gh` through its environment. It never prints, logs or
+stores a token and never runs `gh auth switch`. Each finding names its
+account. `REGISTERED_ORG_NOT_MEMBER` uses the union of all accounts'
+memberships. If the accounts cannot be listed, doctor checks the active
+account and says so. With `gh` absent, logged out, or an account's token
+invalid, the check is reported `SKIP`, never `FAIL`. Organisation names
+appear only in a finding's `fix` and in `--json`, never in a summary line.
+
+Only `fail`-severity findings make `doctor` exit 1. `warn` (`WARN`), `info`
+(`INFO`) and `SKIP` lines are reported and never change the exit code; JSON
+checks carry `severity`, `skipped` and, for gh findings, `account`.
 
 JSON gains `machine: DoctorCheck[]` and per-repo `checks: DoctorCheck[]`;
-`summary.failed` counts them. `--claude-home <dir>` points the guard-hook
+`summary.failed` counts the failing ones. `--claude-home <dir>` points the guard-hook
 check at a Claude Code home other than `~/.claude`. The sweep also records
 every checkout with a GitHub origin into the destination cache
 (`summary.destinationsRecorded`; the text output says `recorded N

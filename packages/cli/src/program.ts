@@ -629,7 +629,7 @@ export async function buildProgram(): Promise<Command> {
     .option("--yes", "apply --fix changes (default: dry-run report only)")
     .option(
       "--no-egress-checks",
-      "skip the egress-guard checks (push.default, gh shim on PATH, guard hook registered, class + visibility resolved per repo)",
+      "skip the egress-guard checks (push.default, gh shim on PATH, guard hook registered, class + visibility resolved per repo, registered owners vs every logged-in gh account, pre-push hook, shell startup overrides)",
     )
     .option("--claude-home <dir>", "override default ~/.claude location (for the guard-hook check)")
     .action((opts, cmd) => doctor(withGlobals(opts, cmd)));

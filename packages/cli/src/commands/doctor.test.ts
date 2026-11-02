@@ -7,9 +7,14 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { doctor } from "./doctor.js";
-import { withEnv } from "../_test-utils.js";
+import { fakeGh, withEnv } from "../_test-utils.js";
 import { HOOK_SCRIPTS, destinationCachePath, readDestinationCache } from "@de-otio/repo-aegis-core";
 import { GH_SHIM_SCRIPT } from "./shim-script.js";
+
+// A test seam, deliberately not exported from the core package's public index.
+const { setDefaultSshDirForTests } = (await import(
+  new URL("../../../core/dist/ssh-config.js", import.meta.url).href
+)) as { setDefaultSshDirForTests(dir: string | undefined): void };
 
 // SAFETY: every case below runs against throwaway repos under a
 // per-case temp scan root, with GIT_CONFIG_GLOBAL/SYSTEM redirected to
@@ -85,16 +90,27 @@ function makeFixture(
     );
   }
 
+  // The owner checks shell out to `gh` and the env checks read shell startup
+  // files. Neither may touch the developer's real GitHub accounts or dotfiles,
+  // so the fixture pins a `gh` that is logged out and a HOME with no dotfiles.
+  // The owner-check blocks below override both.
+  const userHome = join(base, "user-home");
+  mkdirSync(userHome, { recursive: true });
+  const loggedOutGh = fakeGh(join(base, "gh-logged-out"), "exit 1");
+
   const overrides: Record<string, string> = {
     GIT_CONFIG_SYSTEM: "/dev/null",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: globalConfig,
     REPO_AEGIS_HOME: home,
-    PATH: `${binDir}${delimiter}${process.env["PATH"] ?? ""}`,
+    HOME: userHome,
+    PATH: `${binDir}${delimiter}${loggedOutGh}${delimiter}${process.env["PATH"] ?? ""}`,
     ...extraEnv,
   };
 
   function run<T>(fn: () => T): T {
+    // ssh reads the PASSWD home, not $HOME, so pin the reader's directory too.
+    setDefaultSshDirForTests(join(userHome, ".ssh"));
     const prev: Record<string, string | undefined> = {};
     for (const k of Object.keys(overrides)) {
       const value = overrides[k];
@@ -105,6 +121,7 @@ function makeFixture(
     try {
       return fn();
     } finally {
+      setDefaultSshDirForTests(undefined);
       for (const k of Object.keys(overrides)) {
         const p = prev[k];
         if (p === undefined) delete process.env[k];
