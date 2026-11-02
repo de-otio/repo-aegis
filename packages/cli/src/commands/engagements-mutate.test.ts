@@ -391,6 +391,7 @@ describe("engagements add — --github-org", () => {
       captureOutput(() =>
         engagementsAdd("foo-corp", {
           name: "Foo Corp",
+          stderrIsTTY: true, // a person at a terminal (D8)
           githubOrg: ["foo-corp", "foo-corp-archived"],
           registryPath: env.registryPath,
         }),
@@ -410,6 +411,7 @@ describe("engagements add — --github-org", () => {
       const result = captureOutput(() =>
         engagementsAdd("bar-co", {
           name: "Bar Co",
+          stderrIsTTY: true, // a person at a terminal (D8)
           githubOrg: ["bar-co"],
           registryPath: env.registryPath,
         }),
@@ -440,6 +442,7 @@ engagements:
       const result = captureOutput(() =>
         engagementsAdd("new-corp", {
           name: "New Corp",
+          stderrIsTTY: true, // a person at a terminal (D8)
           githubOrg: ["new-corp"],
           registryPath: env.registryPath,
         }),
@@ -457,6 +460,7 @@ engagements:
     withEnv("REPO_AEGIS_HOME", env.home, () => {
       const result = captureOutput(() =>
         engagementsAdd("foo", {
+          stderrIsTTY: true, // a person at a terminal (D8)
           githubOrg: ["FOO-Corp", "-bad", ""],
           registryPath: env.registryPath,
           json: true,
@@ -482,6 +486,7 @@ engagements: []
     withEnv("REPO_AEGIS_HOME", env.home, () => {
       captureOutput(() =>
         engagementsAdd("foo-mixed", {
+          stderrIsTTY: true, // a person at a terminal (D8)
           githubOrg: ["Foo-Corp"], // mixed case input
           registryPath: env.registryPath,
         }),
@@ -504,6 +509,7 @@ engagements: []
     withEnv("REPO_AEGIS_HOME", env.home, () => {
       const result = captureOutput(() =>
         engagementsAdd("dup-corp", {
+          stderrIsTTY: true, // a person at a terminal (D8)
           githubOrg: ["dup-corp", "DUP-Corp", "dup-corp"],
           registryPath: env.registryPath,
           json: true,
@@ -521,6 +527,7 @@ describe("engagements add — --personal-org", () => {
     withEnv("REPO_AEGIS_HOME", env.home, () => {
       captureOutput(() =>
         engagementsAdd(undefined, {
+          stderrIsTTY: true, // a person at a terminal (D8)
           personalOrg: ["my-handle"],
           registryPath: env.registryPath,
         }),
@@ -538,12 +545,14 @@ describe("engagements add — --personal-org", () => {
     withEnv("REPO_AEGIS_HOME", env.home, () => {
       captureOutput(() =>
         engagementsAdd(undefined, {
+          stderrIsTTY: true, // a person at a terminal (D8)
           personalOrg: ["my-handle"],
           registryPath: env.registryPath,
         }),
       );
       const result = captureOutput(() =>
         engagementsAdd(undefined, {
+          stderrIsTTY: true, // a person at a terminal (D8)
           personalOrg: ["my-handle"],
           registryPath: env.registryPath,
           json: true,
@@ -563,6 +572,7 @@ describe("engagements add — --personal-org", () => {
     withEnv("REPO_AEGIS_HOME", env.home, () => {
       const result = captureOutput(() =>
         engagementsAdd("an-engagement", {
+          stderrIsTTY: true, // a person at a terminal (D8)
           personalOrg: ["my-handle"],
           registryPath: env.registryPath,
           json: true,
@@ -582,6 +592,7 @@ describe("engagements add — flag conflict", () => {
     withEnv("REPO_AEGIS_HOME", env.home, () => {
       const result = captureOutput(() =>
         engagementsAdd("foo", {
+          stderrIsTTY: true, // a person at a terminal (D8)
           githubOrg: ["a"],
           personalOrg: ["b"],
           registryPath: env.registryPath,

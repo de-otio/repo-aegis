@@ -144,6 +144,7 @@ describe("resolveDestinationOffline — what the parser now sees", () => {
       intents: parseEgressIntents("gh issue create -Rstranger/r --body x"),
       cwd: repo,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: false },
       scanPayload: () => 0,
@@ -158,6 +159,7 @@ describe("resolveDestinationOffline — what the parser now sees", () => {
       intents: parseEgressIntents("export GH_REPO=stranger/r && gh issue create --body x"),
       cwd: repo,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: false },
       scanPayload: () => 0,
@@ -165,7 +167,6 @@ describe("resolveDestinationOffline — what the parser now sees", () => {
     });
     assert.equal(unresolved.action, "deny");
     assert.equal(unresolved.action === "deny" && unresolved.destination?.unresolved, "env-override");
-    assert.match(unresolved.reason, /env-override/);
   });
 });
 

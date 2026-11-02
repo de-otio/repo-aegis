@@ -58,6 +58,7 @@ function decide(command: string, over: Partial<DecideEgressOptions> = {}) {
     intents,
     cwd: "/work/svc",
     registry: REGISTRY,
+    registryState: "loaded",
     humanPresent: false,
     capabilities: { ask: true },
     resolveDestination: () => dest(),
@@ -490,6 +491,7 @@ function baseOpts(): DecideEgressOptions {
     intents: [],
     cwd: "/work/svc",
     registry: REGISTRY,
+    registryState: "loaded",
     humanPresent: false,
     capabilities: { ask: true },
   };
@@ -682,6 +684,7 @@ describe("resolveDestinationOffline — real git config", () => {
         intents: parseEgressIntents(`gh pr create -t x --body-file ${body} --repo customer-a-org/thing`),
         cwd: other,
         registry: REGISTRY,
+        registryState: "loaded",
         humanPresent: true,
         capabilities: { ask: true },
       });
@@ -698,6 +701,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents("git push https://github.com/customer-a-org/thing.git main"),
       cwd: repo,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: true,
       capabilities: { ask: true },
     });
@@ -734,6 +738,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents("git push origin main"),
       cwd: repo,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
     });
@@ -745,6 +750,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents("git push customer main"),
       cwd: repo,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: true,
       capabilities: { ask: true },
     });
@@ -798,12 +804,18 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.ok(!describeDestination(d).includes("notes"), describeDestination(d));
   });
 
+  // These two tests pin rule g's handling of an unresolved destination. Since
+  // issue #151 rule h refuses an unresolved write first whenever a registry
+  // with owners is loaded (D5), so they run with `registryState: "missing"`
+  // (rule h skipped) to keep reaching rule g. Rule h's own behaviour for the
+  // same mutation is pinned in "decideEgress — rule h" below.
   it("the issue's test: that mutation, no approval, non-interactive shell → refused", () => {
     let askedFor: { org: string; repo: string } | null = null;
     const opts = {
       intents: parseEgressIntents(ENQUEUE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "missing" as const,
       humanPresent: false,
       findApproval: (dst: Destination | null) => {
         askedFor = dst && { org: dst.org, repo: dst.repo };
@@ -829,6 +841,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents(ENQUEUE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "missing" as const,
       humanPresent: false,
       capabilities: { ask: false },
     };
@@ -854,6 +867,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents(ENQUEUE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: true,
       capabilities: { ask: false },
       trustBoundaryOf: () => boundary(["acme"]),
@@ -870,6 +884,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents(VIEWER),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: false },
     });
@@ -930,6 +945,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents("gh pr create -t x -b y --repo acme/other"),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
     });
@@ -943,6 +959,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents(MERGE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
     });
@@ -977,6 +994,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents(MERGE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
     });
@@ -1031,11 +1049,24 @@ describe("decideEgress — an UNKNOWN visibility is treated as public (issue #11
     return dir;
   }
 
+  // `example` must be a registered owner here: since issue #151 an
+  // unregistered owner is refused by rule h before the visibility handling
+  // this block tests is ever reached. It is registered as a customer org (not
+  // a personal one), which keeps these destinations "non-personal".
+  const REGISTRY_WITH_EXAMPLE: Registry = {
+    ...REGISTRY,
+    engagements: [
+      ...REGISTRY.engagements,
+      { id: "customer-b", name: "Customer B", started: "2026-01-01", markers: [], githubOrgs: ["example"] },
+    ],
+  };
+
   function decideIn(cwd: string, over: Partial<DecideEgressOptions> = {}) {
     return decideEgress({
       intents: parseEgressIntents("git push origin main"),
       cwd,
-      registry: REGISTRY,
+      registry: REGISTRY_WITH_EXAMPLE,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
       scanPayload: () => 0,
