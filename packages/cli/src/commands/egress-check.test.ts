@@ -479,8 +479,9 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     assert.equal(r.code, 2, r.stdout);
     const p = JSON.parse(r.stderr.trim()) as Refusal;
     assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.equal(p.details.destination, undefined);
-    assert.match(p.error, /not a valid GitHub owner\/repo/);
+    // PR 2a: a repository that is not a literal owner/repo is an UNRESOLVED destination (`*`), never a named one.
+    assert.equal(p.details.destination?.org, "*");
+    assert.match(p.error, /not a literal <owner>\/<repo>/);
     for (const frag of ["evil.example", "$(", "engagements add", "repo-aegis approve"]) {
       assert.ok(!r.stderr.includes(frag), `must not contain "${frag}"`);
     }
@@ -562,22 +563,28 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
   describe("a destination name that is not a GitHub name never reaches the JSON (re-review)", () => {
     const hostileArgs = (repo: string) => ["egress-check", "--", "issue", "create", "--repo", repo, "--body", "x"];
 
-    it("a registered owner with a hostile repo: the rule g deny drops the destination and the approve hint", () => {
+    // Before PR 2a these reached rule g as NAMED destinations (the name dropped from the output). A
+    // repository with an expansion or a control character is not a literal name, so it now stops at
+    // rule h as unresolved; the rule-g path for a hostile name that does resolve is pinned at the
+    // policy level (egress-policy-rule-h-hardening.test.ts).
+    it("a registered owner with a hostile repo is refused as unresolved: no name, no approve hint", () => {
       const h = registryHome("h-hostile-repo", OWNERS_REGISTRY);
       const r = runCli(h, privateRepo, hostileArgs("acme/r$(id)"));
       assert.equal(r.code, 2, r.stdout);
-      const p = JSON.parse(r.stderr.trim()) as { code: string; error: string; details: { destination?: unknown } };
-      assert.equal(p.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
-      assert.equal(p.details.destination, undefined);
+      const p = JSON.parse(r.stderr.trim()) as { code: string; error: string; details: { destination?: { org: string } } };
+      assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+      assert.equal(p.details.destination?.org, "*");
       assert.ok(!r.stderr.includes("$(id)") && !r.stderr.includes("repo-aegis approve"), r.stderr);
     });
 
-    it("a bidi control character in the repo is dropped the same way", () => {
+    it("a bidi control character in the repo is refused the same way", () => {
       const h = registryHome("h-bidi-repo", OWNERS_REGISTRY);
       const r = runCli(h, privateRepo, hostileArgs("acme/r\u202Egpj"));
       assert.equal(r.code, 2, r.stdout);
       assert.ok(!r.stderr.includes("\u202E") && !r.stderr.includes("\\u202e"), JSON.stringify(r.stderr));
-      assert.equal((JSON.parse(r.stderr.trim()) as { details: { destination?: unknown } }).details.destination, undefined);
+      const p = JSON.parse(r.stderr.trim()) as { code: string; details: { destination?: { org: string } } };
+      assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+      assert.equal(p.details.destination?.org, "*");
     });
   });
 

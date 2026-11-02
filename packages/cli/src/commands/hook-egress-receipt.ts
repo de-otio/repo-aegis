@@ -38,6 +38,7 @@
 import {
   describeDestinationForReceipt,
   describeVerb,
+  egressParseOptions,
   formatReceipt,
   loadRegistry,
   parseEgressIntents,
@@ -368,7 +369,8 @@ export async function hookEgressReceipt(): Promise<void> {
     if (toolName !== undefined && !SHELL_TOOL_NAMES.has(toolName.toLowerCase())) process.exit(0);
     if (command === undefined) process.exit(0);
 
-    const intents = parseEgressIntents(command);
+    // The same environment-aware parse as the guard, so the receipt names the destination it judged.
+    const intents = parseEgressIntents(command, egressParseOptions(process.env));
     if (intents.length === 0) process.exit(0);
 
     const base = cwd ?? process.cwd();

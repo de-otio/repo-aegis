@@ -122,8 +122,41 @@ describe("gh shim — the parser sees the environment gh will run in", { skip: !
     assert.equal(refusal.org, "*");
   });
 
-  it("without the alias file, `ic` is an unknown command and is not judged", () => {
-    assert.equal(shimRefusal(shim(["ic", "-Rstranger/r"], { GH_CONFIG_DIR: join(tmp, "no-such-dir") })), null);
+  it("without the alias file, `ic` is an unknown word: it may be an alias this guard cannot read, so it is unresolved", () => {
+    const refusal = shimRefusal(shim(["ic", "-Rstranger/r"], { GH_CONFIG_DIR: join(tmp, "no-such-dir") }));
+    assert.ok(refusal);
+    assert.equal(refusal.org, "*");
+  });
+});
+
+describe("receipt hook — the same environment-aware parse as the guard (L1)", { skip: !AVAILABLE }, () => {
+  function receipt(command: string, output: string, env: Record<string, string>): string {
+    const r = spawnSync(process.execPath, [cliPath, "hook", "egress-receipt"], {
+      cwd: repo,
+      env: scrubbedEnv(env),
+      encoding: "utf8",
+      input: JSON.stringify({
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_input: { command },
+        tool_response: { stdout: "", stderr: output },
+        cwd: repo,
+      }),
+    });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout;
+  }
+
+  it("a GH_REPO in the hook's environment names the destination in the receipt", () => {
+    const out = receipt("gh issue create --title t --body b", "https://github.com/stranger/r/issues/7", { GH_REPO: "stranger/r" });
+    assert.match(out, /stranger\/r/);
+    assert.ok(!out.includes("acme/internal"), out);
+  });
+
+  it("an alias is expanded from the hook's GH_CONFIG_DIR", () => {
+    const out = receipt("gh ic -Rstranger/r --title t --body b", "https://github.com/stranger/r/issues/7", { GH_CONFIG_DIR: ghConfig });
+    assert.match(out, /stranger\/r/);
+    assert.ok(!out.includes("acme/internal"), out);
   });
 });
 

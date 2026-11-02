@@ -217,8 +217,16 @@ describe("gh per-verb repository table (§3.3.8, F9)", () => {
     assert.equal(only("gh secret set TOKEN").positionalRepo, undefined);
   });
 
-  it("gh label clone <o>/<r> and gh issue develop --branch-repo", () => {
-    assert.equal(only("gh label clone stranger/r").positionalRepo, "stranger/r");
+  it("gh label clone copies FROM its argument INTO the base repo: the source is not a target (M6)", () => {
+    const i = only("gh label clone stranger/r");
+    assert.equal(i.positionalRepo, undefined);
+    assert.deepEqual(targets("gh label clone stranger/r"), []); // the cwd's repository, as before
+    assert.deepEqual(targets("gh label clone stranger/r --repo acme/x"), ["acme/x"]);
+    assert.deepEqual(targets("gh label clone stranger/r -Racme/x"), ["acme/x"]);
+    assert.deepEqual(targets("gh label clone stranger/r", { envRepo: "acme/x" }), ["acme/x"]);
+  });
+
+  it("gh issue develop --branch-repo", () => {
     assert.equal(only("gh issue develop 5 --branch-repo stranger/r").positionalRepo, "stranger/r");
     assert.equal(only("gh issue develop 5 --branch-repo=stranger/r --repo acme/x").repoFlag, "acme/x");
     assert.deepEqual(targets("gh issue develop 5 --branch-repo=stranger/r --repo acme/x"), ["stranger/r", "acme/x"]);
@@ -292,7 +300,8 @@ describe("gh per-verb repository table (§3.3.8, F9)", () => {
     assert.deepEqual(parseEgressIntents("gh run view 123"), []);
     assert.deepEqual(parseEgressIntents("gh workflow list"), []);
     assert.deepEqual(parseEgressIntents("gh secret list"), []);
-    assert.deepEqual(parseEgressIntents("gh constructor create"), []);
+    assert.deepEqual(parseEgressIntents("gh search issues foo"), []);
+    assert.deepEqual(parseEgressIntents("gh auth status"), []);
     // An Object.prototype key is not a subcommand either; it is just an unknown write.
     assert.equal(only("gh pr constructor").unresolved, "unknown-shape");
   });
@@ -443,19 +452,79 @@ describe("gh aliases (S11)", () => {
     assert.deepEqual(parseEgressIntents("gh need3 a b", opts), []);
   });
 
-  it("without aliases, an alias is an unknown command", () => {
-    assert.deepEqual(parseEgressIntents("gh ic --repo stranger/r --body x"), []);
-    assert.deepEqual(parseEgressIntents("gh ic --repo stranger/r --body x", { envRepo: "a/b" }), []);
-  });
-
-  it("prototype keys are not aliases", () => {
-    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
-      assert.deepEqual(parseEgressIntents(`gh ${name} --repo stranger/r --body x`, opts), [], name);
+  it("(C1, inverted) without aliases, an unknown first word fails closed: it may be an alias or an extension", () => {
+    for (const c of ["gh ic --repo stranger/r --body x", "gh foo"]) {
+      for (const o of [undefined, { envRepo: "a/b" }]) {
+        const i = only(c, o);
+        assert.equal(i.verb, "gh-unknown", c);
+        assert.equal(i.unresolved, "gh-alias", c);
+      }
     }
   });
 
-  it("a flag first means no alias lookup, as in gh", () => {
-    assert.deepEqual(parseEgressIntents("gh --repo stranger/r ic", opts), []);
+  it("prototype keys are not aliases: they are unknown words, so unresolved", () => {
+    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+      assert.equal(only(`gh ${name} --repo stranger/r --body x`, opts).unresolved, "gh-alias", name);
+    }
+  });
+
+  it("(C1) an alias after leading flags is unresolved, not ignored", () => {
+    for (const c of [
+      "gh -R stranger/r ic -b x",
+      "gh --repo stranger/r ic -b x",
+      "gh --repo=stranger/r ic -b x",
+      "gh -Rstranger/r ic -b x",
+      "gh --repo stranger/r rv 5", // even an alias to a read: the parser cannot tell it is one from here
+    ]) {
+      const i = only(c, opts);
+      assert.equal(i.verb, "gh-unknown", c);
+      assert.equal(i.unresolved, "gh-alias", c);
+    }
+    // A flag first means gh does no alias lookup, but the unknown word must not pass either.
+    assert.equal(only("gh --repo stranger/r ic", opts).unresolved, "gh-alias");
+  });
+
+  it("aliases of aliases are followed, to a depth of 5", () => {
+    const chain = new Map<string, string>([
+      ["a0", "issue create"],
+      ["a1", "a0"],
+      ["a2", "a1"],
+      ["a3", "a2"],
+      ["a4", "a3"],
+      ["a5", "a4"],
+      ["a6", "a5"],
+    ]);
+    const o = { ghAliases: chain };
+    assert.equal(only("gh a1 --repo stranger/r -b x", o).verb, "gh-issue-create");
+    assert.equal(only("gh a4 --repo stranger/r -b x", o).repoFlag, "stranger/r"); // a4→a3→a2→a1→a0→issue: five expansions
+    const deep = only("gh a5 --repo stranger/r -b x", o); // a sixth: over the cap
+    assert.equal(deep.verb, "gh-unknown");
+    assert.equal(deep.unresolved, "gh-alias");
+    assert.equal(only("gh a6 --repo stranger/r -b x", o).unresolved, "gh-alias"); // and however deep
+    // A cycle is just the cap again.
+    assert.equal(only("gh x --repo a/b", { ghAliases: new Map([["x", "y"], ["y", "x"]]) }).unresolved, "gh-alias");
+    // An alias of a shell alias is a shell alias.
+    assert.equal(only("gh s2", { ghAliases: new Map([["s2", "s1"], ["s1", "!echo"]]) }).verb, "gh-alias-shell");
+  });
+
+  it("(M1) an expansion over 64 KiB, or substituted over it, is unresolved", () => {
+    const big = "issue create --body " + "x".repeat(70 * 1024);
+    assert.equal(only("gh big --repo a/b", { ghAliases: new Map([["big", big]]) }).unresolved, "gh-alias");
+    const grow = new Map([["grow", "issue create --body $1 --body $1 --body $1"]]);
+    assert.equal(only(`gh grow ${"y".repeat(30 * 1024)}`, { ghAliases: grow }).unresolved, "gh-alias");
+    assert.equal(only("gh grow z --repo a/b", { ghAliases: grow }).verb, "gh-issue-create");
+    // More arguments than placeholders can use.
+    const many = Array.from({ length: 100 }, (_, k) => `a${k}`).join(" ");
+    assert.equal(only(`gh grow ${many}`, { ghAliases: grow }).unresolved, "gh-alias");
+  });
+
+  it("(M2) a word-initial # in an expansion starts a comment, as in google/shlex", () => {
+    const o = { ghAliases: new Map([["note", "issue create --body $1 --repo acme/x"]]) };
+    // `$1` = `#x` makes the rest of the line a comment, so --repo acme/x is NOT in effect.
+    assert.equal(only("gh note '#x'", o).repoFlag, undefined);
+    assert.equal(only("gh note 'a#x'", o).repoFlag, "acme/x"); // `#` inside a word is not a comment
+    assert.equal(only("gh note x", o).repoFlag, "acme/x");
+    assert.equal(only("gh issue-ic", { ghAliases: new Map([["issue-ic", "issue create # --repo acme/x"]]) }).repoFlag, undefined);
   });
 
   it("aliases are loaded lazily, once, and only when a gh call needs them", () => {
@@ -474,14 +543,22 @@ describe("gh aliases (S11)", () => {
     assert.equal(loads, 1);
   });
 
-  it("a loader that throws degrades to no aliases", () => {
-    assert.deepEqual(
-      parseEgressIntents("gh ic --body x", {
+  it("a loader that throws means aliases are unknown: a non-built-in first word is unresolved, never 'no aliases' (H1)", () => {
+    const i = only("gh ic --body x", {
+      ghAliases: () => {
+        throw new Error("boom");
+      },
+    });
+    assert.equal(i.verb, "gh-unknown");
+    assert.equal(i.unresolved, "gh-alias");
+    // Built-in commands do not need the aliases.
+    assert.equal(
+      only("gh issue create --body x", {
         ghAliases: () => {
           throw new Error("boom");
         },
-      }),
-      [],
+      }).verb,
+      "gh-issue-create",
     );
   });
 });
@@ -619,7 +696,14 @@ describe("parseEgressIntents with options — never throws", () => {
   }
 
   it("survives pseudo-random junk made of the parser's own vocabulary", () => {
-    const words = ["gh", "issue", "pr", "create", "comment", "api", "-R", "-X", "-f", "-F", "--repo", "--", "-", "=", "a/b", "POST", "&&", ";", "'", '"', "$X", "GH_REPO=a/b", "export", "ic", "-Rx/y", "--repo=x/y"];
+    const words = [
+      "gh", "issue", "pr", "create", "comment", "api", "-R", "-X", "-f", "-F", "--repo", "--", "-", "=", "a/b", "POST",
+      "&&", ";", "'", '"', "$X", "GH_REPO=a/b", "export", "ic", "-Rx/y", "--repo=x/y",
+      // tokeniser and wrapper vocabulary
+      "$'", "$'\\x67h'", '$"', "+=", "GH_REPO+=a/b", "{", "}", "{a,b}", "g{h,}", "$(", "`", ")", "$1", "$2", "#",
+      "bash", "-c", "eval", "xargs", "env", "-S", "timeout", "nice", "sudo", "git", "-C", "push", "--git-dir=x", "GIT_DIR=x",
+      "unset", "source", ".", "read", "printf", "-v", "<<", "EOF", "\n",
+    ];
     let seed = 12345;
     const next = (): number => {
       seed = (seed * 1103515245 + 12345) & 0x7fffffff;

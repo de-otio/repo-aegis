@@ -173,8 +173,18 @@ describe("rule h — hostile destination names never reach pasteable text (revie
       });
       assert.ok(out.action === "deny");
       assert.equal(out.code, "UNREGISTERED_OWNER_EGRESS");
-      assertSafe(out.reason, "evil.example", "end to end");
-      assert.ok(!out.reason.includes("curl"));
+      // Since PR 2a the parser reports a repository holding a shell substitution as UNRESOLVED
+      // (`opaque-repo`) instead of handing the resolver a hostile name: same invariants, the
+      // unresolved wording.
+      assert.equal(out.destination?.unresolved, "opaque-repo");
+      assert.match(out.reason, /not a literal <owner>\/<repo>/);
+      assert.match(out.reason, /No approval covers this/);
+      assert.match(out.reason, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]$/);
+      for (const frag of ["evil.example", "curl", "$(", ...FORBIDDEN_COMMANDS]) {
+        assert.ok(!out.reason.includes(frag), `end to end: no "${frag}"`);
+      }
+      // (No `;` in this class: the shared "do not run that yourself, retry or reroute; report this" sentence has one.)
+      assert.ok(!/[$`|&\n\r]/.test(out.reason), "end to end: no shell metacharacter or line break in the reason");
     });
   });
 

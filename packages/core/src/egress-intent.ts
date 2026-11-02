@@ -8,9 +8,11 @@
 // This is the parser half of "one decision function, several enforcement
 // points". It is pure — text in, intents out — and total: it never throws,
 // because it runs inside pre-command hooks where an exception would surface
-// to the agent as a tool failure instead of a decision. Anything it cannot
-// parse yields no intent, which the policy treats as "not egress" — the
-// shape rules only ever refuse what they positively recognise.
+// to the agent as a tool failure instead of a decision. It fails CLOSED: a
+// segment that runs `gh` or `git push` — directly or through a wrapper,
+// interpreter, alias or substitution — and whose verb or target it cannot
+// determine yields an intent with `unresolved` set, never "no intent". Only a
+// command that is positively something else (or a known read) yields nothing.
 //
 // What it recognises today: `git push`, the mutating `gh` verbs, and
 // `npm|pnpm|yarn publish`. What it deliberately does not attempt: a full
@@ -18,7 +20,12 @@
 // substitution, `${...}`, redirections, heredocs, comments and the segment
 // operators (`;`, `&&`, `||`, `|`, `&`, newline) are handled well enough
 // that the two incident commands and their obvious variants classify
-// correctly; exotic constructs degrade to "no intent", never to a crash.
+// correctly; exotic constructs degrade to a fail-closed `unresolved` intent
+// when they involve `gh` or `git push`, and to "no intent" otherwise — never
+// to a crash.
+
+import { posix } from "node:path";
+import { GH_COMMAND_FLAGS } from "./gh-flags.js";
 
 /** The publishing operations the policy knows how to judge. */
 export type EgressVerb =
@@ -44,6 +51,13 @@ export type EgressVerb =
    * `unresolved: "gh-alias"`.
    */
   | "gh-alias-shell"
+  /**
+   * A `gh` invocation whose verb the parser cannot determine: an unknown first
+   * word (an alias it cannot read, an extension, a brace expansion), a built-in
+   * group with no shape here (`project`, `codespace`, …), or a line it could not
+   * parse. Always carries `unresolved`.
+   */
+  | "gh-unknown"
   /** `gh api` with `-X POST|PATCH|PUT|DELETE`, or with fields and no explicit method (gh then POSTs). */
   | "gh-api-mutating"
   | "npm-publish";
@@ -62,9 +76,22 @@ export type EgressVerb =
  * - `unknown-shape`: a `gh` subcommand of a write group that is neither a
  *   known write verb nor a known read verb;
  * - `ambiguous-target`: produced by the resolver (not the parser) when an
- *   intent names more than one distinct repository.
+ *   intent names more than one distinct repository;
+ * - `unparsed-shape`: the command line could not be taken apart (a parse
+ *   failure, nesting deeper than the parser follows, `xargs`-fed arguments, a
+ *   brace-expanded command word, a `-C`/`--git-dir` the parser cannot name).
+ *
+ * `gh-alias` also covers any first word that is not a built-in `gh` command
+ * and not an alias the parser can resolve: an extension, a typo, an alias
+ * invoked after leading flags, or an alias file it could not read.
  */
-export type IntentUnresolved = "env-override" | "gh-alias" | "opaque-repo" | "unknown-shape" | "ambiguous-target";
+export type IntentUnresolved =
+  | "env-override"
+  | "gh-alias"
+  | "opaque-repo"
+  | "unknown-shape"
+  | "ambiguous-target"
+  | "unparsed-shape";
 
 /** The shell operator that joined a segment to its predecessor. */
 export type SegmentJoin = ";" | "&&" | "||" | "|" | "&" | "\n" | null;
@@ -150,6 +177,46 @@ interface Segment {
 }
 
 /**
+ * One backslash escape inside `$'…'`, starting at `text[at]` (the backslash).
+ * Returns the decoded text and how many characters it consumed. An escape bash
+ * does not define stays as written. Never throws.
+ */
+function decodeAnsiCEscape(text: string, at: number): [string, number] {
+  const e = text[at + 1]!;
+  const simple: Record<string, string> = {
+    a: "\x07",
+    b: "\b",
+    e: "\x1b",
+    E: "\x1b",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    v: "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+  };
+  if (Object.hasOwn(simple, e)) return [simple[e]!, 2];
+  const hex = (re: RegExp): [string, number] | null => {
+    const m = re.exec(text.slice(at + 2, at + 12));
+    if (m === null) return null;
+    return [String.fromCodePoint(parseInt(m[1]!, 16)), 2 + m[1]!.length];
+  };
+  if (e === "x") return hex(/^([0-9A-Fa-f]{1,2})/) ?? ["\\x", 2];
+  if (e === "u") return hex(/^([0-9A-Fa-f]{1,4})/) ?? ["\\u", 2];
+  if (e === "U") {
+    const m = /^([0-9A-Fa-f]{1,8})/.exec(text.slice(at + 2, at + 12));
+    if (m !== null && parseInt(m[1]!, 16) <= 0x10ffff) return [String.fromCodePoint(parseInt(m[1]!, 16)), 2 + m[1]!.length];
+    return ["\\U", 2];
+  }
+  const oct = /^([0-7]{1,3})/.exec(text.slice(at + 1, at + 4));
+  if (oct !== null) return [String.fromCharCode(parseInt(oct[1]!, 8) & 0xff), 1 + oct[1]!.length];
+  return ["\\" + e, 2];
+}
+
+/**
  * Quote-aware split of a command line into operator-delimited segments.
  * Never throws: a malformed line (unterminated quote, dangling operator)
  * yields whatever segments were complete before the problem.
@@ -225,6 +292,30 @@ function tokenise(command: string): Segment[] {
       } else {
         i++;
       }
+      continue;
+    }
+    // `$'…'` (ANSI-C quoting) and `$"…"` (locale quoting) are quoted words: bash
+    // drops the `$` and the quotes, so `gh $'issue' create` runs `gh issue create`.
+    if (c === "$" && command[i + 1] === "'") {
+      inWord = true;
+      let j = i + 2;
+      let text = "";
+      while (j < n && command[j] !== "'") {
+        if (command[j] === "\\" && j + 1 < n) {
+          const [decoded, used] = decodeAnsiCEscape(command, j);
+          text += decoded;
+          j += used;
+        } else {
+          text += command[j];
+          j++;
+        }
+      }
+      word += text;
+      i = j + 1; // closing quote (or past end)
+      continue;
+    }
+    if (c === "$" && command[i + 1] === '"') {
+      i++; // the double-quote branch above takes it from here
       continue;
     }
     // Command / parameter substitution: keep opaque, inside the current word.
@@ -391,43 +482,146 @@ function stripRedirections(tokens: string[]): string[] {
   return out;
 }
 
-const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "builtin", "sudo", "doas"]);
-// Wrapper flags that take a value as the next token (`sudo -u deploy`,
-// `env -u VAR`, `env -C dir`).
-const WRAPPER_FLAGS_WITH_VALUE = new Set(["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-T", "-U", "-S"]);
+/** Wrapper commands that run another command: which of their flags take a value, and how many positionals precede the command. */
+interface WrapperSpec {
+  value: ReadonlySet<string>;
+  positionals?: number;
+}
 
-/** A `NAME=value` assignment in the prefix of a command. */
+const NO_VALUE_FLAGS: ReadonlySet<string> = new Set();
+const WRAPPER_SPECS = new Map<string, WrapperSpec>([
+  ["env", { value: new Set(["-u", "-C", "-a", "--unset", "--chdir", "--argv0"]) }],
+  ["command", { value: NO_VALUE_FLAGS }],
+  ["builtin", { value: NO_VALUE_FLAGS }],
+  ["nohup", { value: NO_VALUE_FLAGS }],
+  ["setsid", { value: NO_VALUE_FLAGS }],
+  ["time", { value: new Set(["-f", "-o", "--format", "--output"]) }],
+  ["exec", { value: new Set(["-a"]) }],
+  [
+    "sudo",
+    {
+      value: new Set([
+        "-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-T", "-U",
+        "--user", "--group", "--host", "--prompt", "--close-from", "--chdir", "--role", "--type",
+      ]),
+    },
+  ],
+  ["doas", { value: new Set(["-u", "-C"]) }],
+  ["nice", { value: new Set(["-n", "--adjustment"]) }],
+  ["timeout", { value: new Set(["-s", "-k", "--signal", "--kill-after"]), positionals: 1 }],
+  ["stdbuf", { value: new Set(["-i", "-o", "-e", "--input", "--output", "--error"]) }],
+  ["ionice", { value: new Set(["-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid", "--pgid", "--uid"]) }],
+  ["caffeinate", { value: new Set(["-t", "-w"]) }],
+  [
+    "xargs",
+    {
+      value: new Set([
+        "-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a", "-l",
+        "--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-lines", "--max-chars", "--eof",
+      ]),
+    },
+  ],
+]);
+
+const SHELL_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"]);
+
+/** A `NAME=value` (or `NAME+=value`) assignment in the prefix of a command. */
 interface Assignment {
   name: string;
   value: string;
+  /** `NAME+=value`: the value is appended to whatever the variable already holds. */
+  append: boolean;
+}
+
+/** What {@link resolveCommand} found. */
+interface ResolvedCommand {
+  /** The tokens, with `env -S 'string'` expanded in place. */
+  tokens: string[];
+  /** Index of the real command word (`tokens.length` when there is none). */
+  start: number;
+  /** The command is fed by `xargs`: arguments arrive on stdin and are not visible here. */
+  viaXargs: boolean;
+  /**
+   * Command text the real command word runs: `sh -c '<text>'`, or the arguments
+   * of `eval`. The caller parses it as a command line of its own.
+   */
+  nestedText?: string;
+  /** The nested text comes from `eval`: it runs in THIS shell, so it can change its variables. */
+  isEval: boolean;
 }
 
 /**
- * Skip leading `NAME=value` assignments and transparent wrappers so the
- * real command name surfaces. `sudo -u user git push` still resolves to
- * `git`; the flags between wrapper and command are skipped. Every
- * assignment passed over (before the wrapper, or after `env`) is appended to
- * `assigns`, in order, so the caller can see `GH_REPO=o/r gh …`.
+ * Skip leading `NAME=value` / `NAME+=value` assignments and transparent
+ * wrappers (`env`, `sudo`, `nice`, `timeout`, `xargs`, …) so the real command
+ * name surfaces; `sudo -u user git push` still resolves to `git`. Every
+ * assignment passed over is appended to `assigns`, in order, so the caller can
+ * see `GH_REPO=o/r gh …`. `env -S 'string'` is split and run in place. A shell
+ * interpreter's `-c` text and the arguments of `eval` are returned as
+ * `nestedText` for the caller to parse.
  */
-function commandStart(tokens: string[], assigns: Assignment[] = []): number {
+function resolveCommand(input: string[], assigns: Assignment[] = []): ResolvedCommand {
+  let tokens = input;
   let i = 0;
-  for (;;) {
+  let viaXargs = false;
+  for (let guard = 0; guard < 256; guard++) {
     for (;;) {
-      const m = i < tokens.length ? /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(tokens[i]!) : null;
+      const m = i < tokens.length ? /^([A-Za-z_][A-Za-z0-9_]*)(\+?)=([\s\S]*)$/.exec(tokens[i]!) : null;
       if (m === null) break;
-      assigns.push({ name: m[1]!, value: m[2]! });
+      assigns.push({ name: m[1]!, value: m[3]!, append: m[2] === "+" });
       i++;
     }
-    if (i >= tokens.length) return i;
-    if (WRAPPERS.has(baseName(tokens[i]!))) {
-      i++;
-      while (i < tokens.length && tokens[i]!.startsWith("-")) {
-        i += WRAPPER_FLAGS_WITH_VALUE.has(tokens[i]!) ? 2 : 1;
+    if (i >= tokens.length) return { tokens, start: i, viaXargs, isEval: false };
+    const word = baseName(tokens[i]!);
+    const spec = WRAPPER_SPECS.get(word);
+    if (spec === undefined) break;
+    if (word === "xargs") viaXargs = true;
+    i++;
+    let restart = false;
+    while (i < tokens.length && tokens[i]!.startsWith("-") && tokens[i] !== "-") {
+      const t = tokens[i]!;
+      if (t === "--") {
+        i++;
+        break;
       }
-      continue;
+      if (word === "env") {
+        // `env -S 'gh issue create …'`: the string is split into words and run.
+        let text: string | undefined;
+        let used = 1;
+        if (t === "-S" || t === "--split-string") {
+          text = tokens[i + 1] ?? "";
+          used = 2;
+        } else if (t.startsWith("--split-string=")) {
+          text = t.slice("--split-string=".length);
+        } else if (t.startsWith("-S") && t.length > 2) {
+          text = t.slice(2);
+        }
+        if (text !== undefined) {
+          tokens = [...tokens.slice(0, i), ...shlexSplit(text), ...tokens.slice(i + used)];
+          restart = true;
+          break;
+        }
+      }
+      i += spec.value.has(t) ? 2 : 1;
     }
-    return i;
+    if (restart) continue;
+    i += spec.positionals ?? 0;
   }
+  const word = i < tokens.length ? baseName(tokens[i]!) : "";
+  if (word === "eval") {
+    return { tokens, start: i, viaXargs, nestedText: tokens.slice(i + 1).join(" "), isEval: true };
+  }
+  if (SHELL_INTERPRETERS.has(word)) {
+    for (let j = i + 1; j < tokens.length; j++) {
+      const t = tokens[j]!;
+      if (t === "--" || !t.startsWith("-")) break;
+      if (/^-[A-Za-z]+$/.test(t) && t.includes("c")) {
+        const text = tokens[j + 1];
+        if (text !== undefined) return { tokens, start: i, viaXargs, nestedText: text, isEval: false };
+        break;
+      }
+    }
+  }
+  return { tokens, start: i, viaXargs, isEval: false };
 }
 
 function baseName(token: string): string {
@@ -462,19 +656,53 @@ const GIT_PUSH_WITH_VALUE = new Set([
   "--push-option",
 ]);
 
+/** True when a word carries a shell expansion this parser cannot evaluate. */
+function hasExpansion(word: string): boolean {
+  return word.includes("$") || word.includes("`");
+}
+
+/** `git -C a -C b` is `a/b`; an absolute path starts over; an empty one is ignored (git semantics). */
+function joinGitDir(current: string | undefined, next: string): string | undefined {
+  if (next === "") return current;
+  if (current === undefined || posix.isAbsolute(next)) return next;
+  return posix.join(current, next);
+}
+
 function classifyGit(
   args: string[],
   base: Omit<EgressIntent, "verb" | "payloadFiles">,
+  assigns: Assignment[],
 ): EgressIntent | null {
   let i = 0;
   let cwdOverride: string | undefined;
+  let gitDir: string | undefined;
+  let opaque = false;
   // Global options precede the subcommand.
   while (i < args.length) {
     const a = args[i]!;
     if (!a.startsWith("-")) break;
     if (a === "-C") {
-      cwdOverride = args[i + 1];
+      const v = args[i + 1];
+      if (v !== undefined) {
+        if (hasExpansion(v)) opaque = true;
+        cwdOverride = joinGitDir(cwdOverride, v);
+      }
       i += 2;
+      continue;
+    }
+    if (a === "--git-dir") {
+      const v = args[i + 1];
+      if (v !== undefined) {
+        if (hasExpansion(v)) opaque = true;
+        gitDir = v;
+      }
+      i += 2;
+      continue;
+    }
+    if (a.startsWith("--git-dir=")) {
+      gitDir = a.slice("--git-dir=".length);
+      if (hasExpansion(gitDir)) opaque = true;
+      i++;
       continue;
     }
     if (GIT_GLOBAL_WITH_VALUE.has(a)) {
@@ -482,12 +710,26 @@ function classifyGit(
       continue;
     }
     if (a.startsWith("-C") && a.length > 2) {
-      cwdOverride = a.slice(2);
+      const v = a.slice(2);
+      if (hasExpansion(v)) opaque = true;
+      cwdOverride = joinGitDir(cwdOverride, v);
     }
-    i++; // `--no-pager`, `-p`, `--git-dir=…`, `-c k=v`-style inline forms, …
+    i++; // `--no-pager`, `-p`, `--work-tree=…`, `-c k=v`-style inline forms, …
   }
   if (args[i] !== "push") return null;
   i++;
+
+  // `GIT_DIR=` in the command prefix is `--git-dir` (the flag wins, as in git).
+  if (gitDir === undefined) {
+    const prefixed = assigns.filter(a => a.name === "GIT_DIR").pop();
+    if (prefixed !== undefined && prefixed.value !== "") {
+      gitDir = prefixed.value;
+      if (prefixed.append || hasExpansion(gitDir)) opaque = true;
+    }
+  }
+  // The repository's config — and so its remotes — comes from the git dir, relative to `-C`. A dir
+  // the parser cannot name (`$DIR`) is unresolved, never silently the cwd.
+  if (gitDir !== undefined) cwdOverride = joinGitDir(cwdOverride, gitDir);
 
   const positionals: string[] = [];
   for (; i < args.length; i++) {
@@ -512,6 +754,7 @@ function classifyGit(
     ...(remote !== undefined && { remote }),
     ...(refspec !== undefined && { refspec }),
     ...(cwdOverride !== undefined && { cwdOverride }),
+    ...(opaque && { unresolved: "unparsed-shape" as const }),
   };
 }
 
@@ -607,6 +850,8 @@ export type ApiEndpointTarget =
 export function analyseApiEndpoint(endpoint: string): ApiEndpointTarget {
   let path = endpoint;
   if (/^https?:\/\//i.test(path)) {
+    // A shell expansion in the host (`https://$HOST/…`) is a host this guard cannot name.
+    if (/^https?:\/\/[^/]*[$`]/i.test(path)) return { kind: "opaque" };
     try {
       // `new URL` percent-encodes braces in a path; undo that for the two placeholder characters.
       path = new URL(path).pathname.replace(/%7B/gi, "{").replace(/%7D/gi, "}");
@@ -614,15 +859,23 @@ export function analyseApiEndpoint(endpoint: string): ApiEndpointTarget {
       return { kind: "none" };
     }
   }
-  path = path.replace(/^\/+/, "").replace(/^api\/v3\//, "");
+  path = path.replace(/^\/+/, "").replace(/^api\/v3\//i, "");
   const parts = path.split(/[?#]/)[0]!.split("/").filter(Boolean);
-  // `repos/<o>/<r>` needs both segments; `orgs/<o>` needs the first.
+  // The first segment decides what the rest means, so an expansion there (`$EP`, `$KIND/o/r`) hides it.
+  if (parts[0] !== undefined && hasExpansion(parts[0])) return { kind: "opaque" };
+  // `repos/<o>/<r>` needs both segments; `orgs/<o>` needs the first. It is matched
+  // case-insensitively (`Repos/o/r`): if GitHub routes that spelling it must not be missed, and
+  // if it does not the request fails, so nothing is lost by treating every case variant alike.
+  const first = parts[0]?.toLowerCase();
   let segments: string[] | null = null;
-  if (parts[0] === "repos" && parts.length >= 3) segments = [parts[1]!, parts[2]!];
-  else if (parts[0] === "orgs" && parts.length >= 2) segments = [parts[1]!];
+  if (first === "repos" && parts.length >= 3) segments = [parts[1]!, parts[2]!];
+  else if (first === "orgs" && parts.length >= 2) segments = [parts[1]!];
   if (segments === null) return { kind: "none" };
   let cwd = false;
   for (const [i, seg] of segments.entries()) {
+    // An expansion in the owner or repo segment (`repos/$O/r`) is unknowable; later segments
+    // cannot change which repository is addressed, so an expansion there is fine.
+    if (hasExpansion(seg)) return { kind: "opaque" };
     if (!seg.includes("{")) continue;
     if (seg === (i === 0 ? "{owner}" : "{repo}")) cwd = true;
     else return { kind: "opaque" };
@@ -798,140 +1051,71 @@ const GH_BUILTIN_COMMANDS = new Set([
   "workflow",
 ]);
 
-// Long flags whose value is the next token (or attached with `=`). A long flag
-// missing from here is treated as boolean, which is the safe direction: its
-// value then surfaces as a spare positional, which can only add a candidate
-// repository, never hide one.
-const GH_LONG_VALUE_FLAGS = new Set([
-  "--add-assignee",
-  "--add-label",
-  "--add-project",
-  "--add-reviewer",
-  "--add-topic",
-  "--app",
-  "--assignee",
-  "--author",
-  "--author-email",
-  "--base",
-  "--body",
-  "--body-file",
-  "--branch",
-  "--branch-repo",
-  "--cache",
-  "--color",
-  "--comment",
-  "--default-branch",
-  "--description",
-  "--discussion-category",
-  "--env",
-  "--env-file",
-  "--field",
-  "--fork-name",
-  "--gitignore",
-  "--head",
-  "--header",
-  "--homepage",
-  "--hostname",
-  "--input",
-  "--job",
-  "--jq",
-  "--json",
-  "--label",
-  "--license",
-  "--limit",
-  "--match-head-commit",
-  "--method",
-  "--milestone",
-  "--name",
-  "--new-name",
-  "--notes",
-  "--notes-file",
-  "--notes-start-tag",
-  "--org",
-  "--preview",
-  "--project",
-  "--raw-field",
-  "--reason",
-  "--ref",
-  "--remote",
-  "--remove-assignee",
-  "--remove-label",
-  "--remove-project",
-  "--remove-reviewer",
-  "--remove-topic",
-  "--repo",
-  "--repos",
-  "--reviewer",
-  "--search",
-  "--source",
-  "--state",
-  "--subject",
-  "--tag",
-  "--target",
-  "--team",
-  "--template",
-  "--title",
-  "--visibility",
+// Built-in groups with no write verb at all. Every OTHER built-in group that has no entry in
+// GH_VERBS (`project`, `agent-task`, `codespace`, `cache`, `ssh-key`, `extension`, …) is a write this
+// parser has no shape for, and is reported unresolved: an unknown command fails closed.
+const GH_READ_GROUPS = new Set([
+  "accessibility",
+  "actions",
+  "alias",
+  "attestation",
+  "auth",
+  "browse",
+  "completion",
+  "config",
+  "help",
+  "licenses",
+  "org",
+  "preview",
+  "search",
+  "status",
 ]);
 
-// Short flags that take a value in EVERY gh write command this parser looks at.
-const GH_SHORT_VALUE_BASE = "RXFbHqtBlnTA";
+/** Flags that take a value, for one command: long names (with `--`) and short letters. */
+interface FlagSpec {
+  long: ReadonlySet<string>;
+  short: ReadonlySet<string>;
+}
 
-// Short flags that take a value only for some verbs, keyed by `group` or
-// `group sub`; a key is added to the base set, never subtracted from it. A
-// letter wrongly treated as a value flag would swallow the next token, which
-// might be the very positional that names the repository, so a letter is
-// listed here only when gh is known to treat it as a value in that verb
-// (`gh pr create -f` is `--fill`, `gh pr review -a` is `--approve`, `gh label
-// create -f` is `--force`, `gh pr merge -d|-m|-r|-s` are booleans).
-const GH_SHORT_VALUE_EXTRA = new Map<string, string>([
-  ["api", "fp"],
-  ["pr create", "amrp"],
-  ["pr edit", "amrp"],
-  ["pr close", "c"],
-  ["pr reopen", "c"],
-  ["issue create", "amp"],
-  ["issue edit", "amp"],
-  ["issue close", "cr"],
-  ["issue reopen", "c"],
-  ["repo create", "dghsr"],
-  ["repo edit", "dgh"],
-  ["repo sync", "s"],
-  ["gist create", "adf"],
-  ["gist edit", "adf"],
-  ["secret set", "aeorvf"],
-  ["secret delete", "eor"],
-  ["variable set", "aeorvf"],
-  ["variable delete", "eor"],
-  ["workflow run", "rf"],
-  ["run rerun", "j"],
-  ["label create", "cd"],
-  ["label edit", "cd"],
-]);
+const FLAG_SPEC_CACHE = new Map<string, FlagSpec>();
 
-function shortValueLetters(group: string, sub: string | undefined): ReadonlySet<string> {
-  const letters = new Set(GH_SHORT_VALUE_BASE);
-  const extra = GH_SHORT_VALUE_EXTRA.get(group === "api" ? "api" : `${group} ${sub ?? ""}`);
-  if (extra !== undefined) for (const c of extra) letters.add(c);
-  return letters;
+/**
+ * The value-taking flags of `gh <group> <sub>`, from the manual-derived table in
+ * `gh-flags.ts`. `-R/--repo` is always a value flag. A command with no table entry gets only
+ * that: the parser reports such a command `unresolved` anyway.
+ */
+function flagSpec(group: string, sub: string | undefined): FlagSpec {
+  const key = group === "api" ? "api" : `${group} ${sub ?? ""}`;
+  const cached = FLAG_SPEC_CACHE.get(key);
+  if (cached !== undefined) return cached;
+  const long = new Set<string>(["--repo"]);
+  const short = new Set<string>(["R"]);
+  const entry = Object.hasOwn(GH_COMMAND_FLAGS, key) ? GH_COMMAND_FLAGS[key] : undefined;
+  if (entry !== undefined) {
+    for (const l of entry.value) long.add(l);
+    for (const c of entry.valueShort) short.add(c);
+  }
+  const spec: FlagSpec = { long, short };
+  FLAG_SPEC_CACHE.set(key, spec);
+  return spec;
 }
 
 /**
  * Where cobra would find the command: the group (`pr`) and subcommand
  * (`create`). cobra's `stripFlags` treats every `--flag` without `=` that it
- * does not know as BOOLEAN-FREE — it swallows the next token as the flag's
- * value — and so does a two-character `-X`. That is why `gh issue --repo
- * stranger/r create` and `gh --repo stranger/r issue create` both run `issue
- * create` against `stranger/r`, and why "the first two non-flag tokens" (the
- * previous heuristic) found no verb at all for them. Null when no command
- * word is found. `api` is a leaf: it has no subcommand.
+ * does not know as taking a value — it swallows the next token — and so does a
+ * two-character `-X`. That is why `gh issue --repo stranger/r create` and `gh
+ * --repo stranger/r issue create` both run `issue create` against
+ * `stranger/r`, and why "the first two non-flag tokens" (the previous
+ * heuristic) found no verb at all for them. Null when no command word is
+ * found. `api` is a leaf: it has no subcommand.
  */
 function findGhCommand(args: string[]): { groupIdx: number; subIdx?: number } | null {
   let groupIdx = -1;
   let i = 0;
   while (i < args.length) {
     const s = args[i]!;
-    if (s === "--") return null;
+    if (s === "--") return groupIdx === -1 ? null : { groupIdx };
     if (s.startsWith("--") && !s.includes("=")) {
       i += s === "--help" || s === "--version" ? 1 : 2;
       continue;
@@ -965,14 +1149,15 @@ interface GhFlagEvent {
  * pflag's argument grammar, for the flags that matter here: `--name value`,
  * `--name=value`, `-X value`, `-Xvalue`, `-X=value` (one leading `=` is
  * stripped), grouped booleans (`-dw`), `--` ending flag parsing, and flags
- * allowed anywhere among the positionals. `skip` holds the indexes of the
- * command words. A repeated flag yields one event per occurrence; callers
- * take the last, as pflag does for a string flag.
+ * allowed anywhere among the positionals. A value flag takes the NEXT token
+ * whatever it looks like (pflag does not check for a leading `-`). `skip`
+ * holds the indexes of the command words. A repeated flag yields one event per
+ * occurrence; callers take the last, as pflag does for a string flag.
  */
 function scanGhArgs(
   args: string[],
   skip: ReadonlySet<number>,
-  shortValue: ReadonlySet<string>,
+  spec: FlagSpec,
 ): { events: GhFlagEvent[]; positionals: string[] } {
   const events: GhFlagEvent[] = [];
   const positionals: string[] = [];
@@ -999,7 +1184,7 @@ function scanGhArgs(
       if (eq !== -1) {
         events.push({ flag: a.slice(0, eq), value: a.slice(eq + 1) });
         i++;
-      } else if (GH_LONG_VALUE_FLAGS.has(a)) {
+      } else if (spec.long.has(a)) {
         events.push({ flag: a, value: args[i + 1] });
         i += 2;
       } else {
@@ -1012,7 +1197,7 @@ function scanGhArgs(
     let consumedNext = false;
     for (let j = 1; j < a.length; j++) {
       const ch = a[j]!;
-      if (!shortValue.has(ch)) {
+      if (!spec.short.has(ch)) {
         events.push({ flag: `-${ch}`, value: undefined });
         continue;
       }
@@ -1127,6 +1312,8 @@ interface RepoShape {
   keepsBase?: true;
 }
 
+// `gh label clone <source>` is deliberately absent: it copies labels FROM the source INTO the base
+// repository (`-R`, `GH_REPO` or the cwd). The write goes to the base; the source is only read.
 const REPO_SHAPES = new Map<string, RepoShape>([
   // Every `gh pr …` and `gh issue …` takes a number, a branch or a URL; a URL names its repository.
   ["pr", { selectors: true }],
@@ -1144,7 +1331,6 @@ const REPO_SHAPES = new Map<string, RepoShape>([
   ["secret delete", { orgFlags: ["--org", "-o"] }],
   ["variable set", { orgFlags: ["--org", "-o"] }],
   ["variable delete", { orgFlags: ["--org", "-o"] }],
-  ["label clone", { repoPositional: 0, keepsBase: true }],
 ]);
 
 interface CollectedTargets {
@@ -1172,7 +1358,11 @@ function collectRepoTargets(
   };
 
   if (shape.selectors === true) {
-    for (const p of positionals) if (/^https?:\/\//i.test(p)) addRepo(p);
+    for (const p of positionals) {
+      // A selector holding a shell expansion (`"$URL"`) may be a URL to anywhere: unknowable.
+      if (hasExpansion(p)) opaque = true;
+      else if (/^https?:\/\//i.test(p)) addRepo(p);
+    }
   }
   if (shape.repoPositional !== undefined) {
     const p = positionals[shape.repoPositional];
@@ -1197,14 +1387,27 @@ function collectRepoTargets(
 // gh aliases (issue #151, S11)
 // ---------------------------------------------------------------------------
 
-/** gh's `shlex.Split`: whitespace separates, quotes group, `\` escapes. Never throws. */
+/** Longest alias expansion (bytes of text) and deepest alias-of-alias chain the parser follows. */
+const ALIAS_MAX_BYTES = 64 * 1024;
+const ALIAS_MAX_DEPTH = 5;
+/** `$N` placeholders are substituted for at most this many arguments. */
+const ALIAS_MAX_ARGS = 64;
+
+/**
+ * gh's `shlex.Split` (github.com/google/shlex, POSIX mode): whitespace
+ * separates, quotes group, `\` escapes, and a `#` that starts a word begins a
+ * comment that runs to the end of the line. Never throws.
+ */
 function shlexSplit(text: string): string[] {
   const out: string[] = [];
   let word = "";
   let inWord = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i]!;
-    if (c === "'") {
+    if (c === "#" && !inWord) {
+      const nl = text.indexOf("\n", i);
+      i = nl === -1 ? text.length : nl;
+    } else if (c === "'") {
       inWord = true;
       const end = text.indexOf("'", i + 1);
       word += text.slice(i + 1, end === -1 ? text.length : end);
@@ -1234,30 +1437,50 @@ function shlexSplit(text: string): string[] {
   return out;
 }
 
+type AliasResult =
+  | { kind: "args"; args: string[] }
+  /** `!script`: arbitrary code. */
+  | { kind: "shell" }
+  /** The first word is neither a built-in nor a resolvable alias (an extension, a typo, an alias this parser cannot read, a cap exceeded). */
+  | { kind: "unresolved" }
+  /** gh itself refuses to run (a `$N` left over): nothing is published. */
+  | { kind: "refused" };
+
 /**
  * gh expands an alias only when the FIRST argument names one (and is not a
  * built-in command): `gh ic --repo stranger/r` with `ic = issue create` runs
- * `gh issue create --repo stranger/r`. A `!` expansion is a shell script.
- * The expansion mirrors gh's own: `$1`… are replaced textually, and when the
- * expansion has no `$` the remaining arguments are appended. Returns the
- * argument vector to classify, `"shell"` for a shell alias, or null when gh
- * itself would refuse to run (a `$N` left over).
+ * `gh issue create --repo stranger/r`. A `!` expansion is a shell script. The
+ * expansion mirrors gh's own: `$1`… are replaced textually, and when the
+ * expansion has no `$` the remaining arguments are appended. gh expands once;
+ * this parser follows an alias of an alias too (to {@link ALIAS_MAX_DEPTH}),
+ * the safe superset. An expansion larger than {@link ALIAS_MAX_BYTES}, or a
+ * chain deeper than the cap, is unresolved.
  */
-function expandGhAlias(args: string[], ctx: GhContext): string[] | "shell" | null {
-  const first = args[0];
-  if (first === undefined || first.startsWith("-") || GH_BUILTIN_COMMANDS.has(first)) return args;
-  const aliases = ctx.aliases?.();
-  const expansion = aliases?.get(first);
-  if (expansion === undefined) return args;
-  if (expansion.startsWith("!")) return "shell";
-  let text = expansion;
-  const extra: string[] = [];
-  args.slice(1).forEach((a, i) => {
-    if (!expansion.includes("$")) extra.push(a);
-    else text = text.split(`$${i + 1}`).join(a);
-  });
-  if (/\$\d/.test(text)) return null;
-  return [...shlexSplit(text), ...extra];
+function resolveGhAlias(input: string[], ctx: GhContext): AliasResult {
+  let args = input;
+  for (let depth = 0; depth <= ALIAS_MAX_DEPTH; depth++) {
+    const first = args[0];
+    if (first === undefined || first.startsWith("-") || GH_BUILTIN_COMMANDS.has(first)) return { kind: "args", args };
+    if (depth === ALIAS_MAX_DEPTH) return { kind: "unresolved" }; // five expansions done and still not a built-in
+    const expansion = ctx.aliases?.().get(first);
+    if (expansion === undefined || expansion.length > ALIAS_MAX_BYTES) return { kind: "unresolved" };
+    if (expansion.startsWith("!")) return { kind: "shell" };
+    const given = args.slice(1);
+    let text = expansion;
+    const extra: string[] = [];
+    if (!expansion.includes("$")) {
+      extra.push(...given);
+    } else {
+      if (given.length > ALIAS_MAX_ARGS) return { kind: "unresolved" };
+      for (const [i, a] of given.entries()) {
+        text = text.split(`$${i + 1}`).join(a);
+        if (text.length > ALIAS_MAX_BYTES) return { kind: "unresolved" };
+      }
+    }
+    if (/\$\d/.test(text)) return { kind: "refused" };
+    args = [...shlexSplit(text), ...extra];
+  }
+  return { kind: "unresolved" };
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,7 +1491,7 @@ function expandGhAlias(args: string[], ctx: GhContext): string[] | "shell" | nul
 interface GhContext {
   /** `GH_REPO` for this command: a prefix assignment, else the caller's environment. Raw. */
   envRepo: string | undefined;
-  /** True when an earlier segment exports or assigns `GH_REPO`. */
+  /** True when an earlier segment (or an enclosing `eval`) exports, assigns or unsets `GH_REPO`. */
   envOverridden: boolean;
   /** Lazily loaded `gh` aliases; absent when the caller supplied none. */
   aliases: (() => ReadonlyMap<string, string>) | undefined;
@@ -1310,23 +1533,33 @@ function ownEntry<T>(table: Readonly<Record<string, T>>, key: string): T | undef
   return Object.hasOwn(table, key) ? table[key] : undefined;
 }
 
+/** An intent for a command whose verb or target the parser cannot determine: it fails CLOSED. */
+function unresolvedIntent(
+  base: Omit<EgressIntent, "verb" | "payloadFiles">,
+  verb: EgressVerb,
+  unresolved: IntentUnresolved,
+): EgressIntent {
+  return { ...base, verb, payloadFiles: [], unresolved };
+}
+
 function classifyGh(
   rawArgs: string[],
   base: Omit<EgressIntent, "verb" | "payloadFiles">,
   ctx: GhContext,
 ): EgressIntent | null {
-  const expanded = expandGhAlias(rawArgs, ctx);
-  if (expanded === null) return null;
-  if (expanded === "shell") {
-    return { ...base, verb: "gh-alias-shell", payloadFiles: [], unresolved: "gh-alias" };
-  }
-  const args = expanded;
+  const aliased = resolveGhAlias(rawArgs, ctx);
+  if (aliased.kind === "refused") return null;
+  if (aliased.kind === "shell") return unresolvedIntent(base, "gh-alias-shell", "gh-alias");
+  if (aliased.kind === "unresolved") return unresolvedIntent(base, "gh-unknown", "gh-alias");
+  const args = aliased.args;
 
   const found = findGhCommand(args);
   if (found === null) return null;
   const { groupIdx, subIdx } = found;
   const group = args[groupIdx]!;
   const sub = subIdx === undefined ? undefined : args[subIdx];
+  // Not a built-in: an alias after leading flags, an extension, a brace expansion, `$CMD`. Unknown fails closed.
+  if (!GH_BUILTIN_COMMANDS.has(group)) return unresolvedIntent(base, "gh-unknown", "gh-alias");
 
   let verb: EgressVerb;
   let unresolved: IntentUnresolved | undefined;
@@ -1334,7 +1567,11 @@ function classifyGh(
     verb = "gh-api-mutating"; // provisional; confirmed below
   } else {
     const verbs = ownEntry(GH_VERBS, group);
-    if (verbs === undefined || sub === undefined) return null;
+    if (verbs === undefined) {
+      // A built-in group with no shape here: read-only ones are no intent, the rest are writes we cannot name.
+      return GH_READ_GROUPS.has(group) ? null : unresolvedIntent(base, "gh-unknown", "unknown-shape");
+    }
+    if (sub === undefined) return null;
     const known = ownEntry(verbs, sub);
     if (known !== undefined) {
       verb = known;
@@ -1348,7 +1585,7 @@ function classifyGh(
 
   const skip = new Set<number>([groupIdx]);
   if (subIdx !== undefined) skip.add(subIdx);
-  const { events, positionals } = scanGhArgs(args, skip, shortValueLetters(group, sub));
+  const { events, positionals } = scanGhArgs(args, skip, flagSpec(group, sub));
 
   const payloadFiles: string[] = [];
   const repoFlag = lastValue(events, "-R", "--repo");
@@ -1424,7 +1661,7 @@ function classifyGh(
   // `gh api` consults it only to fill `{owner}`/`{repo}` placeholders in the
   // endpoint (a spelled-out `repos/<o>/<r>/…`, `graphql` and the like never do).
   const apiTarget = group === "api" && apiEndpoint !== undefined ? analyseApiEndpoint(apiEndpoint) : null;
-  // A placeholder in the owner/repo segment that is not `{owner}`/`{repo}` cannot be named offline.
+  // A placeholder in the owner/repo segment that is not `{owner}`/`{repo}`, or a shell expansion there, cannot be named offline.
   if (apiTarget?.kind === "opaque") opaque = true;
   const apiIgnoresEnv = group === "api" && apiTarget?.kind !== "cwd";
   const envApplies = repoFlag === undefined && !targets.replacesBase && !apiIgnoresEnv;
@@ -1471,18 +1708,6 @@ function classifyNpm(
 // ---------------------------------------------------------------------------
 
 /**
- * Tokenise (quote-aware), split on shell operators, classify each segment.
- * Pure; never throws. Non-egress commands yield an empty list.
- */
-export function parseEgressIntents(command: string, opts: ParseEgressOptions = {}): EgressIntent[] {
-  try {
-    return parseUnsafe(command, opts);
-  } catch {
-    return [];
-  }
-}
-
-/**
  * What the caller knows about the environment the command will run in. Both
  * fields are optional, and the parser stays pure: the caller reads the
  * environment and the filesystem (see `egressParseOptions`), the parser only
@@ -1498,74 +1723,226 @@ export interface ParseEgressOptions {
   /**
    * The user's `gh` aliases (alias name → expansion), or a function that
    * loads them, called at most once and only when a `gh` command's first
-   * argument is not a built-in — so the common path does no I/O.
+   * argument is not a built-in — so the common path does no I/O. Without
+   * aliases, a `gh` command whose first word is not a built-in is reported
+   * `unresolved` (it may be an alias, an extension, or a typo).
    */
   ghAliases?: ReadonlyMap<string, string> | (() => ReadonlyMap<string, string>) | undefined;
 }
 
-// `export GH_REPO=…`-style builtins: they change the environment of every later segment.
-const ENV_MUTATING_BUILTINS = new Set(["export", "declare", "typeset", "readonly", "local"]);
+/** How deep `sh -c '…'`, `eval`, `$(…)` and backtick text is followed. Deeper text that mentions gh/git is unresolved. */
+const MAX_NEST_DEPTH = 5;
 
-/** True when this segment changes `GH_REPO` for the segments after it. */
-function setsGhRepoForLaterSegments(tokens: string[], start: number, assigns: Assignment[]): boolean {
-  if (start >= tokens.length) return assigns.some(a => a.name === "GH_REPO"); // `GH_REPO=o/r` on its own
-  if (!ENV_MUTATING_BUILTINS.has(tokens[start]!)) return false;
-  return tokens.slice(start + 1).some(t => t === "GH_REPO" || t.startsWith("GH_REPO="));
+interface ParseCtx {
+  opts: ParseEgressOptions;
+  aliases: (() => ReadonlyMap<string, string>) | undefined;
+  depth: number;
+  /** An earlier segment (of this or an enclosing command line) changed `GH_REPO` for the ones after it. */
+  envOverridden: boolean;
+  /** `GH_REPO` as the enclosing command line set it for this text; falls back to `opts.envRepo`. */
+  inheritedEnvRepo: string | undefined;
 }
 
-function parseUnsafe(command: string, opts: ParseEgressOptions): EgressIntent[] {
+/**
+ * Tokenise (quote-aware), split on shell operators, classify each segment.
+ * Pure. Non-egress commands yield an empty list.
+ *
+ * This parser FAILS CLOSED. A segment that runs `gh`, or `git push`, directly
+ * or through a wrapper, interpreter, alias or substitution, and whose verb or
+ * target cannot be fully determined, yields an intent with `unresolved` set —
+ * never an empty list. It also never throws: an exception while parsing a line
+ * that mentions `gh` or `git push` yields such an intent too.
+ */
+export function parseEgressIntents(command: string, opts: ParseEgressOptions = {}): EgressIntent[] {
+  try {
+    let aliasMap: ReadonlyMap<string, string> | undefined;
+    const source = opts.ghAliases;
+    const aliases =
+      source === undefined
+        ? undefined
+        : (): ReadonlyMap<string, string> => {
+            if (aliasMap === undefined) {
+              try {
+                aliasMap = typeof source === "function" ? source() : source;
+              } catch {
+                aliasMap = new Map();
+              }
+            }
+            return aliasMap;
+          };
+    return parseUnsafe(command, { opts, aliases, depth: 0, envOverridden: false, inheritedEnvRepo: undefined });
+  } catch {
+    const s = typeof command === "string" ? sentinelFor(command, { precededByCd: false, joinedBy: null, segmentIndex: 0 }) : null;
+    return s === null ? [] : [s];
+  }
+}
+
+/** `gh` as a word (not `ghost`, not `my-gh`), or `git` with `push` as a word. */
+function mentionedEgress(text: string): "gh" | "git" | null {
+  if (/(?:^|[^\w-])gh(?![\w-])/.test(text)) return "gh";
+  if (/(?:^|[^\w-])git(?![\w-])/.test(text) && /(?:^|[^\w-])push(?![\w-])/.test(text)) return "git";
+  return null;
+}
+
+/** The fail-closed intent for text the parser could not work through, or null when it does not mention gh / git push. */
+function sentinelFor(text: string, base: Omit<EgressIntent, "verb" | "payloadFiles">): EgressIntent | null {
+  const which = mentionedEgress(text);
+  if (which === null) return null;
+  return unresolvedIntent(base, which === "gh" ? "gh-unknown" : "git-push", "unparsed-shape");
+}
+
+/** The command texts of `$(…)` and `` `…` `` substitutions inside one word (at most 32). */
+function substitutionTexts(word: string): string[] {
+  const out: string[] = [];
+  if (!word.includes("$(") && !word.includes("`")) return out;
+  let i = 0;
+  while (i < word.length && out.length < 32) {
+    if (word[i] === "$" && word[i + 1] === "(") {
+      let depth = 0;
+      let j = i + 1;
+      for (; j < word.length; j++) {
+        if (word[j] === "(") depth++;
+        else if (word[j] === ")" && --depth === 0) break;
+      }
+      out.push(word.slice(i + 2, j));
+      i = j + 1;
+    } else if (word[i] === "`") {
+      const end = word.indexOf("`", i + 1);
+      const j = end === -1 ? word.length : end;
+      out.push(word.slice(i + 1, j));
+      i = j + 1;
+    } else {
+      i++;
+    }
+  }
+  return out;
+}
+
+/** Bash brace expansion of the first `{a,b}` group, recursively, at most 64 results. */
+function braceCandidates(word: string): string[] {
+  const m = /^([^{]*)\{([^{}]*)\}([\s\S]*)$/.exec(word);
+  if (m === null || !m[2]!.includes(",")) return [word];
+  const out: string[] = [];
+  for (const alt of m[2]!.split(",")) {
+    for (const c of braceCandidates(`${m[1]}${alt}${m[3]}`)) {
+      out.push(c);
+      if (out.length >= 64) return out;
+    }
+  }
+  return out;
+}
+
+/** True when this segment changes — or may change — `GH_REPO` for the segments after it. */
+function mutatesGhRepo(original: string[], resolved: ResolvedCommand, assigns: Assignment[]): boolean {
+  if (original.some((t, i) => (t === "GH_REPO" && (original[i - 1] === "-u" || original[i - 1] === "--unset")) || t === "--unset=GH_REPO" || t === "-uGH_REPO")) {
+    return true; // `env -u GH_REPO`
+  }
+  const { tokens, start } = resolved;
+  if (start >= tokens.length) return assigns.some(a => a.name === "GH_REPO"); // `GH_REPO=o/r` on its own
+  const cmd = baseName(tokens[start]!);
+  const args = tokens.slice(start + 1);
+  const names = (a: string): boolean => a === "GH_REPO" || a.startsWith("GH_REPO=") || a.startsWith("GH_REPO+=");
+  switch (cmd) {
+    case "export":
+    case "declare":
+    case "typeset":
+    case "readonly":
+    case "local":
+    case "unset":
+    case "read":
+      return args.some(names);
+    case "printf":
+      return args.some((a, i) => a === "-v" && args[i + 1] === "GH_REPO");
+    case "set":
+      // `set -a` / `set -o allexport`: every later assignment is exported.
+      return args.some(a => /^-[A-Za-z]*a[A-Za-z]*$/.test(a) || a === "allexport");
+    case "eval":
+    case "source":
+    case ".":
+      return true; // runs text or a file this parser cannot see, in THIS shell
+    default:
+      return false;
+  }
+}
+
+function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
   if (typeof command !== "string" || command.length === 0) return [];
   const segments = tokenise(command);
   const intents: EgressIntent[] = [];
   let precededByCd = false;
-  let envOverridden = false;
-
-  let aliasMap: ReadonlyMap<string, string> | undefined;
-  const aliases = opts.ghAliases;
-  const loadAliases =
-    aliases === undefined
-      ? undefined
-      : (): ReadonlyMap<string, string> => {
-          if (aliasMap === undefined) {
-            try {
-              aliasMap = typeof aliases === "function" ? aliases() : aliases;
-            } catch {
-              aliasMap = new Map();
-            }
-          }
-          return aliasMap;
-        };
+  let envOverridden = ctx.envOverridden;
 
   segments.forEach((seg, segmentIndex) => {
     const tokens = stripRedirections(seg.tokens);
-    const assigns: Assignment[] = [];
-    const start = commandStart(tokens, assigns);
-    if (setsGhRepoForLaterSegments(tokens, start, assigns)) envOverridden = true;
-    if (start >= tokens.length) return;
-    const cmd = baseName(tokens[start]!);
-    const args = tokens.slice(start + 1);
     const base = { precededByCd, joinedBy: seg.joinedBy, segmentIndex };
 
-    let intent: EgressIntent | null = null;
-    if (cmd === "git") intent = classifyGit(args, base);
-    else if (cmd === "gh") {
-      // The command's own prefix beats the inherited environment; an empty
-      // value unsets it, as it does for gh.
-      const prefixed = assigns.filter(a => a.name === "GH_REPO").pop();
-      const raw = prefixed !== undefined ? prefixed.value : opts.envRepo;
-      intent = classifyGh(args, base, {
-        envRepo: raw === undefined || raw === "" ? undefined : raw,
-        envOverridden,
-        aliases: loadAliases,
-      });
-    } else if (cmd === "npm" || cmd === "pnpm" || cmd === "yarn") intent = classifyNpm(cmd, args, base);
+    /** Parse `text` as a command line of its own; its intents take this segment's place in the chain. */
+    const nest = (text: string, envRepo: string | undefined): void => {
+      if (ctx.depth >= MAX_NEST_DEPTH) {
+        const s = sentinelFor(text, base);
+        if (s !== null) intents.push(s);
+        return;
+      }
+      const child: ParseCtx = { ...ctx, depth: ctx.depth + 1, envOverridden, inheritedEnvRepo: envRepo };
+      for (const i of parseUnsafe(text, child)) {
+        intents.push({ ...i, segmentIndex, joinedBy: i.joinedBy ?? seg.joinedBy, precededByCd: i.precededByCd || precededByCd });
+      }
+    };
 
-    if (intent !== null) intents.push(intent);
+    try {
+      const assigns: Assignment[] = [];
+      const resolved = resolveCommand(tokens, assigns);
+      const toks = resolved.tokens;
 
-    // A `cd` anywhere earlier in the line taints every later segment: the
-    // directory change may not have happened (failed `cd` under `;`), and
-    // in an agent's tool call it never persists past the call anyway.
-    if (cmd === "cd" || cmd === "pushd") precededByCd = true;
+      // `GH_REPO` as gh will see it: the command's own prefix over the enclosing environment.
+      let envRaw = ctx.inheritedEnvRepo ?? ctx.opts.envRepo;
+      for (const a of assigns) if (a.name === "GH_REPO") envRaw = a.append ? `${envRaw ?? ""}${a.value}` : a.value;
+      if (envRaw === "") envRaw = undefined;
+
+      // Command substitutions run whatever their text says, wherever they sit in the line. (The text
+      // of `bash -c` / `eval` is parsed whole below, substitutions included.)
+      if (resolved.nestedText === undefined) {
+        for (const w of tokens) for (const inner of substitutionTexts(w)) nest(inner, envRaw);
+      }
+
+      if (resolved.start >= toks.length) {
+        if (mutatesGhRepo(tokens, resolved, assigns)) envOverridden = true;
+        return;
+      }
+      const word = toks[resolved.start]!;
+      const cmd = baseName(word);
+      const args = toks.slice(resolved.start + 1);
+
+      if (resolved.nestedText !== undefined) {
+        nest(resolved.nestedText, envRaw);
+      } else {
+        let intent: EgressIntent | null = null;
+        if (cmd === "git") intent = classifyGit(args, base, assigns);
+        else if (cmd === "gh") {
+          intent = classifyGh(args, base, { envRepo: envRaw, envOverridden, aliases: ctx.aliases });
+        } else if (cmd === "npm" || cmd === "pnpm" || cmd === "yarn") intent = classifyNpm(cmd, args, base);
+        else if (word.includes("{")) {
+          // `{gh,}` / `g{h,}` is brace-expanded by the shell into the command that actually runs.
+          const candidates = braceCandidates(word).map(baseName);
+          if (candidates.includes("gh")) intent = unresolvedIntent(base, "gh-unknown", "unparsed-shape");
+          else if (candidates.includes("git") && args.includes("push")) intent = unresolvedIntent(base, "git-push", "unparsed-shape");
+        }
+        if (intent !== null) {
+          // Arguments arriving on stdin are invisible here: the target cannot be named.
+          if (resolved.viaXargs && intent.unresolved === undefined) intent = { ...intent, unresolved: "unparsed-shape" };
+          intents.push(intent);
+        }
+      }
+
+      if (mutatesGhRepo(tokens, resolved, assigns)) envOverridden = true;
+      // A `cd` anywhere earlier in the line taints every later segment: the
+      // directory change may not have happened (failed `cd` under `;`), and
+      // in an agent's tool call it never persists past the call anyway.
+      if (cmd === "cd" || cmd === "pushd") precededByCd = true;
+    } catch {
+      const s = sentinelFor(tokens.join(" "), base);
+      if (s !== null) intents.push(s);
+    }
   });
 
   return intents;

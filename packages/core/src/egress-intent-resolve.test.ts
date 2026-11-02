@@ -224,6 +224,30 @@ describe("gh-env — GH_REPO and the gh alias file", () => {
     }
   });
 
+  it("(H1) a config that cannot be read means aliases are unknown: a non-built-in word is unresolved, never 'no aliases'", () => {
+    const bomb =
+      "a: &a [x, x, x, x, x, x, x, x, x, x]\n" +
+      Array.from({ length: 200 }, (_, k) => `k${k}: *a`).join("\n") +
+      "\naliases:\n  ic: issue create\n";
+    const oversize = "aliases:\n  ic: issue create\n# " + "x".repeat(1024 * 1024 + 10) + "\n";
+    for (const [name, text] of [
+      ["oversize", oversize],
+      ["unparseable", "aliases: [\n  ic: : issue create\n"],
+      ["yaml alias bomb", bomb],
+    ] as const) {
+      const dir = configDir({ "config.yml": text });
+      const opts = egressParseOptions({ GH_CONFIG_DIR: dir });
+      const i = parseEgressIntents("gh ic -Rstranger/r --body x", opts)[0];
+      assert.equal(i?.verb, "gh-unknown", name);
+      assert.equal(i?.unresolved, "gh-alias", name);
+      // Built-in commands never needed the file.
+      assert.equal(parseEgressIntents("gh issue create -Rstranger/r --body x", opts)[0]?.verb, "gh-issue-create", name);
+    }
+    // Control: the same alias in a readable config resolves.
+    const ok = configDir({ "config.yml": "aliases:\n  ic: issue create\n" });
+    assert.equal(parseEgressIntents("gh ic -Rstranger/r --body x", egressParseOptions({ GH_CONFIG_DIR: ok }))[0]?.verb, "gh-issue-create");
+  });
+
   it("egressParseOptions: GH_REPO from the environment, aliases from its config dir, loaded lazily", () => {
     const dir = configDir({ "config.yml": "aliases:\n  ic: issue create\n" });
     const opts = egressParseOptions({ GH_REPO: "stranger/r", GH_CONFIG_DIR: dir });

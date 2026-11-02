@@ -510,6 +510,11 @@ export function graphqlIntentKind(intent: EgressIntent, base: string): GraphqlOp
  * nothing parses — the context rules then do not fire.
  */
 export const resolveDestinationOffline: DestinationResolver = (intent, cwd, registry) => {
+  // The parser could not name the target (`$REPO`, a shell alias, an unknown
+  // command, an earlier `export GH_REPO=…`, an unparsed line): fail closed,
+  // never the cwd. Checked first, so no git config is read for it either.
+  if (intent.unresolved !== undefined) return unresolvedDestination(intent.unresolved);
+
   const base = intent.cwdOverride ?? cwd;
   const own = ownOrigin(base);
 
@@ -525,15 +530,11 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
 
   if (intent.verb === "npm-publish") return null; // registry, not a repo
 
-  // The parser could not name the target (`$REPO`, a shell alias, an earlier
-  // `export GH_REPO=…`, an unknown write subcommand): fail closed, never the
-  // cwd. Several distinct targets (`--repo` plus a URL positional, …) are the
-  // same shape: no single destination, so a wildcard approval or a person.
+  // Several distinct targets (`--repo` plus a URL positional, …): no single
+  // destination, so a wildcard approval or a person.
   const targets = intentRepoTargets(intent);
   const distinct = new Set(targets.map(t => `${t.org}/${t.repo ?? "*"}`)).size;
-  if (intent.unresolved !== undefined || distinct > 1) {
-    return unresolvedDestination(intent.unresolved ?? "ambiguous-target");
-  }
+  if (distinct > 1) return unresolvedDestination("ambiguous-target");
   if (targets[0] !== undefined) {
     return withLocalClass({ org: targets[0].org, repo: targets[0].repo ?? "*" }, base, own, registry);
   }
@@ -622,6 +623,7 @@ const VERB_LABEL: Record<EgressVerb, string> = {
   "gh-gist-create": "gh gist create",
   "gh-workflow-run": "gh workflow run",
   "gh-alias-shell": "gh (shell alias)",
+  "gh-unknown": "gh (unrecognised command)",
   "gh-api-mutating": "gh api (mutating)",
   "npm-publish": "npm publish",
 };
@@ -756,6 +758,52 @@ function registryPathLabel(): string {
 }
 
 /**
+ * Why each kind of unresolved destination cannot be named offline, and the shape the agent
+ * re-issues the command in (§3.9). Static text: nothing from the command line is interpolated.
+ */
+const UNRESOLVED_REFUSAL: Readonly<Record<NonNullable<Destination["unresolved"]>, { why: string; reissue: string }>> = {
+  "graphql-mutation": {
+    why:
+      "A GraphQL mutation names its target by node id, so repo-aegis cannot tell offline which owner it writes to",
+    reissue: "a gh command that names the repository, such as gh issue comment --repo <owner>/<repo> …",
+  },
+  "env-override": {
+    why:
+      "An earlier part of this command line changes GH_REPO (or may, through eval, source, set -a or unset), so the " +
+      "repository gh will use is not the one repo-aegis can see before the command runs",
+    reissue: "the command alone, with a literal --repo <owner>/<repo>, and run the environment change as its own call",
+  },
+  "gh-alias": {
+    why:
+      "The command starts with a word that is not a built-in gh command and not an alias repo-aegis can read " +
+      "(an alias, a shell alias, an extension, or a shell expansion), so it cannot tell what the command publishes or where",
+    reissue: "the built-in command with a literal repository, such as gh issue comment --repo <owner>/<repo> …",
+  },
+  "opaque-repo": {
+    why:
+      "A repository in this command is not a literal <owner>/<repo> (it is a shell variable or expansion, a bare name, " +
+      "or malformed), so repo-aegis cannot tell which owner it writes to",
+    reissue: "the command with a literal --repo <owner>/<repo> (for gh api, the repos/<owner>/<repo>/… endpoint)",
+  },
+  "unknown-shape": {
+    why:
+      "This gh command writes somewhere repo-aegis has no way to read (an unrecognised subcommand or a command group it " +
+      "does not model)",
+    reissue: "a built-in command that repo-aegis models, with a literal --repo <owner>/<repo>",
+  },
+  "ambiguous-target": {
+    why: "This command names more than one repository (for example --repo plus a URL), so repo-aegis cannot tell which one it writes to",
+    reissue: "the command naming a single repository, with a literal --repo <owner>/<repo>",
+  },
+  "unparsed-shape": {
+    why:
+      "repo-aegis could not take this command line apart (it is nested too deeply, built through a wrapper, brace " +
+      "expansion or stdin, or points git at a directory it cannot name), so it cannot tell what it publishes or where",
+    reissue: "a single plain command with literal arguments, such as gh issue comment --repo <owner>/<repo> …",
+  },
+};
+
+/**
  * Rule h's refusal text (§3.9). Names the verb and the destination's own
  * owner/repo, which the command already carries, and nothing else: never the
  * registered owners, engagement ids or upstreams (the redaction oracle).
@@ -806,21 +854,16 @@ function unregisteredOwnerReason(
   }
 
   if (unresolved) {
+    const text = UNRESOLVED_REFUSAL[destination.unresolved ?? "unparsed-shape"];
     return refusal({
       code,
       what,
-      why:
-        `A GraphQL mutation names its target by node id, so repo-aegis cannot tell offline which owner it ` +
-        `writes to, and an unknown owner is treated as unregistered`,
-      approval: "No approval covers this (since 0.11.0 a '*' approval no longer does)",
-      fixes: [
-        {
-          by: "agent",
-          when: "To act on a repository",
-          command: "a gh command that names it, such as gh issue comment --repo <owner>/<repo> …",
-        },
-        { by: "person" },
-      ],
+      why: `${text.why}, and an unknown owner is treated as unregistered`,
+      approval:
+        destination.unresolved === "graphql-mutation"
+          ? "No approval covers this (since 0.11.0 a '*' approval no longer does)"
+          : "No approval covers this",
+      fixes: [{ by: "agent", when: "To act on a repository", command: text.reissue }, { by: "person" }],
     });
   }
 
