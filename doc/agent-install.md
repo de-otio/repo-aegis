@@ -251,14 +251,16 @@ ask one at a time if the user prefers. Either is fine.
   `githubOrgs`}. The CLI enforces uniqueness across engagements; if
   the user lists the same org twice, ask which scope it belongs to.
 
-## Step 4 — register engagements
+## Step 4 — register engagements, then have the user register their owners
 
-For each engagement the user gave you:
+Two different things happen here, and only the first is yours.
+
+**4a. You register each engagement and its markers.** Leave the org flags
+off:
 
 ```sh
 repo-aegis engagements add customer-a \
   --name "Customer A" \
-  --github-org acme-corp \
   --marker '\bacme-corp\b' \
   --marker 'acme\.com' \
   --marker 'AC-[0-9]+'
@@ -266,12 +268,36 @@ repo-aegis engagements add customer-a \
 
 Use **single quotes** to avoid shell-interpreting the regex.
 
-For personal orgs (no engagement created — just an entry in
-top-level `personalOrgs`):
+**4b. The user registers the owners, from their own terminal.** An *owner*
+is a GitHub org or login whose repositories repo-aegis may publish to:
+`--github-org` ties an org to an engagement, `--personal-org` lists an org
+or login the user owns (no engagement created). Registering one tells
+repo-aegis that publishing there is safe, so those commands refuse unless a
+person is at a terminal (`OWNER_ADD_NEEDS_TTY`), and the agent hook refuses
+any command line that contains them (`AGENT_RAN_HUMAN_COMMAND`). **Do not run
+them, wrap them in `script`, `tmux` or `bash -c`, or edit
+`engagements.yaml`.** Print the exact lines for the user, with the values they
+gave you in step 3, and wait until they say they have run them:
 
-```sh
-repo-aegis engagements add --personal-org rmyers --personal-org my-oss-org
-```
+> Please run these in your own terminal window (not through me), then tell me
+> when they are done:
+>
+> ```sh
+> repo-aegis engagements add customer-a --github-org acme-corp
+> repo-aegis engagements add --personal-org rmyers --personal-org my-oss-org
+> ```
+
+Tell the user why it matters: once any owner is registered, repo-aegis
+refuses, from a shell with no person at it, any publish to an owner that is
+not on the list, so the list has to be complete. That includes the user's own
+`gh` login and every org they publish to. `repo-aegis doctor` (step 6) lists
+the logged-in accounts and orgs that are missing. An operator who registers no
+owner at all gets no owner check (`OWNERS_UNDECLARED`), and a `*` approval then
+covers `npm publish` only.
+
+If the user's `~/.config/repo-aegis/classify.yml` holds legacy rules, they run
+`repo-aegis init --migrate-classify` themselves in the same way: it lists the
+owners it would register and waits for a typed `y`.
 
 After each `engagements add`, the CLI returns JSON with the rendered
 marker count. Surface the result to the user briefly:
@@ -299,10 +325,11 @@ If `engagements add` fails with `ENGAGEMENT_EXISTS`:
   --github-org` is additive on orgs and markers) or pick a different
   id.
 
-If `engagements add --github-org X` fails because `X` already
-belongs to another engagement / `personalOrgs`, surface verbatim and
-ask the user which scope it should belong to. Do **not**
-auto-resolve.
+If the user reports that `engagements add --github-org X` failed because `X`
+already belongs to another engagement / `personalOrgs`, ask which scope it
+should belong to. Do **not** auto-resolve, and do not run the corrected
+command yourself. If a mutator fails with `REGISTRY_WOULD_BE_INVALID`, nothing
+was written; it usually means an org was registered twice.
 
 ## Step 5 — classify the user's existing repos
 
@@ -452,9 +479,23 @@ mutating `gh` verbs, `npm publish`), and returns `allow` / `ask` / `deny`.
   `<remote> <refspec>`, an egress verb after a `cd` in the same command, an
   egress verb joined by `;` or `||` to a prerequisite that may have failed,
   a payload file on a mode-dependent path (`$TMPDIR`, a relative path, the
-  shared sandbox temp root). These need no registry, no classification and
-  no network, so they work on a machine that has only just installed the
-  tool.
+  shared sandbox temp root), a `gh pr create` with no `--repo`
+  (`GH_PR_CREATE_IMPLICIT_TARGET`), an environment or option override on the
+  publishing command (`EGRESS_ENV_OVERRIDE`), a publish that follows a
+  config change in the same command (`EGRESS_AFTER_STATE_CHANGE`), and a
+  publish run under a pty wrapper (`EGRESS_PTY_WRAPPER`). These need no
+  registry, no classification and no network, so they work on a machine that
+  has only just installed the tool.
+- **Rule h refuses an owner nobody registered.** With no person present, a
+  publish to an owner that is not in `personalOrgs`, not in any engagement's
+  `githubOrgs` and not an allowed upstream is refused
+  (`UNREGISTERED_OWNER_EGRESS`), at all three layers, and no approval
+  covers it. So does a write whose owner cannot be named offline (a GraphQL
+  mutation, an opaque `gh api` endpoint, a target in a shell variable). It is
+  skipped when no registry exists or the registry declares no owners, which
+  is why step 4b matters. Only a person registers an owner (step 4b), or an
+  upstream with `repo-aegis upstreams add <owner>/<repo>`; the agent never
+  does.
 - **Context rules fail open** — cross-org egress, a payload matching the
   destination's deny set, a public destination with no human present. They
   need class and cached visibility; where those are missing, the guard does
@@ -474,7 +515,10 @@ mutating `gh` verbs, `npm publish`), and returns `allow` / `ask` / `deny`.
   from their terminal — the mint refuses without a TTY, so the agent
   cannot do it — and the agent re-issues the same command. The approval
   satisfies rule g only, for that destination, for 15 minutes by default;
-  the refusal's reason spells out the exact `approve` line.
+  the refusal's reason spells out the exact `approve` line. A `*` approval
+  covers only the user's own `personalOrgs` and `npm publish`; a customer's
+  repository needs `approve <org>/*` or `approve <org>/<repo>`. An approval
+  never helps with an unregistered owner.
 
 **The receipt:** after a command that published, one line of
 `additionalContext`:
@@ -690,12 +734,13 @@ repo-aegis install shim
 # 3 + 4. for each engagement the user named, with their markers:
 repo-aegis engagements add <id> \
   --name "<Name>" \
-  --github-org <org> \
   --marker '<pattern>' \
   --marker '<pattern>'
 
-# (personal orgs separately:)
-repo-aegis engagements add --personal-org <org>
+# 3b. THE USER runs these in their own terminal (an agent cannot: they need a TTY):
+#     repo-aegis engagements add <id> --github-org <org>
+#     repo-aegis engagements add --personal-org <org>
+# Wait for them before continuing.
 
 # 5. for each existing repo on disk:
 cd <repo>
