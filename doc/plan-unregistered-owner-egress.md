@@ -305,8 +305,21 @@ report `skipped`, not `fail`.
 
 As in `PERSONAL_ORG_UNREGISTERED`, org names appear only in the `fix` field and
 in `--json`, never in a summary line. The membership list can contain customer
-names, and doctor output can land in an agent transcript. Only the **active**
-`gh` account is checked; say so in the check text.
+names, and doctor output can land in an agent transcript.
+
+*Amended 2026-11-02:* other agent sessions on the same machine often switch
+the active `gh` account, so the active account at the moment doctor runs is
+arbitrary. Checking only the active account would give results that change
+from run to run. Doctor therefore checks **every account logged in for
+github.com** (from `gh auth status`). For each one it runs the calls with that
+account's token passed to the child `gh` through the environment
+(`gh auth token --user <login>`). The token is never printed, logged or
+stored. Doctor **never** runs `gh auth switch`, because that would change the
+account under other sessions. Each finding names the account it applies to;
+`GH_LOGIN_UNREGISTERED` fires per account, and
+`REGISTERED_ORG_NOT_MEMBER` uses the union of every account's memberships.
+If listing accounts fails, doctor falls back to the active account and says
+so in the check text.
 
 ### 3.9 Refusal messages
 
@@ -660,6 +673,10 @@ agrees with the plan: ship rule h first.
 - No approval, cached destination, local class, or env var except
   `REPO_AEGIS_EGRESS_HUMAN` changes rule h's answer. Only the registry's owner
   lists and `allowedUpstreams` do, and adding to them needs a TTY.
+- Nothing on the enforcement path depends on which `gh` account is active.
+  Other sessions switch it at will (D3). Rule h, approvals and the registry
+  never consult the gh login; only doctor reads it, and doctor reads every
+  logged-in account.
 - Rule h never makes a network call. §3.7's lookup can only turn a refusal into
   an allow, never the reverse, and it is off the default path.
 - Every refusal answers the five questions in §3.9 (what, why, whether an
