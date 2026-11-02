@@ -25,6 +25,7 @@ import {
   recordWorkingTree,
   describeDestinationForReceipt,
   describeVerb,
+  egressParseOptions,
   formatReceipt,
   isHumanPresent,
   loadRegistry,
@@ -114,7 +115,8 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   const cwd = opts.cwd ?? process.cwd();
   let intents: EgressIntent[];
   try {
-    intents = parseEgressIntents(buildGhCommand(args));
+    // The shim's own environment is the real `gh`'s: its GH_REPO and aliases.
+    intents = parseEgressIntents(buildGhCommand(args), egressParseOptions(process.env));
   } catch (err) {
     return internalError(`could not parse the gh command line: ${(err as Error).message}`);
   }

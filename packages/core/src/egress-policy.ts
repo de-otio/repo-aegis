@@ -36,10 +36,12 @@ import {
 } from "./visibility-lookup.js";
 import {
   graphqlOperationKind,
+  intentRepoTargets,
   parseApiEndpoint,
   type EgressIntent,
   type EgressVerb,
   type GraphqlOperationKind,
+  type IntentUnresolved,
 } from "./egress-intent.js";
 import { resolveCachedDestination } from "./destination-cache.js";
 import { findApproval, type EgressApproval } from "./egress-approval.js";
@@ -128,7 +130,7 @@ export interface Destination {
    * Rule e is skipped (there is no boundary to compare against); rule f
    * still scans the payload against a public-facing deny set.
    */
-  unresolved?: "graphql-mutation";
+  unresolved?: "graphql-mutation" | IntentUnresolved;
 }
 
 export type EgressDecision =
@@ -470,9 +472,17 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
 
   if (intent.verb === "npm-publish") return null; // registry, not a repo
 
-  if (intent.repoFlag !== undefined) {
-    const target = parseRepoFlag(intent.repoFlag);
-    return target ? withLocalClass(target, base, own, registry) : null;
+  // The parser could not name the target (`$REPO`, a shell alias, an earlier
+  // `export GH_REPO=…`, an unknown write subcommand): fail closed, never the
+  // cwd. Several distinct targets (`--repo` plus a URL positional, …) are the
+  // same shape: no single destination, so a wildcard approval or a person.
+  const targets = intentRepoTargets(intent);
+  const distinct = new Set(targets.map(t => `${t.org}/${t.repo ?? "*"}`)).size;
+  if (intent.unresolved !== undefined || distinct > 1) {
+    return unresolvedDestination(intent.unresolved ?? "ambiguous-target");
+  }
+  if (targets[0] !== undefined) {
+    return withLocalClass({ org: targets[0].org, repo: targets[0].repo ?? "*" }, base, own, registry);
   }
   if (intent.apiEndpoint !== undefined) {
     // The destination is in the path. `{owner}/{repo}` placeholders, `graphql`
@@ -484,20 +494,25 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
     // an `enqueuePullRequest` run from a private checkout reaches whichever
     // repository owns that PR (issue #113). A read keeps the cwd fallback.
     if (intent.graphql !== undefined && graphqlIntentKind(intent, base) !== "query") {
-      return {
-        org: "*",
-        repo: "*",
-        class: "private-strict",
-        visibility: "unknown",
-        publicFacing: true,
-        classKnown: false,
-        assumedPublic: true,
-        unresolved: "graphql-mutation",
-      };
+      return unresolvedDestination("graphql-mutation");
     }
   }
   return own ? withLocalClass(own, base, own, registry) : null;
 };
+
+/** A destination nothing offline can name: `*`/`*`, treated as public (the fail-closed stance of `assumedPublic`). */
+function unresolvedDestination(reason: NonNullable<Destination["unresolved"]>): Destination {
+  return {
+    org: "*",
+    repo: "*",
+    class: "private-strict",
+    visibility: "unknown",
+    publicFacing: true,
+    classKnown: false,
+    assumedPublic: true,
+    unresolved: reason,
+  };
+}
 
 /**
  * Default payload scanner: the destination's deny set (its own class when
@@ -553,6 +568,7 @@ const VERB_LABEL: Record<EgressVerb, string> = {
   "gh-repo-edit": "gh repo edit",
   "gh-gist-create": "gh gist create",
   "gh-workflow-run": "gh workflow run",
+  "gh-alias-shell": "gh (shell alias)",
   "gh-api-mutating": "gh api (mutating)",
   "npm-publish": "npm publish",
 };
@@ -567,6 +583,9 @@ export function describeDestination(d: Destination | null | undefined): string {
   if (d.unresolved === "graphql-mutation") {
     return "UNKNOWN repository (GraphQL mutation: the target is a node id, not resolvable offline; treated as public)";
   }
+  if (d.unresolved !== undefined) {
+    return `UNKNOWN repository (${d.unresolved}: the target cannot be named offline; treated as public)`;
+  }
   const vis = d.assumedPublic ? "visibility uncached, treated as public" : d.classKnown ? d.visibility : "visibility unknown";
   const cls = d.classKnown ? d.class : "class unknown";
   return `${d.org}/${d.repo} (${vis}, ${cls})`;
@@ -580,6 +599,7 @@ export function describeDestination(d: Destination | null | undefined): string {
 export function describeDestinationForReceipt(d: Destination | null | undefined): string {
   if (!d) return "(destination not resolved)";
   if (d.unresolved === "graphql-mutation") return "UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC)";
+  if (d.unresolved !== undefined) return `UNKNOWN (TARGET NOT RESOLVED: ${d.unresolved.toUpperCase()}, TREATED AS PUBLIC)`;
   const vis = d.assumedPublic
     ? "VISIBILITY UNCACHED, TREATED AS PUBLIC"
     : d.classKnown
