@@ -59,7 +59,7 @@ import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { registeredOwners, repoAegisHome, type Registry } from "@de-otio/repo-aegis-core";
 import { PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
-import { confirmOnTerminal } from "../require-terminal.js";
+import { confirmOnTerminal, isHumanTerminal } from "../require-terminal.js";
 
 const HOST = "github.com";
 /** One `gh` call must not hang `doctor`: this runs on a developer's machine, interactively. */
@@ -298,12 +298,10 @@ export interface GhCheckOptions {
 }
 
 function defaultConfirm(ghPath: string, logins: string[]): boolean {
-  // TODO(#151, PR 2b): reuse the agent-ancestry check here. A bare "stdin and
-  // stderr are TTYs" is a speed bump, not proof of a person: a pty wrapper
-  // gives an agent both. `isHumanTerminal()` in require-terminal.ts is the one
-  // place that hardening lands (PR 2b is not on this branch yet); route this
-  // call through it once both merge.
-  if (!process.stdin.isTTY || !process.stderr.isTTY) return false;
+  // A bare "stdin and stderr are TTYs" is a speed bump, not proof of a person:
+  // a pty wrapper gives an agent both. `isHumanTerminal()` adds the
+  // agent-ancestry and positive-root checks (issue #151, PR 2b).
+  if (!process.stdin.isTTY || !isHumanTerminal()) return false;
   return confirmOnTerminal(
     `doctor will read the stored token of ${logins.length} other logged-in gh account(s) (${logins.join(", ")}) ` +
       `and hand each to this binary:\n  ${ghPath}\nOnly answer y if that is the gh you installed.`,
