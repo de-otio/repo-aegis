@@ -249,7 +249,10 @@ any of these:
 - `GIT_CONFIG*` (`GIT_CONFIG_COUNT/KEY/VALUE` rewrites the push URL; verified
   by the review), `GIT_SSH*` (including `GIT_SSH_VARIANT`), and
   `SRT_SSH_PROXY_COMMAND`, which the trusted sandbox ssh template evaluates
-  (R9);
+  (R9), and generally `SRT_*`;
+- `SHELL`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `PS4`, and `export -f`:
+  ssh runs a ProxyCommand through `$SHELL`, and macOS `/bin/sh` imports
+  exported functions, so these hijack the sandbox proxy (PR 4 re-review);
 - `GIT_DIR`, `GIT_WORK_TREE` (and the `--git-dir`/`--work-tree` flags on a
   push), which move the repository the remote is read from (PR 2a review);
 - `BASH_ENV`, `ENV`, `ZDOTDIR`;
