@@ -200,6 +200,14 @@ export interface EgressIntent {
    * about a state that no longer holds.
    */
   afterStateChange?: string;
+  /**
+   * Shape rule b″, L2: the first earlier state change when ALL of them are checkout- or remote-kind
+   * (`gh pr checkout`, `git remote`, a `remote.*` / `branch.*` config key, `git branch -u`). They move where an
+   * IMPLICIT target lands but cannot change a literal one, so a `gh` intent that names its repository
+   * (`--repo`, a URL, `repos/<o>/<r>/…`) is exempt; any other egress is refused as for
+   * {@link afterStateChange}. Exclusive with it.
+   */
+  afterLocalStateChange?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -885,6 +893,8 @@ function gitConfigOverrideLabel(kv: string | undefined): string | null {
   if (key === "core.hookspath") return "git -c core.hooksPath";
   // `include.path` / `includeIf.<cond>.path` pull in a whole file of the settings above.
   if (key.startsWith("include.") || key.startsWith("includeif.")) return "git -c include.*";
+  // A CA override (with a proxy) lets a middleman read the credential on the wire.
+  if (/^http\.(?:.*\.)?sslca(?:info|path)$/.test(key)) return "git -c http.sslCAInfo";
   return null;
 }
 
@@ -2203,7 +2213,7 @@ interface ParseCtx {
    * Shape rule b″: the first persistent state change seen so far in this command line (any depth). Shared
    * and mutable: a change made inside `bash -c '…'` outlives it.
    */
-  state: { change: string | undefined };
+  state: { change: string | undefined; strong: string | undefined };
 }
 
 /** A lazy, memoised, never-throwing loader: a failed load is `null` ("could not be read"). */
@@ -2283,7 +2293,7 @@ export function parseEgressIntents(command: string, opts: ParseEgressOptions = {
       tainted: new Map(),
       heredocsAreCode: false,
       dangerEnv: new Set(),
-      state: { change: undefined },
+      state: { change: undefined, strong: undefined },
     });
   } catch {
     const s = typeof command === "string" ? sentinelFor(command, { precededByCd: false, joinedBy: null, segmentIndex: 0 }) : null;
@@ -2627,6 +2637,10 @@ const OVERRIDE_ENV_NAMES: ReadonlySet<string> = new Set([
   "GIT_EXEC_PATH",
   "NODE_OPTIONS",
   "NODE_PATH",
+  // A CA override plus a proxy lets a middleman read the token gh sends.
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
 ]);
 // `REPO_AEGIS_*` picks the registry and approvals; `SRT_*` is the sandbox's own (its trusted ssh template
 // evals `SRT_SSH_PROXY_COMMAND`, R9); `GIT_CONFIG*` rewrites URLs; `GIT_SSH*` (`GIT_SSH`, `GIT_SSH_COMMAND`,
@@ -2792,8 +2806,16 @@ function isRoutingConfigKey(key: string): boolean {
  * of a key that cannot be read, or whose form is unclear (`--edit`), counts.
  */
 function gitConfigChanges(rest: readonly string[]): boolean {
-  if (rest.some(a => a === "-e" || a === "--edit")) return true; // opens the whole file
-  if (rest.some(a => a.startsWith("--get") || GIT_CONFIG_READ_FLAGS.has(a))) return false;
+  return gitConfigChange(rest) !== null;
+}
+
+/**
+ * {@link gitConfigChanges} with the kind: `local` when the key is `remote.*` or `branch.*` (the
+ * remote's URL, its `gh-resolved`, upstream tracking: they move an implicit target only), else `other`.
+ */
+function gitConfigChange(rest: readonly string[]): "local" | "other" | null {
+  if (rest.some(a => a === "-e" || a === "--edit")) return "other"; // opens the whole file
+  if (rest.some(a => a.startsWith("--get") || GIT_CONFIG_READ_FLAGS.has(a))) return null;
   const positionals: string[] = [];
   let explicitWrite = false;
   for (let i = 0; i < rest.length; i++) {
@@ -2805,7 +2827,7 @@ function gitConfigChanges(rest: readonly string[]): boolean {
     }
     positionals.push(a);
   }
-  if (positionals.length === 0) return false;
+  if (positionals.length === 0) return null;
   let key = positionals[0]!;
   let written = explicitWrite || positionals.length >= 2;
   // The newer subcommand forms: `git config set KEY VALUE`, `git config unset KEY`, `git config get KEY`.
@@ -2813,11 +2835,12 @@ function gitConfigChanges(rest: readonly string[]): boolean {
     key = positionals[1] ?? "";
     written = true;
   } else if (key === "edit") {
-    return true;
+    return "other";
   } else if (key === "get" || key === "list") {
-    return false;
+    return null;
   }
-  return written && isRoutingConfigKey(key);
+  if (!written || !isRoutingConfigKey(key)) return null;
+  return /^(?:remote|branch)\./i.test(key) && !/[$`]/.test(key) ? "local" : "other";
 }
 
 /** Whether `git remote <rest>` changes a remote. Reads: no subcommand, `show`, `get-url`, `update`, `prune`. */
@@ -2838,6 +2861,14 @@ const IN_PLACE_EDITORS: ReadonlySet<string> = new Set(["sed", "perl", "ruby"]);
 
 /** The same paths, found anywhere inside program text (`open('.git/config', 'w')`). */
 const PROTECTED_TEXT_RE = /\.git\/|\.gitconfig|\.ssh\/config|\.config\/(?:git|gh)\/|\bgh\/(?:config|hosts)\.yml/i;
+
+/** State changes that only move where an implicit target lands (L2). */
+const LOCAL_STATE_LABELS: ReadonlySet<string> = new Set([
+  "gh pr checkout",
+  "git remote",
+  "git branch upstream",
+  "git config (remote or branch)",
+]);
 
 const PROTECTED_WRITE_LABEL = "a write into git, ssh or gh configuration";
 
@@ -2898,7 +2929,10 @@ function stateChangeLabel(
   if (cmd === "git") {
     const g = gitSubcommandOf(args);
     if (g === null) return null;
-    if (g.sub === "config") return gitConfigChanges(g.rest) ? "git config" : null;
+    if (g.sub === "config") {
+      const kind = gitConfigChange(g.rest);
+      return kind === null ? null : kind === "local" ? "git config (remote or branch)" : "git config";
+    }
     if (g.sub === "remote") return gitRemoteChanges(g.rest) ? "git remote" : null;
     // A fresh or re-pointed checkout: the egress after it may run in it.
     if (g.sub === "clone" || g.sub === "init") return `git ${g.sub}`;
@@ -2969,7 +3003,11 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
       intents.push({
         ...i,
         ...(overrides.size > 0 && { envOverrides: [...overrides] }),
-        ...(i.afterStateChange === undefined && ctx.state.change !== undefined && { afterStateChange: ctx.state.change }),
+        // The first change that can alter even a literal target; else (L2) the first, local-kind one.
+        ...(i.afterStateChange === undefined && ctx.state.strong !== undefined && { afterStateChange: ctx.state.strong }),
+        ...(i.afterStateChange === undefined &&
+          ctx.state.strong === undefined &&
+          ctx.state.change !== undefined && { afterLocalStateChange: ctx.state.change }),
       });
     };
     // A function definition's first token is the function's name, not a command.
@@ -3148,7 +3186,10 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
     } finally {
       // What this segment changed is seen by the segments AFTER it (shape rules b′ and b″).
       if (pendingDanger.length > 0) dangerEnv = new Set([...dangerEnv, ...pendingDanger]);
-      if (pendingState !== null && ctx.state.change === undefined) ctx.state.change = pendingState;
+      if (pendingState !== null) {
+        if (ctx.state.change === undefined) ctx.state.change = pendingState;
+        if (ctx.state.strong === undefined && !LOCAL_STATE_LABELS.has(pendingState)) ctx.state.strong = pendingState;
+      }
     }
   });
 

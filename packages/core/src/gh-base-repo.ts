@@ -70,7 +70,11 @@ function readRemotes(cwd: string): Map<string, RemoteUrls> | null {
   return remotes;
 }
 
-/** `remote.<name>.gh-resolved` values per remote name. */
+/**
+ * `remote.*.gh-resolved` per remote, exactly as gh attributes them (git/client.go populateResolvedRemotes):
+ * the remote is the FIRST dot-segment after `remote.` (`remote.origin.evil.gh-resolved` belongs to `origin`),
+ * and in config order the LAST value for a remote wins.
+ */
 function readResolved(cwd: string): Map<string, string[]> {
   const out = gitOut(cwd, ["config", "-z", "--get-regexp", "^remote\\..*\\.gh-resolved$"]);
   const table = new Map<string, string[]>();
@@ -80,8 +84,9 @@ function readResolved(cwd: string): Map<string, string[]> {
     const nl = entry.indexOf("\n");
     const key = nl === -1 ? entry : entry.slice(0, nl);
     const value = nl === -1 ? "" : entry.slice(nl + 1);
-    const m = /^remote\.(.+)\.gh-resolved$/.exec(key);
-    if (m !== null) table.set(m[1]!, [...(table.get(m[1]!) ?? []), value]);
+    if (!/^remote\..*\.gh-resolved$/.test(key)) continue;
+    const name = key.split(".", 3)[1];
+    if (name !== undefined) table.set(name, [value]);
   }
   return table;
 }
@@ -100,6 +105,28 @@ function nameScore(name: string): number {
   }
 }
 
+/**
+ * Whether gh's `ghrepo.FromURL` accepts a remote URL: it has a host, and its path is exactly
+ * `owner/repo` (exactly two segments). scp-style `user@host:path` is read as an ssh URL, as
+ * `git.ParseURL` does. A local path has no host.
+ */
+function ghUrlParses(raw: string): boolean {
+  let host: string;
+  let path: string;
+  const url = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)([^?#]*)/.exec(raw);
+  if (url !== null) {
+    host = url[1]!.replace(/^.*@/, "").replace(/:\d*$/, "");
+    path = url[2]!;
+  } else {
+    const scp = /^(?:[^@/]+@)?([^:/]+):(.*)$/.exec(raw);
+    if (scp === null) return false;
+    host = scp[1]!;
+    path = scp[2]!;
+  }
+  if (host === "") return false;
+  return path.replace(/^\/+|\/+$/g, "").split("/").length === 2;
+}
+
 type Target = { kind: "github"; org: string; repo: string } | { kind: "unresolved" };
 
 interface Entry {
@@ -115,20 +142,23 @@ function ghRemoteEntries(cwd: string, remotes: Map<string, RemoteUrls>): Entry[]
   const sshOverride = detectSshOverride(cwd);
   const entries: Entry[] = [];
   for (const [name, urls] of remotes) {
-    // gh reads the repository from the fetch URL, and from the push URL only when the fetch URL gives none.
+    // gh reads the repository from the fetch URL, and from the push URL ONLY when the fetch URL gives none
+    // (no host, or a path that is not exactly owner/repo: context/remote.go). A fetch URL that parses on
+    // another host is dropped by host, and its push URL is never read.
     let target: Target | null = null;
-    for (const url of [urls.fetch, urls.push]) {
-      if (url === undefined) continue;
+    const classify = (url: string): Target | null => {
       const t = resolveRemoteUrl(url, undefined, { sshOverride, unknownDotlessUnresolved: true });
-      if (t.kind === "github") {
-        target = { kind: "github", org: t.org, repo: t.repo };
-        break;
-      }
-      if (t.kind === "unresolved") {
-        target = { kind: "unresolved" };
-        break;
-      }
-      // non-github: another host (filtered out by gh), or no repository: try the next URL
+      if (t.kind === "github") return { kind: "github", org: t.org, repo: t.repo };
+      if (t.kind === "unresolved") return { kind: "unresolved" };
+      return null; // another host or no repository
+    };
+    if (urls.fetch !== undefined && ghUrlParses(urls.fetch)) {
+      target = classify(urls.fetch);
+    } else {
+      // gh falls back to the push URL; a fetch URL that is URL-shaped but unclean is never dropped (fail closed).
+      const viaPush = urls.push !== undefined && ghUrlParses(urls.push) ? classify(urls.push) : null;
+      const viaFetch = urls.fetch !== undefined ? classify(urls.fetch) : null;
+      target = viaPush ?? (viaFetch?.kind === "unresolved" ? viaFetch : null);
     }
     if (target === null) continue;
     entries.push({ name, score: nameScore(name), target, resolved: resolved.get(name) ?? [] });

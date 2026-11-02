@@ -1236,6 +1236,13 @@ function envOverrideReason(intent: EgressIntent, labels: readonly string[]): str
   });
 }
 
+/** A `gh` intent whose repository is spelled out: `--repo`, a URL or `o/r` positional, or a literal `repos/<o>/<r>/…` endpoint. */
+function namesLiteralGhTarget(intent: EgressIntent): boolean {
+  if (!intent.verb.startsWith("gh-") || intent.unresolved !== undefined) return false;
+  if (intent.repoFlag !== undefined || intent.positionalRepo !== undefined) return true;
+  return intent.apiEndpoint !== undefined && classifyApiEndpoint(intent.apiEndpoint).kind === "named";
+}
+
 function afterStateChangeReason(intent: EgressIntent, change: string): string {
   const verb = describeVerb(intent.verb);
   return refusal({
@@ -1327,8 +1334,11 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   }
 
   // ---- b″: egress after a persistent state change in the same command (§3.4, F6) ----
-  if (intent.afterStateChange !== undefined) {
-    return deny("EGRESS_AFTER_STATE_CHANGE", afterStateChangeReason(intent, intent.afterStateChange));
+  // A checkout- or remote-kind change cannot change a literal target (L2): exempt a gh intent that names one.
+  const stateChange =
+    intent.afterStateChange ?? (namesLiteralGhTarget(intent) ? undefined : intent.afterLocalStateChange);
+  if (stateChange !== undefined) {
+    return deny("EGRESS_AFTER_STATE_CHANGE", afterStateChangeReason(intent, stateChange));
   }
 
   // ---- D10: a non-interactive `gh pr create` must name its target ------------------

@@ -294,6 +294,38 @@ describe("gh base repository: gh's own pick (§3.3 item 3, superseded after the 
     assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
   });
 
+  it("R1: a dotted subsection key is attributed to the FIRST dot-segment, as gh does, and the last value wins", () => {
+    // `remote.origin.evil.gh-resolved` belongs to `origin` for gh (SplitN(key, ".", 3)[1]), not to `origin.evil`.
+    const dir = checkout({ origin: "git@github.com:acme/x.git" });
+    assert.equal(resolve(issue, dir)?.org, "acme");
+    git(dir, "config", "remote.origin.evil.gh-resolved", "stranger/r");
+    const d = resolve(issue, dir);
+    assert.equal(`${d?.org}/${d?.repo}`, "stranger/r");
+    assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
+    // …and it wins over an earlier `remote.origin.gh-resolved=base` (config order, last wins).
+    const both = checkout({ origin: "git@github.com:acme/x.git" }, { "remote.origin.gh-resolved": "base" });
+    assert.equal(resolve(issue, both)?.org, "acme");
+    git(both, "config", "remote.origin.evil.gh-resolved", "stranger/r");
+    assert.equal(`${resolve(issue, both)?.org}/${resolve(issue, both)?.repo}`, "stranger/r");
+    // Within one remote, a later value replaces an earlier one (config order).
+    const twice = checkout({ origin: "git@github.com:acme/x.git" }, { "remote.origin.gh-resolved": "stranger/r" });
+    git(twice, "config", "--add", "remote.origin.gh-resolved", "base");
+    assert.equal(`${resolve(issue, twice)?.org}/${resolve(issue, twice)?.repo}`, "acme/x");
+  });
+
+  it("R2: the push URL is read only where gh reads it", () => {
+    // upstream's FETCH url parses on another host: gh drops the remote by host and never reads its push URL.
+    const dir = checkout({ upstream: "https://gitlab.com/x/y.git", origin: "git@github.com:stranger/r.git" });
+    git(dir, "remote", "set-url", "--push", "upstream", "git@github.com:acme/x.git");
+    const d = resolve(issue, dir);
+    assert.equal(`${d?.org}/${d?.repo}`, "stranger/r");
+    assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
+    // A fetch URL gh cannot parse (a local path) falls back to the push URL.
+    const local = checkout({ upstream: "/srv/local/up.git", origin: "git@github.com:stranger/r.git" });
+    git(local, "remote", "set-url", "--push", "upstream", "git@github.com:acme/x.git");
+    assert.equal(`${resolve(issue, local)?.org}/${resolve(issue, local)?.repo}`, "acme/x");
+  });
+
   it("the refusal for a gh-resolved junk value carries no remote URL or owner from the checkout", () => {
     const dir = checkout({ origin: "git@github.com:secret-org/secret-repo.git" }, { "remote.origin.gh-resolved": "other" });
     const d = decide(issue, dir);

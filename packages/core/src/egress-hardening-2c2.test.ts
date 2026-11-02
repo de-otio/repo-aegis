@@ -537,3 +537,90 @@ describe("R6 gaps (M5)", () => {
     }
   });
 });
+
+describe("L1: a CA override is refused (with a proxy it lets a middleman take the token)", () => {
+  it("SSL_CERT_FILE, SSL_CERT_DIR, NODE_EXTRA_CA_CERTS as a prefix, an export or an env assignment", () => {
+    for (const v of ["SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]) {
+      assertRefused(`${v}=/tmp/ca.pem ${PUSH}`, "EGRESS_ENV_OVERRIDE");
+      assertRefused(`${v}=/tmp/ca.pem gh issue create --repo acme/x --body x`, "EGRESS_ENV_OVERRIDE");
+      assertRefused(`export ${v}=/tmp/ca.pem && ${PUSH}`, "EGRESS_ENV_OVERRIDE");
+      assertRefused(`env ${v}=/tmp/ca.pem ${PUSH}`, "EGRESS_ENV_OVERRIDE");
+    }
+  });
+
+  it("git -c http.sslCAInfo / http.sslCAPath (any case, also per-URL) on a push", () => {
+    for (const kv of [
+      "http.sslCAInfo=/tmp/ca.pem",
+      "http.sslcainfo=/tmp/ca.pem",
+      "HTTP.SSLCAPATH=/tmp/cas",
+      "http.https://github.com/.sslCAInfo=/tmp/ca.pem",
+    ]) {
+      assertRefused(`git -c '${kv}' push origin main`, "EGRESS_ENV_OVERRIDE");
+    }
+    assertRefused("git --config-env=http.sslCAInfo=CA push origin main", "EGRESS_ENV_OVERRIDE");
+    // Other http.* keys are not this rule's.
+    assertNotShapeRefused("git -c http.postBuffer=1048576 push origin main");
+  });
+});
+
+describe("L2: checkout- and remote-kind state changes cannot change a literal target", () => {
+  const GH_LITERAL = "gh pr comment 5 --repo acme/x --body hi";
+
+  it("`gh pr checkout 5 && gh pr comment 5 --repo acme/x` passes b″; the same without --repo is refused", () => {
+    assertNotShapeRefused(`gh pr checkout 5 && ${GH_LITERAL}`);
+    assertRefused("gh pr checkout 5 && gh pr comment 5 --body hi", "EGRESS_AFTER_STATE_CHANGE");
+    assertRefused(`gh pr checkout 5 && ${PUSH}`, "EGRESS_AFTER_STATE_CHANGE");
+  });
+
+  it("every kind of literal target: --repo, a URL positional, a literal repos/<o>/<r> endpoint", () => {
+    for (const egress of [
+      "gh issue comment 5 --repo acme/x --body hi",
+      "gh issue comment https://github.com/acme/x/issues/5 --body hi",
+      "gh api -X POST repos/acme/x/issues -f title=t",
+    ]) {
+      assertNotShapeRefused(`gh pr checkout 5 && ${egress}`);
+    }
+    // A placeholder endpoint falls back to the base repository: not literal.
+    assertRefused("gh pr checkout 5 && gh api -X POST repos/{owner}/{repo}/issues -f title=t", "EGRESS_AFTER_STATE_CHANGE");
+  });
+
+  it("git remote, remote.* / branch.* config and git branch -u are exempt for a literal gh target only", () => {
+    for (const first of [
+      "git remote set-url origin https://example.test/x.git",
+      "git remote add up https://example.test/x.git",
+      "git config remote.origin.gh-resolved stranger/r",
+      "git config remote.origin.url https://example.test/x.git",
+      "git config branch.main.remote up",
+      "git branch -u up/main",
+    ]) {
+      assertNotShapeRefused(`${first} && ${GH_LITERAL}`);
+      assertRefused(`${first} && gh pr comment 5 --body hi`, "EGRESS_AFTER_STATE_CHANGE");
+      assertRefused(`${first} && ${PUSH}`, "EGRESS_AFTER_STATE_CHANGE");
+    }
+  });
+
+  it("env, alias, config-file and URL-rewrite changes still refuse a literal target (they can change it)", () => {
+    for (const first of [
+      "gh alias set pc 'pr comment'",
+      "gh repo set-default stranger/r",
+      "gh auth switch -u other",
+      "gh config set git_protocol ssh",
+      "git config url.https://example.test/.insteadOf https://github.com/",
+      "git config core.sshCommand /tmp/evil",
+      "git config alias.p push",
+      "export GH_REPO=a/b",
+      "export GH_CONFIG_DIR=/tmp/c",
+      "git clone https://example.test/x.git",
+      "echo x >> .git/config",
+      "source ./env.sh",
+    ]) {
+      const [none] = judge(`${first} && ${GH_LITERAL}`);
+      assert.ok(none!.code === "EGRESS_AFTER_STATE_CHANGE" || none!.code === "EGRESS_ENV_OVERRIDE", `${first}: ${none!.code}`);
+    }
+  });
+
+  it("a strong change after a local one still refuses (the first change does not hide the second)", () => {
+    assertRefused(`gh pr checkout 5 && gh alias set pc 'pr comment' && ${GH_LITERAL}`, "EGRESS_AFTER_STATE_CHANGE");
+    assertRefused(`git remote add up https://example.test/x.git && git config core.sshCommand /tmp/evil && ${GH_LITERAL}`, "EGRESS_AFTER_STATE_CHANGE");
+  });
+});
