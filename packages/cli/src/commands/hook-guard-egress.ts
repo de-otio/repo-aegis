@@ -46,6 +46,7 @@ import {
   type Destination,
   type EgressDecision,
   type Registry,
+  type RegistryState,
 } from "@de-otio/repo-aegis-core";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
 
@@ -176,27 +177,34 @@ const EMPTY_REGISTRY: Registry = {
 
 /**
  * The registry is optional here. The shape rules need no registry at all,
- * and a guard that refused to run because a registry was missing or
- * encrypted would be inert exactly where it is most needed (a fresh machine,
- * a locked registry). So every failure falls back to an empty registry and
- * the condition travels with the decision instead.
+ * and a guard that refused to run because a registry was missing would be
+ * inert exactly where it is most needed (a fresh machine). So a failure falls
+ * back to an empty registry and the condition travels with the decision as
+ * `registryState`, which rule h reads (issue #151, decision D4):
+ *
+ *   - no registry file  → `missing`: rule h is skipped;
+ *   - encrypted, or a file that does not parse or validate → `unreadable`:
+ *     rule h REFUSES any egress that has a destination, because no owner can
+ *     be confirmed. Skipping here would let an agent that can write the file
+ *     switch rule h off with one bad YAML line.
+ *
+ * Only {@link RegistryNotFoundError} is "missing". Anything else, including an
+ * error this code does not know, is `unreadable`: fail closed.
  */
-function loadRegistryOrEmpty(): { registry: Registry; note?: string } {
+function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistryState; note?: string } {
   try {
-    return { registry: loadRegistry() };
+    return { registry: loadRegistry(), registryState: "loaded" };
   } catch (err) {
     if (err instanceof RegistryNotFoundError) {
-      return { registry: EMPTY_REGISTRY };
-    }
-    if (err instanceof RegistryEncryptedError) {
-      return {
-        registry: EMPTY_REGISTRY,
-        note: "registry is encrypted, so only the shape rules ran (context rules need a readable registry)",
-      };
+      return { registry: EMPTY_REGISTRY, registryState: "missing" };
     }
     return {
       registry: EMPTY_REGISTRY,
-      note: "registry could not be read, so only the shape rules ran (context rules need a readable registry)",
+      registryState: "unreadable",
+      note:
+        err instanceof RegistryEncryptedError
+          ? "registry is encrypted: context rules ran without it, and any publish with a destination is refused until it is decrypted"
+          : "registry could not be read: context rules ran without it, and any publish with a destination is refused until it is repaired",
     };
   }
 }
@@ -319,6 +327,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
       intents,
       cwd: cwd ?? process.cwd(),
       registry: loaded.registry,
+      registryState: loaded.registryState,
       humanPresent: isHumanPresent(),
       // Only Claude Code is assumed to have an "ask". Anything else —
       // including an unrecognised `--agent` value — is treated as a
@@ -346,6 +355,9 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     process.exit(0);
   }
 
+  // Rule h's own refusal already says the registry could not be read and how
+  // to fix it (§3.9); appending the note would only repeat it.
+  if (decision.code === "UNREGISTERED_OWNER_EGRESS") registryNote = undefined;
   const reason = registryNote === undefined ? decision.reason : `${decision.reason} (${registryNote})`;
 
   if (decision.action === "ask") {

@@ -9,12 +9,23 @@
 //
 //   1. **Shape rules are unconditional; context rules fail open.** Rules
 //      a–d need no registry, no class and no visibility, so they always
-//      apply. Rules e–h read context that may be missing (an unparseable
+//      apply. Rules e–g read context that may be missing (an unparseable
 //      remote, an unclassified repo, a payload that does not exist); a
 //      guardrail must never block on its own inability to determine
 //      context — that was the spurious `CROSS_ORG_WRITE` flake
 //      (doc/bugs/repo-aegis-check-write-flake.md). Asking is not blocking,
 //      so an uncertain destination may still `ask`.
+//
+//      Rule h (issue #151) is the documented exception, and it is a refusal
+//      no approval satisfies. It refuses non-interactive egress to an owner
+//      that is not registered (in neither `personalOrgs` nor any engagement's
+//      `githubOrgs`). The context is not missing: what is known is that a
+//      write goes to an owner nobody has vouched for. That includes a write
+//      whose owner cannot be named offline (`Destination.unresolved`), and an
+//      unreadable or encrypted registry, where no owner can be confirmed. It
+//      stays out of the way only where there is nothing to judge against: no
+//      registry file at all, or a registry that declares no owners. Only a
+//      person at a terminal passes it.
 //   2. **Decision-only.** This module returns a decision and a reason; it
 //      never returns a rewritten command. Rewriting `git push` into `git
 //      push origin <branch>` would rebuild the implicit-destination defect
@@ -43,6 +54,8 @@ import {
 } from "./egress-intent.js";
 import { resolveCachedDestination } from "./destination-cache.js";
 import { findApproval, type EgressApproval } from "./egress-approval.js";
+import { ownerAdmitted, registeredOwners, UPSTREAM_ADMITTED_VERBS } from "./registered-owners.js";
+import { refusal, type RefusalFix } from "./refusal.js";
 import { parseRemoteUrl } from "./remote-url.js";
 import { readRepoConfig, type RepoClass, type RepoConfig } from "./repo.js";
 import type { Registry } from "./registry.js";
@@ -58,6 +71,7 @@ export type EgressCode =
   | "PAYLOAD_MODE_DEPENDENT_PATH"
   | "CROSS_ORG_EGRESS"
   | "PAYLOAD_MARKER_HIT"
+  | "UNREGISTERED_OWNER_EGRESS"
   | "PUBLIC_EGRESS_NEEDS_HUMAN"
   | "SHIM_UNREACHABLE_NEEDS_HUMAN";
 
@@ -195,11 +209,29 @@ export type PayloadScanner = (file: string, destination: Destination, cwd: strin
  */
 export type ApprovalFinder = (destination: Destination | null, ref: string | undefined) => EgressApproval | null;
 
+/**
+ * How the registry was obtained, so that "empty because missing", "empty
+ * because unreadable" and "loaded and empty" cannot be confused (rule h,
+ * issue #151, decision D4).
+ *
+ * - `loaded`: read successfully. Rule h judges against its owner lists, and
+ *   is skipped when it declares none.
+ * - `missing`: no registry file exists. Rule h is skipped.
+ * - `unreadable`: a file (or ciphertext) exists but could not be read:
+ *   encrypted, unparseable, or a newer schema. Rule h refuses every
+ *   non-interactive egress that has a destination, because no owner can be
+ *   confirmed. Falling open here would let one corrupted line switch the
+ *   rule off.
+ */
+export type RegistryState = "loaded" | "missing" | "unreadable";
+
 export interface DecideEgressOptions {
   intents: EgressIntent[];
   /** Where the command WILL run: the hook payload's cwd, or the shim's `$PWD`. */
   cwd: string;
   registry: Registry;
+  /** How `registry` was obtained. Required: every caller must say (see {@link RegistryState}). */
+  registryState: RegistryState;
   /** From {@link isHumanPresent}. */
   humanPresent: boolean;
   capabilities: {
@@ -629,6 +661,110 @@ function positivelyDisjoint(a: ReadonlySet<string>, b: ReadonlySet<string>): boo
   return true;
 }
 
+/**
+ * Rule h's refusal text (§3.9). Names the verb and the destination's own
+ * owner/repo, which the command already carries, and nothing else: never the
+ * registered owners, engagement ids or upstreams (the redaction oracle).
+ */
+function unregisteredOwnerReason(
+  intent: EgressIntent,
+  destination: Destination,
+  state: RegistryState,
+  registry: Registry,
+): string {
+  const verb = describeVerb(intent.verb);
+  const code = "UNREGISTERED_OWNER_EGRESS";
+  const unresolved = destination.unresolved !== undefined;
+  const owner = destination.org;
+  const target = `${destination.org}/${destination.repo}`;
+  const what = unresolved
+    ? destination.unresolved === "graphql-mutation"
+      ? "gh api graphql (mutation)"
+      : `${verb} (unresolved destination)`
+    : `${verb} → ${target}`;
+
+  if (state === "unreadable") {
+    return refusal({
+      code,
+      what,
+      why:
+        `The registry could not be read (it is encrypted or damaged), so repo-aegis cannot confirm that ` +
+        (unresolved ? `this destination's owner` : `the owner "${owner}"`) +
+        ` is registered and refuses egress it cannot vouch for`,
+      approval: "No approval covers this",
+      fixes: [
+        { by: "person", when: "If the registry is encrypted", command: "repo-aegis registry decrypt --identity <key>" },
+        { by: "person", when: "If it is damaged", command: "repair the registry file, then re-run the command" },
+      ],
+    });
+  }
+
+  if (unresolved) {
+    return refusal({
+      code,
+      what,
+      why:
+        `A GraphQL mutation names its target by node id, so repo-aegis cannot tell offline which owner it ` +
+        `writes to, and an unknown owner is treated as unregistered`,
+      approval: "No approval covers this (since 0.11.0 a '*' approval no longer does)",
+      fixes: [
+        {
+          by: "agent",
+          when: "To act on a repository",
+          command: "a gh command that names it, such as gh issue comment --repo <owner>/<repo> …",
+        },
+        { by: "person" },
+      ],
+    });
+  }
+
+  const upstreamKey = target.toLowerCase();
+  const isUpstream = (registry.allowedUpstreams ?? []).some(u => u.toLowerCase() === upstreamKey);
+  if (isUpstream && !UPSTREAM_ADMITTED_VERBS.has(intent.verb)) {
+    return refusal({
+      code,
+      what,
+      why: `${target} is an allowed upstream, but allowed upstreams accept only PRs, issues and comments, not ${verb}`,
+      approval: "No approval covers this",
+      fixes: [
+        {
+          by: "agent",
+          when: "To propose a change",
+          command: `gh pr create --repo ${target} …`,
+          note: "push the branch to your own fork first",
+        },
+      ],
+    });
+  }
+
+  return refusal({
+    code,
+    what,
+    why:
+      `The owner "${owner}" is not registered (in neither personalOrgs nor any engagement), so repo-aegis ` +
+      `cannot tell whether this repository is yours`,
+    approval: "No approval covers this",
+    fixes: [
+      {
+        by: "person",
+        when: `If "${owner}" is yours or a customer's`,
+        command: `repo-aegis engagements add --personal-org ${owner}`,
+        note: `or --github-org ${owner} under the engagement, for a customer`,
+      },
+      ...(destination.repo === "*"
+        ? []
+        : [
+            {
+              by: "person",
+              when: "If it is an upstream you contribute to",
+              command: `repo-aegis upstreams add ${target}`,
+              note: "PRs and issues only",
+            } satisfies RefusalFix,
+          ]),
+    ],
+  });
+}
+
 function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecision {
   const verb = describeVerb(intent.verb);
   const deny = (code: EgressCode, reason: string, destination?: Destination): EgressDecision => ({
@@ -688,6 +824,33 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   } catch {
     destination = null;
   }
+
+  // ---- h: unregistered owner (issue #151) -----------------------------------
+  // Right after resolution and BEFORE the visibility lookup and rule e: it is
+  // offline and cheap, and it must not send `gh repo view` to an owner the
+  // guard is about to refuse. No approval satisfies it (the finder is never
+  // consulted); only a person does. Only the registry's owner lists count —
+  // not the destination cache, a local class, or an approval (D2).
+  if (destination !== null && !opts.humanPresent) {
+    let refused = false;
+    if (opts.registryState === "unreadable") {
+      // No owner can be confirmed, so none is admitted (D4, revised).
+      refused = true;
+    } else if (opts.registryState === "loaded") {
+      const owners = registeredOwners(opts.registry);
+      // A registry that declares no owners has nothing to judge against.
+      refused = owners.size > 0 && !ownerAdmitted(destination, intent, owners, opts.registry);
+    }
+    // "missing": no registry file at all, rule h is skipped.
+    if (refused) {
+      return deny(
+        "UNREGISTERED_OWNER_EGRESS",
+        unregisteredOwnerReason(intent, destination, opts.registryState, opts.registry),
+        destination,
+      );
+    }
+  }
+
   if (destination !== null) {
     destination = refreshDestinationVisibility(destination, effectiveVisibilityLookup(opts.lookupVisibility));
   }
@@ -846,7 +1009,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     );
   }
 
-  // ---- h: scratch, and everything else ---------------------------------------
+  // ---- otherwise: allow ------------------------------------------------------
   return { action: "allow" };
 }
 

@@ -548,6 +548,137 @@ describe("hook guard-egress — output channels", { skip: !SUBPROCESS_TESTS_AVAI
   });
 });
 
+describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  const OWNERS_REGISTRY =
+    "schemaVersion: 2\n" +
+    "personalOrgs: [acme]\n" +
+    "engagements:\n" +
+    "  - id: customer-a\n" +
+    "    name: Customer A\n" +
+    "    started: '2026-01-01'\n" +
+    "    markers: []\n" +
+    "    githubOrgs: [customer-a-org]\n";
+  const PUSH_STRANGER = "git push git@github.com:stranger/repo.git main";
+  const REGISTERED = ["acme", "customer-a-org", "customer-a", "Customer A"];
+
+  function denied(r: GuardResult): DenyPayload {
+    assert.equal(r.code, 2, `expected deny; got ${r.code} ${r.stdout} ${r.stderr}`);
+    return JSON.parse(r.stderr) as DenyPayload;
+  }
+
+  it("denies (never asks) a push to an unregistered owner on Claude Code, Codex and Gemini", () => {
+    const home = aegisHome("h-owners", OWNERS_REGISTRY);
+    for (const [payload, agent] of [
+      [claudePayload(PUSH_STRANGER), "claude"],
+      [codexPayload(PUSH_STRANGER), "codex"],
+      [geminiPayload(PUSH_STRANGER), "gemini"],
+    ] as const) {
+      const r = runGuard(payload, { home, agent });
+      const p = denied(r);
+      assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS", agent);
+      assert.equal(p.details.destination?.org, "stranger");
+      const j = JSON.parse(r.stdout) as DecisionJson;
+      assert.equal(j.hookSpecificOutput.permissionDecision, "deny", `${agent}: a refusal, not an ask`);
+    }
+  });
+
+  it("the reason is the five-part refusal and the redaction oracle holds on every channel", () => {
+    const home = aegisHome("h-oracle", OWNERS_REGISTRY);
+    const r = runGuard(claudePayload("gh issue create --repo stranger/repo --body x"), { home });
+    const p = denied(r);
+    assert.match(p.error, /^gh issue create → stranger\/repo: refused\./);
+    assert.match(p.error, /No approval covers this/);
+    assert.match(p.error, /a person runs, from a terminal: repo-aegis engagements add --personal-org stranger/);
+    assert.match(p.error, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]/);
+    for (const bad of REGISTERED) {
+      assert.ok(!r.stderr.includes(bad), `stderr must not contain "${bad}"`);
+      assert.ok(!r.stdout.includes(bad), `stdout must not contain "${bad}"`);
+    }
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecisionReason, p.error, "stderr and stdout carry the same reason");
+  });
+
+  it("no approval of any scope satisfies it: `*`, `stranger/*`, `stranger/repo`", () => {
+    for (const [i, target] of [
+      { org: "*", repo: "*" },
+      { org: "stranger", repo: "*" },
+      { org: "stranger", repo: "repo" },
+    ].entries()) {
+      const home = aegisHome(`h-approved-${i}`, OWNERS_REGISTRY);
+      mintApproval({ target, path: approvalsPath(home), by: "op" });
+      const p = denied(runGuard(claudePayload(PUSH_STRANGER), { home }));
+      assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS", JSON.stringify(target));
+    }
+  });
+
+  it("a person present (REPO_AEGIS_EGRESS_HUMAN, the human-only escape) passes it", () => {
+    const home = aegisHome("h-human", OWNERS_REGISTRY);
+    const r = runGuard(claudePayload(PUSH_STRANGER), { home, human: true });
+    assert.equal(r.code, 0, `expected allow; got ${r.code} ${r.stderr}`);
+    assert.equal(r.stdout, "");
+  });
+
+  it("a registered owner is judged exactly as before (here: rule g asks for a public destination)", () => {
+    const home = aegisHome("h-registered", OWNERS_REGISTRY);
+    const r = runGuard(claudePayload("git push git@github.com:acme/svc.git main"), { home });
+    assert.equal(r.code, 0, `expected ask; got ${r.code} ${r.stderr}`);
+    assert.equal((JSON.parse(r.stdout) as DecisionJson).hookSpecificOutput.permissionDecision, "ask");
+  });
+
+  it("no registry file: rule h is skipped (the rest of the guard still asks about an unknown destination)", () => {
+    const home = join(tmp, "h-no-registry-home");
+    mkdirSync(home, { recursive: true });
+    const r = runGuard(claudePayload(PUSH_STRANGER), { home });
+    assert.equal(r.code, 0, `expected ask; got ${r.code} ${r.stderr}`);
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecision, "ask");
+    assert.match(j.hookSpecificOutput.permissionDecisionReason, /PUBLIC_EGRESS|PUBLIC destination/);
+  });
+
+  it("a registry that declares no owners: rule h is skipped", () => {
+    const home = aegisHome("h-no-owners", EMPTY_REGISTRY);
+    const r = runGuard(claudePayload(PUSH_STRANGER), { home });
+    assert.equal(r.code, 0, `expected ask; got ${r.code} ${r.stderr}`);
+    assert.equal((JSON.parse(r.stdout) as DecisionJson).hookSpecificOutput.permissionDecision, "ask");
+  });
+
+  it("an unparseable registry REFUSES (one bad YAML line must not switch rule h off), and says how to repair", () => {
+    const home = aegisHome("h-corrupt", OWNERS_REGISTRY + "this line: is: not valid: yaml: [\n");
+    const r = runGuard(claudePayload(PUSH_STRANGER), { home });
+    const p = denied(r);
+    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+    assert.match(p.error, /could not be read/);
+    assert.match(p.error, /repair/);
+    assert.match(p.error, /repo-aegis registry decrypt --identity/);
+    for (const bad of REGISTERED) assert.ok(!r.stderr.includes(bad), `must not contain "${bad}"`);
+    // A person still passes.
+    assert.equal(runGuard(claudePayload(PUSH_STRANGER), { home, human: true }).code, 0);
+  });
+
+  it("an encrypted registry (only the .age ciphertext on disk) REFUSES", () => {
+    const home = aegisHome("h-encrypted");
+    writeFileSync(join(home, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const p = denied(runGuard(claudePayload(PUSH_STRANGER), { home }));
+    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
+    assert.match(p.error, /encrypted/);
+    assert.match(p.error, /repo-aegis registry decrypt --identity/);
+  });
+
+  it("a registry from a newer schema is unreadable, so it refuses too", () => {
+    const home = aegisHome("h-newer", "schemaVersion: 99\nengagements: []\n");
+    assert.equal(denied(runGuard(claudePayload(PUSH_STRANGER), { home })).code, "UNREGISTERED_OWNER_EGRESS");
+  });
+
+  it("an unreadable registry does not wall off commands with no destination or no egress", () => {
+    const home = aegisHome("h-corrupt-quiet", "engagements: [\n");
+    const quiet = runGuard(claudePayload("ls -la"), { home });
+    assert.equal(quiet.code, 0);
+    assert.equal(quiet.stdout, "");
+    // A shape violation keeps its own code: rule h is later than rules a-d.
+    assert.equal((JSON.parse(runGuard(claudePayload("git push"), { home }).stderr) as DenyPayload).code, "PUSH_IMPLICIT_TARGET");
+  });
+});
+
 describe("hook guard-egress — decision-only oracle", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
   it("never emits `updatedInput` (or any rewritten command) on any path", () => {
     // The locked decision from doc/design/egress-guard.md: rewriting

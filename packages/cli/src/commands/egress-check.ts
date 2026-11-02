@@ -30,10 +30,12 @@ import {
   loadRegistry,
   parseEgressIntents,
   parseRemoteUrl,
+  RegistryNotFoundError,
   resolveDestinationOffline,
   type Destination,
   type EgressIntent,
   type Registry,
+  type RegistryState,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, type OutputOptions } from "../format.js";
 
@@ -66,16 +68,26 @@ export function buildGhCommand(args: string[]): string {
 const EMPTY_REGISTRY: Registry = { engagements: [], alwaysBlock: [] };
 
 /**
- * The registry, or an empty one. Fails OPEN by design: a missing or broken
+ * The registry, or an empty one, with how it was obtained. A missing
  * registry must not stop `gh` from working, and the shape rules (relative
  * or mode-dependent payload paths, `cd`-preceded egress, unguarded chains)
- * need no registry at all — they still apply.
+ * need no registry at all — they still apply. But "missing" and "unreadable"
+ * are different for rule h (issue #151, decision D4):
+ *
+ *   - no registry file → `missing`: rule h is skipped (fails open);
+ *   - encrypted, or a file that does not parse or validate → `unreadable`:
+ *     rule h refuses any egress that has a destination, because no owner can
+ *     be confirmed. Only {@link RegistryNotFoundError} is "missing"; any
+ *     other error, including an unknown one, is `unreadable` (fail closed).
  */
-function loadRegistryOrEmpty(): Registry {
+function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistryState } {
   try {
-    return loadRegistry();
-  } catch {
-    return EMPTY_REGISTRY;
+    return { registry: loadRegistry(), registryState: "loaded" };
+  } catch (err) {
+    return {
+      registry: EMPTY_REGISTRY,
+      registryState: err instanceof RegistryNotFoundError ? "missing" : "unreadable",
+    };
   }
 }
 
@@ -119,7 +131,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
     return internalError(`could not parse the gh command line: ${(err as Error).message}`);
   }
 
-  const registry = loadRegistryOrEmpty();
+  const { registry, registryState } = loadRegistryOrEmpty();
   // Write-through into the machine-wide destination cache (see
   // `hook guard-egress`): a command judged from inside a repository leaves
   // that repository's declaration where a later command from elsewhere can
@@ -131,6 +143,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
       intents,
       cwd,
       registry,
+      registryState,
       humanPresent: isHumanPresent(),
       // A shell has no prompt to offer, so `ask` degrades to `deny` in core.
       capabilities: { ask: false },
