@@ -12,7 +12,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -21,6 +21,7 @@ import {
   SANDBOX_GIT_SSH_COMMAND,
   isSandboxProxyCommand,
   sandboxProxyCommandFor,
+  proxyShellEnvIsClean,
 } from "./push-urls.js";
 
 // Captured before the hermetic env scrub: only its SHAPE is ever tested, never printed.
@@ -568,6 +569,52 @@ describe("an ssh override makes ssh aliases unresolved (H2)", () => {
       for (const v of variants) assert.equal(isSandboxProxyCommand(v), false, v.slice(0, 80));
       assert.equal(isSandboxProxyCommand(undefined), false);
       assert.equal(isSandboxProxyCommand(S), true);
+    });
+
+    it("N1/N2: the trusted template needs a clean proxy-shell environment (fake credential throughout)", () => {
+      const repo = makeRepo();
+      const base = { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S };
+      const redirecting = { present: true, mayRedirect: true };
+      // Control: unset SHELL, and the shells the sandbox may use, stay trusted.
+      for (const shell of [undefined, "", "/bin/zsh", "/bin/sh", "/bin/bash", "/bin/dash", "/bin/ksh", "/usr/bin/zsh", "/usr/bin/bash"]) {
+        const env: NodeJS.ProcessEnv = shell === undefined ? { ...base } : { ...base, SHELL: shell };
+        const r = detectSshOverride(repo, env);
+        // A listed path that does not exist here cannot be realpath'd: untrusted, never a crash.
+        if (shell !== undefined && shell !== "" && !existsSync(shell)) assert.deepEqual(r, redirecting, shell);
+        else assert.deepEqual(r, { present: false, mayRedirect: false }, String(shell));
+      }
+      // N2: SHELL is the program ssh runs the proxy with.
+      for (const shell of ["/tmp/x", "/bin/sh ", "/bin/../bin/sh", "sh", "/usr/local/bin/bash", "/bin/zsh-evil"]) {
+        assert.deepEqual(detectSshOverride(repo, { ...base, SHELL: shell }), redirecting, shell);
+      }
+      // N1: an exported bash function hijacks a builtin the script calls.
+      assert.deepEqual(detectSshOverride(repo, { ...base, "BASH_FUNC_printf%%": "() { :; }" }), redirecting);
+      assert.deepEqual(detectSshOverride(repo, { ...base, "BASH_FUNC_x%%": "() { :; }" }), redirecting);
+      // Startup-time hooks of the shell.
+      for (const name of ["SHELLOPTS", "BASHOPTS", "PS4", "BASH_ENV", "ENV"]) {
+        assert.deepEqual(detectSshOverride(repo, { ...base, [name]: "x" }), redirecting, name);
+      }
+    });
+
+    it("N2: a SHELL symlink that leaves the allowed set is untrusted (realpath), one that stays is fine", (t) => {
+      if (process.platform === "win32") return t.skip("no symlinks");
+      const repo = makeRepo();
+      const out = join(root, `shell-link-${n++}`);
+      symlinkSync("/bin/sh", out);
+      // Not an allowed path in the first place: rejected before realpath is consulted.
+      assert.equal(proxyShellEnvIsClean({ SHELL: out }), false);
+      assert.equal(proxyShellEnvIsClean({ SHELL: "/bin/sh" }), true);
+      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, SHELL: out }).present, true);
+    });
+
+    it("N1/N2 at the resolver: a hijacked shell environment leaves the alias unresolved", () => {
+      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, SHELL: "/tmp/x" })?.unresolved, "opaque-url");
+      assert.equal(
+        aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, "BASH_FUNC_printf%%": "() { :; }" })?.unresolved,
+        "opaque-url",
+      );
+      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, SHELLOPTS: "xtrace" })?.unresolved, "opaque-url");
+      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, SHELL: "/bin/zsh" })?.org, "stranger");
     });
 
     it("R1: the shape matches the live sandbox value, when there is one (boolean only, never printed)", (t) => {

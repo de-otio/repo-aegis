@@ -66,6 +66,7 @@ export {
   isSandboxSshCommand,
   isSandboxProxyCommand,
   sandboxProxyCommandFor,
+  proxyShellEnvIsClean,
 } from "./push-urls.js";
 export type { ParsedRemote, RemoteUrlClass, RemoteTarget, SshOverride, RemoteTransport } from "./remote-url.js";
 

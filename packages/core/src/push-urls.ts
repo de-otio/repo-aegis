@@ -19,6 +19,7 @@
 // The pre-push hook needs none of this: git hands it the URL after all
 // rewriting, once per push URL.
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { looksLikeRemoteUrl, type SshOverride } from "./remote-url.js";
 
 function gitOut(cwd: string, args: string[]): string | null {
@@ -165,6 +166,49 @@ export function sandboxProxyCommandFor(credential: string, port: number): string
   return `${a}${credential}${b}${port}${c}`;
 }
 
+/**
+ * Everything the shell that runs the trusted proxy script reads from the
+ * environment, and why each is checked (ssh runs a ProxyCommand as
+ * `$SHELL -c <command>`, and the command `eval`s the script):
+ *
+ *  - `SHELL`: names the program that runs the command. An arbitrary path IS
+ *    the proxy. Allowed: unset (ssh then uses /bin/sh), or exactly
+ *    /bin/{sh,bash,zsh,dash,ksh} or /usr/bin/ of those. A realpath is used only
+ *    to reject a symlink that leaves that set.
+ *  - `BASH_FUNC_<name>%%`: bash (macOS /bin/sh is bash 3.2) imports exported
+ *    functions from these variables, so a function named `printf` or `read`
+ *    hijacks a builtin the script calls. Any such name is untrusted.
+ *  - `SHELLOPTS`, `BASHOPTS`: bash applies them at startup (`xtrace`,
+ *    `posix`, …), changing how the script runs; with `PS4` they can also run
+ *    command substitutions on trace output.
+ *  - `BASH_ENV`, `ENV`: a startup file the non-interactive shell sources before
+ *    the script runs.
+ *
+ * Not checked here because they are the script's own inputs, fixed by its
+ * shape: its arguments (`%h`, `%p`) and `SRT_SSH_PROXY_COMMAND` itself.
+ * `PATH` is not consulted: the script calls `/bin/cat` and `/usr/bin/nc` by
+ * absolute path and uses only shell builtins besides.
+ */
+const PROXY_SHELLS: ReadonlySet<string> = new Set(
+  ["sh", "bash", "zsh", "dash", "ksh"].flatMap(n => [`/bin/${n}`, `/usr/bin/${n}`]),
+);
+
+/** Whether the environment leaves the trusted proxy script running as the sandbox wrote it. */
+export function proxyShellEnvIsClean(env: NodeJS.ProcessEnv): boolean {
+  const shell = env["SHELL"];
+  if (shell !== undefined && shell !== "") {
+    if (!PROXY_SHELLS.has(shell)) return false;
+    try {
+      if (!PROXY_SHELLS.has(realpathSync(shell))) return false;
+    } catch {
+      return false;
+    }
+  }
+  if (Object.keys(env).some(k => k.startsWith("BASH_FUNC_"))) return false;
+  for (const k of ["SHELLOPTS", "BASHOPTS", "PS4", "BASH_ENV", "ENV"]) if (env[k] !== undefined) return false;
+  return true;
+}
+
 /** `-o HostName=…`, a proxy, `-J` (jump host) or `-F` (another config): ways an ssh command moves a connection. */
 const REDIRECTING_SSH_OPTION_RE = /host\s*name|proxy|(^|\s)-[JF]/i;
 
@@ -182,10 +226,15 @@ export function detectSshOverride(cwd: string, env: NodeJS.ProcessEnv = process.
   // The one override we recognise as host-preserving: Claude Code's sandbox
   // template, taken from the ENVIRONMENT only, AND only together with a
   // sandbox-shaped `SRT_SSH_PROXY_COMMAND` in the same environment (the
-  // template `eval`s it). `GIT_SSH_VARIANT` and `GIT_SSH` alongside are not
-  // trusted.
+  // template `eval`s it) and a clean shell environment (`proxyShellEnvIsClean`).
+  // `GIT_SSH_VARIANT` and `GIT_SSH` alongside are not trusted.
   if (command !== "" && isSandboxSshCommand(command)) {
-    if (isSandboxProxyCommand(env["SRT_SSH_PROXY_COMMAND"]) && program === "" && variant === "") {
+    if (
+      isSandboxProxyCommand(env["SRT_SSH_PROXY_COMMAND"]) &&
+      proxyShellEnvIsClean(env) &&
+      program === "" &&
+      variant === ""
+    ) {
       return { present: false, mayRedirect: false };
     }
     // The template with a missing or foreign proxy command can send the
