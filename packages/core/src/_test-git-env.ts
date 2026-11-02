@@ -5,7 +5,8 @@
 // `GIT_CONFIG_*` (a sandbox or CI wrapper often sets them) or user git config
 // leaks into a test. The ssh override check reads exactly these.
 
-const SCRUBBED = /^(GIT_SSH.*|GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+))$/;
+const SCRUBBED =
+  /^(GIT_SSH.*|GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)|GIT_DIR|GIT_WORK_TREE|REPO_AEGIS_EGRESS_HUMAN|SRT_SSH_PROXY_COMMAND)$/;
 
 /** Remove the ssh/config variables from `process.env`, pin global/system config off; returns the undo. */
 export function scrubGitEnv(): () => void {

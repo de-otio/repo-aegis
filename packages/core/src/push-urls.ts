@@ -101,11 +101,19 @@ export function resolvePushUrls(cwd: string, remote: string): string[] | null {
  * (`GIT_SSH_COMMAND`), NEVER from `core.sshCommand`, which is git config an
  * agent can write.
  *
- * Residual: the proxy command comes from `SRT_SSH_PROXY_COMMAND`, which the
- * sandbox sets. An agent that can write shell startup files could export its
- * own `SRT_SSH_PROXY_COMMAND` and redirect the connection (the R8 class, plan
- * §8.2: the environment a hook or hook-guarded command gets is not fully
- * under the guard's eye).
+ * BUT the template is only half of the trust: its ProxyCommand does
+ * `eval "$SRT_SSH_PROXY_COMMAND"`, and that variable is plain environment that
+ * ONE agent command can set (`SRT_SSH_PROXY_COMMAND='…github.com…' git push
+ * git@zz:stranger/r.git main`): the guard would judge `zz` as another host
+ * while ssh lands on github.com. So the template is trusted only together with
+ * an `SRT_SSH_PROXY_COMMAND` of the sandbox's fixed shape
+ * ({@link isSandboxProxyCommand}), in the same environment. This is not a
+ * startup-file (R8) case; it is a one-command bypass, and it is closed here.
+ *
+ * Residual: a variable of the right shape cannot redirect (host and port come
+ * only from the positional arguments ssh passes), so what remains is the
+ * sandbox's own integrity: the proxy it points at (`127.0.0.1:<port>`) is
+ * trusted to connect to the host it is asked for.
  */
 export const SANDBOX_GIT_SSH_COMMAND =
   "ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand=\"/bin/sh -c 'eval \\\"\\${SRT_SSH_PROXY_COMMAND:?unset, but GIT_SSH_COMMAND needs it}\\\"' sh '%h' %p\"";
@@ -113,6 +121,48 @@ export const SANDBOX_GIT_SSH_COMMAND =
 /** Is `command` exactly {@link SANDBOX_GIT_SSH_COMMAND}, modulo runs of whitespace? */
 export function isSandboxSshCommand(command: string): boolean {
   return command.trim().replace(/\s+/g, " ") === SANDBOX_GIT_SSH_COMMAND;
+}
+
+/**
+ * The shape of the `SRT_SSH_PROXY_COMMAND` the Claude Code sandbox exports,
+ * written from its structure. Everything is fixed text except two values, which
+ * match only their own character classes: the per-session proxy credential
+ * (base64) and the proxy's port (digits). The host and port the connection
+ * goes to come ONLY from the positional arguments (`$1`, `$2`, formatted as
+ * `$1:$2` into a `CONNECT`), validated by the script itself, and the connection
+ * goes to `127.0.0.1:<port>` through `/usr/bin/nc`.
+ *
+ * Any other text, a hard-coded host, a different address, another binary, an
+ * extra command, fails the match. No credential value appears in this file or
+ * in any test: tests build a fake one from the same pieces.
+ */
+const SANDBOX_PROXY_TEMPLATE_PARTS: readonly [string, string, string] = [
+  String.raw`LC_ALL=C; no() { printf "sandbox proxy: %s\n" "$*" >&2; exit 1; }; case $1 in ""|*[!A-Za-z0-9._:-]*) no bad host;; *:*) set -- "[$1]" "$2";; esac; case $2 in ""|*[!0-9]*) no bad port;; esac; exec 3<&0; { printf "CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Authorization: Basic `,
+  String.raw`\r\n\r\n" "$1:$2" "$1:$2"; exec /bin/cat <&3; } | /usr/bin/nc 127.0.0.1 `,
+  String.raw` | { read -r v why; while read -r v; do case $v in ""|?) break;; esac; done; case $why in "200 "*) exec /bin/cat;; esac; why=@@{why%?}; no "$1:$2: @@{why:-no answer}"; } & exec >&-; wait $!`,
+].map(p => p.replaceAll("@@{", "$" + "{")) as unknown as readonly [string, string, string];
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const SANDBOX_PROXY_RE = new RegExp(
+  `^${escapeRegExp(SANDBOX_PROXY_TEMPLATE_PARTS[0])}[A-Za-z0-9+/=]{8,2048}` +
+    `${escapeRegExp(SANDBOX_PROXY_TEMPLATE_PARTS[1])}[0-9]{1,5}${escapeRegExp(SANDBOX_PROXY_TEMPLATE_PARTS[2])}$`,
+);
+
+/** Is `value` an `SRT_SSH_PROXY_COMMAND` of the sandbox's fixed shape (any credential, any port)? */
+export function isSandboxProxyCommand(value: string | undefined): boolean {
+  return value !== undefined && SANDBOX_PROXY_RE.test(value);
+}
+
+/**
+ * Build a well-shaped proxy command around a given credential and port. Test
+ * support: lets tests use a FAKE credential, so no real one is ever a fixture.
+ */
+export function sandboxProxyCommandFor(credential: string, port: number): string {
+  const [a, b, c] = SANDBOX_PROXY_TEMPLATE_PARTS;
+  return `${a}${credential}${b}${port}${c}`;
 }
 
 /** `-o HostName=…`, a proxy, `-J` (jump host) or `-F` (another config): ways an ssh command moves a connection. */
@@ -130,11 +180,17 @@ export function detectSshOverride(cwd: string, env: NodeJS.ProcessEnv = process.
   const program = (env["GIT_SSH"] ?? "").trim();
   const variant = (env["GIT_SSH_VARIANT"] ?? "").trim();
   // The one override we recognise as host-preserving: Claude Code's sandbox
-  // template, taken from the ENVIRONMENT only. With it, git ignores
-  // `core.sshCommand` and `GIT_SSH` (`GIT_SSH_COMMAND` wins over both), so
-  // they cannot change anything; `GIT_SSH_VARIANT` alone is not trusted here.
-  if (command !== "" && isSandboxSshCommand(command) && program === "" && variant === "") {
-    return { present: false, mayRedirect: false };
+  // template, taken from the ENVIRONMENT only, AND only together with a
+  // sandbox-shaped `SRT_SSH_PROXY_COMMAND` in the same environment (the
+  // template `eval`s it). `GIT_SSH_VARIANT` and `GIT_SSH` alongside are not
+  // trusted.
+  if (command !== "" && isSandboxSshCommand(command)) {
+    if (isSandboxProxyCommand(env["SRT_SSH_PROXY_COMMAND"]) && program === "" && variant === "") {
+      return { present: false, mayRedirect: false };
+    }
+    // The template with a missing or foreign proxy command can send the
+    // connection anywhere: an override that may redirect.
+    return { present: true, mayRedirect: true };
   }
   const configured = (gitOut(cwd, ["config", "--get", "core.sshCommand"]) ?? "").trim();
   const present = command !== "" || program !== "" || variant !== "" || configured !== "";

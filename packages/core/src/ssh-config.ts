@@ -33,6 +33,16 @@
 //   - an `Include` it cannot expand (env vars, `%` tokens, a glob in a
 //     directory component, a character class), or one nested too deeply.
 //
+// RESIDUAL (known, accepted): connection multiplexing. `ControlMaster` and
+// `ControlPath` are NOT treated as redirecting, on purpose: `Host *` with
+// `ControlMaster auto` is a common setup, and refusing every alias push that
+// has it would break ordinary use. But a master connection opened earlier
+// (`ssh -M -S <path> -o HostName=github.com -fN git@zz`) is reused by any
+// later ssh to `git@zz` that finds the same control socket, so a push to
+// `git@zz:stranger/r.git` can ride a connection to a different host than this
+// module resolved for `zz`. Closing that needs the live connection state,
+// which a pure, offline reader cannot see.
+//
 // A missing `~/.ssh/config` is not an error: there are simply no aliases.
 //
 // ssh takes the FIRST value it obtains for a keyword, so the first applicable

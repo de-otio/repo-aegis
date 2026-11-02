@@ -26,6 +26,7 @@ import {
   mintApproval,
   HOOK_SCRIPTS,
   SANDBOX_GIT_SSH_COMMAND,
+  sandboxProxyCommandFor,
   parseEgressIntents,
   resolveDestinationOffline,
 } from "@de-otio/repo-aegis-core";
@@ -662,15 +663,31 @@ describe("pre-push rule h — an ssh override makes aliases unresolved (H2)", ()
 
   describe("Claude Code's sandbox GIT_SSH_COMMAND template (what every agent push runs under)", () => {
     const T = SANDBOX_GIT_SSH_COMMAND;
+    // A FAKE credential and port in the sandbox's shape (never a real value).
+    const S = sandboxProxyCommandFor("ZmFrZS1jcmVkZW50aWFsLW5vdC1yZWFs", 43210);
+    const withSandbox = <R>(ssh: string, srt: string | undefined, fn: () => R): R =>
+      withEnv("GIT_SSH_COMMAND", ssh, () => withEnv("SRT_SSH_PROXY_COMMAND", srt, fn));
+
+    it("R1: the template with a hostile SRT (host github.com hard-coded) or no SRT is an override: unresolved", () => {
+      const hostile = S.replace(/"\$1:\$2"/g, '"github.com:22"');
+      assert.notEqual(hostile, S);
+      for (const srt of [hostile, undefined]) {
+        const ctx = setup(`h2-sandbox-srt-${n++}`);
+        sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
+        const repo = makeRepo(`h2-sandbox-srt-repo-${n}`, "git@gh-work:acme/x.git");
+        const r = refusalOf(withSandbox(T, srt, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git")));
+        assert.equal(r.details.destination, "(unresolved)");
+      }
+    });
 
     it("in the environment: an alias resolves through the ssh config, so the operator's own remotes still pass", () => {
       const ctx = setup("h2-sandbox-ok");
       sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
       const repo = makeRepo("h2-sandbox-ok-repo", "git@gh-work:acme/x.git");
-      const ok = withEnv("GIT_SSH_COMMAND", T, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git"));
+      const ok = withSandbox(T, S, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git"));
       assert.equal(ok.exitCode, undefined, ok.stderr);
       // ...and a stranger behind the same alias is judged as stranger/r, not as "unresolved".
-      const r = refusalOf(withEnv("GIT_SSH_COMMAND", T, () => pushCheck(ctx, repo, "git@gh-work:stranger/r.git")));
+      const r = refusalOf(withSandbox(T, S, () => pushCheck(ctx, repo, "git@gh-work:stranger/r.git")));
       assert.equal(r.details.destination, "stranger/r");
     });
 
@@ -679,7 +696,7 @@ describe("pre-push rule h — an ssh override makes aliases unresolved (H2)", ()
       sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
       const repo = makeRepo("h2-sandbox-agree-repo", "git@gh-work:stranger/r.git");
       const hook = withEnv("HOME", ctx.userHome, () =>
-        withEnv("GIT_SSH_COMMAND", T, () =>
+        withSandbox(T, S, () =>
           resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo),
         ),
       );
@@ -702,7 +719,7 @@ describe("pre-push rule h — an ssh override makes aliases unresolved (H2)", ()
         const ctx = setup(`h2-sandbox-changed-${n++}`);
         sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
         const repo = makeRepo(`h2-sandbox-changed-repo-${n}`, "git@gh-work:acme/x.git");
-        const r = refusalOf(withEnv("GIT_SSH_COMMAND", cmd, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git")));
+        const r = refusalOf(withSandbox(cmd, S, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git")));
         assert.equal(r.details.destination, "(unresolved)", cmd);
       }
     });

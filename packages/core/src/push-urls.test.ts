@@ -15,7 +15,16 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolvePushUrls, detectSshOverride, SANDBOX_GIT_SSH_COMMAND } from "./push-urls.js";
+import {
+  resolvePushUrls,
+  detectSshOverride,
+  SANDBOX_GIT_SSH_COMMAND,
+  isSandboxProxyCommand,
+  sandboxProxyCommandFor,
+} from "./push-urls.js";
+
+// Captured before the hermetic env scrub: only its SHAPE is ever tested, never printed.
+const LIVE_SRT = process.env["SRT_SSH_PROXY_COMMAND"];
 import { hermeticGitEnv, scrubGitEnv } from "./_test-git-env.js";
 import {
   decideEgress,
@@ -520,6 +529,51 @@ describe("an ssh override makes ssh aliases unresolved (H2)", () => {
 
   describe("Claude Code's sandbox GIT_SSH_COMMAND template is host-preserving, from the environment only", () => {
     const T = SANDBOX_GIT_SSH_COMMAND;
+    // A FAKE credential and port in the sandbox's shape (never a real value).
+    const S = sandboxProxyCommandFor("ZmFrZS1jcmVkZW50aWFsLW5vdC1yZWFs", 43210);
+
+    it("R1: the template is trusted ONLY with a sandbox-shaped SRT_SSH_PROXY_COMMAND in the same environment", () => {
+      const repo = makeRepo();
+      // SRT unset: untrusted, and it may redirect.
+      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: T }), { present: true, mayRedirect: true });
+      // A different credential and port are fine (only the shape is checked).
+      assert.equal(
+        detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: sandboxProxyCommandFor("QUJD+/RUY=", 1) }).present,
+        false,
+      );
+      // A hostile SRT with host github.com hard-coded instead of "$1": untrusted.
+      const hostile = S.replace(/"\$1:\$2"/g, '"github.com:22"');
+      assert.notEqual(hostile, S);
+      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: hostile }), {
+        present: true,
+        mayRedirect: true,
+      });
+    });
+
+    it("R1: any deviation from the proxy command's shape is rejected", () => {
+      const variants: string[] = [
+        S.replace("127.0.0.1", "10.0.0.1"),
+        S.replace("/usr/bin/nc", "/tmp/nc"),
+        S.replace("exec /bin/cat <&3", "exec /bin/cat </etc/hosts"),
+        `${S}; true`,
+        `true; ${S}`,
+        S.replace("no bad host", "true"),
+        S.replace(/\$1/g, "github.com"),
+        S.replace("43210", "43210 43211"),
+        S.replace("43210", "not-a-port"),
+        S.replace("ZmFrZS1jcmVkZW50aWFsLW5vdC1yZWFs", "x\nPOST /"),
+        S.replace("ZmFrZS1jcmVkZW50aWFsLW5vdC1yZWFs", ""),
+        "",
+      ];
+      for (const v of variants) assert.equal(isSandboxProxyCommand(v), false, v.slice(0, 80));
+      assert.equal(isSandboxProxyCommand(undefined), false);
+      assert.equal(isSandboxProxyCommand(S), true);
+    });
+
+    it("R1: the shape matches the live sandbox value, when there is one (boolean only, never printed)", (t) => {
+      if (LIVE_SRT === undefined) return t.skip("not running under the sandbox");
+      assert.equal(isSandboxProxyCommand(LIVE_SRT), true, "the live SRT_SSH_PROXY_COMMAND no longer has the expected shape");
+    });
 
     it("the constant is the exact template (a literal, not derived from the running environment)", () => {
       assert.equal(
@@ -530,9 +584,9 @@ describe("an ssh override makes ssh aliases unresolved (H2)", () => {
 
     it("detectSshOverride: the exact template in the environment is no override", () => {
       const repo = makeRepo();
-      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: T }), { present: false, mayRedirect: false });
+      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S }), { present: false, mayRedirect: false });
       // Whitespace runs are normalised, nothing else.
-      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: `  ${T.replace(/ -o /g, "   -o ")}  ` }), {
+      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: `  ${T.replace(/ -o /g, "   -o ")}  `, SRT_SSH_PROXY_COMMAND: S }), {
         present: false,
         mayRedirect: false,
       });
@@ -540,7 +594,7 @@ describe("an ssh override makes ssh aliases unresolved (H2)", () => {
 
     it("…and git ignores core.sshCommand when GIT_SSH_COMMAND is set, so a configured one changes nothing", () => {
       const repo = makeRepo([["core.sshCommand", "ssh -J jump"]]);
-      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T }).present, false);
+      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S }).present, false);
     });
 
     it("the template set via core.sshCommand is NOT trusted (agent-writable git config)", () => {
@@ -563,14 +617,14 @@ describe("an ssh override makes ssh aliases unresolved (H2)", () => {
         T.replace("/bin/sh", "/bin/bash"),
         `${T};id`,
       ]) {
-        assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: cmd }).present, true, cmd);
+        assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: cmd, SRT_SSH_PROXY_COMMAND: S }).present, true, cmd);
       }
     });
 
     it("the template does not neutralise GIT_SSH or GIT_SSH_VARIANT", () => {
       const repo = makeRepo();
-      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, GIT_SSH: "/w" }).present, true);
-      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, GIT_SSH_VARIANT: "ssh" }).present, true);
+      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, GIT_SSH: "/w" }).present, true);
+      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, GIT_SSH_VARIANT: "ssh" }).present, true);
     });
 
     function aliasDest(env: Record<string, string>, config: Array<[string, string]> = []): ReturnType<typeof resolveDestinationOffline> {
@@ -588,19 +642,26 @@ describe("an ssh override makes ssh aliases unresolved (H2)", () => {
     }
 
     it("with the template in the environment an alias resolves through the ssh config, as with no override", () => {
-      const d = aliasDest({ GIT_SSH_COMMAND: T });
+      const d = aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S });
       assert.equal(d?.org, "stranger");
       assert.equal(d?.repo, "r");
       assert.equal(d?.unresolved, undefined);
     });
 
     it("the hook layer (no sandbox env) and pre-push (sandbox env) agree for the same repository", () => {
-      const withSandboxEnv = aliasDest({ GIT_SSH_COMMAND: T });
+      const withSandboxEnv = aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S });
       const withoutEnv = aliasDest({});
       assert.deepEqual(
         [withSandboxEnv?.org, withSandboxEnv?.repo, withSandboxEnv?.unresolved],
         [withoutEnv?.org, withoutEnv?.repo, withoutEnv?.unresolved],
       );
+    });
+
+    it("R1: one-command bypass: a hostile or missing SRT makes an alias unresolved at the resolver", () => {
+      const hostile = S.replace(/"\$1:\$2"/g, '"github.com:22"');
+      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: hostile })?.unresolved, "opaque-url");
+      assert.equal(aliasDest({ GIT_SSH_COMMAND: T })?.unresolved, "opaque-url");
+      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S })?.org, "stranger");
     });
 
     it("the template via core.sshCommand (no env) leaves the alias unresolved", () => {
@@ -610,7 +671,7 @@ describe("an ssh override makes ssh aliases unresolved (H2)", () => {
 
     it("a changed template in the environment leaves the alias unresolved", () => {
       for (const cmd of [`${T} -o HostName=x`, `${T} -F f`, `${T} -J h`, T.replace("'%h'", "'x'")]) {
-        assert.equal(aliasDest({ GIT_SSH_COMMAND: cmd })?.unresolved, "opaque-url", cmd);
+        assert.equal(aliasDest({ GIT_SSH_COMMAND: cmd, SRT_SSH_PROXY_COMMAND: S })?.unresolved, "opaque-url", cmd);
       }
     });
   });

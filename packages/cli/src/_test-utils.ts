@@ -255,7 +255,8 @@ function assertDefined(v: unknown, msg: string): asserts v is NonNullable<unknow
   if (v === undefined || v === null) throw new Error(msg);
 }
 
-const GIT_SCRUBBED = /^(GIT_SSH.*|GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+))$/;
+const GIT_SCRUBBED =
+  /^(GIT_SSH.*|GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)|GIT_DIR|GIT_WORK_TREE|REPO_AEGIS_EGRESS_HUMAN|SRT_SSH_PROXY_COMMAND)$/;
 
 /**
  * Make the process's git environment hermetic: no outer `GIT_SSH_COMMAND`,
