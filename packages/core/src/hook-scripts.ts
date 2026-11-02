@@ -119,9 +119,13 @@ export const PRE_PUSH_SCRIPT = `\
 # unattended push to a public-facing repo (\`PUBLIC_PUSH_NEEDS_HUMAN\`), and
 # otherwise prints a one-line receipt naming the destination.
 #
-# \$2 is empty when a push names a URL that git has no remote entry for; the
-# helper below then omits the flag entirely rather than passing an empty
-# value, so \`check\` sees exactly the pre-egress-guard argument list.
+# \$2 is the URL git will push to, AFTER every rewrite (insteadOf,
+# pushInsteadOf, pushurl, \`-c\` and GIT_CONFIG_*), and the hook runs once per
+# push URL. When the push names a URL directly rather than a remote, git
+# passes that same URL as both \$1 and \$2. \$2 is only empty in the unusual
+# case git has nothing to pass; the helper below then omits the flag entirely
+# rather than passing an empty value, so \`check\` sees exactly the
+# pre-egress-guard argument list.
 #
 # Fail-open if repo-aegis is not on PATH so the git workflow doesn't
 # break for users who haven't yet installed the CLI globally.

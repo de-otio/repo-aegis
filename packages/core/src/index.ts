@@ -48,8 +48,19 @@ export {
 export type { Engagement, Registry, ResolveResult } from "./registry.js";
 
 // ---- remote URL parser ---------------------------------------------------
-export { parseRemoteUrl } from "./remote-url.js";
-export type { ParsedRemote } from "./remote-url.js";
+export {
+  parseRemoteUrl,
+  parseRemoteUrlResolved,
+  resolveRemoteUrl,
+  classifyRemoteUrl,
+  looksLikeRemoteUrl,
+} from "./remote-url.js";
+// The pure ssh-config reader behind alias resolution (never `ssh -G`), and the
+// URL(s) a `git push <remote>` writes to (pushurl, insteadOf, pushInsteadOf).
+export { lookupSshHost, SSH_INCLUDE_MAX_DEPTH } from "./ssh-config.js";
+export type { SshHostLookup, SshConfigOptions } from "./ssh-config.js";
+export { resolvePushUrls } from "./push-urls.js";
+export type { ParsedRemote, RemoteUrlClass, RemoteTarget } from "./remote-url.js";
 
 // ---- working-tree resolution (path-aware hook) --------------------------
 export {
@@ -316,7 +327,7 @@ export {
   INVALID_DESTINATION_LABEL,
 } from "./refusal.js";
 export type { RefusalInput, RefusalFix } from "./refusal.js";
-export { findApprovalDefault, SHAPE_RULE_CODES } from "./egress-policy.js";
+export { findApprovalDefault, SHAPE_RULE_CODES, unregisteredOwnerReason } from "./egress-policy.js";
 // Human-minted, time-limited, destination-scoped approvals that satisfy
 // rule g from a shell with no TTY (`repo-aegis approve`).
 export {

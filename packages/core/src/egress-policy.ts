@@ -65,7 +65,8 @@ import {
 } from "./refusal.js";
 import { registryPath } from "./paths.js";
 import { homedir } from "node:os";
-import { parseRemoteUrl } from "./remote-url.js";
+import { parseRemoteUrl, resolveRemoteUrl } from "./remote-url.js";
+import { resolvePushUrls } from "./push-urls.js";
 import { readRepoConfig, type RepoClass, type RepoConfig } from "./repo.js";
 import type { Registry } from "./registry.js";
 import { computeTrustBoundary, type TrustBoundary } from "./trust-boundary.js";
@@ -162,8 +163,18 @@ export interface Destination {
    * `assumedPublic`: rule g asks a person, or refuses from a shell with none.
    * Rule e is skipped (there is no boundary to compare against); rule f
    * still scans the payload against a public-facing deny set.
+   *
+   * `opaque-url`: a push whose URL cannot be resolved to a GitHub repository
+   * offline (a URL-shaped value that is not cleanly `github.com/<owner>/<repo>`,
+   * or an ssh alias the pure ssh-config parser cannot resolve). Same treatment.
    */
-  unresolved?: "graphql-mutation";
+  unresolved?: "graphql-mutation" | "opaque-url";
+  /**
+   * Further `owner/repo` targets of the same command: a remote with several
+   * push URLs writes to all of them. Rule h requires every one to be admitted;
+   * rules e–g judge only the first (`org`/`repo` above).
+   */
+  alsoTargets?: { org: string; repo: string }[];
 }
 
 export type EgressDecision =
@@ -513,12 +524,40 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
 
   if (intent.verb === "git-push") {
     if (intent.remote === undefined) return own ? withLocalClass(own, base, own, registry) : null;
-    const direct = parseRemoteUrl(intent.remote);
-    if (direct) return withLocalClass({ org: direct.org, repo: direct.repo }, base, own, registry);
-    const url = gitConfigGet(base, `remote.${intent.remote}.url`);
-    const parsed = url === null ? null : parseRemoteUrl(url);
-    if (!parsed) return null;
-    return withLocalClass({ org: parsed.org, repo: parsed.repo }, base, own, registry);
+    // Where the push will actually write: `git remote get-url --push --all`
+    // applies pushurl, insteadOf and pushInsteadOf and returns every push URL
+    // (plan §3.3.5). A URL given directly is rewritten the same way.
+    const urls = resolvePushUrls(base, intent.remote);
+    if (urls === null) return null;
+    const targets = urls.map(u => resolveRemoteUrl(u));
+    // A push URL nothing offline can name is a write to an unknown owner (D5).
+    // Not marked public-facing: only rule h acts on it, so that a registry that
+    // is missing or declares no owners (rule h skipped) behaves as it did when
+    // such a URL simply had no destination.
+    if (targets.some(t => t.kind === "unresolved")) {
+      return {
+        org: "*",
+        repo: "*",
+        class: "private-strict",
+        visibility: "unknown",
+        publicFacing: false,
+        classKnown: false,
+        unresolved: "opaque-url",
+      };
+    }
+    const seen = new Set<string>();
+    const found: { org: string; repo: string }[] = [];
+    for (const t of targets) {
+      if (t.kind !== "github") continue;
+      const key = `${t.org}/${t.repo}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ org: t.org, repo: t.repo });
+    }
+    const [first, ...rest] = found;
+    if (first === undefined) return null;
+    const dest = withLocalClass(first, base, own, registry);
+    return rest.length > 0 ? { ...dest, alsoTargets: rest } : dest;
   }
 
   if (intent.verb === "npm-publish") return null; // registry, not a repo
@@ -620,6 +659,9 @@ export function describeDestination(d: Destination | null | undefined): string {
   if (d.unresolved === "graphql-mutation") {
     return "UNKNOWN repository (GraphQL mutation: the target is a node id, not resolvable offline; treated as public)";
   }
+  if (d.unresolved === "opaque-url") {
+    return "UNKNOWN repository (the push URL does not resolve to a GitHub repository offline)";
+  }
   // The name comes from the agent's command line (see refusal.ts): never print one that is not a GitHub name.
   if (safeDestination(d.org, d.repo) === null) return INVALID_DESTINATION_LABEL;
   const vis = d.assumedPublic ? "visibility uncached, treated as public" : d.classKnown ? d.visibility : "visibility unknown";
@@ -635,6 +677,7 @@ export function describeDestination(d: Destination | null | undefined): string {
 export function describeDestinationForReceipt(d: Destination | null | undefined): string {
   if (!d) return "(destination not resolved)";
   if (d.unresolved === "graphql-mutation") return "UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC)";
+  if (d.unresolved === "opaque-url") return "UNKNOWN (PUSH URL NOT RESOLVED)";
   if (safeDestination(d.org, d.repo) === null) return INVALID_DESTINATION_LABEL.toUpperCase();
   const vis = d.assumedPublic
     ? "VISIBILITY UNCACHED, TREATED AS PUBLIC"
@@ -740,11 +783,11 @@ function registryPathLabel(): string {
  * owner/repo, which the command already carries, and nothing else: never the
  * registered owners, engagement ids or upstreams (the redaction oracle).
  */
-function unregisteredOwnerReason(
-  intent: EgressIntent,
-  destination: Destination,
+export function unregisteredOwnerReason(
+  intent: Pick<EgressIntent, "verb">,
+  destination: Pick<Destination, "org" | "repo" | "unresolved">,
   state: RegistryState,
-  registry: Registry,
+  registry: Pick<Registry, "allowedUpstreams">,
 ): string {
   const verb = describeVerb(intent.verb);
   const code = "UNREGISTERED_OWNER_EGRESS";
@@ -781,6 +824,27 @@ function unregisteredOwnerReason(
           when: "If it is damaged",
           step: `repairs ${registryPathLabel()}, then re-runs the command (\`repo-aegis status\` shows why it fails to load)`,
         },
+      ],
+    });
+  }
+
+  if (destination.unresolved === "opaque-url") {
+    return refusal({
+      code,
+      what,
+      why:
+        `The push URL does not resolve offline to a github.com/<owner>/<repo> repository (it is malformed, or an ssh ` +
+        `host alias that repo-aegis cannot resolve from the ssh config), so it cannot tell which owner the push ` +
+        `writes to, and an unknown owner is treated as unregistered`,
+      approval: "No approval covers this",
+      fixes: [
+        {
+          by: "agent",
+          when: "To push to a GitHub repository",
+          command:
+            "git push <a remote whose URL is https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git> <branch>",
+        },
+        { by: "person" },
       ],
     });
   }
@@ -926,8 +990,18 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       refused = true;
     } else if (opts.registryState === "loaded") {
       const owners = registeredOwners(opts.registry);
-      // A registry that declares no owners has nothing to judge against.
-      refused = owners.size > 0 && !ownerAdmitted(destination, intent, owners, opts.registry);
+      // A registry that declares no owners has nothing to judge against. A
+      // remote with several push URLs writes to all of them: every one must be
+      // admitted, and the refusal names the first that is not.
+      if (owners.size > 0) {
+        const rejected = [destination, ...(destination.alsoTargets ?? [])].find(
+          c => !ownerAdmitted(c, intent, owners, opts.registry),
+        );
+        if (rejected !== undefined) {
+          refused = true;
+          if (rejected !== destination) destination = { ...destination, org: rejected.org, repo: rejected.repo };
+        }
+      }
     }
     // "missing": no registry file at all, rule h is skipped.
     if (refused) {

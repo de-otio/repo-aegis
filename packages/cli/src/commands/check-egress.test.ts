@@ -46,6 +46,7 @@ const REGISTRY = `\
 always_block: []
 personalOrgs:
   - acme
+  - example
 engagements:
   - id: customer-a
     name: Customer A
@@ -151,14 +152,17 @@ describe("check --remote-url — CROSS_ORG_PUSH", () => {
     });
 
     assert.equal(result.exitCode, 2);
-    const j = lastJsonLine<{ code: string; error: string; details: { destination: string; boundaryOrgs: string[] } }>(
+    const j = lastJsonLine<{ code: string; error: string; details: { destination: string; boundaryOrgs?: string[] } }>(
       result.stderr,
     );
     assert.equal(j.code, "CROSS_ORG_PUSH");
     assert.match(j.error, /customer-a-org\/svc/);
-    assert.match(j.error, /acme/);
     assert.equal(j.details.destination, "customer-a-org/svc");
-    assert.deepEqual(j.details.boundaryOrgs, ["acme"]);
+    // The boundary's owners can be customer orgs: they are not enumerated
+    // (plan §8.4 F12), in the text or in the details. Only the destination is named.
+    assert.doesNotMatch(j.error, /acme/);
+    assert.equal(j.details.boundaryOrgs, undefined);
+    assert.doesNotMatch(result.stderr, /acme/);
   });
 
   it("names the ref being pushed in the refusal", () => {
