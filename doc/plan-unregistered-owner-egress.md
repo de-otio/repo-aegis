@@ -247,7 +247,9 @@ any of these:
   would do);
 - `XDG_CONFIG_HOME`, `GH_CONFIG_DIR`, `GH_HOST`;
 - `GIT_CONFIG*` (`GIT_CONFIG_COUNT/KEY/VALUE` rewrites the push URL; verified
-  by the review), `GIT_SSH*`;
+  by the review), `GIT_SSH*` (including `GIT_SSH_VARIANT`), and
+  `SRT_SSH_PROXY_COMMAND`, which the trusted sandbox ssh template evaluates
+  (R9);
 - `GIT_DIR`, `GIT_WORK_TREE` (and the `--git-dir`/`--work-tree` flags on a
   push), which move the repository the remote is read from (PR 2a review);
 - `BASH_ENV`, `ENV`, `ZDOTDIR`;
