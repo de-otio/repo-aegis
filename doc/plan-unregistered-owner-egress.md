@@ -162,6 +162,24 @@ owners.
    Rule h requires every candidate to be registered. A fork checkout whose
    `upstream` belongs to an unregistered owner is refused unless that upstream
    is in `allowedUpstreams`, which is the intended workflow.
+
+   *Superseded after the PR 2c review, which read gh 2.102's source.* Without a
+   TTY, gh does not fail and does not ask: it is deterministic. So the guard
+   judges **gh's own pick**, not a candidate set:
+   - remotes come from `git remote -v`, so after `insteadOf`, fetch URL; hosts
+     are normalised as gh does them (lower-case, `www.` and the port dropped,
+     ssh aliases translated);
+   - they are sorted `upstream`, `github`, `origin`, then the rest;
+   - for the `SmartBaseRepo` groups (`pr`, `issue`, `repo`, `release`, `api`,
+     `label`, `run`, `workflow`, `ruleset`, `cache`, `org`, `discussion`), the
+     first remote with `gh-resolved` wins (`base` → that remote; otherwise its
+     value is parsed as a repository; an invalid value → unresolved);
+     otherwise `remotes[0]`;
+   - for the plain `BaseRepo` groups (`secret`, `variable`, …), `gh-resolved`
+     is ignored and `remotes[0]` is used;
+   - a remote whose URL is not a clean GitHub URL makes the result
+     unresolved; it is never dropped from the list. So does a top position
+     that is a tie among "other" remotes, whose order is unstable in gh.
 4. **`gh api` endpoints with no owner in the path.** `parseApiEndpoint` returns
    null for `repositories/<id>/…`, `gists`, `projects/…` and so on, and the
    resolver then falls back to the cwd's origin. For **mutating** calls, classify
