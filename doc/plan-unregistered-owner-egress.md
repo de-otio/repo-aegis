@@ -147,7 +147,13 @@ than the resolver reports (§8, S2–S6). Each fix lands in
    the endpoint instead:
    - `repos/<o>/<r>/…` → that owner;
    - `orgs/<o>/…` → that owner;
-   - `{owner}` placeholders → the cwd (gh fills them from the cwd);
+   - `{owner}` placeholders → the cwd (gh fills them from the cwd), but only
+     when the placeholder **is** the owner or repo segment. The query string
+     is split off first. A placeholder elsewhere (`repos/stranger/r/issues?ref={branch}`,
+     `…/git/refs/heads/{branch}`) leaves the literal owner/repo as the
+     destination; any other placeholder in the owner or repo segment →
+     unresolved. *(Added after the PR 1 review: the old code returned null for
+     any `{` in the path, which attributed `stranger/r` writes to the cwd.)*
    - `user`, `user/…` → the authenticated account's own resources, exempt from
      rule h;
    - `markdown`, `markdown/raw` → read-only rendering, not egress;
