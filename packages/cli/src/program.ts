@@ -218,11 +218,14 @@ export async function buildProgram(): Promise<Command> {
     .option("--with-claude", "install Claude Code PostToolUse hook + CLAUDE.md snippet (default on)", true)
     .option("--no-with-hooks", "skip git hook installation")
     .option("--no-with-claude", "skip Claude Code hook installation")
-    .option("--force", "overwrite existing engagements.yaml")
+    .option(
+      "--force",
+      "overwrite existing engagements.yaml. Needs a terminal (a TTY on stderr) when the existing registry declares anything (owners, upstreams, engagements, markers, always_block)",
+    )
     .option("--claude-home <dir>", "override default ~/.claude location (used by --with-claude)")
     .option(
       "--migrate-classify",
-      "migrate ~/.config/repo-aegis/classify.yml into the engagement registry's githubOrgs/personalOrgs (Phase 1 onboarding); does not bootstrap or install. Adds owners, so it needs a terminal (a TTY on stderr) when classify.yml has any",
+      "migrate ~/.config/repo-aegis/classify.yml into the engagement registry's githubOrgs/personalOrgs (Phase 1 onboarding); does not bootstrap or install. Adds owners, so it needs a terminal (a TTY on stderr), lists them, and asks for a typed y (stdin must be a TTY) when classify.yml has any",
     )
     .action((opts, cmd) => init(withGlobals(opts, cmd)));
 

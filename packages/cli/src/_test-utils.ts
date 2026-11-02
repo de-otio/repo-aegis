@@ -203,6 +203,41 @@ export function withoutGh<T>(dir: string, fn: () => T): T {
 }
 
 /**
+ * Pin `stream.isTTY` for the duration of `fn`. Whether the test runner's own
+ * stderr/stdin is a terminal depends on how a developer invoked it; pinning it
+ * makes both sides of a human-presence gate assertable WITHOUT the
+ * `stderrIsTTY` seam, so the default (`process.stderr.isTTY`) path is tested.
+ */
+export function withStreamTty<T>(stream: "stderr" | "stdin", isTty: boolean, fn: () => T): T {
+  const target = process[stream];
+  const desc = Object.getOwnPropertyDescriptor(target, "isTTY");
+  Object.defineProperty(target, "isTTY", { value: isTty, configurable: true, writable: true });
+  try {
+    return fn();
+  } finally {
+    if (desc) Object.defineProperty(target, "isTTY", desc);
+    else delete (target as { isTTY?: boolean }).isTTY;
+  }
+}
+
+/** Async variant of {@link withStreamTty}. */
+export async function withStreamTtyAsync<T>(
+  stream: "stderr" | "stdin",
+  isTty: boolean,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const target = process[stream];
+  const desc = Object.getOwnPropertyDescriptor(target, "isTTY");
+  Object.defineProperty(target, "isTTY", { value: isTty, configurable: true, writable: true });
+  try {
+    return await fn();
+  } finally {
+    if (desc) Object.defineProperty(target, "isTTY", desc);
+    else delete (target as { isTTY?: boolean }).isTTY;
+  }
+}
+
+/**
  * Parse the last non-empty line of a stream as JSON.
  *
  * `emitError` writes its JSON payload to stderr, but stderr may already

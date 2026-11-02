@@ -9,17 +9,16 @@
 // `add` tells repo-aegis that publishing to a repo it does not know is safe,
 // so it needs a person at a terminal (D8). `remove` only tightens and `list`
 // is read-only, so neither does.
-import { readFileSync, writeFileSync } from "node:fs";
 import { YAMLSeq, Scalar } from "yaml";
 import {
   registryPath as defaultRegistryPath,
   loadRegistry,
   RegistryNotFoundError,
-  OWNER_REPO_REGEX,
+  upstreamProblem,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { requireTerminalForOwnerAdd, recordOwnerAdd } from "../owner-add-gate.js";
-import { loadDocOrExit, saveDoc, withRegistryLock, type Doc } from "./registry-mutate.js";
+import { loadDoc, ownerCount, commitRegistry, withRegistryLock, type Doc } from "./registry-mutate.js";
 
 export interface UpstreamsOptions extends OutputOptions {
   registryPath?: string;
@@ -31,27 +30,18 @@ type Normalized = { ok: true; value: string } | { ok: false; reason: string };
 
 /**
  * Lower-case (GitHub names are case-insensitive) and validate an
- * `owner/repo` argument. Same shape the registry schema enforces, so a value
- * accepted here always loads: OWNER_REPO_REGEX, minus the traversal names
- * `.` and `..` for the repo half. No wildcards, no URLs, no extra segments.
+ * `owner/repo` argument with core's `upstreamProblem`, the same definition the
+ * registry schema applies, so a value accepted here always loads: owner
+ * [a-z0-9-] up to 39 characters, repo [a-z0-9._-] up to 100, never `.`, `..`
+ * or a `.git` suffix; no wildcards, URLs or extra segments.
  */
 export function normalizeUpstream(raw: string | undefined): Normalized {
   if (raw === undefined || raw.trim() === "") {
     return { ok: false, reason: "expected <owner>/<repo>" };
   }
   const value = raw.trim().toLowerCase();
-  if (!OWNER_REPO_REGEX.test(value)) {
-    return {
-      ok: false,
-      reason:
-        "upstream must be exactly 'owner/repo': owner [a-z0-9-], repo [a-z0-9._-], no wildcards, URLs or extra segments",
-    };
-  }
-  const repo = value.slice(value.indexOf("/") + 1);
-  if (repo === "." || repo === "..") {
-    return { ok: false, reason: "upstream repo name must not be '.' or '..'" };
-  }
-  return { ok: true, value };
+  const problem = upstreamProblem(value);
+  return problem === null ? { ok: true, value } : { ok: false, reason: problem };
 }
 
 function normalizeOrExit(raw: string | undefined, verb: string, opts: OutputOptions): string {
@@ -87,36 +77,21 @@ function upstreamSeq(doc: Doc, create: boolean): YAMLSeq | null {
   return seq;
 }
 
-/**
- * Write the mutated doc, then prove the registry still loads. If it does
- * not, put the original bytes back and fail: a command that edits the file
- * the guard reads must not leave it unreadable (an unreadable registry makes
- * rule h refuse everything, D4).
- */
-function saveValidated(doc: Doc, path: string): void {
-  const before = readFileSync(path, "utf8");
-  saveDoc(doc, path);
-  try {
-    loadRegistry(path);
-  } catch (err) {
-    writeFileSync(path, before, { mode: 0o600 });
-    throw err;
-  }
-}
-
 export function upstreamsAdd(target: string | undefined, opts: UpstreamsOptions): void {
   // D8: gate first, before validation and before any write.
   requireTerminalForOwnerAdd({ kind: "upstream", target: target ?? "" }, opts);
   const upstream = normalizeOrExit(target, "add", opts);
   const path = opts.registryPath ?? defaultRegistryPath();
-  const doc = loadDocOrExit(path, opts);
 
   const added = withRegistryLock(opts, () => {
+    // Read inside the lock: a stale read would overwrite a concurrent edit.
+    const doc = loadDoc(path);
+    const ownersBefore = ownerCount(doc);
     const seq = upstreamSeq(doc, true);
     if (seq === null) return false; // unreachable: create=true
     if (seqStrings(seq).includes(upstream)) return false;
     seq.add(upstream);
-    saveValidated(doc, path);
+    commitRegistry(doc, path, { ...opts, ownersBefore, command: { kind: "upstreams-add", target: upstream } });
     return true;
   });
 
@@ -137,9 +112,11 @@ export function upstreamsRemove(target: string | undefined, opts: UpstreamsOptio
   // No TTY needed: removing only tightens.
   const upstream = normalizeOrExit(target, "remove", opts);
   const path = opts.registryPath ?? defaultRegistryPath();
-  const doc = loadDocOrExit(path, opts);
 
   const removed = withRegistryLock(opts, () => {
+    // Read inside the lock: a stale read would overwrite a concurrent edit.
+    const doc = loadDoc(path);
+    const ownersBefore = ownerCount(doc);
     const seq = upstreamSeq(doc, false);
     if (seq === null) return false;
     const idx = seq.items.findIndex(
@@ -147,7 +124,7 @@ export function upstreamsRemove(target: string | undefined, opts: UpstreamsOptio
     );
     if (idx < 0) return false;
     seq.items.splice(idx, 1);
-    saveValidated(doc, path);
+    commitRegistry(doc, path, { ...opts, ownersBefore, command: { kind: "upstreams-remove", target: upstream } });
     return true;
   });
 

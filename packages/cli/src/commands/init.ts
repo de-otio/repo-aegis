@@ -26,7 +26,18 @@ import {
   appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
-import { requireTerminalForOwnerAdd, recordOwnerAdd } from "../owner-add-gate.js";
+import {
+  requireTerminalForOwnerAdd,
+  recordOwnerAdd,
+  ownerSetEmptyRefusal,
+  OWNER_SET_EMPTY_NEEDS_TTY,
+} from "../owner-add-gate.js";
+import { confirmOnTerminal, isHumanTerminal } from "../require-terminal.js";
+import {
+  RegistryCliError,
+  assertValidRegistryText,
+  writeRegistryText,
+} from "./registry-mutate.js";
 
 const REGISTRY_STUB = `\
 # repo-aegis engagement registry
@@ -87,6 +98,10 @@ interface InitOptions extends OutputOptions {
    * to the registry, which only a person at a terminal may do (D8).
    */
   stderrIsTTY?: boolean;
+  /** Test seam: defaults to `process.stdin.isTTY`. The migration's confirmation is read from stdin. */
+  stdinIsTTY?: boolean;
+  /** Test seam: the typed y/N answer to the migration's confirmation. */
+  readAnswer?: () => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +176,53 @@ interface MigrationResult {
   schemaBumped?: boolean;
 }
 
+/** Engagement id → YAML node, for appending githubOrgs. */
+function indexEngagements(doc: ReturnType<typeof parseDocument>): Map<string, YAMLMap> {
+  const nodes = new Map<string, YAMLMap>();
+  const seq = doc.get("engagements") as YAMLSeq | null;
+  if (seq && seq.items) {
+    for (const item of seq.items) {
+      if (!isMap(item)) continue;
+      const idNode = item.get("id");
+      const id =
+        typeof idNode === "string"
+          ? idNode
+          : idNode instanceof Scalar && typeof idNode.value === "string"
+          ? idNode.value
+          : null;
+      if (id) nodes.set(id, item as YAMLMap);
+    }
+  }
+  return nodes;
+}
+
+/** True when the registry text declares anything a `--force` would destroy. */
+function registryDeclaresContent(text: string): boolean {
+  if (text.trim() === "") return false;
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(text);
+  } catch {
+    // Unreadable: cannot show it is empty, so treat it as content (fail closed).
+    return true;
+  }
+  if (parsed === null || parsed === undefined) return false;
+  if (typeof parsed !== "object" || Array.isArray(parsed)) return true;
+  const r = parsed as Record<string, unknown>;
+  const nonEmpty = (v: unknown): boolean => (Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null);
+  // Any engagement counts, even one with no owners or markers: its id is a
+  // deny-set literal. Everything else listed is an owner, upstream, marker
+  // or always-block entry.
+  return (
+    nonEmpty(r["always_block"]) ||
+    nonEmpty(r["personalOrgs"]) ||
+    nonEmpty(r["allowedUpstreams"]) ||
+    nonEmpty(r["engagements"]) ||
+    nonEmpty(r["selfIdentity"]) ||
+    nonEmpty(r["privateInfra"])
+  );
+}
+
 /**
  * Run the classify.yml → registry migration. Returns a structured
  * outcome — caller is responsible for emitting JSON or text.
@@ -218,23 +280,9 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
   const regRaw = readFileSync(regPath, "utf8");
   const regDoc = parseDocument(regRaw);
 
-  // Collect existing engagement ids and build name → node map for
-  // efficient githubOrgs append.
-  const engagementsSeq = regDoc.get("engagements") as YAMLSeq | null;
-  const engagementNodes = new Map<string, YAMLMap>();
-  if (engagementsSeq && engagementsSeq.items) {
-    for (const item of engagementsSeq.items) {
-      if (!isMap(item)) continue;
-      const idNode = item.get("id");
-      const id =
-        typeof idNode === "string"
-          ? idNode
-          : idNode instanceof Scalar && typeof idNode.value === "string"
-          ? idNode.value
-          : null;
-      if (id) engagementNodes.set(id, item as YAMLMap);
-    }
-  }
+  // Collect existing engagement ids (name → node map) for planning. The
+  // mutation below re-reads the file under the lock and re-indexes.
+  const engagementNodes = indexEngagements(regDoc);
 
   // Plan the migration without mutating until we know everything is OK.
   const outcome: MigrationOutcome = {
@@ -305,6 +353,28 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
   // present (fail closed; the person can re-run it).
   if (personalOrgsToAdd.length > 0 || engagementOrgsToAdd.length > 0) {
     requireTerminalForOwnerAdd({ kind: "init-migrate" }, opts);
+
+    // The person approves what will be written, not a count: classify.yml is
+    // a file an agent can plant a rule in. List every owner and where it
+    // goes, then require an explicit y from a stdin TTY. Anything else aborts
+    // with nothing written.
+    const lines = [
+      "init --migrate-classify would register these owners (read from classify.yml):",
+      ...[...new Set(personalOrgsToAdd)].map(o => `  personal org      ${o}`),
+      ...engagementOrgsToAdd.map(e => `  engagement ${e.engagementId}  github org  ${e.org}`),
+      "Registering an owner tells repo-aegis that publishing there is safe.",
+    ];
+    if (!confirmOnTerminal(lines.join("\n"), "Register these owners?", opts)) {
+      emitError(
+        {
+          code: "MIGRATION_NOT_CONFIRMED",
+          error:
+            "init --migrate-classify: aborted, nothing was written. " +
+            "The owners above need an explicit 'y' typed at a terminal (stdin must be a TTY).",
+        },
+        opts,
+      );
+    }
   }
 
   // Apply mutations under the registry lock. Lock scope covers the
@@ -314,8 +384,11 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
   let ownersActuallyAdded = 0;
   try {
     withLockSync(() => {
+      // Read inside the lock: a stale read would overwrite a concurrent edit.
+      const lockedDoc = parseDocument(readFileSync(regPath, "utf8"));
+      const lockedNodes = indexEngagements(lockedDoc);
       // Bump schemaVersion to 2 if needed.
-      const sv = regDoc.get("schemaVersion");
+      const sv = lockedDoc.get("schemaVersion");
       const svNum =
         typeof sv === "number"
           ? sv
@@ -323,15 +396,15 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
           ? sv.value
           : 1;
       if (svNum < 2) {
-        regDoc.set("schemaVersion", 2);
+        lockedDoc.set("schemaVersion", 2);
         schemaBumped = true;
       }
 
       // Append personalOrgs (dedupe).
-      let personalOrgsSeq = regDoc.get("personalOrgs") as YAMLSeq | null;
+      let personalOrgsSeq = lockedDoc.get("personalOrgs") as YAMLSeq | null;
       if (!personalOrgsSeq || !(personalOrgsSeq instanceof YAMLSeq)) {
         personalOrgsSeq = new YAMLSeq();
-        regDoc.set("personalOrgs", personalOrgsSeq);
+        lockedDoc.set("personalOrgs", personalOrgsSeq);
       }
       const personalSet = new Set<string>();
       for (const item of personalOrgsSeq.items ?? []) {
@@ -349,7 +422,7 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
 
       // Append engagement githubOrgs (dedupe per engagement).
       for (const { engagementId, org } of engagementOrgsToAdd) {
-        const node = engagementNodes.get(engagementId);
+        const node = lockedNodes.get(engagementId);
         if (!node) continue;
         let orgsSeq = node.get("githubOrgs") as YAMLSeq | null;
         if (!orgsSeq || !(orgsSeq instanceof YAMLSeq)) {
@@ -368,21 +441,21 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
         }
       }
 
-      // Atomic write: tmp + rename.
-      const tmpPath = `${regPath}.migrate-classify.tmp.${process.pid}`;
-      writeFileSync(tmpPath, regDoc.toString(), { mode: 0o600 });
-      try {
-        chmodSync(tmpPath, 0o600);
-      } catch {
-        /* platform-restricted */
-      }
-      renameSync(tmpPath, regPath);
+      // Validate in memory, then write atomically (tmp + rename): a failed
+      // migration must never leave an unreadable registry, and must leave
+      // classify.yml in place.
+      const text = lockedDoc.toString();
+      assertValidRegistryText(text);
+      writeRegistryText(text, regPath);
 
       // Rename classify.yml to classify.yml.legacy.
       renameSync(classifyYmlPath, legacyPath);
     });
   } catch (err) {
     if (err instanceof LockTimeoutError) {
+      emitError({ code: err.code, error: err.message }, opts);
+    }
+    if (err instanceof RegistryCliError) {
       emitError({ code: err.code, error: err.message }, opts);
     }
     emitError(
@@ -523,6 +596,12 @@ export async function init(opts: InitOptions): Promise<void> {
         registryAlreadyExisted = true;
       }
       if (registryAlreadyExisted && opts.force) {
+        // Overwriting a populated registry with the empty stub empties the
+        // owner set (rule h switches itself off under D4) and discards the
+        // deny set: a person must do it. An empty or stub registry is fine.
+        if (registryDeclaresContent(readFileSync(registry, "utf8")) && !isHumanTerminal(opts)) {
+          throw new RegistryCliError(OWNER_SET_EMPTY_NEEDS_TTY, ownerSetEmptyRefusal({ kind: "init-force" }));
+        }
         writeFileSync(registry, REGISTRY_STUB, { mode: 0o600 });
         registryScaffolded = true;
       }
@@ -536,6 +615,9 @@ export async function init(opts: InitOptions): Promise<void> {
     });
   } catch (err) {
     if (err instanceof LockTimeoutError) {
+      emitError({ code: err.code, error: err.message }, opts);
+    }
+    if (err instanceof RegistryCliError) {
       emitError({ code: err.code, error: err.message }, opts);
     }
     emitError({ code: "FS_ERROR", error: `failed to write registry: ${(err as Error).message}` }, opts);
