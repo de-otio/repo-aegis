@@ -589,7 +589,12 @@ Run `test-critic` on the PR 1 and PR 2 suites before merge.
   org missing from `personalOrgs`. `doctor` names both. Contributing to OSS
   upstreams now needs `upstreams add` (once per repo) plus an approval per
   publish, which is the intended friction.
-- **No registry or no owners:** no change (D4).
+- **No registry or no owners:** rule h is inert (D4). A `*` approval,
+  however, now covers only `npm publish` there: D7 limits `*` to
+  `personalOrgs` owners, and there are none. Such operators need
+  `approve <org>/*` or `approve <org>/<repo>`; `approve '*'` says so when it
+  is minted. *(Corrected during PR 3: this line used to say "no change",
+  which contradicted D7.)*
 - **Older binaries** reading a registry with `allowedUpstreams` ignore it,
   through `.passthrough()`.
 - **Agents:** the guide's new rows tell an agent that `UNREGISTERED_OWNER_EGRESS`
