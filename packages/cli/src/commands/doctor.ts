@@ -46,7 +46,7 @@ import { findWorkingTrees, defaultScanRoots } from "../repo-walk.js";
 import { checkLabel, isFailure, isReportable, PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
 import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
-import { ghOwnerChecks, registryStateChecks, type DoctorRegistryState } from "./doctor-owner-checks.js";
+import { ghOwnerChecks, registryStateChecks, type DoctorRegistryState, type GhCheckOptions } from "./doctor-owner-checks.js";
 import { checkPrePushHook, checkShellStartupOverrides, checkSshGithubRedirect } from "./doctor-env-checks.js";
 
 interface DoctorOptions extends OutputOptions {
@@ -70,6 +70,10 @@ interface DoctorOptions extends OutputOptions {
   homeDir?: string;
   /** Directory holding the ssh `config` for `SSH_GITHUB_REDIRECT` (default: the passwd home's `.ssh`). */
   sshDir?: string;
+  /** Test seam for the gh-backed checks (binary policy, confirmation). Not reachable from the CLI. */
+  ghOptions?: GhCheckOptions;
+  /** Test seam: what the global `core.hooksPath` holds, for `PREPUSH_HOOK_MISSING`. */
+  readGlobalHooksPath?: () => string | null;
 }
 
 export interface DoctorRepoResult {
@@ -233,7 +237,9 @@ function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
   checks.push(...registryStateChecks(reg.state, reg.registry, reg.encrypted));
   // With no registry there is nothing to protect and nothing to compare gh against.
   if (reg.state !== "missing") checks.push(checkRegistryAgentWritable(opts.claudeHome));
-  if (reg.state === "loaded" && reg.registry !== null) checks.push(...ghOwnerChecks(reg.registry));
+  if (reg.state === "loaded" && reg.registry !== null) {
+    checks.push(...ghOwnerChecks(reg.registry, process.env, opts.ghOptions));
+  }
   checks.push(checkShellStartupOverrides(opts.homeDir), checkSshGithubRedirect(opts.sshDir));
   return checks;
 }
@@ -243,17 +249,11 @@ function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
  * no GitHub remote has no destination to be wrong about, so it is skipped
  * outright rather than reported as unresolved.
  */
-function repoEgressChecks(wt: string, registry: Registry | null, hookState: HookState): DoctorCheck[] {
+function repoEgressChecks(wt: string, registry: Registry | null): DoctorCheck[] {
   const org = getRemoteOrg(wt);
   if (org === null) return [];
 
   const out: DoctorCheck[] = [];
-
-  // R11: pre-push is the only layer that sees the environment git and ssh will
-  // really run with; a hook-only install is the weakest place to push from.
-  // Listed only when it fires: a healthy repo's `checks` array stays as it was.
-  const prePush = checkPrePushHook(hookState);
-  if (!prePush.ok) out.push(prePush);
 
   // The sweep is the bulk writer of the machine-wide destination cache: it
   // visits every checkout and reads exactly the two values the cache holds.
@@ -337,7 +337,7 @@ export function doctor(opts: DoctorOptions): void {
       let state = resolveHookState(wt);
       if (!state.isGitRepo) continue; // walker found a `.git` entry that git itself doesn't recognise (corrupt/bare edge case) — nothing to evaluate.
 
-      const checks = egressChecksOn ? repoEgressChecks(wt, registry, state) : [];
+      const checks = egressChecksOn ? repoEgressChecks(wt, registry) : [];
       const hookFailing = isFailing(state);
       // Healthy on BOTH axes: contributes to `scanned` only, never listed —
       // see module header. A repo whose hooks are live but whose class is
@@ -396,6 +396,15 @@ export function doctor(opts: DoctorOptions): void {
     }
   }
 
+  // R11, after the sweep and any `--fix`: one machine-level setting, not a
+  // per-repo property. `checkGuardHook` is the same answer the machine checks
+  // above reported, so a missing guard hook is not double-reported.
+  if (egressChecksOn) {
+    const guardRegistered = checkGuardHook(opts.claudeHome).every(c => c.ok);
+    const prePush = checkPrePushHook(guardRegistered, opts.readGlobalHooksPath);
+    if (prePush !== null) machine.push(prePush);
+  }
+
   // Only `fail`-severity findings count. A warning or an info line is reported
   // and never changes the exit code, so it cannot turn a green CI job red.
   const machineFailed = machine.filter(isFailure).length;
@@ -423,8 +432,14 @@ export function doctor(opts: DoctorOptions): void {
       emitText(`  ${checkLabel(c)} ${c.code} — ${c.detail}`);
       if (c.fix !== undefined) emitText(`       fix: ${c.fix}`);
     }
+    const machineNotes = machine.filter(c => isReportable(c) && !isFailure(c)).length;
     if (results.length === 0 && machineFailed === 0) {
-      emitText("doctor: all clean");
+      // "all clean" is a claim; a WARN or SKIP line printed above contradicts it.
+      emitText(
+        machineNotes === 0
+          ? "doctor: all clean"
+          : `doctor: no failures (${machineNotes} warning, info or skipped finding(s) above)`,
+      );
     } else {
       for (const r of results) {
         const tag = r.fixed ? " [fixed]" : showWouldFix ? " [would fix]" : "";

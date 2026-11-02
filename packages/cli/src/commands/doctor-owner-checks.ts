@@ -27,11 +27,29 @@
 // the token is never printed, logged, stored, put in an argument vector, or
 // echoed into an error message. The only things read from a child are the
 // token (held in one local variable), logins and org slugs.
+//
+// WHICH `gh`. Handing a token to a binary is only as safe as the binary. A `gh`
+// placed earlier on PATH (in `~/bin`, say, which an agent can write to) would
+// receive every account's token the moment a person ran doctor. So:
+//
+//   - the gh checks are skipped when another gh precedes the repo-aegis shim,
+//     or when the gh we would spawn is not the one the shim would run;
+//   - only absolute PATH entries count (an empty or relative entry resolves
+//     against the cwd), and the resolved real path is what is spawned;
+//   - the real path is refused under $HOME, the cwd or a temp directory, and
+//     when its directory is group/world-writable or not owned by root (or by the
+//     user inside a package-manager prefix such as /opt/homebrew);
+//   - the active account is checked without ever reading a token (`gh api`
+//     runs as the active login); another account's token is read only after a
+//     y/N on a stdin TTY that names the gh binary, and never without a TTY.
 import { spawnSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { registeredOwners, repoAegisHome, type Registry } from "@de-otio/repo-aegis-core";
 import { PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
+import { checkShim } from "./install-shim.js";
+import { confirmOnTerminal } from "../require-terminal.js";
 
 const HOST = "github.com";
 /** One `gh` call must not hang `doctor`: this runs on a developer's machine, interactively. */
@@ -105,18 +123,23 @@ function canonical(path: string): string {
 }
 
 /**
- * The real `gh`: the first executable `gh` on PATH that is not the repo-aegis
- * shim's directory. Doctor must not call its own shim; the shim runs
- * `egress-check`, writes audit records, and is the thing being diagnosed.
- * Null when there is no other `gh`.
+ * The `gh` the repo-aegis shim would run: the first executable `gh` on an
+ * ABSOLUTE PATH entry that is not the shim's own directory. Null when there is
+ * none.
+ *
+ * Empty and relative entries are skipped, never resolved: `""` means the cwd to
+ * a shell, and a relative entry means whatever directory doctor was started in.
+ * Both are places an agent can put a file. Doctor spawns the path returned here
+ * (by absolute path), so nothing is re-resolved through PATH at spawn time, and
+ * in particular the shim cannot be reached by accident.
  */
 export function findRealGh(env: NodeJS.ProcessEnv): string | null {
   const pathValue = env["PATH"];
   if (pathValue === undefined || pathValue === "") return null;
   const shimDir = canonical(join(env["REPO_AEGIS_HOME"] ?? repoAegisHome(), "bin"));
   for (const entry of pathValue.split(delimiter)) {
-    const dir = entry === "" ? "." : entry;
-    const candidate = join(dir, "gh");
+    if (entry === "" || !isAbsolute(entry)) continue;
+    const candidate = join(entry, "gh");
     try {
       const st = statSync(candidate);
       if (!st.isFile() || (st.mode & 0o111) === 0) continue;
@@ -127,6 +150,148 @@ export function findRealGh(env: NodeJS.ProcessEnv): string | null {
     return candidate;
   }
   return null;
+}
+
+/** Where a package manager installs `gh`, in order of preference. */
+export const FIXED_GH_PATHS: readonly string[] = [
+  "/opt/homebrew/bin/gh",
+  "/usr/local/bin/gh",
+  "/usr/bin/gh",
+  "/home/linuxbrew/.linuxbrew/bin/gh",
+];
+
+/** Prefixes whose directories a package manager owns as the user rather than as root. */
+const PACKAGE_PREFIXES: readonly string[] = ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew", "/opt/local"];
+
+function within(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
+/**
+ * Why `realPath` must not be handed a token, or null when it may be. `realPath`
+ * is already symlink-resolved. A pure function of the file system and `env`.
+ */
+export function untrustedGhReason(
+  realPath: string,
+  env: NodeJS.ProcessEnv,
+  /** Test seam: skip the home/cwd/temp roots so the permission and ownership branches can be exercised from a temp dir. */
+  opts: { skipLocationRoots?: boolean } = {},
+): string | null {
+  if (!isAbsolute(realPath)) return "its path is relative";
+
+  const roots: Array<[string, string]> = [];
+  const add = (dir: string | undefined, label: string): void => {
+    if (dir === undefined || dir === "" || dir === sep) return;
+    roots.push([canonical(dir), label]);
+  };
+  add(env["HOME"], "your home directory");
+  try {
+    add(userInfo().homedir, "your home directory");
+  } catch {
+    /* no passwd entry */
+  }
+  add(process.cwd(), "the current directory");
+  add(env["TMPDIR"], "a temporary directory");
+  add(tmpdir(), "a temporary directory");
+  for (const t of ["/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"]) add(t, "a temporary directory");
+  for (const [root, label] of opts.skipLocationRoots === true ? [] : roots) {
+    if (within(realPath, root)) return `it is under ${label}, which an agent can write to`;
+  }
+
+  try {
+    const file = statSync(realPath);
+    if ((file.mode & 0o022) !== 0) return "the file is writable by group or others";
+    const dirPath = dirname(realPath);
+    const dir = statSync(dirPath);
+    if ((dir.mode & 0o022) !== 0) return "its directory is writable by group or others";
+    const uid = typeof process.getuid === "function" ? process.getuid() : -1;
+    const packageManaged = PACKAGE_PREFIXES.some(prefix => within(dirPath, prefix));
+    if (dir.uid !== 0 && !(packageManaged && dir.uid === uid)) {
+      return "its directory is not owned by root or a package manager";
+    }
+  } catch {
+    return "its location could not be inspected";
+  }
+  return null;
+}
+
+export interface GhCheckOptions {
+  /**
+   * Test seam. `"permissive"` skips the binary-location policy, because fake
+   * `gh` stubs live in temp directories, which the default policy refuses. There
+   * is deliberately no environment variable for this: an agent controls the
+   * environment, not this call.
+   */
+  policy?: "default" | "permissive";
+  /**
+   * Asked before any NON-active account's token is read. Default: a y/N on a
+   * stdin TTY that names the gh binary; false without one.
+   */
+  confirm?: (ghPath: string, logins: string[]) => boolean;
+}
+
+function defaultConfirm(ghPath: string, logins: string[]): boolean {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) return false;
+  return confirmOnTerminal(
+    `doctor will read the stored token of ${logins.length} other logged-in gh account(s) (${logins.join(", ")}) ` +
+      `and hand each to this binary:\n  ${ghPath}\nOnly answer y if that is the gh you installed.`,
+    "Read those tokens?",
+  );
+}
+
+type GhResolution =
+  | { kind: "ok"; path: string; extra: DoctorCheck[] }
+  | { kind: "skip"; reason: string; extra: DoctorCheck[] };
+
+function untrusted(detail: string): DoctorCheck {
+  return {
+    code: "GH_BINARY_UNTRUSTED",
+    ok: false,
+    severity: "warn",
+    detail,
+    fix: "install gh from your package manager into a root-owned or package-manager directory, and keep user-writable directories out of PATH ahead of it",
+  };
+}
+
+/** Choose the gh doctor may talk to, or say why none. */
+function resolveGh(env: NodeJS.ProcessEnv, policy: "default" | "permissive"): GhResolution {
+  // (a) Another gh ahead of the shim: whatever agents run is not what we would spawn.
+  if (checkShim(env).some(c => c.code === "SHIM_NOT_FIRST" && !c.ok)) {
+    return { kind: "skip", reason: "another `gh` precedes the repo-aegis shim on PATH, so doctor cannot tell which gh would run", extra: [] };
+  }
+  const onPath = findRealGh(env);
+  if (onPath === null) {
+    return { kind: "skip", reason: "`gh` is not installed (or only the repo-aegis shim is on PATH)", extra: [] };
+  }
+  const real = canonical(onPath);
+  if (policy === "permissive") return { kind: "ok", path: real, extra: [] };
+
+  const extra: DoctorCheck[] = [];
+  const bad = untrustedGhReason(real, env);
+  const standard = FIXED_GH_PATHS.map(canonical).find(p => {
+    try {
+      return statSync(p).isFile() && untrustedGhReason(p, env) === null;
+    } catch {
+      return false;
+    }
+  });
+  if (bad !== null) {
+    extra.push(
+      untrusted(
+        `the gh first on PATH (${onPath}) is not trusted: ${bad}` +
+          (standard !== undefined ? `; a standard install exists at ${standard} but is not the gh that agents would run` : ""),
+      ),
+    );
+    return {
+      kind: "skip",
+      reason: "the gh first on PATH is not in a trusted location, so no account token is handed to it",
+      extra,
+    };
+  }
+  if (standard !== undefined && standard !== real) {
+    extra.push(untrusted(`the gh first on PATH (${onPath}) is not the standard install (${standard})`));
+  }
+  return { kind: "ok", path: real, extra };
 }
 
 /** Variables that would make a child `gh` act as an account other than the one we mean. */
@@ -276,6 +441,8 @@ interface AccountFacts {
   apiLogin: string | null;
   /** `gh api user/orgs` slugs, lower-cased; null when the call failed. */
   orgs: string[] | null;
+  /** Why an unreachable account was not checked, when it is not simply an invalid token. */
+  skipNote?: string;
 }
 
 function lines(text: string): string[] {
@@ -332,23 +499,53 @@ function skippedAll(reason: string): DoctorCheck[] {
  * does not call this for a missing or unreadable one (there is nothing to
  * compare against, and no reason to spend network calls on it).
  *
- * Best-effort: gh absent, or no usable login, is `skipped`, never a failure. A
- * guardrail must not report something it could not substantiate.
+ * Best-effort: gh absent or untrusted, or no usable login, is `skipped`, never a
+ * failure. A guardrail must not report something it could not substantiate.
+ *
+ * The ACTIVE account is queried first and without reading any token (`gh api`
+ * acts as it). Every other account needs its token read, which happens only
+ * after `opts.confirm` says yes, naming the gh binary; with no terminal that is
+ * a no, and those accounts are reported as not checked.
  */
-export function ghOwnerChecks(registry: Registry, env: NodeJS.ProcessEnv = process.env): DoctorCheck[] {
-  const gh = findRealGh(env);
-  if (gh === null) return skippedAll("`gh` is not installed (or only the repo-aegis shim is on PATH)");
+export function ghOwnerChecks(
+  registry: Registry,
+  env: NodeJS.ProcessEnv = process.env,
+  opts: GhCheckOptions = {},
+): DoctorCheck[] {
+  const res = resolveGh(env, opts.policy ?? "default");
+  if (res.kind === "skip") return [...skippedAll(res.reason), ...res.extra];
+  const gh = res.path;
 
   const listing = listAccounts(gh, env);
-  let facts: AccountFacts[];
-  let fallbackNote = "";
+  const active = queryWithToken(gh, env, "active account", "inherit");
+  const facts: AccountFacts[] = [];
+  let note = "";
+
   if (listing.kind === "accounts") {
-    facts = listing.accounts.map(a => queryAccount(gh, env, a));
+    if (active.reachable) facts.push(active);
+    const others = listing.accounts.filter(a => a.login.toLowerCase() !== active.apiLogin);
+    const fetchable = others.filter(a => a.tokenValid);
+    const confirmed = fetchable.length > 0 && (opts.confirm ?? defaultConfirm)(gh, fetchable.map(a => a.login));
+    for (const a of others) {
+      if (!a.tokenValid || confirmed) facts.push(queryAccount(gh, env, a));
+      else {
+        facts.push({
+          login: a.login,
+          reachable: false,
+          apiLogin: null,
+          orgs: null,
+          skipNote:
+            "was not checked: reading another account's token needs a y/N confirmation at a terminal, and there was none (or it was declined)",
+        });
+      }
+    }
+    if (fetchable.length > 0 && !confirmed) {
+      note = " (only the active account was checked: reading another account's token needs a y/N at a terminal)";
+    }
   } else {
     // Listing failed, or gh says nobody is logged in for a stored login. Fall
     // back to whatever account `gh` itself would use (environment token or the
     // active login) and SAY SO: the result is then about one arbitrary account.
-    const active = queryWithToken(gh, env, "active account", "inherit");
     if (!active.reachable) {
       return skippedAll(
         listing.kind === "none"
@@ -356,19 +553,26 @@ export function ghOwnerChecks(registry: Registry, env: NodeJS.ProcessEnv = proce
           : "`gh` could not list its accounts and the active account could not be queried",
       );
     }
-    facts = [active];
-    fallbackNote = " (gh could not list the logged-in accounts, so only the active account was checked)";
+    facts.push(active);
+    note =
+      listing.kind === "none"
+        ? " (gh lists no logged-in account, so only the account gh itself would use was checked)"
+        : " (gh could not list the logged-in accounts, so only the active account was checked)";
   }
+  if (facts.length === 0) return skippedAll("no gh account could be queried");
 
   const owners = registeredOwners(registry);
-  const checks: DoctorCheck[] = [];
+  const checks: DoctorCheck[] = [...res.extra];
 
   for (const f of facts) {
-    const who = fallbackNote === "" ? `gh account ${f.login}` : `the active gh account (${f.apiLogin ?? f.login})`;
     const account = f.apiLogin ?? f.login;
+    const who = `gh account ${account}`;
 
     if (!f.reachable) {
-      const detail = `skipped: ${who} is logged in but its token is invalid or could not be read, so it was not checked`;
+      const detail =
+        f.skipNote !== undefined
+          ? `skipped: ${who} ${f.skipNote}`
+          : `skipped: ${who} is logged in but its token is invalid or could not be read, so it was not checked`;
       checks.push({ code: "GH_LOGIN_UNREGISTERED", ok: true, skipped: true, account, detail });
       checks.push({ code: "GH_MEMBER_ORG_UNREGISTERED", ok: true, skipped: true, account, detail });
       continue;
@@ -384,7 +588,7 @@ export function ghOwnerChecks(registry: Registry, env: NodeJS.ProcessEnv = proce
         (loginRegistered
           ? `${who}: its login is a registered owner`
           : `${who}: its login is not a registered owner, so rule h refuses non-interactive egress to repositories under that login`) +
-        fallbackNote,
+        note,
       ...(loginRegistered
         ? {}
         : { fix: `repo-aegis engagements add --personal-org ${login}   (${PERSON_RUNS_THIS})` }),
@@ -409,7 +613,7 @@ export function ghOwnerChecks(registry: Registry, env: NodeJS.ProcessEnv = proce
         (unregistered.length === 0
           ? `${who}: every organisation it belongs to is a registered owner`
           : `${who}: belongs to ${unregistered.length} organisation(s) that are not registered owners, so rule h refuses non-interactive egress to them`) +
-        fallbackNote,
+        note,
       ...(unregistered.length === 0
         ? {}
         : {
@@ -463,6 +667,9 @@ function registeredNotMember(owners: ReadonlySet<string>, facts: readonly Accoun
     detail:
       `${missing.length} registered owner(s) match no login or organisation of the ${reachable.length} gh account(s) checked ` +
       `(normal for an archived engagement)${note}`,
-    fix: `none required; not matched: ${missing.join(", ")}`,
+    // Registry owners can be customer names, and doctor output can land in an
+    // agent transcript: the list is in --json only, never in a text line.
+    fix: "none required; the unmatched owners are listed in --json",
+    names: missing,
   };
 }

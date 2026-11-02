@@ -662,19 +662,28 @@ neither replaces the other, and both coexist with any user-authored hook
 already in that entry. `--uninstall` removes every repo-aegis entry and
 reports the count per event.
 
-3. Adds two `permissions.deny` entries to `settings.json`, `Edit(//<dir>/**)`
-   and `Write(//<dir>/**)`, where `<dir>` is the directory holding the
-   registry file (`REPO_AEGIS_HOME`, default `~/.config/repo-aegis`). Without
-   them the agent's own Edit/Write tools can add an owner to
+3. Adds `permissions.deny` **`Edit(...)`** rules to `settings.json` for the
+   files whose tampering bypasses the guard, and nothing else: the registry
+   file and its `.age` ciphertext, the approvals store
+   (`egress-approvals.json`), `hooks/**` (the git hook scripts) and `bin/**`
+   (the `gh` shim), under `REPO_AEGIS_HOME` (default `~/.config/repo-aegis`).
+   Without them the agent's own file tools can add an owner to
    `engagements.yaml` with no terminal, which undoes the unregistered-owner
-   check. They stop only those tools: a Bash `sed -i` is not an Edit call.
-   To stop that too, add the directory to `sandbox.filesystem.denyWrite` in
-   the same `settings.json` yourself. repo-aegis prints the line to add but
-   does not edit sandbox settings. `--uninstall` removes exactly the two
-   `permissions.deny` entries (computed from the current `REPO_AEGIS_HOME` /
-   `REPO_AEGIS_REGISTRY`) and leaves your other rules and any sandbox entry
-   you added. `doctor` reports `REGISTRY_AGENT_WRITABLE` (warn) while they are
-   absent.
+   check. Only `Edit` rules are written: Claude Code matches path rules for
+   `Edit` and `Read` only, a `Write(path)` rule is never matched, and an Edit
+   rule covers every built-in editing tool. Claude Code also merges Edit deny
+   rules into the sandbox's write-deny list, so they stop a sandboxed Bash
+   `sed -i` too; verify on your machine with a sandboxed `touch <registry
+   file>` (it should fail). `state/` (audit log, lock, caches) is deliberately
+   **not** denied: denying the whole home broke audit appends, the state lock,
+   cache writes and an agent running `install hooks` or `install shim`. A
+   registry relocated to `$HOME`, `/` or a git work tree is denied as a file
+   only, with a warning; a home in one of those places loses the `hooks/**` and
+   `bin/**` rules, also with a warning. The rules install added are recorded
+   in `state/claude-md-deny-rules.json`; `--uninstall` removes exactly those
+   (a rule you already had before install is never removed), and also removes
+   the broader `Edit`/`Write` forms an earlier build wrote. `doctor` reports
+   `REGISTRY_AGENT_WRITABLE` (warn) while they are absent.
 
 No file is written under `~/.claude/hooks/` — the bin command parses
 stdin JSON natively, so `jq` is no longer required.
@@ -1235,22 +1244,41 @@ now reports, unless `--no-egress-checks`:
 | `GH_LOGIN_UNREGISTERED` | a logged-in `gh` account's login is not a registered owner | `--personal-org <login>` (a person, at a terminal) |
 | `GH_MEMBER_ORG_UNREGISTERED` | an organisation a logged-in `gh` account belongs to is not registered | `--personal-org` or `--github-org`, or leave it and let rule h refuse it |
 | `REGISTERED_ORG_NOT_MEMBER` (info) | a registered owner is no checked account's login or organisation (normal for archived engagements) | none required |
-| `REGISTRY_AGENT_WRITABLE` (warn) | Claude Code `settings.json` has no `permissions.deny` for `Edit` and `Write` under the registry directory | `repo-aegis install claude-md`; add the directory to `sandbox.filesystem.denyWrite` |
-| `PREPUSH_HOOK_MISSING` (warn, per repo) | a repo with a GitHub remote has no active repo-aegis `pre-push` hook, the only layer that sees the environment git and ssh really run with | `repo-aegis install hooks` |
-| `SHELL_STARTUP_OVERRIDES` (warn) | `~/.zshenv`, `~/.zshrc`, `~/.bashrc`, `~/.bash_profile` or `~/.profile` sets `GH_REPO`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `SRT_*` or `REPO_AEGIS_*`; reported by name and file, never value | remove the export |
-| `SSH_GITHUB_REDIRECT` (info) | `~/.ssh/config` has a `Host github.com` block whose `HostName` is not GitHub | none if intended |
+| `REGISTRY_AGENT_WRITABLE` (warn) | Claude Code `settings.json` has no `permissions.deny` `Edit` rule covering the registry file, its `.age`, the approvals store, `hooks/` and `bin/` | `repo-aegis install claude-md`; verify with a sandboxed `touch` |
+| `GH_BINARY_UNTRUSTED` (warn) | the `gh` first on `PATH` is under `$HOME`, the cwd or a temp directory, sits in a group/world-writable or non-root directory, or is not the standard install | install gh from your package manager; keep user-writable directories out of `PATH` ahead of it |
+| `PREPUSH_HOOK_MISSING` (warn) | the egress guard hook is registered but the **global** `core.hooksPath` is unset or not the repo-aegis hooks directory, so a repo that does not set it locally has no `pre-push` hook, the only layer that sees the environment git and ssh really run with | `repo-aegis install hooks` |
+| `SHELL_STARTUP_OVERRIDES` (warn) | `~/.zshenv`, `~/.zshrc`, `~/.zprofile`, `~/.zlogin`, `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` or `~/.profile` sets `GH_REPO`, `GH_HOST`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `SRT_*` or `REPO_AEGIS_*`; reported by name and file, never value | remove the export |
+| `SSH_GITHUB_REDIRECT` (info) | `~/.ssh/config` has a `Host github.com` block whose `HostName` is not GitHub, or that applies a `ProxyCommand` / `ProxyJump` | none if intended |
 
 The `gh`-backed checks (`GH_LOGIN_UNREGISTERED`, `GH_MEMBER_ORG_UNREGISTERED`,
 `REGISTERED_ORG_NOT_MEMBER`) cover **every account logged in for
-github.com**, not just the active one: for each, doctor runs `gh api user`
-and `gh api user/orgs` with that account's token (`gh auth token --user`)
-handed to the child `gh` through its environment. It never prints, logs or
-stores a token and never runs `gh auth switch`. Each finding names its
-account. `REGISTERED_ORG_NOT_MEMBER` uses the union of all accounts'
-memberships. If the accounts cannot be listed, doctor checks the active
-account and says so. With `gh` absent, logged out, or an account's token
-invalid, the check is reported `SKIP`, never `FAIL`. Organisation names
-appear only in a finding's `fix` and in `--json`, never in a summary line.
+github.com**, not just the active one. A token is only as safe as the binary
+it is handed to, so:
+
+- The active account is checked **without reading any token** (`gh api`
+  acts as it). Another account's token (`gh auth token --user`) is read only
+  after a **y/N on a stdin terminal that names the gh binary path**. Without a
+  terminal, or if you decline, only the active account is checked and the
+  report says so; the others are `SKIP`.
+- Doctor skips these checks, with a reason, when another `gh` precedes the
+  repo-aegis shim on `PATH`, or when the `gh` it would spawn is not in a
+  trusted place: only absolute `PATH` entries count (an empty or relative one
+  would resolve against the cwd), the resolved real path is what is run, and it
+  is refused under `$HOME`, the cwd or a temp directory, and in a
+  group/world-writable directory or one not owned by root (or by you inside a
+  package-manager prefix such as `/opt/homebrew`). `GH_BINARY_UNTRUSTED` warns.
+- The token goes to the child `gh` through its environment only; it is never
+  printed, logged, stored or put in an argument, and a child's stderr is
+  discarded. Doctor never runs `gh auth switch`.
+
+Each finding names its account. `REGISTERED_ORG_NOT_MEMBER` uses the union of
+all accounts' memberships; its owner list is in `--json` (`names`) only. If the
+accounts cannot be listed, doctor checks the active account and says so. With
+`gh` absent, logged out, untrusted, or an account's token invalid, the check is
+reported `SKIP`, never `FAIL`. Organisation names appear only in a finding's
+`fix` and in `--json`, never in a summary line. `doctor` prints `all clean`
+only when nothing at all was reported; with only warnings, info or skips it
+prints `no failures`.
 
 Only `fail`-severity findings make `doctor` exit 1. `warn` (`WARN`), `info`
 (`INFO`) and `SKIP` lines are reported and never change the exit code; JSON

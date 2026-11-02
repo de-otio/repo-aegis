@@ -507,7 +507,8 @@ describe("doctor — egress checks: PUSH_DEFAULT_IMPLICIT", () => {
 
     assert.equal(exitCode, undefined);
     assert.doesNotMatch(stdout, /PUSH_DEFAULT_IMPLICIT/);
-    assert.match(stdout, /all clean/);
+    // A run with a WARN/SKIP line is "no failures", never "all clean" (that claim is only made when nothing was printed).
+    assert.match(stdout, /doctor: (all clean|no failures)/);
   });
 
   it("reads the GLOBAL scope only: a repo-local push.default=nothing does not satisfy it", () => {
@@ -580,7 +581,8 @@ describe("doctor — egress checks: per-repo", () => {
     });
 
     assert.equal(exitCode, undefined);
-    assert.match(stdout, /all clean/);
+    // A run with a WARN/SKIP line is "no failures", never "all clean" (that claim is only made when nothing was printed).
+    assert.match(stdout, /doctor: (all clean|no failures)/);
   });
 
   it("the sweep records every checkout with a GitHub origin into the destination cache", () => {

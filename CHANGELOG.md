@@ -17,12 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints a token). Organisation names appear only in `fix` and `--json`.
   `warn` and `info` findings never change the exit code. Also new:
   `PREPUSH_HOOK_MISSING`, `SHELL_STARTUP_OVERRIDES` and `SSH_GITHUB_REDIRECT`.
-- **`install claude-md` adds `permissions.deny` for `Edit` and `Write` under the
-  registry directory**, so the agent's file tools cannot register an owner by
-  editing `engagements.yaml`. `install claude-md --uninstall` removes exactly
-  those entries. Add the directory to `sandbox.filesystem.denyWrite` yourself
-  to stop a Bash `sed -i` as well. To recover from a rule you do not want:
+- **`install claude-md` adds `permissions.deny` `Edit` rules for the registry
+  file (and its `.age`), the approvals store, `hooks/**` and `bin/**`**, so the
+  agent's file tools cannot register an owner by editing `engagements.yaml`.
+  Edit rules reach the sandbox, so a sandboxed `sed -i` is stopped too (verify
+  with a sandboxed `touch`); `state/` stays writable. `install claude-md
+  --uninstall` removes exactly the rules install added, recorded under
+  `state/`. To recover from a rule you do not want:
   `repo-aegis install claude-md --uninstall`.
+- **`doctor` only hands a token to a trusted `gh`.** The active account is
+  checked without reading a token; other accounts' tokens are read only after a
+  y/N at a terminal naming the gh binary. The checks are skipped when another
+  `gh` precedes the shim or the gh is under `$HOME`, the cwd or a temp
+  directory, or in a writable directory (`GH_BINARY_UNTRUSTED`).
 - The `PERSONAL_ORG_UNREGISTERED` fix now says a person runs the owner add from
   their own terminal.
 

@@ -22,6 +22,7 @@ export type DoctorCheckCode =
   | "GH_LOGIN_UNREGISTERED"
   | "GH_MEMBER_ORG_UNREGISTERED"
   | "REGISTERED_ORG_NOT_MEMBER"
+  | "GH_BINARY_UNTRUSTED"
   | "REGISTRY_AGENT_WRITABLE"
   | "REGISTRY_UNREADABLE"
   // Residual risks R8, R9, R11 (§8.2).
@@ -50,6 +51,11 @@ export interface DoctorCheck {
    * silent gap cannot read as a clean result.
    */
   skipped?: boolean;
+  /**
+   * Names that belong in the report but not in a text line (owners can be
+   * customer names). Emitted in `--json` only.
+   */
+  names?: string[];
   /** The gh account a finding applies to, when it applies to one (the login, shown in `detail` as well). */
   account?: string;
   /**

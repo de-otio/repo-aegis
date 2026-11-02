@@ -2,9 +2,9 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 //
 // `install claude-md` registry write protection (doc/plan-unregistered-owner-
-// egress.md §8.2, R1): permissions.deny for Edit/Write under the registry
-// directory, the opposite in `--uninstall`, and the doctor check
-// REGISTRY_AGENT_WRITABLE that reads them back.
+// egress.md §8.2, R1): Edit deny rules for the files whose tampering bypasses
+// the guard, the ledger that lets `--uninstall` remove exactly what install
+// added, and the doctor check REGISTRY_AGENT_WRITABLE that reads them back.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,8 +13,9 @@ import { join } from "node:path";
 import { captureOutput, withEnv } from "../_test-utils.js";
 import {
   checkRegistryAgentWritable,
-  denyRuleCoversDir,
+  denyRuleCoversPath,
   installClaudeMd,
+  registryDenyPlan,
   registryDenyRules,
 } from "./install-claude-md.js";
 
@@ -48,138 +49,243 @@ function inEnv<T>(e: Env, fn: () => T): T {
   return withEnv("REPO_AEGIS_REGISTRY", undefined, () => withEnv("REPO_AEGIS_HOME", e.aegisHome, fn));
 }
 
-function readSettings(e: Env): { permissions?: { deny?: string[]; allow?: string[] }; hooks?: unknown; [k: string]: unknown } {
-  return JSON.parse(readFileSync(e.settingsPath, "utf8")) as ReturnType<typeof readSettings>;
+type Settings = { permissions?: { deny?: string[]; allow?: string[] }; hooks?: unknown; [k: string]: unknown };
+
+function readSettings(e: Env): Settings {
+  return JSON.parse(readFileSync(e.settingsPath, "utf8")) as Settings;
 }
 
-describe("registryDenyRules", () => {
-  it("is Edit and Write under the registry directory, using Claude Code's absolute-path prefix", () => {
-    assert.deepEqual(registryDenyRules("/home/u/.config/repo-aegis"), [
-      "Edit(//home/u/.config/repo-aegis/**)",
-      "Write(//home/u/.config/repo-aegis/**)",
+function install(e: Env, opts: Record<string, unknown> = {}): { stdout: string } {
+  return inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, ...opts })));
+}
+
+const LEDGER = "state/claude-md-deny-rules.json";
+
+describe("registryDenyPlan", () => {
+  it("denies Edit on the registry, its .age, the approvals store, hooks/** and bin/** — and nothing else", () => {
+    const e = makeEnv("plan");
+    const h = e.aegisHome;
+    const plan = inEnv(e, () => registryDenyPlan());
+    assert.deepEqual(plan.rules, [
+      `Edit(/${h}/engagements.yaml)`,
+      `Edit(/${h}/engagements.yaml.age)`,
+      `Edit(/${h}/egress-approvals.json)`,
+      `Edit(/${h}/hooks/**)`,
+      `Edit(/${h}/bin/**)`,
     ]);
+    assert.deepEqual(plan.warnings, []);
+    // Claude Code never matches a Write(path) rule: none is written.
+    assert.ok(plan.rules.every(r => r.startsWith("Edit(")));
+    // The run-time state stays writable: audit log, lock, caches.
+    assert.ok(plan.rules.every(r => !r.includes("/state")), "state/ must not be denied");
+    assert.ok(plan.rules.every(r => r !== `Edit(/${h}/**)`), "the whole home must not be denied");
   });
 
-  it("follows REPO_AEGIS_HOME, and the directory of REPO_AEGIS_REGISTRY when that is set", () => {
-    const e = makeEnv("rules-dir");
-    inEnv(e, () => assert.deepEqual(registryDenyRules(), [`Edit(/${e.aegisHome}/**)`, `Write(/${e.aegisHome}/**)`]));
-    withEnv("REPO_AEGIS_REGISTRY", "/elsewhere/reg/engagements.yaml", () =>
-      assert.deepEqual(registryDenyRules(), ["Edit(//elsewhere/reg/**)", "Write(//elsewhere/reg/**)"]),
+  it("a relocated registry is denied as a FILE, never as its directory", () => {
+    const e = makeEnv("relocated");
+    const elsewhere = join(tmp, `elsewhere-${n++}`);
+    mkdirSync(elsewhere, { recursive: true });
+    const plan = withEnv("REPO_AEGIS_REGISTRY", join(elsewhere, "reg.yaml"), () =>
+      withEnv("REPO_AEGIS_HOME", e.aegisHome, () => registryDenyPlan()),
     );
+    assert.ok(plan.rules.includes(`Edit(/${elsewhere}/reg.yaml)`));
+    assert.ok(plan.rules.includes(`Edit(/${elsewhere}/reg.yaml.age)`));
+    assert.ok(plan.rules.every(r => !r.includes(`/${elsewhere}/**`)));
+  });
+
+  it("a registry inside a git work tree is still denied as a file, with a warning", () => {
+    const e = makeEnv("in-git");
+    const repo = join(tmp, `repo-${n++}`);
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    const plan = withEnv("REPO_AEGIS_REGISTRY", join(repo, "engagements.yaml"), () =>
+      withEnv("REPO_AEGIS_HOME", e.aegisHome, () => registryDenyPlan()),
+    );
+    assert.ok(plan.rules.includes(`Edit(/${repo}/engagements.yaml)`));
+    assert.equal(plan.warnings.length, 1);
+    assert.match(plan.warnings[0]!, /inside a git work tree/);
+  });
+
+  it("a home that is $HOME, or inside a work tree, loses the hooks/ and bin/ globs and warns", () => {
+    const e = makeEnv("home-is-home");
+    const atHome = withEnv("HOME", e.aegisHome, () =>
+      withEnv("REPO_AEGIS_REGISTRY", undefined, () => withEnv("REPO_AEGIS_HOME", e.aegisHome, () => registryDenyPlan())),
+    );
+    assert.ok(atHome.rules.every(r => !r.includes("/hooks/") && !r.includes("/bin/")));
+    assert.match(atHome.warnings.join("\n"), /home directory/);
+
+    const g = makeEnv("home-in-git");
+    mkdirSync(join(g.aegisHome, ".git"), { recursive: true });
+    const inGit = inEnv(g, () => registryDenyPlan());
+    assert.ok(inGit.rules.every(r => !r.includes("/hooks/") && !r.includes("/bin/")));
+    assert.match(inGit.warnings.join("\n"), /git work tree/);
+    assert.ok(inGit.rules.some(r => r.endsWith("engagements.yaml)")), "the files are still denied");
   });
 });
 
 describe("install claude-md — registry deny rules", () => {
-  it("adds Edit and Write deny rules, keeps the user's own rules, and is idempotent", () => {
+  it("adds only Edit rules, keeps the user's own, and is idempotent", () => {
     const e = makeEnv("install");
     writeFileSync(
       e.settingsPath,
       JSON.stringify({ permissions: { deny: ["Read(//secrets/**)"], allow: ["Bash(ls)"] }, model: "x" }),
     );
-    inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome })));
+    install(e);
     const first = readSettings(e);
     const rules = inEnv(e, () => registryDenyRules());
     assert.deepEqual(first.permissions?.deny, ["Read(//secrets/**)", ...rules]);
+    assert.ok(first.permissions!.deny!.every(r => !r.startsWith("Write(")));
     assert.deepEqual(first.permissions?.allow, ["Bash(ls)"]);
     assert.equal(first["model"], "x");
 
-    inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome })));
+    install(e);
     assert.deepEqual(readSettings(e).permissions?.deny, first.permissions?.deny, "re-running must not duplicate");
   });
 
-  it("tells the operator to add the directory to sandbox.filesystem.denyWrite (it does not edit sandbox settings itself)", () => {
-    const e = makeEnv("sandbox-note");
-    const out = inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome })));
-    assert.match(out.stdout, /sandbox\.filesystem\.denyWrite/);
-    assert.ok(out.stdout.includes(e.aegisHome));
-    assert.equal((readSettings(e) as { sandbox?: unknown }).sandbox, undefined);
+  it("prints that Edit rules reach the sandbox, and a sandboxed `touch` to verify it; no denyWrite instruction", () => {
+    const e = makeEnv("advice");
+    const out = install(e);
+    assert.match(out.stdout, /merges Edit deny rules into the sandbox/);
+    assert.match(out.stdout, /touch .*engagements\.yaml/);
+    assert.doesNotMatch(out.stdout, /denyWrite/);
+    assert.match(out.stdout, /state\/ .* deliberately not denied/);
+    assert.equal((readSettings(e) as { sandbox?: unknown }).sandbox, undefined, "sandbox settings are never edited");
   });
 
-  it("--dry-run shows the rules and writes nothing", () => {
+  it("--dry-run shows the rules and writes neither settings nor ledger", () => {
     const e = makeEnv("dry");
-    const out = inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, dryRun: true })));
+    const out = install(e, { dryRun: true });
     assert.match(out.stdout, /Edit\(\/\//);
-    assert.match(out.stdout, /Write\(\/\//);
     assert.equal(existsSync(e.settingsPath), false);
+    assert.equal(existsSync(join(e.aegisHome, LEDGER)), false);
   });
 
-  it("--json reports the rules and what was added", () => {
+  it("--json reports the rules, warnings and how to verify", () => {
     const e = makeEnv("json");
-    const out = inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, json: true })));
-    const parsed = JSON.parse(out.stdout) as { registryDeny: { rules: string[]; added: string[]; sandboxDenyWrite: string } };
-    assert.equal(parsed.registryDeny.added.length, 2);
-    assert.equal(parsed.registryDeny.sandboxDenyWrite, e.aegisHome);
+    const out = install(e, { json: true });
+    const parsed = JSON.parse(out.stdout) as {
+      registryDeny: { rules: string[]; added: string[]; warnings: string[]; verifyWith: string };
+    };
+    assert.equal(parsed.registryDeny.added.length, parsed.registryDeny.rules.length);
+    assert.match(parsed.registryDeny.verifyWith, /^touch .*engagements\.yaml$/);
   });
 
-  it("--uninstall removes exactly those rules and leaves the user's, and drops empty stubs", () => {
+  it("--uninstall removes exactly the rules install added, and drops empty stubs", () => {
     const e = makeEnv("uninstall");
     writeFileSync(e.settingsPath, JSON.stringify({ permissions: { deny: ["Read(//secrets/**)"] } }));
-    inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome })));
-    inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, uninstall: true })));
-    const after = readSettings(e);
-    assert.deepEqual(after.permissions?.deny, ["Read(//secrets/**)"]);
-    assert.equal(after.hooks, undefined);
+    install(e);
+    assert.ok(existsSync(join(e.aegisHome, LEDGER)), "install records what it added");
+    install(e, { uninstall: true });
+    assert.deepEqual(readSettings(e).permissions?.deny, ["Read(//secrets/**)"]);
+    assert.equal(existsSync(join(e.aegisHome, LEDGER)), false, "the record goes with the rules");
 
-    // With no user rules the stub keys disappear entirely.
     const f = makeEnv("uninstall-clean");
-    inEnv(f, () => captureOutput(() => installClaudeMd({ claudeHome: f.claudeHome })));
-    inEnv(f, () => captureOutput(() => installClaudeMd({ claudeHome: f.claudeHome, uninstall: true })));
+    install(f);
+    install(f, { uninstall: true });
     assert.equal(readSettings(f).permissions, undefined);
   });
 
-  it("--uninstall on a settings.json with only our rules still writes the file (rules alone are a change)", () => {
-    const e = makeEnv("uninstall-rules-only");
-    const rules = inEnv(e, () => registryDenyRules());
-    writeFileSync(e.settingsPath, JSON.stringify({ permissions: { deny: rules } }));
-    const out = inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, uninstall: true })));
-    assert.match(out.stdout, /removed 2 registry permissions\.deny rule/);
+  it("never removes a rule the user already had before install (even one install would also write)", () => {
+    const e = makeEnv("user-had-it");
+    const mine = inEnv(e, () => registryDenyRules())[0]!;
+    writeFileSync(e.settingsPath, JSON.stringify({ permissions: { deny: [mine, "Read(//secrets/**)"] } }));
+    const out = install(e, { json: true });
+    const parsed = JSON.parse(out.stdout) as { registryDeny: { added: string[]; alreadyPresent: string[] } };
+    assert.deepEqual(parsed.registryDeny.alreadyPresent, [mine]);
+    assert.ok(!parsed.registryDeny.added.includes(mine));
+    install(e, { uninstall: true });
+    assert.deepEqual(readSettings(e).permissions?.deny, [mine, "Read(//secrets/**)"], "the user's own rule survives uninstall");
+  });
+
+  it("a second install keeps remembering what the first added", () => {
+    const e = makeEnv("twice");
+    install(e);
+    install(e);
+    install(e, { uninstall: true });
     assert.equal(readSettings(e).permissions, undefined);
+  });
+
+  it("upgrade: an earlier build's whole-directory Edit and Write rules are replaced, not kept", () => {
+    const e = makeEnv("legacy");
+    const old = [`Edit(/${e.aegisHome}/**)`, `Write(/${e.aegisHome}/**)`, "Read(//secrets/**)"];
+    writeFileSync(e.settingsPath, JSON.stringify({ permissions: { deny: old } }));
+    const out = install(e, { json: true });
+    const parsed = JSON.parse(out.stdout) as { registryDeny: { rules: string[] } };
+    const deny = readSettings(e).permissions!.deny!;
+    assert.ok(!deny.includes(old[0]!) && !deny.includes(old[1]!), "the broad rules must go");
+    assert.ok(deny.includes("Read(//secrets/**)"));
+    for (const r of parsed.registryDeny.rules) assert.ok(deny.includes(r));
+  });
+
+  it("uninstall of an earlier build's install (no ledger) removes its Edit and Write forms and keeps the user's rules", () => {
+    const e = makeEnv("legacy-uninstall");
+    const old = [`Edit(/${e.aegisHome}/**)`, `Write(/${e.aegisHome}/**)`];
+    writeFileSync(e.settingsPath, JSON.stringify({ permissions: { deny: [...old, "Read(//secrets/**)"] } }));
+    const out = install(e, { uninstall: true });
+    assert.match(out.stdout, /removed 2 registry permissions\.deny rule/);
+    assert.deepEqual(readSettings(e).permissions?.deny, ["Read(//secrets/**)"]);
   });
 });
 
-describe("denyRuleCoversDir", () => {
-  const dir = "/home/u/.config/repo-aegis";
-  it("accepts an absolute pattern at or above the directory, and a bare tool", () => {
-    assert.equal(denyRuleCoversDir("Edit(//home/u/.config/repo-aegis/**)", "Edit", dir), true);
-    assert.equal(denyRuleCoversDir("Edit(//home/u/.config/**)", "Edit", dir), true);
-    assert.equal(denyRuleCoversDir("Edit(//home/u/.config/repo-aegis/*)", "Edit", dir), true);
-    assert.equal(denyRuleCoversDir("Write", "Write", dir), true);
-    assert.equal(denyRuleCoversDir("Edit(~/.config/repo-aegis/**)", "Edit", dir, "/home/u"), true);
+describe("denyRuleCoversPath", () => {
+  const file = "/home/u/.config/repo-aegis/engagements.yaml";
+  it("accepts the exact file, a directory glob above it, ~ paths, and a bare Edit", () => {
+    assert.equal(denyRuleCoversPath("Edit(//home/u/.config/repo-aegis/engagements.yaml)", file), true);
+    assert.equal(denyRuleCoversPath("Edit(//home/u/.config/repo-aegis/**)", file), true);
+    assert.equal(denyRuleCoversPath("Edit(//home/u/.config/**)", file), true);
+    assert.equal(denyRuleCoversPath("Edit(//home/u/.config/repo-aegis/*)", file), true);
+    assert.equal(denyRuleCoversPath("Edit(~/.config/repo-aegis/engagements.yaml)", file, "/home/u"), true);
+    assert.equal(denyRuleCoversPath("Edit", file), true);
   });
-  it("rejects other directories, the wrong tool, relative patterns, prefixes that only look alike, and non-strings", () => {
-    assert.equal(denyRuleCoversDir("Edit(//home/u/.config/other/**)", "Edit", dir), false);
-    assert.equal(denyRuleCoversDir("Edit(//home/u/.config/repo-aeg/**)", "Edit", dir), false);
-    assert.equal(denyRuleCoversDir("Write(//home/u/.config/repo-aegis/**)", "Edit", dir), false);
-    assert.equal(denyRuleCoversDir("Edit(./.config/repo-aegis/**)", "Edit", dir), false);
-    assert.equal(denyRuleCoversDir("Edit(/.config/repo-aegis/**)", "Edit", dir), false);
-    assert.equal(denyRuleCoversDir(42, "Edit", dir), false);
+  it("rejects other files, Write and Read rules, relative patterns, look-alike prefixes and non-strings", () => {
+    assert.equal(denyRuleCoversPath("Edit(//home/u/.config/repo-aegis/engagements.yaml.age)", file), false);
+    assert.equal(denyRuleCoversPath("Edit(//home/u/.config/repo-aeg/**)", file), false);
+    assert.equal(denyRuleCoversPath("Write(//home/u/.config/repo-aegis/**)", file), false, "Write(path) is never matched by Claude Code");
+    assert.equal(denyRuleCoversPath("Write", file), false);
+    assert.equal(denyRuleCoversPath("Read(//home/u/.config/repo-aegis/**)", file), false);
+    assert.equal(denyRuleCoversPath("Edit(./.config/repo-aegis/**)", file), false);
+    assert.equal(denyRuleCoversPath("Edit(/.config/repo-aegis/**)", file), false);
+    assert.equal(denyRuleCoversPath(42, file), false);
+  });
+  it("a state/ file is not covered by what install writes", () => {
+    const e = makeEnv("state-writable");
+    const rules = inEnv(e, () => registryDenyRules());
+    const audit = join(e.aegisHome, "state", "audit.log");
+    assert.equal(rules.some(r => denyRuleCoversPath(r, audit)), false);
+    assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "hooks", "pre-push"))), true);
   });
 });
 
 describe("checkRegistryAgentWritable", () => {
-  it("warns (never fails) with no settings.json, an empty one, or only one of the two rules", () => {
+  it("warns (never fails) with no settings.json, an empty one, or a settings.json that covers only some paths", () => {
     const e = makeEnv("check-warn");
-    const dir = e.aegisHome;
-    const none = checkRegistryAgentWritable(e.claudeHome, dir);
+    const none = inEnv(e, () => checkRegistryAgentWritable(e.claudeHome));
     assert.equal(none.ok, false);
     assert.equal(none.severity, "warn");
     assert.match(none.fix ?? "", /install claude-md/);
-    assert.match(none.fix ?? "", /sandbox\.filesystem\.denyWrite/);
+    assert.match(none.fix ?? "", /touch /);
+    assert.doesNotMatch(none.fix ?? "", /denyWrite/);
 
-    writeFileSync(e.settingsPath, JSON.stringify({ permissions: { deny: [`Edit(/${dir}/**)`] } }));
-    assert.equal(checkRegistryAgentWritable(e.claudeHome, dir).ok, false, "Edit alone is not enough");
+    const registryOnly = `Edit(/${e.aegisHome}/engagements.yaml)`;
+    writeFileSync(e.settingsPath, JSON.stringify({ permissions: { deny: [registryOnly] } }));
+    assert.equal(inEnv(e, () => checkRegistryAgentWritable(e.claudeHome)).ok, false, "the registry alone is not enough");
 
     writeFileSync(e.settingsPath, "{ not json");
-    const bad = checkRegistryAgentWritable(e.claudeHome, dir);
+    const bad = inEnv(e, () => checkRegistryAgentWritable(e.claudeHome));
     assert.equal(bad.ok, false);
     assert.equal(bad.severity, "warn");
   });
 
+  it("a Write-only deny does not satisfy it (Claude Code never matches Write(path))", () => {
+    const e = makeEnv("check-write-only");
+    writeFileSync(e.settingsPath, JSON.stringify({ permissions: { deny: [`Write(/${e.aegisHome}/**)`] } }));
+    assert.equal(inEnv(e, () => checkRegistryAgentWritable(e.claudeHome)).ok, false);
+  });
+
   it("is clean once `install claude-md` has run, and warns again after `--uninstall`", () => {
     const e = makeEnv("check-roundtrip");
-    inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome })));
+    install(e);
     assert.equal(inEnv(e, () => checkRegistryAgentWritable(e.claudeHome)).ok, true);
-    inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, uninstall: true })));
+    install(e, { uninstall: true });
     assert.equal(inEnv(e, () => checkRegistryAgentWritable(e.claudeHome)).ok, false);
   });
 });
