@@ -34,6 +34,7 @@ import { parseDocument } from "yaml";
 import {
   withLockSync,
   parseRegistryText,
+  registeredOwners,
   PatternValidationError,
   RegistryNotFoundError,
   LockTimeoutError,
@@ -108,9 +109,8 @@ export function writeRegistryText(text: string, path: string): void {
  * The registered-owner set of `doc`: personalOrgs plus the githubOrgs of EVERY
  * engagement (ended or not), lower-cased, as a set.
  *
- * MUST MATCH core `registeredOwners()` (rule h, branch pr1-rule-h,
- * packages/core/src/registered-owners.ts); replace this with that import when
- * the branches merge. If the two disagree, this gate's idea of "the owner set
+ * Computed by core `registeredOwners()`, the function rule h uses. If the
+ * two ever disagreed, this gate's idea of "the owner set
  * just became empty" differs from the guard's, and a non-interactive caller can
  * empty the set the guard sees one step at a time. Tolerant of a malformed
  * document: it runs on the text before and after an edit, either of which may
@@ -126,15 +126,18 @@ export function registeredOwnerSet(doc: Doc): Set<string> {
   }
   if (js === null || typeof js !== "object") return owners;
   const root = js as Record<string, unknown>;
-  const add = (v: unknown): void => {
-    if (Array.isArray(v)) for (const x of v) if (typeof x === "string") owners.add(x.toLowerCase());
-  };
-  add(root["personalOrgs"]);
-  const engagements = Array.isArray(root["engagements"]) ? root["engagements"] : [];
-  for (const e of engagements) {
-    if (e !== null && typeof e === "object") add((e as Record<string, unknown>)["githubOrgs"]);
-  }
-  return owners;
+  // Keep only well-typed string lists, then defer to the guard's own
+  // function so the two cannot disagree.
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  const engagements = (Array.isArray(root["engagements"]) ? root["engagements"] : [])
+    .filter((e): e is Record<string, unknown> => e !== null && typeof e === "object")
+    .map(e => ({ id: "", name: "", markers: [], githubOrgs: strings(e["githubOrgs"]) }));
+  return registeredOwners({
+    alwaysBlock: [],
+    personalOrgs: strings(root["personalOrgs"]),
+    engagements,
+  });
 }
 
 /** Size of {@link registeredOwnerSet}. */
