@@ -727,6 +727,22 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
     assert.match(p.error, /not a valid GitHub owner\/repo/);
   });
 
+  it("a registered owner with a hostile repo: the rule g ask carries no name and no approve command (re-review)", () => {
+    const home = aegisHome("h-hostile-repo", OWNERS_REGISTRY);
+    for (const repo of ["acme/r$(id)", "acme/r‮gpj"]) {
+      const r = runGuard(claudePayload(`gh issue create --repo '${repo}' --body x`), { home, shimOnPath: true });
+      assert.equal(r.code, 0, r.stderr);
+      const reason = (JSON.parse(r.stdout) as DecisionJson).hookSpecificOutput.permissionDecisionReason;
+      assert.ok(!reason.includes("$(id)") && !reason.includes("‮"), JSON.stringify(reason));
+      assert.ok(!reason.includes("repo-aegis approve"), reason);
+      assert.match(reason, /invalid owner\/repo name/);
+    }
+    // The deny channel (no ask on Codex) drops the destination from `details` as well.
+    const d = denied(runGuard(codexPayload("gh issue create --repo 'acme/r$(id)' --body x"), { home, agent: "codex" }));
+    assert.equal(d.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    assert.equal(d.details.destination, undefined);
+  });
+
   it("an unparseable registry REFUSES (one bad YAML line must not switch rule h off), and says how to repair", () => {
     const home = aegisHome("h-corrupt", OWNERS_REGISTRY + "this line: is: not valid: yaml: [\n");
     const r = runGuard(claudePayload(PUSH_STRANGER), { home });

@@ -27,12 +27,14 @@ import {
   describeVerb,
   formatReceipt,
   isHumanPresent,
+  isPrintableDestination,
   loadRegistry,
   parseEgressIntents,
   parseRemoteUrl,
   RegistryNotFoundError,
   resolveDestinationOffline,
   ruleHStatus,
+  SHAPE_RULE_CODES,
   type Destination,
   type EgressIntent,
   type Registry,
@@ -102,7 +104,13 @@ interface DestinationJson {
   unresolved?: string;
 }
 
-function destinationJson(d: Destination): DestinationJson {
+/**
+ * The verdict's view of a destination, or `undefined` when its name is not a
+ * plausible GitHub owner/repo (shell syntax, a line break, U+202E): the name
+ * came from the agent's command line and this JSON reaches a terminal.
+ */
+function destinationJson(d: Destination): DestinationJson | undefined {
+  if (!isPrintableDestination(d)) return undefined;
   if (d.unresolved !== undefined) {
     return { org: d.org, repo: d.repo, visibility: "unknown", class: "unknown", unresolved: d.unresolved };
   }
@@ -134,6 +142,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
 
   const { registry, registryState } = loadRegistryOrEmpty();
   const ruleH = ruleHStatus(registryState, registry);
+  const humanPresent = isHumanPresent();
   // Write-through into the machine-wide destination cache (see
   // `hook guard-egress`): a command judged from inside a repository leaves
   // that repository's declaration where a later command from elsewhere can
@@ -146,7 +155,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
       cwd,
       registry,
       registryState,
-      humanPresent: isHumanPresent(),
+      humanPresent,
       // A shell has no prompt to offer, so `ask` degrades to `deny` in core.
       capabilities: { ask: false },
     });
@@ -155,6 +164,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   }
 
   if (decision.action === "deny" || decision.action === "ask") {
+    const shown = decision.destination && destinationJson(decision.destination);
     process.stderr.write(
       JSON.stringify({
         code: decision.code,
@@ -162,8 +172,10 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
         details: {
           verb: describeVerb(decision.intent.verb),
           // D4: say whether rule h judged (`applied`) or was skipped, and why.
-          ruleH,
-          ...(decision.destination && { destination: destinationJson(decision.destination) }),
+          // As in the hook: not when a person is present, and not for a shape
+          // rule (a–d), which never reached rule h.
+          ...(!humanPresent && !SHAPE_RULE_CODES.has(decision.code) && { ruleH }),
+          ...(shown && { destination: shown }),
         },
       }) + "\n",
     );
@@ -212,11 +224,12 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
     first === undefined
       ? undefined
       : `${describeVerb(first.verb)}${first.refspec !== undefined ? ` ${first.refspec}` : ""}`;
+  const destJson = destination ? destinationJson(destination) : undefined;
   emitJson({
     action: "allow",
     // Only for a command with egress intents: a plain read stays `{action}`.
-    ...(intents.length > 0 && { ruleH }),
-    ...(destination && { destination: destinationJson(destination) }),
+    ...(intents.length > 0 && !humanPresent && { ruleH }),
+    ...(destJson && { destination: destJson }),
     ...(decision.action === "allow" &&
       decision.approval !== undefined && {
         approval: { id: decision.approval.id, expiresAt: decision.approval.expiresAt },

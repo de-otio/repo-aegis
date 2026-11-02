@@ -76,6 +76,21 @@ export function safeDestination(org: string, repo: string): { org: string; repo:
   return { org: org.toLowerCase(), repo: repo.toLowerCase() };
 }
 
+/** Whether one owner name is a plausible GitHub owner (same rule as {@link safeDestination}). */
+export function isSafeOwner(org: string): boolean {
+  return SAFE_OWNER.test(org);
+}
+
+/**
+ * Whether `d` may be PRINTED or attached to a decision that a layer prints as
+ * JSON: an unresolved destination (`org`/`repo` are `*`) always may; a named
+ * one only if its name passes {@link safeDestination}. Keeps shell syntax,
+ * line breaks and bidirectional-control characters (U+202E) out of terminals.
+ */
+export function isPrintableDestination(d: { org: string; repo: string; unresolved?: string }): boolean {
+  return d.unresolved !== undefined || safeDestination(d.org, d.repo) !== null;
+}
+
 /** What stands in for a destination whose name failed {@link safeDestination}. */
 export const INVALID_DESTINATION_LABEL = "a destination with an invalid owner/repo name";
 

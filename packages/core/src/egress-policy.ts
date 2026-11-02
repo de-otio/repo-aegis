@@ -35,7 +35,7 @@
 // ref or PR — the receipt-before-the-fact a human sees when asked. They
 // never carry payload content, matched substrings, or registry entries.
 
-import { basename, isAbsolute, resolve as resolvePath } from "node:path";
+import { basename, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
 import { closeSync, openSync, readSync } from "node:fs";
 import { readCachedVisibility, treatAsPublicDestination, type RepoVisibility } from "./egress.js";
@@ -55,7 +55,14 @@ import {
 import { resolveCachedDestination } from "./destination-cache.js";
 import { findApproval, type EgressApproval } from "./egress-approval.js";
 import { ownerAdmitted, registeredOwners, UPSTREAM_ADMITTED_VERBS } from "./registered-owners.js";
-import { refusal, safeDestination, INVALID_DESTINATION_LABEL, type RefusalFix } from "./refusal.js";
+import {
+  refusal,
+  safeDestination,
+  isSafeOwner,
+  isPrintableDestination,
+  INVALID_DESTINATION_LABEL,
+  type RefusalFix,
+} from "./refusal.js";
 import { registryPath } from "./paths.js";
 import { homedir } from "node:os";
 import { parseRemoteUrl } from "./remote-url.js";
@@ -76,6 +83,18 @@ export type EgressCode =
   | "UNREGISTERED_OWNER_EGRESS"
   | "PUBLIC_EGRESS_NEEDS_HUMAN"
   | "SHIM_UNREACHABLE_NEEDS_HUMAN";
+
+/**
+ * The shape rules (a–d): unconditional, they never reach rule h. Layers use
+ * this to leave rule h's standing (`ruleH`, the skip note) out of a refusal
+ * that rule h had no part in.
+ */
+export const SHAPE_RULE_CODES: ReadonlySet<EgressCode> = new Set<EgressCode>([
+  "PUSH_IMPLICIT_TARGET",
+  "EGRESS_AFTER_CD",
+  "EGRESS_UNGUARDED_CHAIN",
+  "PAYLOAD_MODE_DEPENDENT_PATH",
+]);
 
 export interface Destination {
   org: string;
@@ -667,27 +686,60 @@ function positivelyDisjoint(a: ReadonlySet<string>, b: ReadonlySet<string>): boo
 }
 
 /**
- * Rule h's refusal text (§3.9). Names the verb and the destination's own
- * owner/repo, which the command already carries, and nothing else: never the
- * registered owners, engagement ids or upstreams (the redaction oracle).
+ * `d` if it may be printed or attached to a decision (see
+ * {@link isPrintableDestination}), else `undefined`: the name is dropped, as
+ * the refusal text drops it. Layers print the attached destination as JSON, so
+ * an invalid name (shell syntax, a line break, U+202E) never reaches a
+ * terminal through that channel either.
  */
+function printable(d: Destination): Destination | undefined {
+  return isPrintableDestination(d) ? d : undefined;
+}
+
+/** Orgs for a message: valid names, sorted; any invalid ones are counted, not shown. */
+function printOrgs(orgs: Iterable<string>): string {
+  const valid: string[] = [];
+  let invalid = 0;
+  for (const o of orgs) {
+    if (isSafeOwner(o)) valid.push(o.toLowerCase());
+    else invalid++;
+  }
+  const names = [...new Set(valid)].sort();
+  if (invalid > 0) names.push(invalid === 1 ? "1 invalid name" : `${invalid} invalid names`);
+  return names.join(", ");
+}
+
+/** A path for a message; one with control or format characters (U+202E and friends) is described instead. */
+function printablePath(p: string | undefined): string {
+  return p !== undefined && !/[\p{C}]/u.test(p) ? p : "a checkout on this machine";
+}
+
 /**
- * The registry file's path for the repair hint: the resolved path
- * (`REPO_AEGIS_REGISTRY`, or `<home>/engagements.yaml`), with the home
- * directory shown as `~`, and only if it is made of plain path characters
- * (a path with shell metacharacters is described, never printed).
+ * Where the registry file is, for the repair hint. The path is printed only
+ * when it is the default location under the home directory; for an override
+ * the hint names the variable instead, so a path the environment chose (and
+ * that could carry anything) is never echoed.
  */
 function registryPathLabel(): string {
   try {
-    const p = registryPath();
+    const viaRegistry = process.env["REPO_AEGIS_REGISTRY"];
+    if (viaRegistry !== undefined) return "the registry file (set by REPO_AEGIS_REGISTRY)";
+    if (process.env["REPO_AEGIS_HOME"] !== undefined) return "the registry file (under REPO_AEGIS_HOME)";
     const h = homedir();
-    const shown = h.length > 1 && p.startsWith(`${h}/`) ? `~${p.slice(h.length)}` : p;
-    return /^[A-Za-z0-9_.~/@+:-]+$/.test(shown) ? shown : "the registry file";
+    if (h.length > 1 && registryPath() === join(h, ".config", "repo-aegis", "engagements.yaml")) {
+      return "~/.config/repo-aegis/engagements.yaml";
+    }
+    return "the registry file";
   } catch {
     return "the registry file";
   }
 }
 
+/**
+ * Rule h's refusal text (§3.9). Names the verb and the destination's own
+ * owner/repo, which the command already carries, and nothing else: never the
+ * registered owners, engagement ids or upstreams (the redaction oracle).
+ */
 function unregisteredOwnerReason(
   intent: EgressIntent,
   destination: Destination,
@@ -727,7 +779,7 @@ function unregisteredOwnerReason(
         {
           by: "person",
           when: "If it is damaged",
-          step: `repairs ${registryPathLabel()} (\`repo-aegis status\` shows why it fails to load), then re-runs the command`,
+          step: `repairs ${registryPathLabel()}, then re-runs the command (\`repo-aegis status\` shows why it fails to load)`,
         },
       ],
     });
@@ -882,12 +934,10 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       // A destination whose name is not a plausible GitHub owner/repo is not
       // attached to the decision: layers print it as JSON, and the refusal
       // text deliberately carries no such name either.
-      const nameOk =
-        destination.unresolved !== undefined || safeDestination(destination.org, destination.repo) !== null;
       return deny(
         "UNREGISTERED_OWNER_EGRESS",
         unregisteredOwnerReason(intent, destination, opts.registryState, opts.registry),
-        nameOk ? destination : undefined,
+        printable(destination),
       );
     }
   }
@@ -939,9 +989,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           "CROSS_ORG_EGRESS",
           `${verb} → ${describeDestination(destination)}: the ${
             intent.verb === "git-push" ? "repository being pushed" : "payload's working tree"
-          } belongs to a trust boundary (${[...src.orgs].sort().join(", ")}) that does not overlap ` +
-            `the destination's (${[...destOrgs].sort().join(", ")}). This is the boundary both incidents crossed.`,
-          destination,
+          } belongs to a trust boundary (${printOrgs(src.orgs)}) that does not overlap ` +
+            `the destination's (${printOrgs(destOrgs)}). This is the boundary both incidents crossed.`,
+          printable(destination),
         );
       }
     }
@@ -962,7 +1012,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           `${verb} → ${describeDestination(destination)}: payload file \`${basename(file)}\` matches the ` +
             `destination's deny set (${hits} hit${hits === 1 ? "" : "s"}). Run \`repo-aegis check --path\` ` +
             `on it from the destination repo to see which patterns; nothing is shown here.`,
-          destination,
+          printable(destination),
         );
       }
     }
@@ -982,8 +1032,10 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       approval = null;
     }
     if (approval !== null) {
-      return { action: "allow", approval, intent, ...(destination && { destination }) };
+      const shown = destination && printable(destination);
+      return { action: "allow", approval, intent, ...(shown && { destination: shown }) };
     }
+    const shownDestination = destination ? printable(destination) : undefined;
     const what =
       destination?.unresolved !== undefined
         ? `UNRESOLVED destination`
@@ -1001,7 +1053,14 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     const approveCommand =
       approveTarget === null
         ? null
-        : `repo-aegis approve ${approveTarget === "wildcard" ? "'*'" : `${approveTarget.org}/${approveTarget.repo}`}`;
+        : `repo-aegis approve ${
+            approveTarget === "wildcard"
+              ? "'*'"
+              : approveTarget.repo === "*"
+                ? // `*` is a shell glob: quote it, as the global form is.
+                  `'${approveTarget.org}/*'`
+                : `${approveTarget.org}/${approveTarget.repo}`
+          }`;
     // Public only because nothing says private (issue #114): say so, and say
     // how the visibility gets recorded, so the refusal is not a dead end. Not
     // for an unresolved GraphQL target — there is no repository to record.
@@ -1018,7 +1077,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         : intent.repoFlag !== undefined
           ? ` (from --repo)`
           : destination?.fromCache
-            ? ` (from the checkout at ${destination.workingTree})`
+            ? ` (from the checkout at ${printablePath(destination.workingTree)})`
             : intent.apiEndpoint !== undefined && destination !== null
               ? ` (from the API path)`
               : "") +
@@ -1046,14 +1105,20 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
             `, or start the agent from a shell where the shim ` +
             `comes first (\`repo-aegis doctor\` says which).` +
             hint,
-          destination ?? undefined,
+          shownDestination,
         );
       }
       const reason =
         approveCommand === null
           ? `${head}: re-issue the command naming a valid owner/repo, or run it from a terminal.${hint}`
           : `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.${hint}`;
-      return { action: "ask", code: "PUBLIC_EGRESS_NEEDS_HUMAN", reason, ...(destination && { destination }), intent };
+      return {
+        action: "ask",
+        code: "PUBLIC_EGRESS_NEEDS_HUMAN",
+        reason,
+        ...(shownDestination && { destination: shownDestination }),
+        intent,
+      };
     }
     return deny(
       "PUBLIC_EGRESS_NEEDS_HUMAN",
@@ -1061,7 +1126,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         (approveCommand === null ? "" : `mint an approval first (\`${approveCommand}\`), `) +
         `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).` +
         hint,
-      destination ?? undefined,
+      shownDestination,
     );
   }
 

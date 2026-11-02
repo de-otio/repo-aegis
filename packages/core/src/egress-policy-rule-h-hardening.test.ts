@@ -68,10 +68,14 @@ function decide(command: string, over: Partial<DecideEgressOptions> = {}) {
   });
 }
 
-function withEnv<T>(vars: Record<string, string>, fn: () => T): T {
+/** Set (or, for `undefined`, unset) environment variables around `fn`. */
+function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
   const prior: Record<string, string | undefined> = {};
   for (const k of Object.keys(vars)) prior[k] = process.env[k];
-  Object.assign(process.env, vars);
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
   try {
     return fn();
   } finally {
@@ -264,27 +268,210 @@ describe("rule h — unreadable registry repair hint (review L4)", () => {
       reason: string;
     }).reason;
 
-  it("names the resolved registry path, says `repo-aegis status` shows why, and keeps the decrypt hint", () => {
-    withHome(home => {
-      const reason = reasonFor();
-      assert.ok(reason.includes(`repairs ${join(home, "engagements.yaml")} (\`repo-aegis status\` shows why it fails to load)`), reason);
-      assert.match(reason, /If the registry is encrypted, a person runs, from a terminal: repo-aegis registry decrypt --identity <key>/);
-      assert.ok(!reason.includes("repair the registry file"), "no longer reads as a command");
+  it("the default location (nothing overridden) is printed, as ~/..., with the status hint and the decrypt hint", () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "egress-rule-h-fakehome-"));
+    try {
+      withEnv({ REPO_AEGIS_HOME: undefined, REPO_AEGIS_REGISTRY: undefined, HOME: fakeHome }, () => {
+        const reason = reasonFor();
+        assert.ok(
+          reason.includes(
+            "repairs ~/.config/repo-aegis/engagements.yaml, then re-runs the command (`repo-aegis status` shows why it fails to load)",
+          ),
+          reason,
+        );
+        assert.ok(!reason.includes(fakeHome), "the home directory itself is not printed");
+        assert.match(reason, /If the registry is encrypted, a person runs, from a terminal: repo-aegis registry decrypt --identity <key>/);
+        assert.ok(!reason.includes("repair the registry file"), "does not read as a command");
+      });
+    } finally {
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("REPO_AEGIS_REGISTRY: the variable is named, the path (whatever it holds) is not printed", () => {
+    for (const p of [join(homedir(), "elsewhere", "engagements.yaml"), "/tmp/x y;$(id)/engagements.yaml", "/tmp/plain/engagements.yaml"]) {
+      withEnv({ REPO_AEGIS_REGISTRY: p }, () => {
+        const reason = reasonFor();
+        assert.ok(reason.includes("repairs the registry file (set by REPO_AEGIS_REGISTRY), then re-runs the command"), reason);
+        assert.ok(!reason.includes("elsewhere") && !reason.includes("$(id)") && !reason.includes("/tmp/plain"), reason);
+      });
+    }
+  });
+
+  it("REPO_AEGIS_HOME: the variable is named, the home path is not printed", () => {
+    withEnv({ REPO_AEGIS_REGISTRY: undefined }, () => {
+      withHome(home => {
+        const reason = reasonFor();
+        assert.ok(reason.includes("repairs the registry file (under REPO_AEGIS_HOME), then re-runs the command"), reason);
+        assert.ok(!reason.includes(home), reason);
+      });
     });
   });
 
-  it("honours REPO_AEGIS_REGISTRY, and shows the home directory as ~", () => {
-    const p = join(homedir(), "elsewhere", "engagements.yaml");
-    withEnv({ REPO_AEGIS_REGISTRY: p }, () => {
-      assert.ok(reasonFor().includes("repairs ~/elsewhere/engagements.yaml ("), reasonFor());
+  it("REPO_AEGIS_REGISTRY wins over REPO_AEGIS_HOME in the label, as it does in registryPath()", () => {
+    withHome(() => {
+      withEnv({ REPO_AEGIS_REGISTRY: "/tmp/r.yaml" }, () => {
+        assert.match(reasonFor(), /\(set by REPO_AEGIS_REGISTRY\)/);
+      });
     });
   });
+});
 
-  it("a path with shell metacharacters is described, never printed", () => {
-    withEnv({ REPO_AEGIS_REGISTRY: "/tmp/x y;$(id)/engagements.yaml" }, () => {
-      const reason = reasonFor();
-      assert.ok(reason.includes("repairs the registry file ("), reason);
-      assert.ok(!reason.includes("$(id)"), reason);
+// ---------------------------------------------------------------------------
+// Re-review: every destination that reaches text or JSON is validated
+// ---------------------------------------------------------------------------
+
+describe("destinations reaching rules e, f and g are validated too (re-review)", () => {
+  const RLO = "‮";
+  /** Nothing hostile may survive in the reason or in the whole decision, as JSON. */
+  function assertClean(out: { reason?: string; destination?: unknown }, label: string): void {
+    const json = JSON.stringify(out);
+    for (const frag of ["$(", RLO, "\\u202e", "\\u202E"]) {
+      assert.ok(!json.includes(frag), `${label}: decision JSON must not contain ${JSON.stringify(frag)}`);
+    }
+    assert.equal(out.destination, undefined, `${label}: an invalid destination is dropped from the decision`);
+  }
+
+  const REGISTERED_HOSTILE_REPOS = ["r$(id)", `r${RLO}gpj`];
+
+  for (const repo of REGISTERED_HOSTILE_REPOS) {
+    const shown = JSON.stringify(repo);
+    // Owner `acme` is registered, so rule h admits it; the repo is the hostile half.
+    it(`rule g under a registered owner: acme/${shown} — ask, deny and shim-unreachable carry no name and no approve command`, () => {
+      const base = { resolveDestination: () => dest({ org: "acme", repo }) };
+      const ask = decide("gh issue create --body x", base);
+      assert.ok(ask.action === "ask");
+      assertClean(ask, "ask");
+      assert.ok(!ask.reason.includes("repo-aegis approve"), ask.reason);
+      const denied = decide("gh issue create --body x", { ...base, capabilities: { ask: false } });
+      assert.ok(denied.action === "deny");
+      assertClean(denied, "deny");
+      assert.ok(!denied.reason.includes("repo-aegis approve"), denied.reason);
+      const shim = decide("gh issue create --body x", { ...base, capabilities: { ask: true, ghShimOnPath: false } });
+      assert.ok(shim.action === "deny");
+      assertClean(shim, "shim");
+    });
+
+    it(`an approval standing in for a person does not attach acme/${shown} to the allow`, () => {
+      const out = decide("gh issue create --body x", {
+        resolveDestination: () => dest({ org: "acme", repo }),
+        findApproval: () => ({ id: "a1", org: "*", repo: "*", createdAt: "", expiresAt: "2099-01-01T00:00:00.000Z", by: "op" }),
+      });
+      assert.equal(out.action, "allow");
+      assert.equal((out as { destination?: unknown }).destination, undefined);
+    });
+
+    it(`rule e (CROSS_ORG_EGRESS) for acme/${shown}: no name in the reason, none attached`, () => {
+      const out = decide("git push origin main", {
+        humanPresent: true,
+        resolveDestination: () => dest({ org: "acme", repo, classKnown: false }),
+        trustBoundaryOf: () => boundary(["customer-a-org"]),
+      });
+      assert.ok(out.action === "deny");
+      assert.equal(out.code, "CROSS_ORG_EGRESS");
+      assertClean(out, "rule e");
+      assert.match(out.reason, /a destination with an invalid owner\/repo name/);
+    });
+
+    it(`rule f (PAYLOAD_MARKER_HIT) for acme/${shown}: no name in the reason, none attached`, () => {
+      const out = decide("gh pr create -t x --body-file /abs/pr.md", {
+        humanPresent: true,
+        resolveDestination: () => dest({ org: "acme", repo }),
+        scanPayload: () => 2,
+      });
+      assert.ok(out.action === "deny");
+      assert.equal(out.code, "PAYLOAD_MARKER_HIT");
+      assertClean(out, "rule f");
+    });
+  }
+
+  it("rule e's org lists show valid names only: a hostile boundary org is counted, not printed", () => {
+    const out = decide("git push origin main", {
+      humanPresent: true,
+      resolveDestination: () => dest({ org: "acme", repo: "svc", classKnown: true, workingTree: "/work/dest" }),
+      // The source boundary (the cwd, /work/svc) and the destination's boundary
+      // (/work/dest) each carry a hostile org name.
+      trustBoundaryOf: wt =>
+        wt === "/work/dest" ? boundary([`dest${RLO}`, "acme-labs"]) : boundary([`src$(id)`, "customer-a-org"]),
+    });
+    assert.ok(out.action === "deny");
+    assert.equal(out.code, "CROSS_ORG_EGRESS");
+    for (const frag of ["$(", RLO]) assert.ok(!JSON.stringify(out.reason).includes(frag), JSON.stringify(frag));
+    assert.match(out.reason, /1 invalid name/);
+    assert.match(out.reason, /customer-a-org/);
+    assert.match(out.reason, /acme-labs/);
+  });
+
+  it("an invalid OWNER (registry missing, so rule h is skipped) is dropped by rules e, f and g alike", () => {
+    const hostile = dest({ org: `acme${RLO}`, repo: "r" });
+    const e = decide("git push origin main", {
+      registryState: "missing",
+      humanPresent: true,
+      resolveDestination: () => hostile,
+      trustBoundaryOf: () => boundary(["customer-a-org"]),
+    });
+    assert.ok(e.action === "deny" && e.code === "CROSS_ORG_EGRESS");
+    assertClean(e, "owner/rule e");
+    const f = decide("gh pr create -t x --body-file /abs/pr.md", {
+      registryState: "missing",
+      humanPresent: true,
+      resolveDestination: () => hostile,
+      scanPayload: () => 1,
+    });
+    assert.ok(f.action === "deny" && f.code === "PAYLOAD_MARKER_HIT");
+    assertClean(f, "owner/rule f");
+    const g = decide("gh issue create --body x", { registryState: "missing", resolveDestination: () => hostile });
+    assert.ok(g.action === "ask");
+    assertClean(g, "owner/rule g");
+  });
+
+  it("a valid destination is still attached to rule e, f and g decisions", () => {
+    const e = decide("git push origin main", {
+      humanPresent: true,
+      resolveDestination: () => dest({ org: "customer-a-org", repo: "x", classKnown: false }),
+      trustBoundaryOf: () => boundary(["acme"]),
+    });
+    assert.ok(e.action === "deny" && e.destination?.org === "customer-a-org");
+    const g = decide("gh issue create --body x", { resolveDestination: () => dest({ org: "acme", repo: "svc" }) });
+    assert.ok(g.action === "ask" && g.destination?.repo === "svc");
+  });
+
+  it("the checkout path of a cached destination is described, not printed, when it carries control or bidi characters", () => {
+    const out = decide("gh issue create --body x", {
+      resolveDestination: () =>
+        dest({ org: "acme", repo: "svc", fromCache: true, classKnown: true, workingTree: `/work/${RLO}gpj` }),
+    });
+    assert.ok(out.action === "ask");
+    assert.ok(!out.reason.includes(RLO), out.reason);
+    assert.match(out.reason, /from the checkout at a checkout on this machine/);
+    const plain = decide("gh issue create --body x", {
+      resolveDestination: () =>
+        dest({ org: "acme", repo: "svc", fromCache: true, classKnown: true, workingTree: "/work/svc" }),
+    });
+    assert.ok(plain.action === "ask" && plain.reason.includes("from the checkout at /work/svc"));
+  });
+
+  describe("a wildcard approve hint is shell-quoted", () => {
+    it("org-level destination: `repo-aegis approve 'acme/*'`, as the global form is `'*'`", () => {
+      for (const capabilities of [{ ask: true }, { ask: false }, { ask: true, ghShimOnPath: false }]) {
+        const out = decide("gh api -X POST orgs/acme/repos -f name=x", {
+          capabilities,
+          resolveDestination: () => dest({ org: "acme", repo: "*" }),
+        });
+        assert.ok(out.action !== "allow");
+        assert.ok(out.reason.includes("`repo-aegis approve 'acme/*'`"), out.reason);
+        assert.ok(!out.reason.includes("approve acme/*"), "never the unquoted glob");
+      }
+    });
+
+    it("the global form and a plain repo are unchanged", () => {
+      const unresolved = decide("gh api graphql -f query=x", {
+        registryState: "missing",
+        resolveDestination: () => dest({ org: "*", repo: "*", unresolved: "graphql-mutation" }),
+      });
+      assert.ok(unresolved.action === "ask" && unresolved.reason.includes("`repo-aegis approve '*'`"));
+      const plain = decide("gh issue create --body x", { resolveDestination: () => dest({ org: "acme", repo: "svc" }) });
+      assert.ok(plain.action === "ask" && plain.reason.includes("`repo-aegis approve acme/svc`"));
     });
   });
 });

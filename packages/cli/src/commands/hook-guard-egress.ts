@@ -39,10 +39,12 @@ import {
   recordWorkingTree,
   describeVerb,
   isHumanPresent,
+  isPrintableDestination,
   loadRegistry,
   parseEgressIntents,
   ruleHSkipNote,
   ruleHStatus,
+  SHAPE_RULE_CODES,
   RegistryEncryptedError,
   RegistryNotFoundError,
   type Destination,
@@ -222,7 +224,9 @@ function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistrySta
 function destinationDetails(
   d: Destination | undefined,
 ): { org: string; repo: string; visibility: string; class: string; unresolved?: string } | undefined {
-  if (!d) return undefined;
+  // Defence in depth: the policy already drops an invalid name from the
+  // decision, but this is what reaches the terminal, so check once more.
+  if (!d || !isPrintableDestination(d)) return undefined;
   return {
     org: d.org,
     repo: d.repo,
@@ -370,7 +374,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   // (no destination) or a person at the keyboard gets no extra line. No
   // registry contents, ever.
   const skipNote =
-    decision.destination !== undefined && !humanPresent && decision.code !== "UNREGISTERED_OWNER_EGRESS"
+    !humanPresent && decision.code !== "UNREGISTERED_OWNER_EGRESS" && !SHAPE_RULE_CODES.has(decision.code)
       ? ruleHSkipNote(ruleH)
       : null;
   const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);

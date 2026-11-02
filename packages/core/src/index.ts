@@ -306,9 +306,16 @@ export {
 export type { OwnerCandidate, RuleHStatus } from "./registered-owners.js";
 // The shared five-part refusal builder (what, why, approval, fix + who, where
 // to read more), so the three enforcement layers cannot drift in wording.
-export { refusal, agentGuideAnchor, safeDestination, INVALID_DESTINATION_LABEL } from "./refusal.js";
+export {
+  refusal,
+  agentGuideAnchor,
+  safeDestination,
+  isSafeOwner,
+  isPrintableDestination,
+  INVALID_DESTINATION_LABEL,
+} from "./refusal.js";
 export type { RefusalInput, RefusalFix } from "./refusal.js";
-export { findApprovalDefault } from "./egress-policy.js";
+export { findApprovalDefault, SHAPE_RULE_CODES } from "./egress-policy.js";
 // Human-minted, time-limited, destination-scoped approvals that satisfy
 // rule g from a shell with no TTY (`repo-aegis approve`).
 export {
