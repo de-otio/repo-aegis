@@ -12,20 +12,24 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureOutput, withEnv, lastJsonLine } from "../_test-utils.js";
+import { captureOutput, withEnv, lastJsonLine, scrubGitEnv } from "../_test-utils.js";
 import { check } from "./check.js";
 import { approvalsPath, mintApproval } from "@de-otio/repo-aegis-core";
 
 let tmp: string;
 let originalCwd: string;
+let restoreGitEnv: () => void;
 
 before(() => {
+  // Hermetic git env: the pre-push layer reads GIT_SSH_COMMAND / core.sshCommand.
+  restoreGitEnv = scrubGitEnv();
   tmp = mkdtempSync(join(tmpdir(), "repo-aegis-check-egress-"));
   originalCwd = process.cwd();
 });
 
 after(() => {
   process.chdir(originalCwd);
+  restoreGitEnv();
   rmSync(tmp, { recursive: true, force: true });
 });
 

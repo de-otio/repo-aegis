@@ -8,25 +8,42 @@
 // says, which is usually github.com, sometimes not. Rule h needs to know which
 // owner a push lands on, so it needs to know whether the alias is GitHub at all.
 //
+// PRINCIPLE: this is not an ssh emulator. It answers "positively this alias is
+// host X" only when it is sure, and says UNRESOLVED for everything doubtful.
+// Rule h refuses an unresolved push when it is active and nobody is present,
+// so a doubt costs a refusal, never a leak.
+//
 // Why not `ssh -G <host>`: it EVALUATES the config, including `Match exec
 // <command>`, and the config file is something an agent can write while the
 // hook that would run `ssh -G` runs outside the agent's sandbox. This module
 // only reads text. It understands `Host` (patterns with `*`, `?`, `!`),
-// `HostName`, `Include` (bounded depth, relative to ~/.ssh), and treats
-// anything it cannot evaluate purely as UNRESOLVED, never as "probably fine":
+// `HostName`, and `Include` (bounded, relative to ~/.ssh). Lines are split the
+// way OpenSSH's argv_split does (quotes, backslash escapes, and `#` starting a
+// comment only at the beginning of a token). It returns UNRESOLVED for:
 //
-//   - a `Match` block that sets `HostName` before any `Host` block has decided
-//     (its condition may be `exec …`, which this never runs);
-//   - a config or include file that exists but cannot be read, or is huge;
+//   - a `Match` block that sets `HostName`, or any other directive that can
+//     move the connection (its condition may be `exec …`, never run here);
+//   - `ProxyCommand`, `ProxyJump`, `CanonicalizeHostname` or `CanonicalDomains`
+//     in a block that applies (or may apply) to the alias: the host named in
+//     the URL is then not necessarily where the bytes go;
+//   - a `HostName` that is not a plain host name (quotes, `%` tokens, spaces,
+//     anything outside letters, digits, `.`, `-`, `_`);
+//   - a config or include file that exists but cannot be read, is huge, is not
+//     a regular file (a fifo would hang the hook), or has an unterminated quote;
 //   - an `Include` it cannot expand (env vars, `%` tokens, a glob in a
-//     directory component), or one nested too deeply;
-//   - a `HostName` containing `%` tokens.
+//     directory component, a character class), or one nested too deeply.
 //
 // A missing `~/.ssh/config` is not an error: there are simply no aliases.
 //
 // ssh takes the FIRST value it obtains for a keyword, so the first applicable
-// `HostName` in file order wins, and that is what this returns.
-import { readFileSync, readdirSync, statSync } from "node:fs";
+// `HostName` in file order wins, and that is what this returns. The whole
+// config is still walked afterwards, because a later block can add a proxy.
+//
+// Known limit (TOCTOU): a file can change between the check that it is a
+// regular file and the read. The file is opened with O_NONBLOCK and its type is
+// checked on the open descriptor, so a swapped-in fifo cannot hang the reader,
+// but the content read is whatever is there at that moment.
+import { constants, closeSync, fstatSync, openSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
@@ -46,17 +63,22 @@ export interface SshConfigOptions {
 
 /** `Include` nesting bound. ssh itself allows 16; a sane config needs 1 or 2. */
 export const SSH_INCLUDE_MAX_DEPTH = 5;
-/** Total files read for one lookup, so a fan-out of includes cannot be used to stall the hook. */
+/** Files opened plus directories listed for one lookup, so a fan-out of includes cannot stall the hook. */
 const MAX_FILES = 64;
 /** A config file bigger than this is not a config file. */
 const MAX_FILE_BYTES = 1024 * 1024;
+/** A `HostName` this parser will believe: a plain DNS name or address. */
+const PLAIN_HOSTNAME_RE = /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/;
 
 type Block = "applies" | "skips" | "match";
 
 interface Walk {
   host: string;
   sshDir: string;
+  /** Files opened plus directories listed so far. */
   files: number;
+  /** The first applicable HostName, once seen. */
+  hostName?: string;
 }
 
 /** `*` and `?` globs, anchored, case-insensitive. */
@@ -81,60 +103,113 @@ function hostPatternsApply(patterns: readonly string[], host: string): boolean {
   return positive;
 }
 
-/** Split a config line's value into tokens, honouring double quotes. `#` starts a comment outside quotes. */
-function tokenize(value: string): string[] {
+/**
+ * Split a config line the way OpenSSH's `argv_split` does: whitespace
+ * separates tokens; single and double quotes group; a backslash escapes a
+ * quote, a backslash or a space; and `#` starts a comment ONLY at the
+ * beginning of a token (`Host foo#x gh` has two patterns). Returns null for an
+ * unterminated quote, which makes ssh itself refuse the config.
+ */
+export function splitSshLine(line: string): string[] | null {
   const tokens: string[] = [];
-  let cur = "";
-  let inQuote = false;
-  let has = false;
-  for (const ch of value) {
-    if (inQuote) {
-      if (ch === '"') inQuote = false;
-      else cur += ch;
-    } else if (ch === '"') {
-      inQuote = true;
-      has = true;
-    } else if (ch === "#") {
-      break;
-    } else if (/\s/.test(ch)) {
-      if (has || cur.length > 0) tokens.push(cur);
-      cur = "";
-      has = false;
-    } else {
-      cur += ch;
-      has = true;
+  let i = 0;
+  const n = line.length;
+  for (;;) {
+    while (i < n && /\s/.test(line[i]!)) i++;
+    if (i >= n || line[i] === "#") break;
+    let cur = "";
+    while (i < n) {
+      const ch = line[i]!;
+      if (ch === "\\" && i + 1 < n && "'\"\\ ".includes(line[i + 1]!)) {
+        cur += line[i + 1]!;
+        i += 2;
+      } else if (ch === '"' || ch === "'") {
+        i++;
+        let closed = false;
+        while (i < n) {
+          const c = line[i]!;
+          if (c === "\\" && i + 1 < n && "'\"\\".includes(line[i + 1]!)) {
+            cur += line[i + 1]!;
+            i += 2;
+          } else if (c === ch) {
+            closed = true;
+            i++;
+            break;
+          } else {
+            cur += c;
+            i++;
+          }
+        }
+        if (!closed) return null;
+      } else if (/\s/.test(ch)) {
+        break;
+      } else {
+        cur += ch;
+        i++;
+      }
     }
+    tokens.push(cur);
   }
-  if (has || cur.length > 0) tokens.push(cur);
   return tokens;
 }
 
-/** `Keyword value…` or `Keyword=value…`; null for blanks and comments. */
-function parseLine(line: string): { keyword: string; args: string[] } | null {
-  const m = /^\s*([A-Za-z][A-Za-z0-9]*)\s*(?:=\s*|\s+)(.*)$/.exec(line);
-  if (m === null) return null;
-  return { keyword: m[1]!.toLowerCase(), args: tokenize(m[2]!) };
+/** `Keyword value…` or `Keyword=value…` (or `Keyword = value`); null for blanks and comments. */
+function parseLine(line: string): { keyword: string; args: string[] } | "bad" | null {
+  const tokens = splitSshLine(line);
+  if (tokens === null) return "bad";
+  if (tokens.length === 0) return null;
+  let first = tokens[0]!;
+  const rest = tokens.slice(1);
+  const eq = first.indexOf("=");
+  if (eq !== -1) {
+    const after = first.slice(eq + 1);
+    first = first.slice(0, eq);
+    if (after !== "") rest.unshift(after);
+  } else if (rest[0] === "=") {
+    rest.shift();
+  } else if (rest[0]?.startsWith("=")) {
+    rest[0] = rest[0].slice(1);
+  }
+  if (!/^[A-Za-z][A-Za-z0-9]*$/.test(first)) return null;
+  return { keyword: first.toLowerCase(), args: rest };
 }
-
-type StepResult = SshHostLookup | null; // null: keep looking
 
 function unresolved(why: string): SshHostLookup {
   return { kind: "unresolved", why };
 }
 
-/** Read a config file: null when absent, a lookup failure when unreadable. */
+/** Read a config file: null when absent or a directory, a lookup failure when unusable. */
 function readConfig(path: string, w: Walk): string | null | SshHostLookup {
   if (++w.files > MAX_FILES) return unresolved("too many included ssh config files");
+  let fd: number | undefined;
   try {
-    const st = statSync(path);
-    if (!st.isFile()) return null;
+    // A fifo or device must not be opened blocking. Check the type on the open
+    // descriptor (not on the path, which could change in between).
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const st = fstatSync(fd);
+    if (st.isDirectory()) return null;
+    if (!st.isFile()) return unresolved("an ssh config file is not a regular file");
     if (st.size > MAX_FILE_BYTES) return unresolved("an ssh config file is too large to read");
-    return readFileSync(path, "utf8");
+    return readFileSync(fd, "utf8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return null;
     return unresolved("an ssh config file exists but cannot be read");
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* nothing to do */
+      }
+    }
   }
+}
+
+/** glob(3): a leading `.` in a name is matched only by a pattern that itself starts with `.`. */
+function globMatchesName(pattern: string, name: string): boolean {
+  if (name.startsWith(".") && !pattern.startsWith(".")) return false;
+  return globToRegExp(pattern).test(name);
 }
 
 /** The files one `Include` argument names, in the order ssh reads them, or a failure. */
@@ -149,6 +224,8 @@ function expandInclude(arg: string, w: Walk): string[] | SshHostLookup {
   if (/[*?[]/.test(dir)) return unresolved("an Include has a glob in a directory component");
   if (!/[*?[]/.test(base)) return [path];
   if (base.includes("[")) return unresolved("an Include uses a character class");
+  // A directory listing counts against the same bound as a file read.
+  if (++w.files > MAX_FILES) return unresolved("too many included ssh config files");
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -157,14 +234,23 @@ function expandInclude(arg: string, w: Walk): string[] | SshHostLookup {
     if (code === "ENOENT" || code === "ENOTDIR") return [];
     return unresolved("an Include directory cannot be read");
   }
-  const re = globToRegExp(base);
   return names
-    .filter(n => re.test(n))
+    .filter(n => globMatchesName(base, n))
     .sort()
     .map(n => join(dir, n));
 }
 
-function walkFile(path: string, depth: number, initial: Block, w: Walk): StepResult {
+/** Directives that can move where an ssh connection really goes. */
+const REDIRECTING = new Set(["proxycommand", "proxyjump", "canonicalizehostname", "canonicaldomains"]);
+
+function isNoOp(keyword: string, arg: string | undefined): boolean {
+  const a = (arg ?? "").toLowerCase();
+  if (keyword === "proxycommand" || keyword === "proxyjump") return a === "none";
+  if (keyword === "canonicalizehostname") return a === "no";
+  return false;
+}
+
+function walkFile(path: string, depth: number, initial: Block, w: Walk): SshHostLookup | null {
   if (depth > SSH_INCLUDE_MAX_DEPTH) return unresolved("ssh config Includes are nested too deeply");
   const text = readConfig(path, w);
   if (text === null) return null;
@@ -173,6 +259,7 @@ function walkFile(path: string, depth: number, initial: Block, w: Walk): StepRes
   for (const line of text.split(/\r?\n/)) {
     const parsed = parseLine(line);
     if (parsed === null) continue;
+    if (parsed === "bad") return unresolved("an ssh config line has an unterminated quote");
     switch (parsed.keyword) {
       case "host":
         block = hostPatternsApply(parsed.args, w.host) ? "applies" : "skips";
@@ -184,9 +271,15 @@ function walkFile(path: string, depth: number, initial: Block, w: Walk): StepRes
         if (block === "skips") break;
         const value = parsed.args[0];
         if (value === undefined || value === "") break;
-        if (block === "match") return unresolved("a Match block sets HostName and cannot be evaluated offline");
-        if (value.includes("%")) return unresolved("HostName uses a % token");
-        return { kind: "hostname", hostName: value.toLowerCase().replace(/\.$/, "") };
+        if (block === "match") {
+          if (w.hostName === undefined) return unresolved("an ssh Match block sets HostName and cannot be evaluated offline");
+          break; // an earlier Host block already decided; first value wins
+        }
+        if (w.hostName !== undefined) break;
+        const hostName = value.toLowerCase().replace(/\.$/, "");
+        if (!PLAIN_HOSTNAME_RE.test(hostName)) return unresolved("HostName is not a plain host name");
+        w.hostName = hostName;
+        break;
       }
       case "include": {
         if (block === "skips") break;
@@ -201,6 +294,13 @@ function walkFile(path: string, depth: number, initial: Block, w: Walk): StepRes
         break;
       }
       default:
+        if (REDIRECTING.has(parsed.keyword) && block !== "skips" && !isNoOp(parsed.keyword, parsed.args[0])) {
+          return unresolved(
+            block === "match"
+              ? "an ssh Match block sets a connection redirect and cannot be evaluated offline"
+              : `the ssh config sets ${parsed.keyword} for this host, so the named host is not necessarily where the connection goes`,
+          );
+        }
         break;
     }
   }
@@ -215,7 +315,9 @@ export function lookupSshHost(host: string, opts: SshConfigOptions = {}): SshHos
   try {
     const sshDir = opts.sshDir ?? join(homedir(), ".ssh");
     const w: Walk = { host: host.toLowerCase(), sshDir, files: 0 };
-    return walkFile(join(sshDir, "config"), 0, "applies", w) ?? { kind: "none" };
+    const r = walkFile(join(sshDir, "config"), 0, "applies", w);
+    if (r !== null) return r;
+    return w.hostName !== undefined ? { kind: "hostname", hostName: w.hostName } : { kind: "none" };
   } catch {
     return unresolved("the ssh config could not be evaluated");
   }

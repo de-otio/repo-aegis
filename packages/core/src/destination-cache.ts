@@ -32,7 +32,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { readCachedVisibility, type RepoVisibility } from "./egress.js";
 import { repoAegisHome } from "./paths.js";
-import { parseRemoteUrl } from "./remote-url.js";
+import { parseRemoteUrlResolved } from "./remote-url.js";
 import { readRepoConfig, REPO_CLASSES, type RepoClass } from "./repo.js";
 import { getRemoteUrl } from "./working-tree.js";
 
@@ -123,7 +123,7 @@ export function describeWorkingTree(
   workingTree: string,
 ): { key: string; entry: Omit<DestinationCacheEntry, "checkedAt"> } | null {
   const url = getRemoteUrl(workingTree);
-  const parsed = url === null ? null : parseRemoteUrl(url);
+  const parsed = url === null ? null : parseRemoteUrlResolved(url);
   if (parsed === null) return null;
   const cfg = readRepoConfig(workingTree);
   return {

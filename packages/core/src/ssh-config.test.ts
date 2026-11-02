@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { lookupSshHost, SSH_INCLUDE_MAX_DEPTH } from "./ssh-config.js";
+import { execFileSync } from "node:child_process";
+import { lookupSshHost, splitSshLine, SSH_INCLUDE_MAX_DEPTH } from "./ssh-config.js";
 
 let root: string;
 let n = 0;
@@ -201,5 +202,141 @@ describe("lookupSshHost — unreadable input fails closed", () => {
   it("never throws on garbage", () => {
     const sshDir = sshDirWith("\u0000\u0001 Host\nHost\nHostName\nInclude\n=\n\"unterminated\n");
     assert.doesNotThrow(() => lookupSshHost("x", { sshDir }));
+  });
+});
+
+describe("splitSshLine / lookupSshHost — tokenizing follows OpenSSH's argv_split (H1)", () => {
+  it("splits like argv_split: quotes, escapes, and `#` only at the start of a token", () => {
+    assert.deepEqual(splitSshLine("Host 'gh'"), ["Host", "gh"]);
+    assert.deepEqual(splitSshLine('HostName "github.com"'), ["HostName", "github.com"]);
+    assert.deepEqual(splitSshLine("Host foo#x gh"), ["Host", "foo#x", "gh"]);
+    assert.deepEqual(splitSshLine("Host gh #comment here"), ["Host", "gh"]);
+    assert.deepEqual(splitSshLine("# whole line"), []);
+    assert.deepEqual(splitSshLine("HostName a\\ b"), ["HostName", "a b"]);
+    assert.deepEqual(splitSshLine('Host "a b" \'c d\''), ["Host", "a b", "c d"]);
+    assert.deepEqual(splitSshLine('Host "a\\"b"'), ["Host", 'a"b']);
+    assert.deepEqual(splitSshLine("Host a'b c'd"), ["Host", "ab cd"]);
+    assert.equal(splitSshLine('Host "unterminated'), null);
+    assert.equal(splitSshLine("Host 'unterminated"), null);
+  });
+
+  it("single-quoted and double-quoted Host and HostName are understood", () => {
+    const sshDir = sshDirWith("Host 'gh'\n  HostName 'github.com'\n");
+    assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com" });
+    const dq = sshDirWith('Host "gh"\n  HostName "ssh.github.com"\n');
+    assert.deepEqual(lookupSshHost("gh", { sshDir: dq }), { kind: "hostname", hostName: "ssh.github.com" });
+  });
+
+  it("`Host foo#x gh` has two patterns, so `gh` is covered", () => {
+    const sshDir = sshDirWith("Host foo#x gh\n  HostName github.com\n");
+    assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com" });
+    assert.deepEqual(lookupSshHost("foo#x", { sshDir }), { kind: "hostname", hostName: "github.com" });
+  });
+
+  it("a trailing comment after a value is not part of the value", () => {
+    const sshDir = sshDirWith("Host gh # the work alias\n  HostName github.com # real host\n");
+    assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com" });
+  });
+
+  it("a HostName that is not a plain host name is unresolved", () => {
+    for (const bad of ['"git hub.com"', "a\\ b", "evil.example;id", "$(id)", "[::1]", "a@b"]) {
+      const sshDir = sshDirWith(`Host gh\n  HostName ${bad}\n`);
+      assert.equal(lookupSshHost("gh", { sshDir }).kind, "unresolved", bad);
+    }
+  });
+
+  it("an unterminated quote anywhere makes the config unresolved", () => {
+    assert.equal(lookupSshHost("gh", { sshDir: sshDirWith('Host gh\n  HostName "github.com\n') }).kind, "unresolved");
+  });
+});
+
+describe("lookupSshHost — redirection other than HostName is a doubt (H2)", () => {
+  for (const directive of [
+    "ProxyCommand nc evil.example 22",
+    "ProxyJump jump.example",
+    "CanonicalizeHostname yes",
+    "CanonicalDomains example.org",
+  ]) {
+    it(`${directive.split(" ")[0]} in an applying block makes the alias unresolved`, () => {
+      const sshDir = sshDirWith(`Host gh\n  HostName github.com\n  ${directive}\n`);
+      assert.equal(lookupSshHost("gh", { sshDir }).kind, "unresolved");
+    });
+
+    it(`${directive.split(" ")[0]} under a Host * block applies to every alias`, () => {
+      const sshDir = sshDirWith(`Host gh\n  HostName github.com\nHost *\n  ${directive}\n`);
+      assert.equal(lookupSshHost("gh", { sshDir }).kind, "unresolved");
+    });
+
+    it(`${directive.split(" ")[0]} in a block that does not apply is ignored`, () => {
+      const sshDir = sshDirWith(`Host other\n  ${directive}\nHost gh\n  HostName github.com\n`);
+      assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com" });
+    });
+
+    it(`${directive.split(" ")[0]} in a Match block is unresolved`, () => {
+      const sshDir = sshDirWith(`Host gh\n  HostName github.com\nMatch exec "true"\n  ${directive}\n`);
+      assert.equal(lookupSshHost("gh", { sshDir }).kind, "unresolved");
+    });
+  }
+
+  it("`none` values are no-ops", () => {
+    const sshDir = sshDirWith("Host gh\n  HostName github.com\n  ProxyCommand none\n  ProxyJump none\n  CanonicalizeHostname no\n");
+    assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com" });
+  });
+
+  it("a Match block that sets only unrelated options does not matter", () => {
+    const sshDir = sshDirWith('Match exec "true"\n  ForwardAgent no\nHost gh\n  HostName github.com\n');
+    assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com" });
+  });
+
+  it("the reason for a Match doubt names the Match block", () => {
+    const r = lookupSshHost("gh", { sshDir: sshDirWith('Match exec "true"\n  HostName github.com\n') });
+    assert.equal(r.kind, "unresolved");
+    if (r.kind === "unresolved") assert.match(r.why, /Match block/);
+  });
+});
+
+describe("lookupSshHost — Include globs and file handling (M1)", () => {
+  it("a glob does not match dotfiles unless the pattern itself starts with `.`", () => {
+    const sshDir = sshDirWith("Include conf.d/*\n", {
+      "conf.d/.hidden": "Host gh\n  HostName git.example.org\n",
+      "conf.d/10-real": "Host gh\n  HostName github.com\n",
+    });
+    assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com" });
+    const onlyHidden = sshDirWith("Include conf.d/*\n", { "conf.d/.hidden": "Host gh\n  HostName git.example.org\n" });
+    assert.deepEqual(lookupSshHost("gh", { sshDir: onlyHidden }), { kind: "none" });
+    const explicit = sshDirWith("Include conf.d/.*\n", { "conf.d/.hidden": "Host gh\n  HostName git.example.org\n" });
+    assert.deepEqual(lookupSshHost("gh", { sshDir: explicit }), { kind: "hostname", hostName: "git.example.org" });
+  });
+
+  it("directory listings count against the same bound as file reads", () => {
+    // 70 glob Includes, none matching: each is a readdir, so the bound trips.
+    const many = sshDirWith(Array.from({ length: 70 }, (_, i) => `Include none${i}*\n`).join(""));
+    assert.equal(lookupSshHost("gh", { sshDir: many }).kind, "unresolved");
+    // ...and a handful of them is fine.
+    const few = sshDirWith(Array.from({ length: 5 }, (_, i) => `Include none${i}*\n`).join(""));
+    assert.deepEqual(lookupSshHost("gh", { sshDir: few }), { kind: "none" });
+  });
+
+  it("a fifo in place of a config file cannot hang the reader", (t) => {
+    if (process.platform === "win32") return t.skip("no fifos");
+    const sshDir = sshDirWith(null);
+    try {
+      execFileSync("mkfifo", [join(sshDir, "config")]);
+    } catch {
+      return t.skip("mkfifo unavailable");
+    }
+    const r = lookupSshHost("gh", { sshDir });
+    assert.equal(r.kind, "unresolved");
+  });
+
+  it("a fifo named by an Include is unresolved too", (t) => {
+    if (process.platform === "win32") return t.skip("no fifos");
+    const sshDir = sshDirWith("Include pipe\n");
+    try {
+      execFileSync("mkfifo", [join(sshDir, "pipe")]);
+    } catch {
+      return t.skip("mkfifo unavailable");
+    }
+    assert.equal(lookupSshHost("gh", { sshDir }).kind, "unresolved");
   });
 });

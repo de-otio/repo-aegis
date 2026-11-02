@@ -83,7 +83,6 @@ describe("parseRemoteUrl — hostile URLs are never attributed", () => {
       "https://github.com@evil.example/stranger/r",
       "https://gitlab.com/stranger/r.git",
       "git@gitlab.com:stranger/r.git", // no ssh config here: its own host
-      "ssh://git@[::1]/stranger/r",
       "file:///srv/git/r.git",
       "/srv/git/r.git",
       "../relative/path",
@@ -155,10 +154,15 @@ describe("resolveRemoteUrl — ssh Host aliases", () => {
     assert.equal(resolveRemoteUrl("git@gh-work:stranger/../acme/r.git", lookup).kind, "unresolved");
   });
 
-  it("the `github.com-<alias>` convention stays GitHub when nothing contradicts it, and when the config cannot be read", () => {
+  it("the `github.com-<alias>` convention stays GitHub when the ssh config says nothing about it", () => {
     assert.equal(resolveRemoteUrl("git@github.com-work:stranger/r.git", NO_SSH_CONFIG).kind, "github");
-    const unresolved = lookupTable({ "github.com-work": { kind: "unresolved", why: "x" } });
-    assert.equal(resolveRemoteUrl("git@github.com-work:stranger/r.git", unresolved).kind, "github");
+  });
+
+  it("…but when the ssh config cannot be resolved for it, that is a doubt: unresolved, and the reason names the doubt", () => {
+    const unresolved = lookupTable({ "github.com-work": { kind: "unresolved", why: "an ssh Match block sets HostName" } });
+    const t = resolveRemoteUrl("git@github.com-work:stranger/r.git", unresolved);
+    assert.equal(t.kind, "unresolved");
+    if (t.kind === "unresolved") assert.match(t.why, /Match block/);
   });
 
   it("…but an ssh config that says that alias is another host wins", () => {
@@ -174,6 +178,136 @@ describe("resolveRemoteUrl — ssh Host aliases", () => {
     };
     assert.equal(resolveRemoteUrl("git@$(id):stranger/r.git", lookup).kind, "unresolved");
     assert.equal(asked, false);
+  });
+});
+
+describe("bracketed hosts are classified by their inner host (C1: git strips the brackets)", () => {
+  it("`[github.com]` in every position is github.com, never skipped", () => {
+    for (const u of [
+      "[github.com]:stranger/r.git",
+      "git@[github.com]:stranger/r.git",
+      "[github.com:22]:stranger/r.git",
+      "git@[github.com:22]:stranger/r.git",
+      "ssh://[github.com]/stranger/r.git",
+      "ssh://git@[github.com]/stranger/r.git",
+      "ssh://git@[github.com]:22/stranger/r.git",
+      "ssh://git@[ssh.github.com]:443/stranger/r.git",
+    ]) {
+      assert.deepEqual(resolveRemoteUrl(u, NO_SSH_CONFIG), { kind: "github", org: "stranger", repo: "r" }, u);
+      assert.deepEqual(parseRemoteUrl(u), { host: "github.com", org: "stranger", repo: "r" }, u);
+    }
+  });
+
+  it("a bracketed alias is looked up by its inner host", () => {
+    const asked: string[] = [];
+    const lookup = (h: string): SshHostLookup => {
+      asked.push(h);
+      return { kind: "hostname", hostName: "github.com" };
+    };
+    assert.equal(resolveRemoteUrl("[gh-work]:stranger/r.git", lookup).kind, "github");
+    assert.deepEqual(asked, ["gh-work"]);
+  });
+
+  it("a real IP literal in brackets is unresolved (v4, v6, numeric spellings)", () => {
+    for (const u of [
+      "[::1]:stranger/r.git",
+      "git@[2001:db8::1]:stranger/r.git",
+      "ssh://git@[::1]/stranger/r.git",
+      "ssh://[2001:db8::1]:22/stranger/r.git",
+      "git@[127.0.0.1]:stranger/r.git",
+      "[140.82.112.3]:stranger/r.git",
+      "ssh://git@[140.82.112.3]/stranger/r.git",
+    ]) {
+      assert.equal(resolveRemoteUrl(u, NO_SSH_CONFIG).kind, "unresolved", u);
+    }
+  });
+
+  it("malformed brackets are unresolved, never GitHub", () => {
+    for (const u of [
+      "[github.com:stranger/r.git",
+      "[github.com]x:stranger/r.git",
+      "ssh://[github.com/stranger/r.git",
+      "ssh://[github.com]x/stranger/r.git",
+      "[github.com:abc]:stranger/r.git",
+      "x[github.com]:stranger/r.git",
+    ]) {
+      assert.notEqual(resolveRemoteUrl(u, NO_SSH_CONFIG).kind, "github", u);
+    }
+  });
+});
+
+describe("only the guard being SURE makes a push non-GitHub (M2, M4, L1)", () => {
+  const ssh = (hostName: string): ((h: string) => SshHostLookup) => () => ({ kind: "hostname", hostName });
+
+  it("a one-letter scp host is ssh, not a local path (M2)", () => {
+    assert.equal(classifyRemoteUrl("a:stranger/r.git").kind, "alias");
+    const asked: string[] = [];
+    const t = resolveRemoteUrl("a:stranger/r.git", h => {
+      asked.push(h);
+      return { kind: "hostname", hostName: "github.com" };
+    });
+    assert.deepEqual(t, { kind: "github", org: "stranger", repo: "r" });
+    assert.deepEqual(asked, ["a"]);
+  });
+
+  it("IP-literal hosts are unresolved, directly or through HostName (M4)", () => {
+    for (const u of [
+      "git@140.82.112.3:stranger/r.git",
+      "ssh://git@140.82.112.3/stranger/r.git",
+      "https://140.82.112.3/stranger/r.git",
+      "https://2130706433/stranger/r.git",
+      "https://0x7f.1/stranger/r.git",
+    ]) {
+      assert.equal(resolveRemoteUrl(u, NO_SSH_CONFIG).kind, "unresolved", u);
+    }
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", ssh("140.82.112.3")).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", ssh("::1")).kind, "unresolved");
+  });
+
+  it("a github.com subdomain other than ssh.github.com is unresolved, directly or through HostName (M4)", () => {
+    for (const u of [
+      "git@gist.github.com:stranger/r.git",
+      "git@www.github.com:stranger/r.git",
+      "ssh://git@api.github.com/stranger/r.git",
+      "https://gist.github.com/stranger/r.git",
+    ]) {
+      assert.equal(resolveRemoteUrl(u, NO_SSH_CONFIG).kind, "unresolved", u);
+    }
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", ssh("gist.github.com")).kind, "unresolved");
+    // ...while a look-alike that is not under github.com is just another host.
+    assert.equal(resolveRemoteUrl("https://notgithub.com/stranger/r.git", NO_SSH_CONFIG).kind, "non-github");
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", ssh("github.com.evil.example")).kind, "non-github");
+  });
+
+  it("a remote-helper address is classified by its address; an unknown helper is unresolved (L1)", () => {
+    assert.deepEqual(resolveRemoteUrl("https::https://github.com/stranger/r.git", NO_SSH_CONFIG), {
+      kind: "github",
+      org: "stranger",
+      repo: "r",
+    });
+    for (const u of [
+      "ext::ssh git@github.com %S stranger/r.git",
+      "foo::https://github.com/stranger/r.git",
+      "testgit::git@github.com:stranger/r.git",
+      "fd::3",
+      "https::git@github.com:stranger/r.git",
+    ]) {
+      assert.equal(resolveRemoteUrl(u, NO_SSH_CONFIG).kind, "unresolved", u);
+    }
+  });
+
+  it("an ssh override makes every ssh alias unresolved; a literal github.com only when it can redirect (H2)", () => {
+    const found = ssh("github.com");
+    const plain = { present: true, mayRedirect: false };
+    const redirecting = { present: true, mayRedirect: true };
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", found, { sshOverride: plain }).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", found, { sshOverride: redirecting }).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("git@gitlab.example:stranger/r.git", NO_SSH_CONFIG, { sshOverride: plain }).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("git@github.com:stranger/r.git", found, { sshOverride: plain }).kind, "github");
+    assert.equal(resolveRemoteUrl("git@github.com:stranger/r.git", found, { sshOverride: redirecting }).kind, "unresolved");
+    // An override changes nothing for a non-ssh transport.
+    assert.equal(resolveRemoteUrl("https://github.com/stranger/r.git", found, { sshOverride: redirecting }).kind, "github");
+    assert.equal(resolveRemoteUrl("https://gitlab.example/stranger/r.git", found, { sshOverride: redirecting }).kind, "non-github");
   });
 });
 

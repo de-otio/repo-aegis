@@ -254,3 +254,37 @@ export function lastJsonLine<T>(stream: string): T {
 function assertDefined(v: unknown, msg: string): asserts v is NonNullable<unknown> {
   if (v === undefined || v === null) throw new Error(msg);
 }
+
+const GIT_SCRUBBED = /^(GIT_SSH.*|GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+))$/;
+
+/**
+ * Make the process's git environment hermetic: no outer `GIT_SSH_COMMAND`,
+ * `GIT_CONFIG_*` (a sandbox or CI wrapper often sets them; the ssh override
+ * check reads exactly these), global and system git config off. Returns the undo.
+ */
+export function scrubGitEnv(): () => void {
+  const saved: Record<string, string | undefined> = {};
+  const touch = (name: string, value: string | undefined): void => {
+    if (!(name in saved)) saved[name] = process.env[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  };
+  for (const name of Object.keys(process.env)) if (GIT_SCRUBBED.test(name)) touch(name, undefined);
+  touch("GIT_CONFIG_GLOBAL", "/dev/null");
+  touch("GIT_CONFIG_NOSYSTEM", "1");
+  return () => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+}
+
+/** An environment for a child `git`: the current one, scrubbed of ssh/config overrides, plus `extra`. */
+export function hermeticGitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!GIT_SCRUBBED.test(k)) env[k] = v;
+  env["GIT_CONFIG_GLOBAL"] = "/dev/null";
+  env["GIT_CONFIG_NOSYSTEM"] = "1";
+  return { ...env, ...extra };
+}

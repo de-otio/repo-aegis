@@ -15,8 +15,14 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolvePushUrls } from "./push-urls.js";
-import { decideEgress, resolveDestinationOffline } from "./egress-policy.js";
+import { resolvePushUrls, detectSshOverride } from "./push-urls.js";
+import { hermeticGitEnv, scrubGitEnv } from "./_test-git-env.js";
+import {
+  decideEgress,
+  describeDestination,
+  describeDestinationForReceipt,
+  resolveDestinationOffline,
+} from "./egress-policy.js";
 import type { Registry } from "./registry.js";
 import { parseEgressIntents } from "./egress-intent.js";
 
@@ -31,11 +37,14 @@ function git(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}): string {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, ...env },
+    env: hermeticGitEnv(env),
   });
 }
 
+let restoreEnv: () => void;
+
 before(() => {
+  restoreEnv = scrubGitEnv();
   root = mkdtempSync(join(tmpdir(), "repo-aegis-push-urls-"));
   bare = join(root, "bare.git");
   mkdirSync(bare);
@@ -53,6 +62,7 @@ before(() => {
 });
 
 after(() => {
+  restoreEnv();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -209,7 +219,10 @@ describe("resolveDestinationOffline for `git push <remote>` uses the push URLs",
     ]);
     const d = destFor(repo, "git push origin main");
     assert.equal(d?.org, "acme");
-    assert.deepEqual(d?.alsoTargets, [{ org: "stranger", repo: "y" }]);
+    assert.deepEqual(
+      d?.alsoTargets?.map(t => `${t.org}/${t.repo}`),
+      ["stranger/y"],
+    );
   });
 
   it("an insteadOf rewrite to another owner decides the destination", () => {
@@ -343,5 +356,200 @@ describe("rule h requires EVERY push URL to be admitted (decideEgress, default r
     if (d.action === "deny") assert.match(d.reason, /does not resolve offline/);
     const withPerson = decide(repo, true);
     assert.equal(withPerson.action, "allow", JSON.stringify(withPerson));
+  });
+});
+
+describe("rules e–g judge EVERY push target, and the most restrictive decision wins (M3)", () => {
+  const registry = {
+    engagements: [],
+    alwaysBlock: [],
+    personalOrgs: ["acme", "other-org"],
+    schemaVersion: 2,
+  } as unknown as Registry;
+
+  /** `acme/x` is this repo's own origin, cached private; every other target has no cache (visibility unknown). */
+  function privateRepo(config: Array<[string, string]>): string {
+    const repo = makeRepo([
+      ["remote.origin.url", "git@github.com:acme/x.git"],
+      ["repo-aegis.class", "private-strict"],
+      ["repo-aegis.visibility", "private"],
+      ...config,
+    ]);
+    return repo;
+  }
+
+  function decide(repo: string, humanPresent = false): ReturnType<typeof decideEgress> {
+    return decideEgress({
+      intents: parseEgressIntents("git push origin main"),
+      cwd: repo,
+      registry,
+      registryState: "loaded",
+      humanPresent,
+      capabilities: { ask: false },
+      lookupVisibility: () => null,
+      findApproval: () => null,
+    });
+  }
+
+  it("a private first target does not hide a public-facing second one (rule g)", () => {
+    const repo = privateRepo([
+      ["remote.origin.pushurl", "git@github.com:acme/x.git"],
+      ["remote.origin.pushurl", "git@github.com:acme/y.git"],
+    ]);
+    const d = decide(repo);
+    assert.equal(d.action, "deny", JSON.stringify(d));
+    if (d.action !== "deny") return;
+    assert.equal(d.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    assert.match(d.reason, /acme\/y/);
+  });
+
+  it("a second target in another trust boundary is refused by rule e even when the first is fine", () => {
+    const repo = privateRepo([
+      ["remote.origin.pushurl", "git@github.com:acme/x.git"],
+      ["remote.origin.pushurl", "git@github.com:other-org/y.git"],
+    ]);
+    const d = decide(repo);
+    assert.equal(d.action, "deny", JSON.stringify(d));
+    if (d.action === "deny") assert.equal(d.code, "CROSS_ORG_EGRESS");
+  });
+
+  it("…and the same push with only the private target is allowed (control)", () => {
+    const repo = privateRepo([["remote.origin.pushurl", "git@github.com:acme/x.git"]]);
+    assert.equal(decide(repo).action, "allow");
+  });
+
+  it("the order of the targets does not matter", () => {
+    const repo = privateRepo([
+      ["remote.origin.pushurl", "git@github.com:acme/y.git"],
+      ["remote.origin.pushurl", "git@github.com:acme/x.git"],
+    ]);
+    const d = decide(repo);
+    assert.equal(d.action, "deny", JSON.stringify(d));
+  });
+
+  it("a person present passes rule g for every target", () => {
+    const repo = privateRepo([
+      ["remote.origin.pushurl", "git@github.com:acme/x.git"],
+      ["remote.origin.pushurl", "git@github.com:acme/y.git"],
+    ]);
+    assert.equal(decide(repo, true).action, "allow");
+  });
+
+  it("the receipt names every target, each through safeDestination", () => {
+    const repo = privateRepo([
+      ["remote.origin.pushurl", "git@github.com:acme/x.git"],
+      ["remote.origin.pushurl", "git@github.com:other-org/y.git"],
+    ]);
+    const d = resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo, registry);
+    const receipt = describeDestinationForReceipt(d);
+    assert.match(receipt, /acme\/x/);
+    assert.match(receipt, /other-org\/y/);
+    assert.match(describeDestination(d), /acme\/x.*AND.*other-org\/y/);
+    // A target whose name fails validation is never printed.
+    const bad = { ...d!, alsoTargets: [{ ...d!, org: "o$(id)", repo: "r" }] };
+    assert.doesNotMatch(describeDestinationForReceipt(bad), /\$\(id\)/);
+    assert.doesNotMatch(describeDestination(bad), /\$\(id\)/);
+  });
+});
+
+describe("an ssh override makes ssh aliases unresolved (H2)", () => {
+  const savedHome = process.env["HOME"];
+  after(() => {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+    for (const k of ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]) delete process.env[k];
+  });
+
+  function aliasRepo(config: Array<[string, string]> = []): string {
+    const home = join(root, `home-${n++}`);
+    mkdirSync(join(home, ".ssh"), { recursive: true });
+    writeFileSync(join(home, ".ssh", "config"), "Host gh-work\n  HostName github.com\n");
+    process.env["HOME"] = home;
+    return makeRepo([["remote.origin.url", "git@gh-work:stranger/r.git"], ...config]);
+  }
+  function dest(repo: string): ReturnType<typeof resolveDestinationOffline> {
+    return resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo);
+  }
+
+  it("control: no override, the alias resolves through the ssh config", () => {
+    assert.equal(dest(aliasRepo())?.org, "stranger");
+  });
+
+  for (const name of ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]) {
+    it(`${name} in the hook's environment makes the alias unresolved`, () => {
+      const repo = aliasRepo();
+      process.env[name] = "ssh";
+      try {
+        assert.equal(dest(repo)?.unresolved, "opaque-url");
+        assert.match(dest(repo)?.unresolvedWhy ?? "", /ssh override/);
+      } finally {
+        delete process.env[name];
+      }
+    });
+  }
+
+  it("core.sshCommand in the repository's git config makes the alias unresolved", () => {
+    const repo = aliasRepo([["core.sshCommand", "ssh -i /nowhere/key"]]);
+    assert.equal(dest(repo)?.unresolved, "opaque-url");
+  });
+
+  it("a LITERAL github.com host with a plain `ssh -i` override stays GitHub (owner checked)", () => {
+    const repo = makeRepo([
+      ["remote.origin.url", "git@github.com:stranger/r.git"],
+      ["core.sshCommand", "ssh -i /nowhere/key"],
+    ]);
+    assert.equal(dest(repo)?.org, "stranger");
+  });
+
+  it("…but not when the override can redirect (-o HostName, a proxy, -J, -F, or a GIT_SSH program)", () => {
+    for (const cmd of ["ssh -o HostName=elsewhere.example", "ssh -oHostname=x", "ssh -o ProxyCommand=nc", "ssh -J jump", "ssh -F /x/config"]) {
+      const repo = makeRepo([
+        ["remote.origin.url", "git@github.com:stranger/r.git"],
+        ["core.sshCommand", cmd],
+      ]);
+      assert.equal(dest(repo)?.unresolved, "opaque-url", cmd);
+    }
+    const repo = makeRepo([["remote.origin.url", "git@github.com:stranger/r.git"]]);
+    process.env["GIT_SSH"] = "/nowhere/wrapper";
+    try {
+      assert.equal(dest(repo)?.unresolved, "opaque-url");
+    } finally {
+      delete process.env["GIT_SSH"];
+    }
+  });
+
+  it("detectSshOverride reports nothing when nothing is set", () => {
+    const repo = makeRepo();
+    assert.deepEqual(detectSshOverride(repo, {}), { present: false, mayRedirect: false });
+    assert.deepEqual(detectSshOverride(repo, { GIT_SSH_VARIANT: "ssh" }), { present: true, mayRedirect: false });
+    assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: "ssh -i k" }), { present: true, mayRedirect: false });
+    assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: "ssh -J h" }), { present: true, mayRedirect: true });
+  });
+});
+
+describe("an alias origin counts as own at every layer (L2)", () => {
+  const savedHome = process.env["HOME"];
+  after(() => {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  });
+
+  it("`git@gh-work:acme/x.git` is acme/x for the origin lookup and the working-tree helpers", async () => {
+    const home = join(root, `home-${n++}`);
+    mkdirSync(join(home, ".ssh"), { recursive: true });
+    writeFileSync(join(home, ".ssh", "config"), "Host gh-work\n  HostName github.com\n");
+    process.env["HOME"] = home;
+    const repo = makeRepo([
+      ["remote.origin.url", "git@gh-work:acme/x.git"],
+      ["repo-aegis.class", "private-strict"],
+      ["repo-aegis.visibility", "private"],
+    ]);
+    const { getRemoteOrg } = await import("./working-tree.js");
+    assert.equal(getRemoteOrg(repo), "acme");
+    // Pushing to the origin by name is judged as the repository's OWN declaration (private, cached).
+    const d = resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo);
+    assert.equal(d?.org, "acme");
+    assert.equal(d?.classKnown, true);
+    assert.equal(d?.visibility, "private");
   });
 });

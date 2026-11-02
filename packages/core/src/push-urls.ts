@@ -19,7 +19,7 @@
 // The pre-push hook needs none of this: git hands it the URL after all
 // rewriting, once per push URL.
 import { execFileSync } from "node:child_process";
-import { looksLikeRemoteUrl } from "./remote-url.js";
+import { looksLikeRemoteUrl, type SshOverride } from "./remote-url.js";
 
 function gitOut(cwd: string, args: string[]): string | null {
   try {
@@ -83,4 +83,26 @@ export function resolvePushUrls(cwd: string, remote: string): string[] | null {
   }
   if (!looksLikeRemoteUrl(remote.trim())) return null;
   return [rewriteForPush(cwd, remote.trim())];
+}
+
+/** `-o HostName=…`, a proxy, `-J` (jump host) or `-F` (another config): ways an ssh command moves a connection. */
+const REDIRECTING_SSH_OPTION_RE = /host\s*name|proxy|(^|\s)-[JF]/i;
+
+/**
+ * The ssh override in effect where a push runs (see `SshOverride`):
+ * `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT` in `env`, or `core.sshCommand`
+ * in the git config seen from `cwd` (which includes `git -c`, passed down to
+ * hooks). Callers pass the environment the push will run with: the pre-push
+ * hook and the agent hook both see it as git does.
+ */
+export function detectSshOverride(cwd: string, env: NodeJS.ProcessEnv = process.env): SshOverride {
+  const command = (env["GIT_SSH_COMMAND"] ?? "").trim();
+  const program = (env["GIT_SSH"] ?? "").trim();
+  const variant = (env["GIT_SSH_VARIANT"] ?? "").trim();
+  const configured = (gitOut(cwd, ["config", "--get", "core.sshCommand"]) ?? "").trim();
+  const present = command !== "" || program !== "" || variant !== "" || configured !== "";
+  // A GIT_SSH program is opaque, so it may redirect; a command line can be read.
+  const mayRedirect =
+    program !== "" || REDIRECTING_SSH_OPTION_RE.test(command) || REDIRECTING_SSH_OPTION_RE.test(configured);
+  return { present, mayRedirect: present && mayRedirect };
 }

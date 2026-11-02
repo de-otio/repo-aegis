@@ -28,6 +28,7 @@ import {
   // `git` hands this hook the URL AFTER insteadOf/pushInsteadOf rewriting, so
   // only ssh aliases need resolving here (`resolveRemoteUrl`, pure, never `ssh -G`).
   resolveRemoteUrl,
+  detectSshOverride,
   parseRemoteUrlResolved,
   safeDestination,
   registeredOwners,
@@ -51,6 +52,9 @@ import {
   EGRESS_HUMAN_ENV,
   findApproval,
   approvalScopeOf,
+  findUncoveringStarApproval,
+  uncoveredStarSentence,
+  type ApprovalScope,
   isHumanPresent,
   loadRegistry,
   appendAuditRecord,
@@ -439,18 +443,26 @@ function pushRefusal(
 /**
  * The "does an approval help?" sentence of the PUBLIC_PUSH_NEEDS_HUMAN refusal.
  *
- * TODO(pr3-approval-scoping, plan D7 / §3.9): once `*` approvals cover only
- * `personalOrgs` owners, the hook says so when a live `*` approval exists but
- * does not cover the destination ("A '*' approval (<id>, until <time>) is live,
- * but since 0.11.0 '*' covers only personalOrgs owners; <owner> is not one.").
- * Add that sentence HERE, with the same wording as the hook's rule g refusal,
- * so the two layers do not drift. It needs a lookup of live `*` approvals made
- * after `findApproval` (below) returns null; `findApproval`'s call in
- * `evaluateDestination` stays as it is until PR 3 changes its signature. Name
- * only the destination owner and the approval id/expiry, never registry contents.
+ * When a live `*` approval exists but does not cover the destination (D7), the
+ * refusal says so, in the hook's own words (`uncoveredStarSentence`, shared
+ * from core so the layers cannot drift), instead of leaving the operator to
+ * conclude the guard is broken. It names only the destination owner and the
+ * approval's id and expiry, never registry contents.
  */
-function publicPushApprovalSentence(dest: { org: string; repo: string }): string {
-  return `A live approval for ${dest.org}/${dest.repo} would cover this, and none exists`;
+function publicPushApprovalSentence(
+  dest: { org: string; repo: string },
+  ref: string | undefined,
+  scope: ApprovalScope,
+  registry: Registry,
+): string {
+  const base = `A live approval for ${dest.org}/${dest.repo} would cover this, and none exists.`;
+  try {
+    const star = findUncoveringStarApproval(dest, ref, scope);
+    if (star === null) return base;
+    return base + uncoveredStarSentence(dest, star.approval, star.gap, registry);
+  } catch {
+    return base;
+  }
 }
 
 /**
@@ -476,7 +488,10 @@ function publicPushApprovalSentence(dest: { org: string; repo: string }): string
  */
 function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestination | null {
   if (opts.remoteUrl === undefined || opts.remoteUrl.trim() === "") return null;
-  const target = resolveRemoteUrl(opts.remoteUrl);
+  // The pre-push hook sees the real environment and git config of the push: an
+  // ssh override (GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT, core.sshCommand)
+  // makes ssh aliases unresolvable (see `SshOverride`).
+  const target = resolveRemoteUrl(opts.remoteUrl, undefined, { sshOverride: detectSshOverride(repo.cwd) });
   if (target.kind === "non-github") return null;
 
   const ref = refLabel(opts);
@@ -488,7 +503,13 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   if (!humanPresent) {
     const named = target.kind === "github" ? { org: target.org, repo: target.repo } : null;
     const candidate =
-      named ?? ({ org: "*", repo: "*", unresolved: "opaque-url" } as const);
+      named ??
+      ({
+        org: "*",
+        repo: "*",
+        unresolved: "opaque-url",
+        ...(target.kind === "unresolved" && { unresolvedWhy: target.why }),
+      } as const);
     let refused = false;
     if (loaded.state === "unreadable") {
       refused = true; // no owner can be confirmed, so none is admitted (D4, revised)
@@ -610,12 +631,13 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
                 by: "agent",
                 command: "git push <a remote inside this repository's trust boundary> <branch>",
               },
+              // Only "push inside the boundary" or "re-classify this repository".
+              // Never `engagements add --github-org <destination owner>`: that
+              // would teach the refused party to widen the boundary to fit.
               {
                 by: "person",
-                when: `If "${parsed.org}" belongs inside it`,
-                step:
-                  `declares the boundary from a terminal (repo-aegis classify, or repo-aegis engagements add ` +
-                  `--github-org ${parsed.org} under the engagement that owns this repository)`,
+                when: "If this repository was classified wrongly",
+                step: "re-classifies it from a terminal (repo-aegis classify) so its boundary matches where it should publish",
               },
             ],
           ),
@@ -663,7 +685,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
           `The destination ${parsed.org}/${parsed.repo} (${visLabel}, ${cls}) is public-facing, and no person is ` +
             `present` +
             (assumedPublic ? `.${UNKNOWN_VISIBILITY_HINT}` : ""),
-          publicPushApprovalSentence(parsed),
+          publicPushApprovalSentence(parsed, opts.pushRef, scope, registry ?? EMPTY_REGISTRY),
           [
             {
               by: "person",

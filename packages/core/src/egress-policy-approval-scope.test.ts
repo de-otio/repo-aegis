@@ -13,7 +13,17 @@
 // Fixture (placeholders only): personal org `acme`, engagement `customer-a`
 // owning `customer-a-org`, allowed upstream `upstream-org/lib`; `stranger` is
 // registered nowhere.
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
+import { scrubGitEnv } from "./_test-git-env.js";
+
+// Hermetic git env: the destination resolver reads GIT_SSH_COMMAND / core.sshCommand.
+let restoreGitEnv: () => void;
+before(() => {
+  restoreGitEnv = scrubGitEnv();
+});
+after(() => {
+  restoreGitEnv();
+});
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
