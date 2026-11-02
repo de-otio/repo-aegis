@@ -1,22 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
-import { parseDocument, YAMLSeq, YAMLMap, Scalar, isMap } from "yaml";
+import { YAMLSeq, YAMLMap, Scalar, isMap } from "yaml";
 import {
   registryPath as defaultRegistryPath,
   loadRegistry,
   validatePatterns,
   isActive,
   renderMarkers,
-  withLockSync,
-  PatternValidationError,
   RegistryNotFoundError,
-  LockTimeoutError,
   ALWAYS_BLOCK_RESERVED_ID,
   ORG_NAME_REGEX,
   appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { requireTerminalForOwnerAdd, recordOwnerAdd } from "../owner-add-gate.js";
+import { loadDoc, saveDoc, loadDocOrExit, withRegistryLock, type Doc } from "./registry-mutate.js";
 
 interface EngagementsAddOptions extends OutputOptions {
   name?: string;
@@ -36,6 +34,11 @@ interface EngagementsAddOptions extends OutputOptions {
    * `personalOrgs`.
    */
   personalOrg?: string[];
+  /**
+   * Test seam: defaults to `process.stderr.isTTY`. `--personal-org` and
+   * `--github-org` add owners, which only a person at a terminal may do (D8).
+   */
+  stderrIsTTY?: boolean;
 }
 
 interface EngagementsEndOptions extends OutputOptions {
@@ -59,8 +62,6 @@ interface EngagementsRemoveOptions extends OutputOptions {
   hard?: boolean;
 }
 
-type Doc = ReturnType<typeof parseDocument>;
-
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -69,21 +70,6 @@ function backdated13MonthsIso(): string {
   const d = new Date();
   d.setMonth(d.getMonth() - 13);
   return d.toISOString().slice(0, 10);
-}
-
-function loadDoc(path: string): Doc {
-  if (!existsSync(path)) throw new RegistryNotFoundError(path);
-  const raw = readFileSync(path, "utf8");
-  return parseDocument(raw);
-}
-
-function saveDoc(doc: Doc, path: string): void {
-  writeFileSync(path, doc.toString(), { mode: 0o600 });
-  try {
-    chmodSync(path, 0o600);
-  } catch {
-    /* platform-restricted */
-  }
 }
 
 function findEngagementNode(doc: Doc, id: string): YAMLMap | null {
@@ -210,52 +196,6 @@ function appendPersonalOrgs(
 }
 
 /**
- * Load the registry YAML doc or call emitError (which exits 2). Used to
- * collapse the `let doc; try { doc = ... } catch { emitError(...) }`
- * pattern into a single expression so TypeScript flow analysis narrows
- * the result without `!` assertions.
- */
-function loadDocOrExit(path: string, opts: OutputOptions): Doc {
-  try {
-    return loadDoc(path);
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
-      emitError(
-        {
-          code: "REGISTRY_NOT_FOUND",
-          error: "registry not found; run `repo-aegis init` first",
-          details: err.path,
-        },
-        opts,
-      );
-    }
-    emitError({ error: (err as Error).message }, opts);
-  }
-}
-
-/**
- * Run a callback under the registry write lock; map known exception types
- * to their canonical CLI error payloads. Centralises the lock+error dance
- * shared by add / end / remove.
- */
-function withRegistryLock<T>(opts: OutputOptions, fn: () => T): T {
-  try {
-    return withLockSync(fn);
-  } catch (err) {
-    if (err instanceof LockTimeoutError) {
-      emitError({ code: err.code, error: err.message }, opts);
-    }
-    if (err instanceof PatternValidationError) {
-      emitError(
-        { code: "PATTERN_VALIDATION", error: err.message, details: err.invalid },
-        opts,
-      );
-    }
-    emitError({ code: "RENDER_ERROR", error: (err as Error).message }, opts);
-  }
-}
-
-/**
  * stderr writer used for the [SEC M-8] schemaVersion-bump warning. Pulled
  * out so tests can spy / replace if needed.
  */
@@ -270,6 +210,19 @@ export function engagementsAdd(
   // [SEC fix] Reject the conflicting-flag combination up front.
   const githubOrgsRaw = opts.githubOrg ?? [];
   const personalOrgsRaw = opts.personalOrg ?? [];
+
+  // D8: adding an owner tells repo-aegis that publishing there is safe, so it
+  // needs a person at a terminal. Gate first, before any validation (no
+  // oracle for an agent) and before any write. Removing never needs one.
+  if (personalOrgsRaw.length > 0) {
+    requireTerminalForOwnerAdd({ kind: "personal-org", owners: personalOrgsRaw }, opts);
+  }
+  if (githubOrgsRaw.length > 0) {
+    requireTerminalForOwnerAdd(
+      { kind: "github-org", owners: githubOrgsRaw, ...(id !== undefined && { engagementId: id }) },
+      opts,
+    );
+  }
   if (githubOrgsRaw.length > 0 && personalOrgsRaw.length > 0) {
     emitError(
       {
@@ -340,6 +293,9 @@ export function engagementsAdd(
       });
     } catch {
       /* audit log must not break user-facing ops */
+    }
+    if (result.added.length > 0) {
+      recordOwnerAdd({ kind: "personal-org", added: result.added.length, via: "engagements-add" });
     }
 
     if (opts.json) {
@@ -491,6 +447,9 @@ export function engagementsAdd(
     });
   } catch {
     /* audit log must not break user-facing ops */
+  }
+  if (normalisedGithubOrgs.length > 0) {
+    recordOwnerAdd({ kind: "github-org", added: normalisedGithubOrgs.length, via: "engagements-add" });
   }
 
   if (opts.json) {

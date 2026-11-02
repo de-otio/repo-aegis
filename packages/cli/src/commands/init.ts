@@ -26,6 +26,7 @@ import {
   appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { requireTerminalForOwnerAdd, recordOwnerAdd } from "../owner-add-gate.js";
 
 const REGISTRY_STUB = `\
 # repo-aegis engagement registry
@@ -81,6 +82,11 @@ interface InitOptions extends OutputOptions {
    * Commander.
    */
   classifyRulesPath?: string;
+  /**
+   * Test seam: defaults to `process.stderr.isTTY`. The migration adds owners
+   * to the registry, which only a person at a terminal may do (D8).
+   */
+  stderrIsTTY?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,10 +298,20 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
     }
   }
 
+  // D8: the migration would add owners to the registry. That tells repo-aegis
+  // publishing there is safe, so it needs a person at a terminal. Gate here:
+  // the plan is complete (nothing has been written, classify.yml is still in
+  // place) and any non-empty plan counts, even if every owner is already
+  // present (fail closed; the person can re-run it).
+  if (personalOrgsToAdd.length > 0 || engagementOrgsToAdd.length > 0) {
+    requireTerminalForOwnerAdd({ kind: "init-migrate" }, opts);
+  }
+
   // Apply mutations under the registry lock. Lock scope covers the
   // YAML mutate, write, and rename so a concurrent registry edit can't
   // corrupt the in-flight migration.
   let schemaBumped = false;
+  let ownersActuallyAdded = 0;
   try {
     withLockSync(() => {
       // Bump schemaVersion to 2 if needed.
@@ -327,6 +343,7 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
         if (!personalSet.has(org)) {
           personalOrgsSeq.add(org);
           personalSet.add(org);
+          ownersActuallyAdded++;
         }
       }
 
@@ -345,7 +362,10 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
           else if (item instanceof Scalar && typeof item.value === "string")
             seen.add(item.value);
         }
-        if (!seen.has(org)) orgsSeq.add(org);
+        if (!seen.has(org)) {
+          orgsSeq.add(org);
+          ownersActuallyAdded++;
+        }
       }
 
       // Atomic write: tmp + rename.
@@ -372,6 +392,14 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
       },
       opts,
     );
+  }
+
+  if (ownersActuallyAdded > 0) {
+    recordOwnerAdd({
+      kind: "init-migrate",
+      added: ownersActuallyAdded,
+      via: "init-migrate-classify",
+    });
   }
 
   return {

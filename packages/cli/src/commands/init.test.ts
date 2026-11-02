@@ -347,6 +347,7 @@ describe("init --migrate-classify", () => {
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
           json: true,
         }),
       ),
@@ -370,6 +371,7 @@ describe("init --migrate-classify", () => {
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
         }),
       ),
     );
@@ -409,6 +411,7 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
         }),
       ),
     );
@@ -432,6 +435,7 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
         }),
       ),
     );
@@ -441,6 +445,7 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
           json: true,
         }),
       ),
@@ -464,6 +469,7 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
           json: true,
         }),
       ),
@@ -493,6 +499,7 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
           json: true,
         }),
       ),
@@ -526,6 +533,7 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
           json: true,
         }),
       ),

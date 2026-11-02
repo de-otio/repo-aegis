@@ -111,6 +111,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "status",
       "suggest-markers",
       "uninstall",
+      "upstreams",
       "waive",
     ],
   },
@@ -245,6 +246,16 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "engagements end", flags: ["--purge"], subcommands: [] },
   { path: "engagements show", flags: [], subcommands: [] },
   { path: "engagements remove", flags: ["--hard"], subcommands: [] },
+
+  // ---- upstreams ----
+  {
+    path: "upstreams",
+    flags: [],
+    subcommands: ["add", "list", "remove"],
+  },
+  { path: "upstreams add", flags: [], subcommands: [] },
+  { path: "upstreams remove", flags: [], subcommands: [] },
+  { path: "upstreams list", flags: [], subcommands: [] },
 
   // ---- context ----
   {
