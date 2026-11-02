@@ -187,16 +187,25 @@ describe("approve — mint-time scope warnings (issue #151, D7, plan §3.2/§3.9
     }
   });
 
-  it("names only what the person typed, and only if it passes safeDestination (no echo of a malformed name)", () => {
-    // parseApprovalTarget already accepts `.`/`_` in an org; GitHub owners cannot contain them.
-    for (const bad of ["bad_org/*", "bad.org/repo", "-/*"]) {
+  it("refuses to mint for a name that is not a plausible GitHub owner/repo (it could never match), with no warning or command", () => {
+    // GitHub owners cannot contain `_` or `.`, or start with `-`; such an approval would never match.
+    const before = listApprovals(path, T0).length;
+    for (const bad of ["bad_org/*", "bad.org/repo", "-/*", `${"a".repeat(40)}/*`, "acme/..", "Korp/*"]) {
       const r = run(bad, "owners.yaml", { json: true });
-      assert.equal(r.exitCode, undefined, `${bad}: ${r.stderr}`);
-      const j = JSON.parse(r.stdout) as { warnings?: string[] };
-      assert.deepEqual(j.warnings ?? [], [], bad);
-      const text = run(bad, "owners.yaml").stdout;
-      assert.ok(!/warning|engagements add|upstreams add/.test(text), `${bad}: ${text}`);
+      assert.equal(r.exitCode, 2, `${bad}: ${r.stdout}`);
+      assert.match(r.stderr, /USAGE/, bad);
+      assert.ok(!/engagements add|upstreams add/.test(r.stdout + r.stderr), bad);
     }
+    assert.equal(listApprovals(path, T0).length, before, "nothing was minted");
+  });
+
+  it("`approve <owner>/*` for an unregistered owner that has an allowed upstream says it covers only that owner's upstream repos, PR/issue verbs only, without naming the upstream", () => {
+    const w = warningsOf("upstream-org/*", "owners.yaml");
+    assert.equal(w.length, 1);
+    assert.match(w[0]!, /covers only that owner's allowed upstream repositories, and only for PR and issue verbs/);
+    assert.match(w[0]!, /everything else under it stays refused by rule h/);
+    assert.ok(!w[0]!.includes("lib"), w[0]!);
+    assert.ok(!/engagements add/.test(w[0]!), "no misleading 'register it' command for the softened case");
   });
 
   it("still refuses without a TTY before reading any registry or printing a warning", () => {

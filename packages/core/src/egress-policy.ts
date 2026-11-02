@@ -59,6 +59,7 @@ import {
   findUncoveringStarApproval,
   type ApprovalScope,
   type EgressApproval,
+  type StarApprovalGap,
 } from "./egress-approval.js";
 import { ownerAdmitted, registeredOwners, UPSTREAM_ADMITTED_VERBS } from "./registered-owners.js";
 import {
@@ -291,12 +292,36 @@ export interface DecideEgressOptions {
   /** Injectable for tests; defaults to the approvals store. */
   findApproval?: ApprovalFinder;
   /**
+   * Injectable for tests: the lookup behind rule g's "a `*` approval is live
+   * but does not cover this" sentence. When omitted it follows
+   * {@link findApproval}: the real store is read only when the real finder is
+   * in use (omitted, or {@link findApprovalDefault}); an injected finder
+   * means no gap lookup, so an injected finder controls what rule g sees and
+   * a test never reads the developer's own approvals store.
+   */
+  findUncoveredStar?: UncoveredStarFinder;
+  /**
    * Live lookup for a destination whose visibility is unknown. Injectable
    * for tests; defaults to `gh repo view` unless
    * `REPO_AEGIS_VISIBILITY_LOOKUP=0`.
    */
   lookupVisibility?: VisibilityLookup;
 }
+
+/**
+ * Looks up a live `*` approval that exists but does NOT cover `destination`
+ * (D7), so rule g's refusal can say so. Same injection seam as
+ * {@link ApprovalFinder}: see {@link DecideEgressOptions.findUncoveredStar}.
+ */
+export type UncoveredStarFinder = (
+  destination: Destination,
+  ref: string | undefined,
+  scope: ApprovalScope,
+) => { approval: EgressApproval; gap: StarApprovalGap } | null;
+
+/** Default {@link UncoveredStarFinder}: the approvals store under `REPO_AEGIS_HOME`. */
+export const findUncoveredStarDefault: UncoveredStarFinder = (destination, ref, scope) =>
+  findUncoveringStarApproval(destination, ref, scope);
 
 /**
  * Default {@link ApprovalFinder}. A `*` approval covers only `personalOrgs`
@@ -758,46 +783,38 @@ function registryPathLabel(): string {
  * registered owners, engagement ids or upstreams (the redaction oracle).
  */
 /**
- * Rule g's refusal when a live `*` approval exists but does not cover the
- * destination (D7, §3.9): it says so, says why, and gives the narrower,
- * quoted approve command. Names only the destination's own owner/repo (which
- * the command already carries), never another owner, an engagement id or the
- * registry's contents; `refusal()` discards the message for an invalid name.
+ * The sentence rule g ADDS to its existing refusal when a live `*` approval
+ * exists but does not cover the destination (D7, §3.9: "existing message,
+ * plus"): it says so, says why, and gives the narrower, quoted approve
+ * commands. Leading space included, so it concatenates; empty when the
+ * destination's name is not a plausible GitHub owner/repo (nothing
+ * interpolated from an invalid name, no command to paste). Names only the
+ * destination's own owner/repo, which the command already carries; never
+ * another owner, an engagement id or the registry's contents.
  */
-function uncoveredStarReason(
-  verb: string,
+function uncoveredStarSentence(
   destination: Destination,
   star: EgressApproval,
-  gap: "not-personal" | "upstream",
+  gap: StarApprovalGap,
   registry: Registry,
 ): string {
   const safe = safeDestination(destination.org, destination.repo);
-  const owner = safe?.org ?? "";
-  const target = safe === null ? "" : `${safe.org}/${safe.repo}`;
-  const isCustomer = registry.engagements.some(e =>
-    (e.githubOrgs ?? []).some(o => o.toLowerCase() === destination.org.toLowerCase()),
-  );
+  if (safe === null) return "";
+  const owner = safe.org;
+  const target = `${safe.org}/${safe.repo}`;
+  const isCustomer = registry.engagements.some(e => (e.githubOrgs ?? []).some(o => o.toLowerCase() === owner));
   const kind =
     gap === "upstream"
       ? `${target} is an allowed upstream, not one of your own repositories`
       : isCustomer
         ? `${owner} is a customer org`
         : `${owner} is not one of your personal orgs`;
-  const publicOrNot = destination.publicFacing === true ? "is public" : "is an operation that is hard to undo";
-  return refusal({
-    code: "PUBLIC_EGRESS_NEEDS_HUMAN",
-    destination: { verb, org: destination.org, repo: destination.repo },
-    what: `${verb} → ${target}`,
-    why:
-      `The destination ${publicOrNot}, so a person must approve it from a terminal. A '*' approval ` +
-      `(${star.id}, until ${star.expiresAt}) is live, but since 0.11.0 '*' covers only personal-org ` +
-      `repositories and destination-less commands such as npm publish; ${kind}`,
-    approval: `The '*' approval does not cover this; an approval that names ${owner} does`,
-    fixes: [
-      { by: "person", command: `repo-aegis approve '${owner}/*'`, note: "the whole org" },
-      { by: "person", command: `repo-aegis approve ${target}`, note: "this repository only" },
-    ],
-  });
+  return (
+    ` A '*' approval (${star.id}, until ${star.expiresAt}) is live, but since 0.11.0 '*' covers only ` +
+    `personal-org repositories and destination-less commands such as npm publish; ${kind}. ` +
+    `No '*' approval covers it. A person runs, from a terminal: \`repo-aegis approve '${owner}/*'\` ` +
+    `(the whole org) or \`repo-aegis approve ${target}\` (this repository only).`
+  );
 }
 
 function unregisteredOwnerReason(
@@ -1155,31 +1172,21 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     // A live `*` approval that exists but does not cover this destination (D7):
     // say exactly that, with the narrower command, so the operator does not
     // conclude the guard is broken (§3.9). Only for a named destination.
-    let starGap: string | null = null;
-    if (destination !== null && destination.unresolved === undefined) {
+    // The sentence is ADDED to the existing message (§3.9: "existing message,
+    // plus"), before the visibility hint, so every existing clause stays.
+    // The lookup is behind the same injection seam as the finder.
+    const gapFinder: UncoveredStarFinder | null =
+      opts.findUncoveredStar ??
+      (opts.findApproval === undefined || opts.findApproval === findApprovalDefault ? findUncoveredStarDefault : null);
+    let starGap = "";
+    if (gapFinder !== null && destination !== null && destination.unresolved === undefined) {
       try {
-        const uncovered = findUncoveringStarApproval(destination, intent.refspec, approvalScope);
+        const uncovered = gapFinder(destination, intent.refspec, approvalScope);
         if (uncovered !== null) {
-          starGap = uncoveredStarReason(verb, destination, uncovered.approval, uncovered.gap, opts.registry);
+          starGap = uncoveredStarSentence(destination, uncovered.approval, uncovered.gap, opts.registry);
         }
       } catch {
-        starGap = null;
-      }
-    }
-    if (starGap !== null) {
-      // Same shape as the generic refusal (ask where the host can ask, deny
-      // otherwise), except where the shim cannot hold the command: that case
-      // keeps its own code, and is handled below.
-      if (!(opts.capabilities.ask && opts.capabilities.ghShimOnPath === false && intent.verb.startsWith("gh-"))) {
-        return opts.capabilities.ask
-          ? {
-              action: "ask",
-              code: "PUBLIC_EGRESS_NEEDS_HUMAN",
-              reason: starGap,
-              ...(shownDestination && { destination: shownDestination }),
-              intent,
-            }
-          : deny("PUBLIC_EGRESS_NEEDS_HUMAN", starGap, shownDestination);
+        starGap = "";
       }
     }
     if (opts.capabilities.ask) {
@@ -1204,14 +1211,15 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
               : `Mint an approval from a terminal (\`${approveCommand}\`) and re-run`) +
             `, or start the agent from a shell where the shim ` +
             `comes first (\`repo-aegis doctor\` says which).` +
+            starGap +
             hint,
           shownDestination,
         );
       }
       const reason =
         approveCommand === null
-          ? `${head}: re-issue the command naming a valid owner/repo, or run it from a terminal.${hint}`
-          : `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.${hint}`;
+          ? `${head}: re-issue the command naming a valid owner/repo, or run it from a terminal.${starGap}${hint}`
+          : `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.${starGap}${hint}`;
       return {
         action: "ask",
         code: "PUBLIC_EGRESS_NEEDS_HUMAN",
@@ -1225,6 +1233,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       `${head}: re-run it from a terminal, ` +
         (approveCommand === null ? "" : `mint an approval first (\`${approveCommand}\`), `) +
         `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).` +
+        starGap +
         hint,
       shownDestination,
     );

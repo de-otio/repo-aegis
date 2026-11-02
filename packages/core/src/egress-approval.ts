@@ -37,6 +37,7 @@ import { randomBytes } from "node:crypto";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { repoAegisHome } from "./paths.js";
+import { isSafeOwner, safeDestination } from "./refusal.js";
 
 export interface EgressApproval {
   /** Short random id, for `--revoke` and the audit trail. */
@@ -101,20 +102,29 @@ export function parseApprovalTarget(text: string): { org: string; repo: string }
   if (parts.length !== 2) return null;
   const [org, repo] = parts as [string, string];
   if (org === "*") return null; // `*/<repo>` means nothing
-  if (!/^[A-Za-z0-9._-]+$/.test(org) || !(repo === "*" || /^[A-Za-z0-9._-]+$/.test(repo))) return null;
-  return { org: org.toLowerCase(), repo: repo.toLowerCase() };
+  // Only plausible GitHub names (the same test the guard applies to a destination):
+  // an approval for `bad_org/*` could never match anything, so refuse to mint one.
+  return safeDestination(org, repo);
 }
+
+/** The id `mintApproval` produces: `randomBytes(4)` as hex. Anything else did not come from a mint. */
+const APPROVAL_ID = /^[0-9a-f]{8}$/;
+/** ISO-8601 date-time with a zone, as `Date.prototype.toISOString` (and any sane writer) emits it. */
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function isApproval(v: unknown): v is EgressApproval {
   if (!v || typeof v !== "object") return false;
   const a = v as Record<string, unknown>;
   return (
     typeof a["id"] === "string" &&
+    APPROVAL_ID.test(a["id"]) &&
+    typeof a["expiresAt"] === "string" &&
+    ISO_TIMESTAMP.test(a["expiresAt"]) &&
+    Number.isFinite(Date.parse(a["expiresAt"])) &&
     typeof a["org"] === "string" &&
     typeof a["repo"] === "string" &&
     (a["ref"] === undefined || typeof a["ref"] === "string") &&
     typeof a["createdAt"] === "string" &&
-    typeof a["expiresAt"] === "string" &&
     typeof a["by"] === "string"
   );
 }
@@ -263,6 +273,10 @@ export type StarApprovalGap = "not-personal" | "upstream";
  */
 export function starApprovalCovers(destination: { org: string; repo: string }, scope: ApprovalScope): boolean {
   if (scope.destinationless === true) return true;
+  // The owner is tested as the agent typed it, BEFORE lower-casing: lower-casing
+  // first would turn U+212A (KELVIN SIGN) into a plain `k` and let `Korp` match
+  // a personal org `korp`. A name that is not plain ASCII is covered by nothing.
+  if (!isSafeOwner(destination.org)) return false;
   const org = destination.org.toLowerCase();
   const repo = destination.repo.toLowerCase();
   if (scope.upstreams?.has(`${org}/${repo}`) === true) return false;
@@ -287,6 +301,10 @@ export function findApproval(
 ): EgressApproval | null {
   try {
     if (!existsSync(path)) return null;
+    // A named destination must be a plausible ASCII GitHub name as typed, before any
+    // lower-casing (Kelvin sign → `k`). This guards `<org>/*` and `<org>/<repo>`
+    // approvals as well as `*`. A destination-less call has no name to check.
+    if (scope.destinationless !== true && safeDestination(destination.org, destination.repo) === null) return null;
     const org = destination.org.toLowerCase();
     const repo = destination.repo.toLowerCase();
     const wanted = ref === undefined ? undefined : normaliseRef(ref);

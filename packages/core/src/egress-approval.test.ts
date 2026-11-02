@@ -10,6 +10,7 @@ import {
   approvalsPath,
   findApproval,
   findUncoveringStarApproval,
+  starApprovalCovers,
   listApprovals,
   mintApproval,
   normaliseRef,
@@ -154,14 +155,53 @@ describe("approval store", () => {
       JSON.stringify({
         version: 1,
         approvals: [
-          { id: "ok000000", org: "acme", repo: "svc", createdAt: T0.toISOString(), expiresAt: plus(60_000).toISOString(), by: "op" },
+          { id: "0a000000", org: "acme", repo: "svc", createdAt: T0.toISOString(), expiresAt: plus(60_000).toISOString(), by: "op" },
           { id: "bad", org: "acme" },
           "nonsense",
         ],
       }),
     );
-    assert.equal(findApproval({ org: "acme", repo: "svc" }, undefined, SCOPE, bad, T0)?.id, "ok000000");
+    assert.equal(findApproval({ org: "acme", repo: "svc" }, undefined, SCOPE, bad, T0)?.id, "0a000000");
     assert.equal(readApprovalStore(bad).approvals.length, 1);
+  });
+
+  it("L4: an entry whose id is not what a mint produces, or whose expiresAt is not an ISO-8601 timestamp, is ignored", () => {
+    const p = join(root, "shape.json");
+    const base = { org: "acme", repo: "svc", createdAt: T0.toISOString(), by: "op" };
+    const good = { ...base, id: "0a0b0c0d", expiresAt: plus(60_000).toISOString() };
+    const bads = [
+      { ...good, id: "../../etc" },
+      { ...good, id: "0A0B0C0D" }, // upper-case: not what randomBytes().toString("hex") emits
+      { ...good, id: "0a0b0c0" }, // short
+      { ...good, id: "0a0b0c0d0" }, // long
+      { ...good, id: "g00000000".slice(0, 8) }, // non-hex
+      { ...good, expiresAt: "2099" }, // Date.parse accepts it, ISO-8601 date-time it is not
+      { ...good, expiresAt: "tomorrow" },
+      { ...good, expiresAt: "2099-01-01" }, // date only
+      { ...good, expiresAt: "2099-01-01T00:00:00" }, // no zone
+      { ...good, expiresAt: 4102444800000 }, // a number
+    ];
+    writeFileSync(p, JSON.stringify({ version: 1, approvals: [...bads, good] }));
+    const kept = readApprovalStore(p).approvals;
+    assert.deepEqual(kept.map(a => a.id), ["0a0b0c0d"]);
+    assert.equal(findApproval({ org: "acme", repo: "svc" }, undefined, SCOPE, p, T0)?.id, "0a0b0c0d");
+    // Offset forms of a real timestamp are still accepted.
+    writeFileSync(p, JSON.stringify({ version: 1, approvals: [{ ...good, expiresAt: "2026-09-12T20:00:00+02:00" }] }));
+    assert.equal(readApprovalStore(p).approvals.length, 1);
+    // And whatever a mint writes round-trips.
+    const minted = mintApproval({ target: { org: "acme", repo: "round" }, path: p, now: T0 });
+    assert.ok(readApprovalStore(p).approvals.some(a => a.id === minted.id));
+  });
+
+  it("parseApprovalTarget refuses names that could never match (not plausible GitHub owners/repos)", () => {
+    for (const bad of ["bad_org/*", "bad.org/repo", "-/*", `${"a".repeat(40)}/*`, "acme/..", "acme/.", "Korp/*", "acme/" + "r".repeat(101)]) {
+      assert.equal(parseApprovalTarget(bad), null, bad);
+    }
+    assert.deepEqual(parseApprovalTarget("a".repeat(39) + "/" + "r".repeat(100)), {
+      org: "a".repeat(39),
+      repo: "r".repeat(100),
+    });
+    assert.deepEqual(parseApprovalTarget("Acme/My.Repo_1-x"), { org: "acme", repo: "my.repo_1-x" });
   });
 });
 
@@ -262,6 +302,29 @@ describe("approval form × owner kind (D7, issue #151)", () => {
       assert.equal(findUncoveringStarApproval({ org: "upstream-org", repo: "lib" }, undefined, scope, p, T0)?.gap, "upstream");
       // Covered, so nothing is "uncovered".
       assert.equal(findUncoveringStarApproval({ org: "acme", repo: "r" }, undefined, scope, p, T0), null);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("L1: the owner is tested as typed, before lower-casing: `Korp` with U+212A is not `korp`", () => {
+    const kelvin = "Korp";
+    assert.equal(kelvin.toLowerCase(), "korp", "the premise: lower-casing maps it onto a plain k");
+    const korp = approvalScopeOf({ personalOrgs: ["korp"] });
+    assert.equal(starApprovalCovers({ org: "korp", repo: "r" }, korp), true, "control: plain spelling is covered");
+    assert.equal(starApprovalCovers({ org: kelvin, repo: "r" }, korp), false);
+    assert.equal(starApprovalCovers({ org: "korp", repo: "Keep" }, korp), true, "starApprovalCovers judges the owner; findApproval also judges the repo");
+    const root = mkdtempSync(join(tmpdir(), "egress-approval-kelvin-"));
+    try {
+      const p = join(root, "a.json");
+      mintApproval({ target: { org: "*", repo: "*" }, path: p, now: T0 });
+      mintApproval({ target: { org: "korp", repo: "*" }, path: p, now: T0 });
+      assert.notEqual(findApproval({ org: "korp", repo: "r" }, undefined, korp, p, T0), null, "control");
+      // Neither the `*` approval nor the `korp/*` approval matches the Kelvin spelling.
+      assert.equal(findApproval({ org: kelvin, repo: "r" }, undefined, korp, p, T0), null);
+      assert.equal(findApproval({ org: "korp", repo: "Keep" }, undefined, korp, p, T0), null);
+      // Other non-ASCII owners likewise.
+      assert.equal(findApproval({ org: "kоrp", repo: "r" }, undefined, korp, p, T0), null);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

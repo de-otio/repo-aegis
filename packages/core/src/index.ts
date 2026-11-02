@@ -316,7 +316,8 @@ export {
   INVALID_DESTINATION_LABEL,
 } from "./refusal.js";
 export type { RefusalInput, RefusalFix } from "./refusal.js";
-export { findApprovalDefault, SHAPE_RULE_CODES } from "./egress-policy.js";
+export { findApprovalDefault, findUncoveredStarDefault, SHAPE_RULE_CODES } from "./egress-policy.js";
+export type { UncoveredStarFinder } from "./egress-policy.js";
 // Human-minted, time-limited, destination-scoped approvals that satisfy
 // rule g from a shell with no TTY (`repo-aegis approve`).
 export {

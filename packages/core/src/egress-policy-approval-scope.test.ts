@@ -18,6 +18,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { UNKNOWN_VISIBILITY_HINT } from "./visibility-lookup.js";
 import { parseEgressIntents } from "./egress-intent.js";
 import {
   decideEgress,
@@ -32,7 +34,7 @@ import type { TrustBoundary } from "./trust-boundary.js";
 
 const REGISTRY: Registry = {
   engagements: [
-    { id: "customer-a", name: "Customer A", started: "2026-01-01", markers: [], githubOrgs: ["customer-a-org"] },
+    { id: "eng-zeta", name: "Zeta Engagement", started: "2026-01-01", markers: [], githubOrgs: ["customer-a-org"] },
   ],
   alwaysBlock: [],
   personalOrgs: ["acme"],
@@ -253,36 +255,103 @@ describe("approval scoping: `*` against a GraphQL mutation", () => {
 });
 
 describe("approval scoping: refusal text when a `*` approval does not cover (§3.9, §5.4)", () => {
-  const FORBIDDEN = ["acme", "customer-a ", "Customer A", "upstream-org", "stranger", "payload-sentinel-xyz"];
+  // The engagement id and name are deliberately NOT substrings of any org name
+  // in play, so a bare-id leak cannot hide inside the destination's own name.
+  const FORBIDDEN = ["acme", "eng-zeta", "Zeta Engagement", "upstream-org", "stranger", "payload-sentinel-xyz"];
 
-  it("names the live `*` approval, says why it does not apply, and gives the narrower quoted commands", () => {
+  it("keeps the existing message and ADDS the `*` sentence: id, why, narrower quoted commands", () => {
     withHome(() => {
       const star = mintApproval({ target: { org: "*", repo: "*" } });
       const reason = assertNeedsHuman(
         decide("gh issue create --repo customer-a-org/repo --body x", publicDest("customer-a-org", "repo")),
         "customer",
       );
-      assert.ok(reason.startsWith("gh issue create → customer-a-org/repo: refused."), reason);
-      assert.ok(reason.includes(`'*' approval (${star.id}, until ${star.expiresAt}) is live`), reason);
+      // Every clause of the pre-existing ask text is still there.
+      assert.ok(reason.startsWith("gh issue create: PUBLIC destination — customer-a-org/repo (public, public-eligible)"), reason);
+      assert.match(reason, /\(from --repo\), from a non-interactive shell\. A person must approve this/);
+      assert.ok(reason.includes("or mint an approval first: `repo-aegis approve customer-a-org/repo` from a terminal."), reason);
+      // The added sentence.
+      assert.ok(reason.includes(`A '*' approval (${star.id}, until ${star.expiresAt}) is live`), reason);
       assert.match(reason, /since 0\.11\.0 '\*' covers only personal-org repositories/);
       assert.match(reason, /customer-a-org is a customer org/);
-      assert.ok(reason.includes("repo-aegis approve 'customer-a-org/*'"), reason);
-      assert.ok(reason.includes("repo-aegis approve customer-a-org/repo"), reason);
+      assert.ok(reason.includes("`repo-aegis approve 'customer-a-org/*'` (the whole org)"), reason);
+      assert.ok(reason.includes("`repo-aegis approve customer-a-org/repo` (this repository only)"), reason);
       assert.match(reason, /A person runs, from a terminal/);
-      assert.match(reason, /Agents: do not run that yourself/);
-      assert.match(reason, /\[PUBLIC_EGRESS_NEEDS_HUMAN, see doc\/agent-guide\.md#public_egress_needs_human\]/);
     });
   });
 
-  it("works for the ask and the deny (no-ask host) shapes alike", () => {
+  it("works for the ask and the deny (no-ask host) shapes alike, keeping the human escape text on deny", () => {
     withHome(() => {
       mintApproval({ target: { org: "*", repo: "*" } });
       for (const ask of [true, false]) {
         const d = decide("git push origin main", publicDest("customer-a-org", "repo"), { capabilities: { ask } });
         assert.equal(d.action, ask ? "ask" : "deny");
         const reason = assertNeedsHuman(d, `ask=${ask}`);
-        assert.ok(reason.includes("repo-aegis approve 'customer-a-org/*'"), reason);
+        assert.ok(reason.includes("`repo-aegis approve 'customer-a-org/*'`"), reason);
+        if (!ask) {
+          assert.match(reason, /re-run it from a terminal, mint an approval first/);
+          assert.match(reason, /or a human sets REPO_AEGIS_EGRESS_HUMAN=1 for this one invocation \(an agent never sets it\)/);
+        }
       }
+    });
+  });
+
+  it("keeps the visibility wording: an uncached destination is still `assumed public`, with the hint after the gap sentence", () => {
+    withHome(() => {
+      mintApproval({ target: { org: "*", repo: "*" } });
+      const uncached: Destination = {
+        ...publicDest("customer-a-org", "repo"),
+        class: "private-strict",
+        visibility: "unknown",
+        classKnown: false,
+        assumedPublic: true,
+      };
+      // The live lookup cannot answer, so the destination stays "assumed public".
+      const reason = assertNeedsHuman(
+        decide("gh issue create --repo customer-a-org/repo --body x", uncached, { lookupVisibility: () => null }),
+        "uncached",
+      );
+      assert.ok(reason.includes("visibility uncached, treated as public"), reason);
+      assert.ok(reason.includes(UNKNOWN_VISIBILITY_HINT), reason);
+      assert.ok(reason.indexOf("is live, but since 0.11.0") < reason.indexOf(UNKNOWN_VISIBILITY_HINT), reason);
+    });
+  });
+
+  it("the shim-unreachable deny also carries the sentence, and keeps its own code", () => {
+    withHome(() => {
+      mintApproval({ target: { org: "*", repo: "*" } });
+      const d = decide("gh issue create --repo customer-a-org/repo --body x", publicDest("customer-a-org", "repo"), {
+        capabilities: { ask: true, ghShimOnPath: false },
+      });
+      assert.equal(d.action === "deny" && d.code, "SHIM_UNREACHABLE_NEEDS_HUMAN");
+      assert.ok(d.action === "deny" && d.reason.includes("'*' approval"), d.action === "deny" ? d.reason : "");
+    });
+  });
+
+  it("M1: the gap lookup is behind the injection seam — an injected finder never reads the real store", () => {
+    withHome(() => {
+      mintApproval({ target: { org: "*", repo: "*" } }); // live `*` in the (temp) real home
+      const cmd = "gh issue create --repo customer-a-org/repo --body x";
+      const injected = assertNeedsHuman(decide(cmd, publicDest("customer-a-org", "repo"), { findApproval: () => null }), "injected");
+      assert.ok(!injected.includes("'*' approval"), injected);
+      // An injected gap finder is honoured, with no store at all.
+      const star = { id: "deadbeef", org: "*", repo: "*", createdAt: "", expiresAt: "2099-01-01T00:00:00.000Z", by: "op" };
+      const viaSeam = assertNeedsHuman(
+        decide(cmd, publicDest("customer-a-org", "repo"), {
+          findApproval: () => null,
+          findUncoveredStar: () => ({ approval: star, gap: "not-personal" }),
+        }),
+        "seam",
+      );
+      assert.ok(viaSeam.includes("A '*' approval (deadbeef, until 2099-01-01T00:00:00.000Z) is live"), viaSeam);
+      // A throwing gap finder degrades to the plain message, never to an allow.
+      const thrown = decide(cmd, publicDest("customer-a-org", "repo"), {
+        findApproval: () => null,
+        findUncoveredStar: () => {
+          throw new Error("boom");
+        },
+      });
+      assert.equal(thrown.action, "ask");
     });
   });
 
@@ -298,7 +367,7 @@ describe("approval scoping: refusal text when a `*` approval does not cover (§3
     });
   });
 
-  it("says nothing about a `*` approval when there is none, and the old message shape is kept", () => {
+  it("says nothing about a `*` approval when there is none, and the old message is byte-for-byte unchanged", () => {
     withHome(() => {
       const reason = assertNeedsHuman(
         decide("gh issue create --repo customer-a-org/repo --body x", publicDest("customer-a-org", "repo")),
@@ -306,6 +375,12 @@ describe("approval scoping: refusal text when a `*` approval does not cover (§3
       );
       assert.ok(!reason.includes("'*' approval"), reason);
       assert.ok(reason.includes("repo-aegis approve customer-a-org/repo"), reason);
+      assert.equal(
+        reason,
+        "gh issue create: PUBLIC destination — customer-a-org/repo (public, public-eligible) (from --repo), " +
+          "from a non-interactive shell. A person must approve this, or mint an approval first: " +
+          "`repo-aegis approve customer-a-org/repo` from a terminal.",
+      );
     });
   });
 
@@ -317,6 +392,9 @@ describe("approval scoping: refusal text when a `*` approval does not cover (§3
         "oracle",
       );
       for (const bad of FORBIDDEN) assert.ok(!reason.includes(bad), `${JSON.stringify(bad)} leaked into: ${reason}`);
+      // The bare engagement id appears nowhere, and the fixture proves the id is not hiding in a name.
+      assert.ok(!reason.includes("eng-zeta"), reason);
+      assert.ok(!"customer-a-org".includes("eng-zeta"));
     });
   });
 
@@ -335,4 +413,62 @@ describe("approval scoping: refusal text when a `*` approval does not cover (§3
       assert.ok(!reason.includes("repo-aegis approve"), reason);
     });
   });
+});
+
+describe("approval scoping: owner names are tested as typed, before lower-casing (L1)", () => {
+  it("`Korp` spelled with U+212A (KELVIN SIGN) is not covered by `*` for a personal org `korp`, nor by `korp/*`", () => {
+    const kelvin = "Korp";
+    assert.equal(kelvin.toLowerCase(), "korp", "the premise: lower-casing maps it onto a plain k");
+    const registry = { ...REGISTRY, personalOrgs: ["korp"] } as Registry;
+    withHome(() => {
+      mintApproval({ target: { org: "*", repo: "*" } });
+      mintApproval({ target: { org: "korp", repo: "*" } });
+      // Control: the plain spelling IS covered.
+      assertCovered(decide("gh issue create --repo korp/r --body x", publicDest("korp", "r"), { registry }), "korp");
+      // Rule h inert, so the destination reaches rule g and the matcher alone decides.
+      const d = decide("gh issue create --repo x/r --body x", publicDest(kelvin, "r"), {
+        registry: NO_OWNERS,
+        registryState: "missing",
+      });
+      assert.notEqual(d.action, "allow", JSON.stringify(d));
+    });
+  });
+});
+
+describe("approval scoping: gh gist create (§3.3 item 9)", () => {
+  // A gist belongs to the authenticated account, not to the cwd's origin, so a
+  // personal `*` approval must never cover a public paste. Today the resolver
+  // attributes it to the cwd's origin (`acme/svc`, a personal org) and `*`
+  // covers it. Fixed by PR 2c (resolver hardening); this pins the target.
+  it(
+    "is not covered by `*` from a personal checkout",
+    { todo: "fails until PR 2c lands (plan §3.3 item 9: a gist is attributed to the account, not the cwd)" },
+    () => {
+      const repo = mkdtempSync(join(tmpdir(), "egress-gist-"));
+      try {
+        execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+        execFileSync("git", ["config", "remote.origin.url", "git@github.com:acme/svc.git"], { cwd: repo });
+        execFileSync("git", ["config", "repo-aegis.class", "public-eligible"], { cwd: repo });
+        execFileSync("git", ["config", "repo-aegis.visibility", "public"], { cwd: repo });
+        withHome(() => {
+          mintApproval({ target: { org: "*", repo: "*" } });
+          const d = decideEgress({
+            intents: parseEgressIntents("gh gist create --public"),
+            cwd: repo,
+            registry: REGISTRY,
+            registryState: "loaded",
+            humanPresent: false,
+            capabilities: { ask: true },
+            findApproval: findApprovalDefault,
+            lookupVisibility: () => "public",
+            scanPayload: () => 0,
+            trustBoundaryOf: () => boundary(["acme"]),
+          });
+          assert.notEqual(d.action, "allow", "a `*` approval must not cover a public gist");
+        });
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    },
+  );
 });

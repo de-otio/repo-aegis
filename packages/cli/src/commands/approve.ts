@@ -98,6 +98,16 @@ function mintWarnings(target: { org: string; repo: string }, registryPath: strin
     (registry?.allowedUpstreams ?? []).some(u => u.toLowerCase() === `${safe.org}/${safe.repo}`);
   // A missing registry or one with no owners leaves rule h inert: nothing to warn about.
   if (owners.size === 0 || owners.has(safe.org) || exactUpstream) return [];
+  // `<owner>/*` for an owner that is not registered but has an allowed upstream:
+  // rule h admits that upstream for PR and issue verbs, so the approval is not
+  // useless, only narrow. Does not name the upstream.
+  if (safe.repo === "*" && (registry?.allowedUpstreams ?? []).some(u => u.toLowerCase().startsWith(`${safe.org}/`))) {
+    return [
+      `"${safe.org}" is not a registered owner. This approval covers only that owner's allowed upstream ` +
+        `repositories, and only for PR and issue verbs; everything else under it stays refused by rule h ` +
+        `(UNREGISTERED_OWNER_EGRESS) until a person registers the owner.`,
+    ];
+  }
   return [
     `"${safe.org}" is not a registered owner, so rule h (UNREGISTERED_OWNER_EGRESS) will still refuse ` +
       `non-interactive egress there until a person registers it, whatever approval exists. ` +
