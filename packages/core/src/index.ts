@@ -328,12 +328,22 @@ export {
   mintApproval,
   revokeApprovals,
   findApproval,
+  findUncoveringStarApproval,
+  approvalScopeOf,
+  starApprovalCovers,
   normaliseRef,
   APPROVALS_FILE,
   DEFAULT_APPROVAL_TTL_MS,
   MAX_APPROVAL_TTL_MS,
 } from "./egress-approval.js";
-export type { EgressApproval, ApprovalStore, MintOptions } from "./egress-approval.js";
+export type {
+  EgressApproval,
+  ApprovalStore,
+  MintOptions,
+  ApprovalScope,
+  ApprovalScopeRegistry,
+  StarApprovalGap,
+} from "./egress-approval.js";
 
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";

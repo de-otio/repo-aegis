@@ -464,12 +464,13 @@ describe("destinations reaching rules e, f and g are validated too (re-review)",
       }
     });
 
-    it("the global form and a plain repo are unchanged", () => {
+    it("a plain repo is unchanged; an unresolved target offers no approve command (D7: `*` no longer covers it)", () => {
       const unresolved = decide("gh api graphql -f query=x", {
         registryState: "missing",
         resolveDestination: () => dest({ org: "*", repo: "*", unresolved: "graphql-mutation" }),
       });
-      assert.ok(unresolved.action === "ask" && unresolved.reason.includes("`repo-aegis approve '*'`"));
+      assert.ok(unresolved.action === "ask" && !unresolved.reason.includes("repo-aegis approve"), JSON.stringify(unresolved));
+      assert.ok(unresolved.action === "ask" && unresolved.reason.includes("run it from a terminal"));
       const plain = decide("gh issue create --body x", { resolveDestination: () => dest({ org: "acme", repo: "svc" }) });
       assert.ok(plain.action === "ask" && plain.reason.includes("`repo-aegis approve acme/svc`"));
     });

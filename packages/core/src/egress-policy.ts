@@ -53,7 +53,13 @@ import {
   type GraphqlOperationKind,
 } from "./egress-intent.js";
 import { resolveCachedDestination } from "./destination-cache.js";
-import { findApproval, type EgressApproval } from "./egress-approval.js";
+import {
+  approvalScopeOf,
+  findApproval,
+  findUncoveringStarApproval,
+  type ApprovalScope,
+  type EgressApproval,
+} from "./egress-approval.js";
 import { ownerAdmitted, registeredOwners, UPSTREAM_ADMITTED_VERBS } from "./registered-owners.js";
 import {
   refusal,
@@ -225,10 +231,16 @@ export type PayloadScanner = (file: string, destination: Destination, cwd: strin
 /**
  * Looks up a live human-minted approval for a destination (null when the
  * command has none, e.g. `npm publish`) and the ref the command names.
- * Injectable for tests; defaults to the approvals store under
- * `REPO_AEGIS_HOME`.
+ * `scope` says what a `*` approval may cover for this call (D7): the
+ * registry's personal orgs and upstreams, and whether the verb is
+ * destination-less. Injectable for tests; defaults to the approvals store
+ * under `REPO_AEGIS_HOME`.
  */
-export type ApprovalFinder = (destination: Destination | null, ref: string | undefined) => EgressApproval | null;
+export type ApprovalFinder = (
+  destination: Destination | null,
+  ref: string | undefined,
+  scope: ApprovalScope,
+) => EgressApproval | null;
 
 /**
  * How the registry was obtained, so that "empty because missing", "empty
@@ -286,9 +298,14 @@ export interface DecideEgressOptions {
   lookupVisibility?: VisibilityLookup;
 }
 
-/** Default {@link ApprovalFinder}: a destination-less command is covered only by a `*` approval. */
-export const findApprovalDefault: ApprovalFinder = (destination, ref) =>
-  findApproval(destination ?? { org: "*", repo: "*" }, ref);
+/**
+ * Default {@link ApprovalFinder}. A `*` approval covers only `personalOrgs`
+ * owners and destination-less verbs (`scope.destinationless`); a null
+ * destination that is not flagged destination-less is covered by nothing
+ * but an explicit person.
+ */
+export const findApprovalDefault: ApprovalFinder = (destination, ref, scope) =>
+  findApproval(destination ?? { org: "*", repo: "*" }, ref, scope);
 
 // ---------------------------------------------------------------------------
 // Destination resolution (offline)
@@ -740,6 +757,49 @@ function registryPathLabel(): string {
  * owner/repo, which the command already carries, and nothing else: never the
  * registered owners, engagement ids or upstreams (the redaction oracle).
  */
+/**
+ * Rule g's refusal when a live `*` approval exists but does not cover the
+ * destination (D7, §3.9): it says so, says why, and gives the narrower,
+ * quoted approve command. Names only the destination's own owner/repo (which
+ * the command already carries), never another owner, an engagement id or the
+ * registry's contents; `refusal()` discards the message for an invalid name.
+ */
+function uncoveredStarReason(
+  verb: string,
+  destination: Destination,
+  star: EgressApproval,
+  gap: "not-personal" | "upstream",
+  registry: Registry,
+): string {
+  const safe = safeDestination(destination.org, destination.repo);
+  const owner = safe?.org ?? "";
+  const target = safe === null ? "" : `${safe.org}/${safe.repo}`;
+  const isCustomer = registry.engagements.some(e =>
+    (e.githubOrgs ?? []).some(o => o.toLowerCase() === destination.org.toLowerCase()),
+  );
+  const kind =
+    gap === "upstream"
+      ? `${target} is an allowed upstream, not one of your own repositories`
+      : isCustomer
+        ? `${owner} is a customer org`
+        : `${owner} is not one of your personal orgs`;
+  const publicOrNot = destination.publicFacing === true ? "is public" : "is an operation that is hard to undo";
+  return refusal({
+    code: "PUBLIC_EGRESS_NEEDS_HUMAN",
+    destination: { verb, org: destination.org, repo: destination.repo },
+    what: `${verb} → ${target}`,
+    why:
+      `The destination ${publicOrNot}, so a person must approve it from a terminal. A '*' approval ` +
+      `(${star.id}, until ${star.expiresAt}) is live, but since 0.11.0 '*' covers only personal-org ` +
+      `repositories and destination-less commands such as npm publish; ${kind}`,
+    approval: `The '*' approval does not cover this; an approval that names ${owner} does`,
+    fixes: [
+      { by: "person", command: `repo-aegis approve '${owner}/*'`, note: "the whole org" },
+      { by: "person", command: `repo-aegis approve ${target}`, note: "this repository only" },
+    ],
+  });
+}
+
 function unregisteredOwnerReason(
   intent: EgressIntent,
   destination: Destination,
@@ -1025,9 +1085,14 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     // A person may have declared themselves in advance: a live approval
     // minted at a terminal for this destination (and ref, when scoped).
     // Rule g is the ONLY rule it satisfies — everything above still ran.
+    // `*` covers personalOrgs owners and destination-less verbs only (D7). The
+    // destination-less flag is explicit and tied to the verb: a null
+    // destination on any other verb, or an unresolved `*`/`*` one (GraphQL),
+    // is not destination-less.
+    const approvalScope = approvalScopeOf(opts.registry, destination === null && intent.verb === "npm-publish");
     let approval: EgressApproval | null = null;
     try {
-      approval = (opts.findApproval ?? findApprovalDefault)(destination, intent.refspec);
+      approval = (opts.findApproval ?? findApprovalDefault)(destination, intent.refspec, approvalScope);
     } catch {
       approval = null;
     }
@@ -1046,10 +1111,15 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     // The destination's name comes from the agent's command line and this hint
     // is text a person pastes: interpolate only a validated name. A name that
     // fails validation gets no approve command at all (see refusal.ts).
+    // `approve '*'` is only offered where a `*` approval actually covers the
+    // call (destination-less `npm publish`). An unresolved destination, or a
+    // null one on another verb, is covered by no approval, so none is offered.
     const approveTarget =
       destination && destination.unresolved === undefined
         ? safeDestination(destination.org, destination.repo)
-        : "wildcard";
+        : destination === null && approvalScope.destinationless === true
+          ? "wildcard"
+          : null;
     const approveCommand =
       approveTarget === null
         ? null
@@ -1082,6 +1152,36 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
               ? ` (from the API path)`
               : "") +
       `, from a non-interactive shell. A person must approve this`;
+    // A live `*` approval that exists but does not cover this destination (D7):
+    // say exactly that, with the narrower command, so the operator does not
+    // conclude the guard is broken (§3.9). Only for a named destination.
+    let starGap: string | null = null;
+    if (destination !== null && destination.unresolved === undefined) {
+      try {
+        const uncovered = findUncoveringStarApproval(destination, intent.refspec, approvalScope);
+        if (uncovered !== null) {
+          starGap = uncoveredStarReason(verb, destination, uncovered.approval, uncovered.gap, opts.registry);
+        }
+      } catch {
+        starGap = null;
+      }
+    }
+    if (starGap !== null) {
+      // Same shape as the generic refusal (ask where the host can ask, deny
+      // otherwise), except where the shim cannot hold the command: that case
+      // keeps its own code, and is handled below.
+      if (!(opts.capabilities.ask && opts.capabilities.ghShimOnPath === false && intent.verb.startsWith("gh-"))) {
+        return opts.capabilities.ask
+          ? {
+              action: "ask",
+              code: "PUBLIC_EGRESS_NEEDS_HUMAN",
+              reason: starGap,
+              ...(shownDestination && { destination: shownDestination }),
+              intent,
+            }
+          : deny("PUBLIC_EGRESS_NEEDS_HUMAN", starGap, shownDestination);
+      }
+    }
     if (opts.capabilities.ask) {
       // An `ask` is a refusal only if something can still hold the command
       // when the ask is not answered by a person — and on at least one agent

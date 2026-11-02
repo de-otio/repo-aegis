@@ -24,7 +24,8 @@
 // treats a matching, unexpired approval as "human present" for rule g and
 // nothing else: the shape rules, the cross-org boundary and the payload
 // scan still apply, the receipt still prints. Approvals are scoped
-// (`<org>/<repo>`, `<org>/*`, or `*`, optionally one ref), expire on their
+// (`<org>/<repo>`, `<org>/*`, or `*` — which covers personalOrgs owners and
+// destination-less verbs only, optionally one ref), expire on their
 // own (default 15 minutes, never more than a day), are listed and revoked
 // by the same command, and every mint and every use is an audit record.
 //
@@ -209,14 +210,78 @@ export function normaliseRef(ref: string): string {
 }
 
 /**
+ * What a `*` approval may cover (decision D7, issue #151).
+ *
+ * A `*` approval is no longer a global wildcard. It covers a destination only
+ * when the destination's owner is one of the operator's own `personalOrgs`,
+ * or when the call has no repository destination at all (`npm publish`). A
+ * customer's repository needs `approve <org>/*` or `approve <org>/<repo>`;
+ * so does an `allowedUpstreams` repository. `<org>/*` and `<org>/<repo>`
+ * approvals behave exactly as before.
+ */
+export interface ApprovalScope {
+  /** Lower-cased `personalOrgs`. Build it with {@link approvalScopeOf}. */
+  personalOrgs: ReadonlySet<string>;
+  /**
+   * Exact lower-cased `owner/repo` entries of `allowedUpstreams`. A `*`
+   * approval never covers one of these, even if its owner is also personal:
+   * an upstream is somewhere the operator proposes changes, not somewhere a
+   * blanket approval publishes (D6, D7). Fail closed.
+   */
+  upstreams?: ReadonlySet<string>;
+  /**
+   * The verb has no repository destination (`npm publish`), so a `*`
+   * approval covers it. This is an explicit flag, NOT a `*`/`*` destination:
+   * an unresolved GraphQL mutation also carries a `*`/`*` destination, and a
+   * `*` approval must not cover that (rule h refuses it first, but the
+   * matcher does not rely on the ordering).
+   */
+  destinationless?: boolean;
+}
+
+/** The registry fields {@link approvalScopeOf} reads. */
+export interface ApprovalScopeRegistry {
+  personalOrgs?: readonly string[] | undefined;
+  allowedUpstreams?: readonly string[] | undefined;
+}
+
+/** Build an {@link ApprovalScope} from the registry. The one place the lower-casing happens. */
+export function approvalScopeOf(registry: ApprovalScopeRegistry, destinationless = false): ApprovalScope {
+  return {
+    personalOrgs: new Set((registry.personalOrgs ?? []).map(o => o.toLowerCase())),
+    upstreams: new Set((registry.allowedUpstreams ?? []).map(u => u.toLowerCase())),
+    destinationless,
+  };
+}
+
+/** Why a live `*` approval did not cover a destination (for refusal text). */
+export type StarApprovalGap = "not-personal" | "upstream";
+
+/**
+ * Whether a `*` approval covers `destination` under `scope`. Exported so the
+ * refusal text can ask the same question the matcher answers.
+ */
+export function starApprovalCovers(destination: { org: string; repo: string }, scope: ApprovalScope): boolean {
+  if (scope.destinationless === true) return true;
+  const org = destination.org.toLowerCase();
+  const repo = destination.repo.toLowerCase();
+  if (scope.upstreams?.has(`${org}/${repo}`) === true) return false;
+  return scope.personalOrgs.has(org);
+}
+
+/**
  * The live approval covering a destination (and ref, when the command names
- * one), or null. `*` scopes match anything; an approval with a ref matches
- * only that ref, one without matches every ref. Never throws — a store
- * that cannot be read is simply no approval, which is the safe direction.
+ * one), or null. An approval with a ref matches only that ref, one without
+ * matches every ref. `<org>/*` and `<org>/<repo>` match as written; a `*`
+ * approval matches only what {@link starApprovalCovers} says (D7). A
+ * destination-less call (`scope.destinationless`) is matched by `*` alone,
+ * never by an `<org>/…` approval. Never throws — a store that cannot be read
+ * is simply no approval, which is the safe direction.
  */
 export function findApproval(
   destination: { org: string; repo: string },
   ref: string | undefined,
+  scope: ApprovalScope,
   path: string = approvalsPath(),
   now: Date = new Date(),
 ): EgressApproval | null {
@@ -225,11 +290,46 @@ export function findApproval(
     const org = destination.org.toLowerCase();
     const repo = destination.repo.toLowerCase();
     const wanted = ref === undefined ? undefined : normaliseRef(ref);
+    const starCovers = starApprovalCovers(destination, scope);
     for (const a of listApprovals(path, now)) {
-      if (a.org !== "*" && a.org !== org) continue;
-      if (a.repo !== "*" && a.repo !== repo) continue;
+      if (a.org === "*") {
+        if (!starCovers) continue;
+      } else {
+        if (scope.destinationless === true) continue;
+        if (a.org !== org) continue;
+        if (a.repo !== "*" && a.repo !== repo) continue;
+      }
       if (a.ref !== undefined && (wanted === undefined || a.ref !== wanted)) continue;
       return a;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The live `*` approval, if any, that exists but does NOT cover `destination`
+ * under `scope`. Rule g uses it to say "your `*` approval is live but no
+ * longer covers this" rather than leave the operator believing the guard is
+ * broken (§3.9). Returns the approval and why.
+ */
+export function findUncoveringStarApproval(
+  destination: { org: string; repo: string },
+  ref: string | undefined,
+  scope: ApprovalScope,
+  path: string = approvalsPath(),
+  now: Date = new Date(),
+): { approval: EgressApproval; gap: StarApprovalGap } | null {
+  try {
+    if (!existsSync(path) || starApprovalCovers(destination, scope)) return null;
+    const wanted = ref === undefined ? undefined : normaliseRef(ref);
+    const upstream =
+      scope.upstreams?.has(`${destination.org.toLowerCase()}/${destination.repo.toLowerCase()}`) === true;
+    for (const a of listApprovals(path, now)) {
+      if (a.org !== "*") continue;
+      if (a.ref !== undefined && (wanted === undefined || a.ref !== wanted)) continue;
+      return { approval: a, gap: upstream ? "upstream" : "not-personal" };
     }
     return null;
   } catch {
