@@ -92,6 +92,12 @@ const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack"]);
 const SEARCH_RUN_FLAGS = new Set(["--pager", "--pre"]);
 /** Commands whose arguments are only text or paths to look at, never a program. */
 const LOOKUP_COMMANDS = new Set(["man", "apropos"]);
+/**
+ * Commands that only LOOK UP a name or a process (`which setsid`, `type tmux`, `command -v screen`, `pkill setsid`,
+ * `pgrep tmux`). Their arguments are exempt for the detached-session check only. The human-command check keeps
+ * them, because `$(which repo-aegis) approve` runs the program `which` printed.
+ */
+const DETACH_LOOKUP_COMMANDS = new Set(["which", "whereis", "type", "pkill", "pgrep", "pidof"]);
 /** `git` options whose value is a directory. */
 const GIT_DIR_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--namespace"]);
 /** `gh` options whose value is a repository. */
@@ -106,14 +112,17 @@ const GH_REPO_FLAGS = new Set(["-R", "--repo"]);
  *     (`grep -rn "repo-aegis approve" doc/`).
  * A flag that RUNS something (`grep --pager`, `git -c`, `--exec`) is still read.
  */
-function regionWords(tokens: readonly string[]): string[] {
+function regionWords(tokens: readonly string[], forDetached = false): string[] {
   const bases = tokens.map(tokenBase);
   const first = bases[0] ?? "";
   const isGit = bases.includes("git");
   const isGh = bases.includes("gh");
   const isGitOrGh = isGit || isGh;
   const words: string[] = [];
-  if (first === "cd" || first === "pushd" || first === "popd" || LOOKUP_COMMANDS.has(first)) {
+  const lookup =
+    forDetached &&
+    (DETACH_LOOKUP_COMMANDS.has(first) || (first === "command" && (tokens[1] === "-v" || tokens[1] === "-V")));
+  if (first === "cd" || first === "pushd" || first === "popd" || LOOKUP_COMMANDS.has(first) || lookup) {
     return tokens.slice(0, 1).flatMap(t => t.split(WORD_SPLIT).filter(w => w !== ""));
   }
   const searching = SEARCH_COMMANDS.has(first);
@@ -172,7 +181,7 @@ interface Region {
   endedBy: string;
 }
 
-function splitRegions(text: string): Region[] {
+function splitRegions(text: string, forDetached = false): Region[] {
   const regions: Region[] = [];
   let tokens: string[] = [];
   let buf = "";
@@ -183,7 +192,7 @@ function splitRegions(text: string): Region[] {
   };
   const flush = (endedBy = ""): void => {
     endToken();
-    const words = regionWords(tokens);
+    const words = regionWords(tokens, forDetached);
     // An empty region is kept: it separates `$(…)` from whatever follows the next `;`.
     if (words.length > 0 || endedBy !== "") regions.push({ words, endedBy });
     tokens = [];
@@ -395,11 +404,24 @@ export function humanCommandRefusal(hit: HumanOnlyHit): string {
 
 export const AGENT_DETACHED_SESSION = "AGENT_DETACHED_SESSION";
 
-export type DetachedKind = "tmux-detached" | "screen-detached" | "setsid" | "daemonize" | "nohup-disown";
+export type DetachedKind =
+  | "tmux-detached"
+  | "tmux-spawn"
+  | "screen-detached"
+  | "screen-inject"
+  | "setsid"
+  | "daemonize"
+  | "nohup-disown";
 
 export interface DetachedHit {
   kind: DetachedKind;
 }
+
+/** tmux subcommands (and their aliases) that start a process in a pane or type into one. */
+const TMUX_SPAWN_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "new-window", "neww", "split-window", "splitw", "send-keys", "send", "respawn-pane", "respawnp",
+  "respawn-window", "respawnw",
+]);
 
 /** The last path component, lower-cased. (Searches and `man`/`which` arguments are already dropped by {@link regionWords}.) */
 const detachBase = (w: string): string => w.slice(w.lastIndexOf("/") + 1).toLowerCase();
@@ -415,12 +437,19 @@ function detachedKindOf(words: readonly string[]): DetachedKind | null {
       const win = followingWords(words, i);
       const sub = win.find(x => x === "new" || x === "new-session");
       if (sub !== undefined && win.some(x => /^-[A-Za-z]*d[A-Za-z]*$/.test(x))) return "tmux-detached";
+      // Any command that starts a process in, or types into, a pane of a tmux server (whatever the target):
+      // the pane's pty belongs to the server, not to this command.
+      if (win.some(x => TMUX_SPAWN_SUBCOMMANDS.has(x))) return "tmux-spawn";
     }
     if (b === "screen") {
       const letters = followingWords(words, i)
         .filter(x => /^-[A-Za-z]+$/.test(x))
         .join("");
       if (letters.includes("d") && letters.includes("m")) return "screen-detached";
+      // `screen -S x -X stuff 'cmd'` / `-X screen cmd`: run something in, or type into, a session.
+      const win = followingWords(words, i);
+      const x = win.indexOf("-X");
+      if (x !== -1 && (win[x + 1] === "stuff" || win[x + 1] === "screen")) return "screen-inject";
     }
   }
   return null;
@@ -428,8 +457,10 @@ function detachedKindOf(words: readonly string[]): DetachedKind | null {
 
 /**
  * The first detached-session start in this command line, or null: `tmux new -d`,
- * `tmux new-session -d`, `screen -dm` / `-d -m`, `setsid` (also `os.setsid()` in
- * interpreter text), `daemonize`, and `nohup` combined with `disown`.
+ * `tmux new-session -d`, `tmux new-window` / `split-window` / `send-keys` /
+ * `respawn-pane` / `respawn-window`, `screen -dm` / `-d -m`, `screen -X stuff` /
+ * `-X screen`, `setsid` (also `os.setsid()` in interpreter text), `daemonize`, and
+ * `nohup` combined with `disown`.
  */
 export function findDetachedStart(command: string): DetachedHit | null {
   if (typeof command !== "string" || command === "") return null;
@@ -438,7 +469,7 @@ export function findDetachedStart(command: string): DetachedHit | null {
   try {
     let nohup = false;
     let disown = false;
-    for (const { words } of splitRegions(command)) {
+    for (const { words } of splitRegions(command, true)) {
       const kind = detachedKindOf(words);
       if (kind !== null) return { kind };
       for (const w of words) {
@@ -456,7 +487,9 @@ export function findDetachedStart(command: string): DetachedHit | null {
 
 const DETACHED_WHAT: Readonly<Record<DetachedKind, string>> = {
   "tmux-detached": "tmux new -d (a detached tmux session)",
+  "tmux-spawn": "tmux new-window / split-window / send-keys / respawn (a command run in a tmux server's pane)",
   "screen-detached": "screen -dm (a detached screen session)",
+  "screen-inject": "screen -X stuff / -X screen (a command run in a screen session)",
   setsid: "setsid (a new session, detached from this command)",
   daemonize: "daemonize (a detached background process)",
   "nohup-disown": "nohup … & disown (a background job dropped from the shell)",
@@ -468,13 +501,17 @@ export function detachedStartRefusal(hit: DetachedHit): string {
     code: AGENT_DETACHED_SESSION,
     what: DETACHED_WHAT[hit.kind],
     why:
-      "A detached session outlives this command and is re-parented to the system's init process, and a terminal it " +
-      "opens would look like a person's to repo-aegis, which is how an agent could approve its own publishes",
+      hit.kind === "tmux-spawn" || hit.kind === "screen-inject"
+        ? "A command run in a tmux or screen server's pane belongs to that server, which is re-parented to the system's " +
+          "init process, and its terminal would look like a person's to repo-aegis, which is how an agent could approve " +
+          "its own publishes"
+        : "A detached session outlives this command and is re-parented to the system's init process, and a terminal it " +
+          "opens would look like a person's to repo-aegis, which is how an agent could approve its own publishes",
     approval: "No approval covers this",
     fixes: [
       {
         by: "agent",
-        command: "run the command in the foreground, or as a plain `nohup <command> &` for a dev server (without disown, setsid or a detached tmux/screen)",
+        command: "run the command in the foreground, or as a plain `nohup <command> &` for a dev server (without disown, setsid, a detached tmux/screen, or tmux/screen commands that run something in a pane)",
       },
       { by: "person", when: "If a long-lived terminal session is really needed", step: "starts it in their own terminal" },
     ],

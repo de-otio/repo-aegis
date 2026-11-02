@@ -14,13 +14,14 @@ import { setAncestryReaderForTests, type AncestorInfo } from "@de-otio/repo-aegi
 export const PERSON_ANCESTRY: readonly AncestorInfo[] = [
   { pid: 14, ppid: 13, comm: "zsh", argv: ["/bin/zsh"], exe: "/bin/zsh" },
   { pid: 13, ppid: 12, comm: "-zsh", argv: ["-zsh"], exe: "-zsh" },
-  { pid: 12, ppid: 11, comm: "login", argv: ["login", "-pf", "me"], exe: "/usr/bin/login" },
+  { pid: 12, ppid: 11, comm: "login", argv: ["login", "-pf", "me"], exe: "/usr/bin/login", uid: 0 },
   {
     pid: 11,
     ppid: 1,
     comm: "Terminal",
     argv: ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"],
-    exe: "/System/Applicat",
+    exe: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+    uid: 501,
   },
 ];
 

@@ -43,7 +43,7 @@
 // presence signal an agent cannot forge (a Keychain item with a user-presence
 // ACL / Touch ID), which is tracked as a follow-up.
 import { readSync } from "node:fs";
-import { checkTerminal, type AncestryReader, type MultiplexerProbe } from "@de-otio/repo-aegis-core";
+import { checkTerminal, type AncestryReader, type ExeResolver, type MultiplexerProbe } from "@de-otio/repo-aegis-core";
 import { emitError, type OutputOptions } from "./format.js";
 
 export interface HumanTerminalOptions {
@@ -55,6 +55,8 @@ export interface HumanTerminalOptions {
   env?: NodeJS.ProcessEnv;
   /** TEST-ONLY: tmux/screen attached-client probe. */
   probe?: MultiplexerProbe;
+  /** TEST-ONLY: resolves a process's real executable path (emulator roots). */
+  resolveExe?: ExeResolver;
 }
 
 export interface RequireTerminalOptions extends OutputOptions, HumanTerminalOptions {}
@@ -62,7 +64,7 @@ export interface RequireTerminalOptions extends OutputOptions, HumanTerminalOpti
 export type TerminalVerdict =
   | { human: true }
   | { human: false; why: "no-tty" }
-  | { human: false; why: "agent-ancestor"; ancestor: string }
+  | { human: false; why: "agent-ancestor"; ancestor: string; via?: "env" }
   | { human: false; why: "no-positive-root" }
   | { human: false; why: "ancestry-undeterminable" };
 
@@ -73,6 +75,7 @@ export function terminalVerdict(opts: HumanTerminalOptions = {}): TerminalVerdic
     ...(opts.ancestry !== undefined && { ancestry: opts.ancestry }),
     ...(opts.env !== undefined && { env: opts.env }),
     ...(opts.probe !== undefined && { probe: opts.probe }),
+    ...(opts.resolveExe !== undefined && { resolveExe: opts.resolveExe }),
   });
   switch (check.kind) {
     case "no-tty":
@@ -81,7 +84,7 @@ export function terminalVerdict(opts: HumanTerminalOptions = {}): TerminalVerdic
     case "clear":
       return { human: true };
     case "agent":
-      return { human: false, why: "agent-ancestor", ancestor: check.ancestor };
+      return { human: false, why: "agent-ancestor", ancestor: check.ancestor, ...(check.via !== undefined && { via: check.via }) };
     case "unrooted":
       return { human: false, why: "no-positive-root" };
     case "undeterminable":
@@ -101,6 +104,14 @@ export function isHumanTerminal(opts: HumanTerminalOptions = {}): boolean {
 /** The sentence added to a refusal when a terminal IS attached but is not trusted. */
 function ancestryNote(v: TerminalVerdict): string {
   if (v.human || v.why === "no-tty") return "";
+  if (v.why === "agent-ancestor" && v.via === "env") {
+    return (
+      " A terminal is attached, but the environment says this shell belongs to Claude Code (CLAUDECODE=1 or " +
+      "CLAUDE_CODE_ENTRYPOINT is set). That also happens in your own terminal when a tmux server or a shell was started " +
+      "from inside Claude Code: every new pane inherits it. If this is your own terminal, open a fresh terminal window " +
+      "(or unset both variables in this shell) and run it there."
+    );
+  }
   if (v.why === "agent-ancestor") {
     return (
       ` A terminal is attached, but it runs under ${v.ancestor}, an agent host or terminal wrapper, so it is not ` +

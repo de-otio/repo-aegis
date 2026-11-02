@@ -30,8 +30,8 @@ import { engagementsAdd, engagementsRemove } from "./commands/engagements-mutate
 import { init } from "./commands/init.js";
 import { upstreamsAdd } from "./commands/upstreams.js";
 
-function proc(pid: number, ppid: number, comm: string, argv: string[] = [comm], exe?: string): AncestorInfo {
-  return { pid, ppid, comm, argv, ...(exe !== undefined && { exe }) };
+function proc(pid: number, ppid: number, comm: string, argv: string[] = [comm], exe?: string, uid?: number): AncestorInfo {
+  return { pid, ppid, comm, argv, ...(exe !== undefined && { exe }), ...(uid !== undefined && { uid }) };
 }
 
 /** What `ps` shows for a person's own terminal, and for a Claude Code session (names only). */
@@ -110,7 +110,23 @@ describe("terminalVerdict / isHumanTerminal", () => {
       human: false,
       why: "agent-ancestor",
       ancestor: "claude",
+      via: "env",
     });
+  });
+
+  it("a forged login (not uid 0) or an emulator whose real path is untrusted leaves the chain without a root", () => {
+    const forgedLogin = (): AncestorInfo[] => [proc(61, 60, "zsh"), proc(60, 1, "login", ["login"], "login", 501)];
+    assert.deepEqual(terminalVerdict({ stderrIsTTY: true, ancestry: forgedLogin }), { human: false, why: "no-positive-root" });
+    const forgedEmulator = (): AncestorInfo[] => [proc(71, 70, "zsh"), proc(70, 1, "kitty", ["kitty"], "/Applications/ki", 501)];
+    assert.deepEqual(
+      terminalVerdict({ stderrIsTTY: true, ancestry: forgedEmulator, resolveExe: () => "/Users/me/.nvm/bin/node" }),
+      { human: false, why: "no-positive-root" },
+    );
+    assert.equal(terminalVerdict({ stderrIsTTY: true, ancestry: forgedEmulator, resolveExe: () => null }).human, false);
+    assert.equal(
+      terminalVerdict({ stderrIsTTY: true, ancestry: forgedEmulator, resolveExe: () => "/Applications/kitty.app/Contents/MacOS/kitty" }).human,
+      true,
+    );
   });
 
   it("a tmux server is a root only with an attached client", () => {
@@ -180,6 +196,15 @@ describe("requireTerminal", () => {
     assert.match(body.error, /^do it yourself/);
     assert.match(body.error, /runs under claude, an agent host or terminal wrapper/);
     assert.match(body.error, /Run this in your own terminal window/);
+  });
+
+  it("4: the CLAUDECODE=1 refusal names the tmux-inherits-it case and the way out", () => {
+    const r = run({ stderrIsTTY: true, ancestry: PERSON, env: { CLAUDECODE: "1" } });
+    assert.equal(r.exitCode, 2);
+    const { error } = JSON.parse(r.stderr) as { error: string };
+    assert.match(error, /CLAUDECODE=1 or CLAUDE_CODE_ENTRYPOINT is set/);
+    assert.match(error, /tmux server or a shell was started from inside Claude Code/);
+    assert.match(error, /open a fresh terminal window/);
   });
 
   it("refuses a chain with no positive root and says why", () => {

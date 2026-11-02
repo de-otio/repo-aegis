@@ -3,6 +3,23 @@
 //
 // Who is behind this terminal? (issue #151, PR 2b; plan §8.1 S10)
 //
+// ===========================================================================
+// THE BOUNDARY (read this before trusting anything below)
+// ===========================================================================
+// Outside the agent's sandbox, an agent that runs as the same user can forge
+// ANY process-identity signal this module reads: it can name a process
+// anything (`exec -a login`, a copied binary called `login`, `process.title`),
+// set any environment variable, and write the approvals file or the registry
+// directly (plan §8.2 R1). So outside the sandbox these checks are SPEED BUMPS,
+// not proof of a person. INSIDE the agent sandbox (no pty, `ps` and `lsof`
+// blocked) they fail closed: nothing can be read, so `approve` and the owner
+// adds refuse. The sandbox is the real boundary; this code makes the common
+// accidental and the cheap deliberate routes fail. The lasting fix is a
+// presence signal an agent cannot forge: a Keychain item with a user-presence
+// ACL / Touch ID prompt for `approve` and owner adds (tracked as a follow-up
+// issue; it predates #151).
+// ===========================================================================
+//
 // "stderr is a TTY" is a speed bump, not proof of a person: `script -q
 // /dev/null <cmd>`, `unbuffer`, `expect`, `python -c 'import pty…'`, `socat …
 // pty` and `ssh -tt localhost` give an agent's child a pty. This module reads
@@ -18,12 +35,17 @@
 //   - `ps` is run by ABSOLUTE path (`/bin/ps` or `/usr/bin/ps`, a root-owned
 //     regular file, nothing else) with a minimal environment, never through
 //     `PATH`: an agent can put a fake `ps` first on its own PATH.
-//   - ONE snapshot (`ps -A -o pid=,ppid=,ucomm=,comm=,args=`) is parsed once and
-//     walked in memory: no per-hop spawns, no PID-reuse race, no stall. On Linux
-//     `/proc` is read instead.
-//   - The process NAME is `ucomm` (the kernel's `p_comm`); `comm` (the
-//     executable path) is kept to check where a root really lives; `args` gives
-//     argv for the JS-runtime and interpreter checks.
+//   - ONE snapshot (`ps -A -o pid=,ppid=,uid=,ucomm=,comm=,args=`) is parsed once
+//     and walked in memory: no per-hop spawns, no PID-reuse race, no stall. On
+//     Linux `/proc` is read instead.
+//   - The process NAME is `ucomm` (the kernel's `p_comm`). NOTE: on macOS the
+//     `comm` column is NOT the executable path: it follows argv[0] (and is cut to
+//     16 characters), so `exec -a login x` shows as `login`. It and `args` are
+//     therefore hints for classification only, never proof of what is running.
+//   - What a root really IS comes from two harder facts: its effective uid (a
+//     real `login` / `sshd` runs as uid 0) and its executable's real path (from
+//     `lsof -d txt` on macOS, `/proc/<pid>/exe` on Linux), which an emulator must
+//     have under a root-owned application directory.
 //   - Each hop is classified as it is read: an agent found anywhere is "agent"
 //     even when a later hop could not be read. Only an unreadable chain with no
 //     hit is "undeterminable".
@@ -39,9 +61,9 @@
 //   - `ssh -tt localhost` has an `sshd` ancestor, which is a positive root: a
 //     person logging in remotely is legitimate. Only the agent hook's text rules
 //     cover it.
-//   - A root is recognised by name and by where the executable lives (macOS
-//     `ps` truncates the path to 16 characters, so only its prefix is checked).
-//     An agent that can write under /Applications could forge one.
+//   - A root is recognised by name plus uid 0 (login, sshd) or plus a verified
+//     real executable path (emulators). An agent that can write under
+//     /Applications, or that can run as root, could still forge one.
 //   - `tmux new -d` / `screen -dm` / `setsid` / double-fork reparent under init;
 //     the agent hook refuses those starts in the text of any command
 //     (`AGENT_DETACHED_SESSION`), and a chain that ends there has no positive
@@ -60,8 +82,13 @@ export interface AncestorInfo {
   comm: string;
   /** The first few argv words, used only for classification (never printed). */
   argv: readonly string[];
-  /** The executable's path as the OS reports it (truncated to 16 characters by macOS `ps`). Absent in fixtures. */
+  /**
+   * The `comm` column as `ps` prints it: on macOS argv[0]-style and cut to 16 characters, so NOT proof of the
+   * executable. Linux: `readlink /proc/<pid>/exe`. A hint only; roots are verified separately.
+   */
   exe?: string;
+  /** Effective uid. A real `login` / `sshd` runs as 0. Absent in older fixtures, which then cannot be those roots. */
+  uid?: number;
 }
 
 /** What was read of the chain: the ancestors that WERE read, nearest parent first, and whether it reached init. */
@@ -76,7 +103,13 @@ export type AncestryReader = () => AncestryChain | readonly AncestorInfo[] | nul
 
 export type AncestryVerdict =
   | { kind: "clear"; /** The positive root that was found; absent when no root was required. */ root?: string }
-  | { kind: "agent"; /** A fixed, content-free label such as `claude` or `script`. */ ancestor: string }
+  | {
+      kind: "agent";
+      /** A fixed, content-free label such as `claude` or `script`. */
+      ancestor: string;
+      /** `env` when the signal was the Claude Code environment (`CLAUDECODE=1`), not a process in the chain. */
+      via?: "env";
+    }
   /** A complete chain that reaches init without a login session, terminal emulator or attached multiplexer. */
   | { kind: "unrooted" }
   | { kind: "undeterminable"; why: string };
@@ -193,15 +226,36 @@ export function agentEnvSignal(env: NodeJS.ProcessEnv): string | null {
 // Positive roots (pure)
 // ---------------------------------------------------------------------------
 
-/** Where a root's executable may live. A binary in /tmp or $HOME named `login` is not one. */
-const TRUSTED_EXE_PREFIXES = ["/Applications/", "/System/", "/usr/", "/bin/", "/sbin/", "/opt/", "/snap/", "/nix/", "/Library/"];
+/**
+ * Where a login / sshd executable may live, when `ps` could read its path at all. (A bare name, which is what
+ * macOS shows for a setuid process, is judged by the uid check instead.) A full prefix: a short one such as
+ * "/" or "/A" must not match.
+ */
+const TRUSTED_EXE_PREFIXES = ["/usr/", "/bin/", "/sbin/", "/System/", "/opt/", "/snap/", "/nix/"];
 
 function exeTrusted(info: AncestorInfo): boolean {
   const e = info.exe;
-  // Not reported, or not an absolute path: macOS `ps` falls back to the argv[0]-style name (`login`, `-zsh`)
-  // for a setuid or foreign-user process whose path it cannot read. Judged by name then.
-  if (e === undefined || !e.startsWith("/")) return true;
-  return TRUSTED_EXE_PREFIXES.some(p => e.startsWith(p) || p.startsWith(e));
+  if (e === undefined || !e.startsWith("/")) return true; // not a path: judged by uid, not by location
+  return TRUSTED_EXE_PREFIXES.some(p => e.startsWith(p));
+}
+
+/**
+ * The REAL executable path of an emulator may only be under a root-owned application directory: not the user's
+ * home, not /tmp, not /usr/local or Homebrew's user-owned prefix (only its Caskroom).
+ */
+const TRUSTED_APP_PATHS: readonly RegExp[] = [
+  /^\/Applications\/[^/]+\.app\//,
+  /^\/System\/(?:Applications|Library|Volumes\/Preboot\/Cryptexes)\//,
+  /^\/usr\/(?:bin|sbin|libexec|lib|share|lib64)\//,
+  /^\/opt\/homebrew\/Caskroom\//,
+  /^\/opt\/(?!homebrew(?:\/|$))[^/]+\//,
+  /^\/(?:snap|nix\/store|var\/lib\/flatpak)\//,
+];
+
+/** True when `path` is a canonical absolute path under a root-owned application directory. */
+export function isTrustedAppPath(path: string): boolean {
+  if (!path.startsWith("/") || path.split("/").some(seg => seg === ".." || seg === ".")) return false;
+  return TRUSTED_APP_PATHS.some(re => re.test(path));
 }
 
 /** Terminal emulators by process name (lower-case, `ucomm`). */
@@ -220,25 +274,56 @@ const TERMINAL_EMULATORS: ReadonlyArray<readonly [name: RegExp, label: string]> 
   [/^(?:tilix|terminator|foot|xfce4-terminal|lxterminal|mate-terminal|kgx|ptyxis|urxvt|rxvt|hyper|tabby)$/, "terminal emulator"],
 ];
 
-/** Probe: does the tmux / screen server this process belongs to have an attached client? Injectable. */
-export type MultiplexerProbe = (kind: "tmux" | "screen", env: NodeJS.ProcessEnv) => boolean;
+/**
+ * Probe: does the tmux / screen server have an attached client? For tmux, `socket` is the socket path read from
+ * the SERVER process's own title (`tmux: server (/path/to/socket)`), never from `$TMUX`, which the agent controls;
+ * null when the title names none. Injectable.
+ */
+export type MultiplexerProbe = (kind: "tmux" | "screen", socket: string | null) => boolean;
 
-/** The positive root `info` is, or null. A multiplexer server is a root only when `probe` finds a client. */
-export function positiveRoot(info: AncestorInfo, probe: MultiplexerProbe, env: NodeJS.ProcessEnv): string | null {
+/** The real executable path of a process, or null when it cannot be established. Injectable. */
+export type ExeResolver = (info: AncestorInfo) => string | null;
+
+export interface RootContext {
+  probe: MultiplexerProbe;
+  resolveExe: ExeResolver;
+}
+
+/**
+ * The positive root `info` is, or null.
+ *   - `login` / `sshd`: by name AND effective uid 0. A copied or `exec -a`-renamed binary runs as the user.
+ *   - A terminal emulator: by name AND a real executable path under a root-owned application directory
+ *     ({@link isTrustedAppPath}). If the path cannot be established (no `lsof`, a sandbox), it does not count.
+ *   - A tmux / screen server: only with an attached client.
+ */
+export function positiveRoot(info: AncestorInfo, ctx: RootContext): string | null {
   const name = lowerBase(info.comm);
   const argv = info.argv.join(" ");
-  const trusted = exeTrusted(info);
-  if (name === "login" && trusted) return "login";
-  if (name.startsWith("sshd") && trusted) return "sshd";
-  if (trusted) {
-    for (const [re, label] of TERMINAL_EMULATORS) if (re.test(name)) return label;
-    if (/\/Warp\.app\//.test(argv)) return "Warp";
+  if (name === "login") return info.uid === 0 && exeTrusted(info) ? "login" : null;
+  if (name.startsWith("sshd")) return info.uid === 0 && exeTrusted(info) ? "sshd" : null;
+  let label: string | null = null;
+  for (const [re, l] of TERMINAL_EMULATORS) {
+    if (re.test(name)) {
+      label = l;
+      break;
+    }
+  }
+  if (label === null && /\/Warp\.app\//.test(argv)) label = "Warp";
+  if (label !== null) {
+    let real: string | null = null;
+    try {
+      real = ctx.resolveExe(info);
+    } catch {
+      real = null;
+    }
+    return real !== null && isTrustedAppPath(real) ? label : null;
   }
   const lowerArgv = argv.toLowerCase();
   if (name.startsWith("tmux") && (lowerArgv.startsWith("tmux: server") || name === "tmux: server")) {
-    return probe("tmux", env) ? "tmux" : null;
+    const socket = /\((\/[^)]+)\)/.exec(argv)?.[1] ?? null;
+    return ctx.probe("tmux", socket) ? "tmux" : null;
   }
-  if (name === "screen" && !lowerArgv.includes(" -")) return probe("screen", env) ? "screen" : null;
+  if (name === "screen" && !lowerArgv.includes(" -")) return ctx.probe("screen", null) ? "screen" : null;
   return null;
 }
 
@@ -249,7 +334,7 @@ export function positiveRoot(info: AncestorInfo, probe: MultiplexerProbe, env: N
  */
 export function judgeAncestry(
   read: ReturnType<AncestryReader>,
-  opts: { requireRoot?: boolean; probe?: MultiplexerProbe; env?: NodeJS.ProcessEnv } = {},
+  opts: { requireRoot?: boolean; probe?: MultiplexerProbe; resolveExe?: ExeResolver } = {},
 ): AncestryVerdict {
   const chain = normalise(read);
   for (const info of chain.ancestors) {
@@ -258,10 +343,9 @@ export function judgeAncestry(
   }
   if (!chain.complete) return { kind: "undeterminable", why: "the process chain could not be read to its end" };
   if (opts.requireRoot !== true) return { kind: "clear" };
-  const probe = opts.probe ?? realMultiplexerProbe;
-  const env = opts.env ?? process.env;
+  const ctx: RootContext = { probe: opts.probe ?? realMultiplexerProbe, resolveExe: opts.resolveExe ?? realExeOf };
   for (const info of chain.ancestors) {
-    const root = positiveRoot(info, probe, env);
+    const root = positiveRoot(info, ctx);
     if (root !== null) return { kind: "clear", root };
   }
   return { kind: "unrooted" };
@@ -272,25 +356,32 @@ export function judgeAncestry(
 // ---------------------------------------------------------------------------
 
 /**
- * Parse one line of `ps -A -ww -o pid=,ppid=,ucomm=,comm=,args=` (macOS layout:
- * `ucomm` and `comm` are 16-character columns, each followed by one space).
- * Returns null for a line that does not fit.
+ * Parse one line of `ps -A -ww -o pid=,ppid=,uid=,ucomm=,comm=,args=` (macOS
+ * layout: `ucomm` and `comm` are 16-character columns, each followed by one
+ * space; `uid` is the EFFECTIVE uid). Returns null for a line that does not fit.
  */
 export function parsePsSnapshotLine(line: string): AncestorInfo | null {
-  const m = /^\s*(\d+)\s+(\d+) (.{16}) (.{16}) ?(.*)$/.exec(line);
+  const m = /^\s*(\d+)\s+(\d+)\s+(\d+) (.{16}) (.{16}) ?(.*)$/.exec(line);
   if (m === null) return null;
   const pid = Number(m[1]);
   const ppid = Number(m[2]);
-  if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) return null;
-  const argv = (m[5] ?? "").split(/\s+/).filter(w => w !== "").slice(0, 6);
-  return { pid, ppid, comm: m[3]!.trim(), argv, exe: m[4]!.trim() };
+  const uid = Number(m[3]);
+  if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid) || !Number.isSafeInteger(uid)) return null;
+  const argv = (m[6] ?? "").split(/\s+/).filter(w => w !== "").slice(0, 6);
+  return { pid, ppid, uid, comm: m[4]!.trim(), argv, exe: m[5]!.trim() };
 }
 
 /**
  * Parse `/proc/<pid>/stat` (`pid (comm) S ppid …`; comm may contain spaces and
  * parentheses, so split on the LAST `)`) and `/proc/<pid>/cmdline` (NUL-separated).
  */
-export function parseProcEntry(pid: number, stat: string, cmdline: string, exe?: string): AncestorInfo | null {
+export function parseProcEntry(
+  pid: number,
+  stat: string,
+  cmdline: string,
+  exe?: string,
+  status?: string,
+): AncestorInfo | null {
   const close = stat.lastIndexOf(")");
   const open = stat.indexOf("(");
   if (open === -1 || close === -1 || close < open) return null;
@@ -299,7 +390,17 @@ export function parseProcEntry(pid: number, stat: string, cmdline: string, exe?:
   const ppid = Number(rest[1]);
   if (!Number.isSafeInteger(ppid) || ppid < 0) return null;
   const argv = cmdline.split("\0").filter(w => w !== "").slice(0, 6);
-  return { pid, ppid, comm, argv, ...(exe !== undefined && exe !== "" && { exe }) };
+  // `/proc/<pid>/status`: "Uid:\treal\teffective\tsaved\tfs". The effective uid is the second.
+  const uidMatch = status === undefined ? null : /^Uid:\s+\d+\s+(\d+)/m.exec(status);
+  const uid = uidMatch === null ? undefined : Number(uidMatch[1]);
+  return {
+    pid,
+    ppid,
+    comm,
+    argv,
+    ...(exe !== undefined && exe !== "" && { exe }),
+    ...(uid !== undefined && Number.isSafeInteger(uid) && { uid }),
+  };
 }
 
 /** Looks one process up; `null` when it cannot be read. Injectable for tests. */
@@ -313,7 +414,19 @@ function lookupViaProc(pid: number): AncestorInfo | null {
     } catch {
       /* a foreign process: judged by name */
     }
-    return parseProcEntry(pid, readFileSync(`/proc/${pid}/stat`, "utf8"), readFileSync(`/proc/${pid}/cmdline`, "utf8"), exe);
+    let status: string | undefined;
+    try {
+      status = readFileSync(`/proc/${pid}/status`, "utf8");
+    } catch {
+      /* no uid: such a process cannot be a login / sshd root */
+    }
+    return parseProcEntry(
+      pid,
+      readFileSync(`/proc/${pid}/stat`, "utf8"),
+      readFileSync(`/proc/${pid}/cmdline`, "utf8"),
+      exe,
+      status,
+    );
   } catch {
     return null;
   }
@@ -339,7 +452,7 @@ export function trustedPsPath(candidates: readonly string[] = PS_CANDIDATES): st
 export function snapshotViaPs(psPath: string | null = trustedPsPath()): Map<number, AncestorInfo> | null {
   if (psPath === null) return null;
   try {
-    const out = execFileSync(psPath, ["-A", "-ww", "-o", "pid=,ppid=,ucomm=,comm=,args="], {
+    const out = execFileSync(psPath, ["-A", "-ww", "-o", "pid=,ppid=,uid=,ucomm=,comm=,args="], {
       encoding: "utf8",
       timeout: PS_TIMEOUT_MS,
       maxBuffer: PS_MAX_BUFFER,
@@ -419,32 +532,75 @@ function firstExisting(paths: readonly string[]): string | null {
   return null;
 }
 
-/** Does the tmux server (socket from `$TMUX`) or any screen session have an attached client? Absolute paths, minimal env. */
-export const realMultiplexerProbe: MultiplexerProbe = (kind, env) => {
+const MINIMAL_ENV = { PATH: "/usr/bin:/bin", LC_ALL: "C" };
+
+/** Does the tmux server on `socket` (taken from the server's own title) or any screen session have an attached client? Absolute paths, minimal env. */
+export const realMultiplexerProbe: MultiplexerProbe = (kind, socket) => {
   try {
     if (kind === "tmux") {
-      const socket = (env["TMUX"] ?? "").split(",")[0] ?? "";
       const bin = firstExisting(["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux", "/bin/tmux"]);
-      if (bin === null || !socket.startsWith("/")) return false;
+      if (bin === null || socket === null || !socket.startsWith("/")) return false;
       const out = execFileSync(bin, ["-S", socket, "list-clients", "-F", "#{client_pid}"], {
         encoding: "utf8",
         timeout: 2000,
         stdio: ["ignore", "pipe", "ignore"],
-        env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
+        env: MINIMAL_ENV,
       });
       return out.trim() !== "";
     }
     const bin = firstExisting(["/usr/bin/screen", "/opt/homebrew/bin/screen", "/usr/local/bin/screen"]);
     if (bin === null) return false;
-    const out = execFileSync(bin, ["-ls"], {
-      encoding: "utf8",
-      timeout: 2000,
-      stdio: ["ignore", "pipe", "ignore"],
-      env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
-    });
+    const out = execFileSync(bin, ["-ls"], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"], env: MINIMAL_ENV });
     return out.includes("(Attached)");
   } catch {
     return false;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// The real executable path of a process
+// ---------------------------------------------------------------------------
+
+const LSOF_PATH = "/usr/sbin/lsof";
+
+/** `lsof`, by absolute path, only when it is a root-owned regular file. */
+export function trustedLsofPath(path: string = LSOF_PATH): string | null {
+  try {
+    const st = statSync(path);
+    return st.isFile() && st.uid === 0 ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The first `n<path>` line of `lsof -Fn` output for `-d txt`: the executable's real path. */
+export function parseLsofTxt(out: string): string | null {
+  for (const line of out.split("\n")) {
+    if (line.startsWith("n/")) return line.slice(1);
+  }
+  return null;
+}
+
+/**
+ * The REAL executable of a process, which argv[0] and `comm` cannot fake. Linux: `readlink /proc/<pid>/exe`.
+ * macOS: `lsof -p <pid> -a -d txt -Fn` (the first text mapping is the executable), by absolute path with a
+ * minimal environment. Null when it cannot be established, in which case an emulator root does not count.
+ */
+export const realExeOf: ExeResolver = info => {
+  try {
+    if (existsSync("/proc/self/stat")) return readlinkSync(`/proc/${info.pid}/exe`);
+    const lsof = trustedLsofPath();
+    if (lsof === null) return null;
+    const out = execFileSync(lsof, ["-p", String(info.pid), "-a", "-d", "txt", "-Fn"], {
+      encoding: "utf8",
+      timeout: 3000,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: MINIMAL_ENV,
+    });
+    return parseLsofTxt(out);
+  } catch {
+    return null;
   }
 };
 
@@ -479,10 +635,12 @@ export interface TerminalCheckOptions {
   stderrIsTTY?: boolean;
   /** TEST-ONLY: a synthetic process chain. Ignored outside the test runner. */
   ancestry?: AncestryReader;
-  /** Environment for the agent-env signal and the tmux probe. Default `process.env`, or `{}` for a synthetic chain. */
+  /** TEST-ONLY (ignored outside the test runner): the environment for the agent-env signal. Default `{}` for a synthetic chain, else `process.env`. */
   env?: NodeJS.ProcessEnv;
   /** TEST-ONLY: the multiplexer probe. Synthetic chains default to "has a client". */
   probe?: MultiplexerProbe;
+  /** TEST-ONLY: the real-executable resolver. Synthetic chains default to the fixture's own `exe`. */
+  resolveExe?: ExeResolver;
 }
 
 export type TerminalCheck =
@@ -504,22 +662,26 @@ export function checkTerminal(opts: TerminalCheckOptions = {}): TerminalCheck {
   if (!tty) return { kind: "no-tty" };
   const synthetic = test ? (opts.ancestry ?? readerOverride) : undefined;
   if (injected && synthetic === undefined) return { kind: "skipped" };
-  const env = opts.env ?? (synthetic !== undefined ? {} : process.env);
+  // Every override is test-only: outside the test runner the real environment, probes and process table decide.
+  const env = test && opts.env !== undefined ? opts.env : synthetic !== undefined ? {} : process.env;
   const fromEnv = agentEnvSignal(env);
-  if (fromEnv !== null) return { kind: "agent", ancestor: fromEnv };
+  if (fromEnv !== null) return { kind: "agent", ancestor: fromEnv, via: "env" };
   let read: ReturnType<AncestryReader>;
   try {
     read = synthetic !== undefined ? synthetic() : readProcessAncestry();
   } catch {
     return { kind: "undeterminable", why: "the ancestry reader failed" };
   }
+  const probe: MultiplexerProbe | undefined = test && opts.probe !== undefined ? opts.probe : synthetic !== undefined ? () => true : undefined;
+  const resolveExe: ExeResolver | undefined =
+    test && opts.resolveExe !== undefined
+      ? opts.resolveExe
+      : synthetic !== undefined
+        ? info => (info.exe !== undefined && info.exe.startsWith("/") ? info.exe : null)
+        : undefined;
   return judgeAncestry(read, {
     requireRoot: true,
-    env,
-    ...(test && opts.probe !== undefined
-      ? { probe: opts.probe }
-      : synthetic !== undefined
-        ? { probe: () => true }
-        : {}),
+    ...(probe !== undefined && { probe }),
+    ...(resolveExe !== undefined && { resolveExe }),
   });
 }

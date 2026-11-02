@@ -7,7 +7,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,20 +18,28 @@ import {
   judgeAncestry,
   MAX_ANCESTRY_DEPTH,
   parseProcEntry,
+  isTrustedAppPath,
+  parseLsofTxt,
+  realExeOf,
   parsePsSnapshotLine,
   positiveRoot,
+  trustedLsofPath,
   readProcessAncestry,
   snapshotViaPs,
   trustedPsPath,
   type AncestorInfo,
+  type ExeResolver,
   type MultiplexerProbe,
   type ProcessLookup,
 } from "./process-ancestry.js";
 import { EGRESS_HUMAN_ENV, humanPresence, isHumanPresent } from "./egress-policy.js";
 
-function proc(pid: number, ppid: number, comm: string, argv: string[] = [comm], exe?: string): AncestorInfo {
-  return { pid, ppid, comm, argv, ...(exe !== undefined && { exe }) };
+function proc(pid: number, ppid: number, comm: string, argv: string[] = [comm], exe?: string, uid?: number): AncestorInfo {
+  return { pid, ppid, comm, argv, ...(exe !== undefined && { exe }), ...(uid !== undefined && { uid }) };
 }
+
+/** A resolver that trusts the fixture's own `exe` when it is an absolute path (the real one asks lsof or /proc). */
+const FIXTURE_EXE: ExeResolver = info => (info.exe !== undefined && info.exe.startsWith("/") ? info.exe : null);
 
 /** A lookup over a fixed table; an absent pid is unreadable. */
 function table(...procs: AncestorInfo[]): ProcessLookup {
@@ -41,7 +49,7 @@ function table(...procs: AncestorInfo[]): ProcessLookup {
 
 const NO_CLIENT: MultiplexerProbe = () => false;
 const HAS_CLIENT: MultiplexerProbe = () => true;
-const ROOTED = { requireRoot: true, probe: HAS_CLIENT, env: {} } as const;
+const ROOTED = { requireRoot: true, probe: HAS_CLIENT, resolveExe: FIXTURE_EXE } as const;
 
 describe("classifyAncestor", () => {
   it("agent hosts by process name", () => {
@@ -128,36 +136,37 @@ describe("agentEnvSignal (M2)", () => {
 });
 
 describe("positive roots (H2a)", () => {
-  const root = (info: AncestorInfo, probe: MultiplexerProbe = NO_CLIENT) => positiveRoot(info, probe, {});
+  const root = (info: AncestorInfo, probe: MultiplexerProbe = NO_CLIENT, resolveExe: ExeResolver = FIXTURE_EXE) =>
+    positiveRoot(info, { probe, resolveExe });
 
   it("login, with the real executable path", () => {
-    assert.equal(root(proc(2, 1, "login", ["login", "-pf", "me"], "/usr/bin/login")), "login");
+    assert.equal(root(proc(2, 1, "login", ["login", "-pf", "me"], "/usr/bin/login", 0)), "login");
   });
 
   it("a `login` whose path ps could not read (the bare name macOS shows for a setuid process) is judged by name", () => {
-    assert.equal(root(proc(2, 1, "login", ["login", "-pf", "me"], "login")), "login");
+    assert.equal(root(proc(2, 1, "login", ["login", "-pf", "me"], "login", 0)), "login");
   });
 
   it("a `login` that lives under /tmp or $HOME is not a root", () => {
-    assert.equal(root(proc(2, 1, "login", ["login"], "/private/tmp/clau")), null);
-    assert.equal(root(proc(2, 1, "login", ["login"], "/Users/me/.local/")), null);
+    assert.equal(root(proc(2, 1, "login", ["login"], "/private/tmp/clau", 0)), null);
+    assert.equal(root(proc(2, 1, "login", ["login"], "/Users/me/.local/", 0)), null);
   });
 
   it("sshd and its per-session children", () => {
-    assert.equal(root(proc(2, 1, "sshd", ["sshd"], "/usr/sbin/sshd")), "sshd");
-    assert.equal(root(proc(2, 1, "sshd-session", ["sshd-session"], "/usr/libexec/ssh")), "sshd");
+    assert.equal(root(proc(2, 1, "sshd", ["sshd"], "/usr/sbin/sshd", 0)), "sshd");
+    assert.equal(root(proc(2, 1, "sshd-session", ["sshd-session"], "/usr/libexec/ssh", 0)), "sshd");
   });
 
   const EMULATORS: ReadonlyArray<readonly [label: string, info: AncestorInfo]> = [
-    ["Terminal", proc(2, 1, "Terminal", ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"], "/System/Applicat")],
-    ["iTerm2", proc(2, 1, "iTerm2", ["/Applications/iTerm.app/Contents/MacOS/iTerm2"], "/Applications/iT")],
-    ["VS Code", proc(2, 1, "Code Helper (Plu", ["/Applications/Visual", "Studio", "Code.app/x/Code", "Helper", "(Plugin)"], "/Applications/Vi")],
-    ["VS Code", proc(2, 1, "Electron", ["/Applications/Visual"], "/Applications/Vi")],
-    ["WezTerm", proc(2, 1, "wezterm-gui", ["wezterm-gui"], "/Applications/We")],
-    ["Alacritty", proc(2, 1, "alacritty", ["alacritty"], "/Applications/Al")],
-    ["kitty", proc(2, 1, "kitty", ["kitty"], "/Applications/ki")],
-    ["Ghostty", proc(2, 1, "ghostty", ["ghostty"], "/Applications/Gh")],
-    ["Warp", proc(2, 1, "stable", ["/Applications/Warp.app/Contents/MacOS/stable"], "/Applications/Wa")],
+    ["Terminal", proc(2, 1, "Terminal", ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"], "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal")],
+    ["iTerm2", proc(2, 1, "iTerm2", ["/Applications/iTerm.app/Contents/MacOS/iTerm2"], "/Applications/iTerm.app/Contents/MacOS/iTerm2")],
+    ["VS Code", proc(2, 1, "Code Helper (Plu", ["/Applications/Visual", "Studio", "Code.app/x/Code", "Helper", "(Plugin)"], "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)")],
+    ["VS Code", proc(2, 1, "Electron", ["/Applications/Visual"], "/Applications/Visual Studio Code.app/Contents/MacOS/Electron")],
+    ["WezTerm", proc(2, 1, "wezterm-gui", ["wezterm-gui"], "/Applications/WezTerm.app/Contents/MacOS/wezterm-gui")],
+    ["Alacritty", proc(2, 1, "alacritty", ["alacritty"], "/Applications/Alacritty.app/Contents/MacOS/alacritty")],
+    ["kitty", proc(2, 1, "kitty", ["kitty"], "/Applications/kitty.app/Contents/MacOS/kitty")],
+    ["Ghostty", proc(2, 1, "ghostty", ["ghostty"], "/Applications/Ghostty.app/Contents/MacOS/ghostty")],
+    ["Warp", proc(2, 1, "stable", ["/Applications/Warp.app/Contents/MacOS/stable"], "/Applications/Warp.app/Contents/MacOS/stable")],
     ["gnome-terminal", proc(2, 1, "gnome-terminal-", ["/usr/libexec/gnome-terminal-server"], "/usr/libexec/gnome-terminal-server")],
     ["konsole", proc(2, 1, "konsole", ["konsole"], "/usr/bin/konsole")],
     ["xterm", proc(2, 1, "xterm", ["xterm"], "/usr/bin/xterm")],
@@ -173,7 +182,7 @@ describe("positive roots (H2a)", () => {
   });
 
   it("a tmux server is a root only with an attached client", () => {
-    const server = proc(2, 1, "tmux", ["tmux: server", "(/private/tmp/tmux-501/default)"], "/opt/homebrew/bin");
+    const server = proc(2, 1, "tmux", ["tmux:", "server", "(/private/tmp/tmux-501/default)"], "/opt/homebrew/bin");
     assert.equal(root(server, HAS_CLIENT), "tmux");
     assert.equal(root(server, NO_CLIENT), null);
     const linux = proc(2, 1, "tmux: server", ["tmux: server"], "/usr/bin/tmux");
@@ -196,8 +205,8 @@ describe("judgeAncestry", () => {
     const chain = [
       proc(5, 4, "zsh", ["/bin/zsh"], "/bin/zsh"),
       proc(4, 3, "-zsh", ["-zsh"], "-zsh"),
-      proc(3, 2, "login", ["login", "-pf", "me"], "/usr/bin/login"),
-      proc(2, 1, "Terminal", ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"], "/System/Applicat"),
+      proc(3, 2, "login", ["login", "-pf", "me"], "/usr/bin/login", 0),
+      proc(2, 1, "Terminal", ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"], "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"),
     ];
     assert.deepEqual(judgeAncestry(chain, ROOTED), { kind: "clear", root: "login" });
     assert.deepEqual(judgeAncestry(chain.slice(0, 2), ROOTED).kind, "unrooted");
@@ -205,7 +214,7 @@ describe("judgeAncestry", () => {
   });
 
   it("an agent host anywhere in the chain is an agent, rooted or not", () => {
-    const chain = [proc(4, 3, "zsh"), proc(3, 2, "claude"), proc(2, 1, "login", ["login"], "/usr/bin/login")];
+    const chain = [proc(4, 3, "zsh"), proc(3, 2, "claude"), proc(2, 1, "login", ["login"], "/usr/bin/login", 0)];
     assert.deepEqual(judgeAncestry(chain, ROOTED), { kind: "agent", ancestor: "claude" });
     assert.deepEqual(judgeAncestry(chain), { kind: "agent", ancestor: "claude" });
   });
@@ -236,7 +245,7 @@ describe("judgeAncestry", () => {
   });
 
   it("tmux under a person's login is rooted by the login; a lone tmux server needs a client", () => {
-    const server = proc(3, 1, "tmux", ["tmux: server"], "/opt/homebrew/bin");
+    const server = proc(3, 1, "tmux", ["tmux:", "server", "(/private/tmp/tmux-501/default)"], "/opt/homebrew/bin");
     const pane = proc(4, 3, "zsh");
     assert.deepEqual(judgeAncestry([pane, server], { ...ROOTED, probe: HAS_CLIENT }), { kind: "clear", root: "tmux" });
     assert.deepEqual(judgeAncestry([pane, server], { ...ROOTED, probe: NO_CLIENT }), { kind: "unrooted" });
@@ -299,15 +308,17 @@ describe("readProcessAncestry — bounded, offline, never throws", () => {
 
 describe("parsers", () => {
   it("parsePsSnapshotLine reads the macOS ucomm/comm/args layout", () => {
-    const line = "  624     1 logind           /System/Library/ /System/Library/CoreServices/logind";
+    const line = "  624     1   501 logind           /System/Library/ /System/Library/CoreServices/logind";
     assert.deepEqual(parsePsSnapshotLine(line), {
       pid: 624,
       ppid: 1,
+      uid: 501,
       comm: "logind",
       argv: ["/System/Library/CoreServices/logind"],
       exe: "/System/Library/",
     });
-    const helper = "15270 11442 Code Helper (Plu /Applications/Vi /Applications/Visual Studio Code.app/x --type=utility";
+    assert.equal(parsePsSnapshotLine(" 1692  1535     0 login            login            login -pf me")?.uid, 0);
+    const helper = "15270 11442   501 Code Helper (Plu /Applications/Vi /Applications/Visual Studio Code.app/x --type=utility";
     const p = parsePsSnapshotLine(helper);
     assert.equal(p?.comm, "Code Helper (Plu");
     assert.equal(p?.exe, "/Applications/Vi");
@@ -317,8 +328,8 @@ describe("parsers", () => {
 
   it("parseProcEntry survives a comm with spaces and parentheses", () => {
     const stat = "77 (tmux: server (x)) S 5 77 77 0 -1 4194560";
-    const p = parseProcEntry(77, stat, "tmux\0new\0-d\0", "/usr/bin/tmux");
-    assert.deepEqual(p, { pid: 77, ppid: 5, comm: "tmux: server (x)", argv: ["tmux", "new", "-d"], exe: "/usr/bin/tmux" });
+    const p = parseProcEntry(77, stat, "tmux\0new\0-d\0", "/usr/bin/tmux", "Name:\ttmux\nUid:\t501\t0\t501\t501\n");
+    assert.deepEqual(p, { pid: 77, ppid: 5, comm: "tmux: server (x)", argv: ["tmux", "new", "-d"], exe: "/usr/bin/tmux", uid: 0 });
     assert.equal(parseProcEntry(77, "garbage", ""), null);
   });
 });
@@ -374,7 +385,7 @@ describe("the real ps snapshot (H1, L5, L6)", () => {
 });
 
 describe("checkTerminal — the entry point both gates use", () => {
-  const PERSON = [proc(4, 3, "-zsh"), proc(3, 2, "login", ["login"], "/usr/bin/login")];
+  const PERSON = [proc(4, 3, "-zsh"), proc(3, 2, "login", ["login"], "/usr/bin/login", 0)];
   const run = (over: Parameters<typeof checkTerminal>[0]) => checkTerminal({ stderrIsTTY: true, ...over });
 
   it("no TTY: the chain is never read", () => {
@@ -388,7 +399,7 @@ describe("checkTerminal — the entry point both gates use", () => {
   });
 
   it("the Claude Code environment is an agent signal, even over a person-looking chain", () => {
-    assert.deepEqual(run({ ancestry: () => PERSON, env: { CLAUDECODE: "1" } }), { kind: "agent", ancestor: "claude" });
+    assert.deepEqual(run({ ancestry: () => PERSON, env: { CLAUDECODE: "1" } }), { kind: "agent", ancestor: "claude", via: "env" });
   });
 
   it("a person-looking environment never makes an agent chain clear", () => {
@@ -415,7 +426,7 @@ describe("checkTerminal — the entry point both gates use", () => {
 
 describe("humanPresence — the policy for rules g and h", () => {
   const claudeAbove = (): AncestorInfo[] => [proc(3, 2, "zsh"), proc(2, 1, "claude")];
-  const plainShell = (): AncestorInfo[] => [proc(3, 2, "zsh"), proc(2, 1, "login", ["login"], "/usr/bin/login")];
+  const plainShell = (): AncestorInfo[] => [proc(3, 2, "zsh"), proc(2, 1, "login", ["login"], "/usr/bin/login", 0)];
 
   it("a TTY with a claude ancestor is NOT a person", () => {
     const p = humanPresence({}, true, claudeAbove);
@@ -479,6 +490,179 @@ describe("humanPresence — the policy for rules g and h", () => {
     assert.deepEqual(humanPresence({}, true), { present: true, ancestry: "skipped" });
   });
 });
+
+describe("roots cannot be forged by name (final review: uid 0 and a verified real path)", () => {
+  const root = (info: AncestorInfo, resolveExe: ExeResolver = FIXTURE_EXE, probe: MultiplexerProbe = NO_CLIENT) =>
+    positiveRoot(info, { probe, resolveExe });
+
+  it("1: login and sshd need effective uid 0; a same-user process called `login` is not a root", () => {
+    assert.equal(root(proc(2, 1, "login", ["login", "-pf", "me"], "login", 0)), "login");
+    assert.equal(root(proc(2, 1, "login", ["login", "-pf", "me"], "login", 501)), null);
+    assert.equal(root(proc(2, 1, "login", ["login"], "login")), null); // uid unknown: cannot be vouched for
+    assert.equal(root(proc(2, 1, "sshd", ["sshd"], "/usr/sbin/sshd", 501)), null);
+    assert.equal(root(proc(2, 1, "sshd-session", ["sshd-session"], "/usr/libexec/ssh", 0)), "sshd");
+  });
+
+  it("1: a real login at uid 0 whose path is somewhere untrusted still fails", () => {
+    assert.equal(root(proc(2, 1, "login", ["login"], "/private/tmp/x/login", 0)), null);
+    assert.equal(root(proc(2, 1, "login", ["login"], "/Users/me/x/login", 0)), null);
+  });
+
+  it("1: a short or empty path prefix cannot stand in for a trusted one", () => {
+    for (const exe of ["/", "/u", "/s", "/A", "/Applications", "/usr", "/opt"]) {
+      assert.equal(root(proc(2, 1, "login", ["login"], exe, 0)), null, exe);
+    }
+  });
+
+  it("2: an emulator root needs a trusted REAL executable path, not its name", () => {
+    const forged = proc(2, 1, "kitty", ["kitty"], "/Applications/ki");
+    assert.equal(root(forged, () => "/Users/me/.nvm/versions/node/v22/bin/node"), null);
+    assert.equal(root(forged, () => "/private/tmp/claude-501/x/code"), null);
+    assert.equal(root(forged, () => "/Applications/kitty.app/Contents/MacOS/kitty"), "kitty");
+  });
+
+  it("2: if the real path cannot be established (no lsof, a sandbox), an emulator does not count", () => {
+    const term = proc(2, 1, "Terminal", ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"], "/System/Applicat");
+    assert.equal(root(term, () => null), null);
+    assert.equal(
+      root(term, () => {
+        throw new Error("lsof failed");
+      }),
+      null,
+    );
+    assert.equal(root(term, () => "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"), "Terminal");
+  });
+
+  it("2: the trusted application paths", () => {
+    for (const ok of [
+      "/Applications/iTerm.app/Contents/MacOS/iTerm2",
+      "/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+      "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+      "/usr/bin/xterm",
+      "/usr/libexec/gnome-terminal-server",
+      "/opt/homebrew/Caskroom/ghostty/1.0/Ghostty.app/Contents/MacOS/ghostty",
+      "/opt/kitty/bin/kitty",
+      "/snap/kitty/current/bin/kitty",
+    ]) {
+      assert.equal(isTrustedAppPath(ok), true, ok);
+    }
+    for (const bad of [
+      "",
+      "/",
+      "/A",
+      "/Applications",
+      "/Applications/x/y",
+      "/Applications/../tmp/x.app/y",
+      "/Users/me/Applications/kitty.app/Contents/MacOS/kitty",
+      "/private/tmp/claude-501/x/login",
+      "/tmp/x/code",
+      "/usr/local/bin/kitty",
+      "/opt/homebrew/bin/kitty",
+      "/opt/homebrew/Cellar/kitty/1/bin/kitty",
+      "relative/Applications/x.app/y",
+    ]) {
+      assert.equal(isTrustedAppPath(bad), false, bad);
+    }
+  });
+
+  it("3: a tmux server's socket comes from its own title, never from $TMUX", () => {
+    let seen: string | null | undefined;
+    const probe: MultiplexerProbe = (_kind, socket) => ((seen = socket), true);
+    const server = proc(2, 1, "tmux", ["tmux:", "server", "(/private/tmp/tmux-501/default)"], "/opt/homebrew/bin");
+    assert.equal(root(server, FIXTURE_EXE, probe), "tmux");
+    assert.equal(seen, "/private/tmp/tmux-501/default");
+    seen = undefined;
+    const untitled = proc(2, 1, "tmux", ["tmux:", "server"], "/opt/homebrew/bin");
+    assert.equal(root(untitled, FIXTURE_EXE, probe), "tmux"); // the probe decides; real probes refuse a null socket
+    assert.equal(seen, null);
+  });
+
+  it("parseLsofTxt takes the first text mapping, the executable", () => {
+    const out = "p1535\nftxt\nn/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal\nftxt\nn/usr/lib/dyld\n";
+    assert.equal(parseLsofTxt(out), "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal");
+    assert.equal(parseLsofTxt("p1\n"), null);
+    assert.equal(parseLsofTxt(""), null);
+  });
+
+  it("trustedLsofPath refuses a missing path and a non-root-owned file", () => {
+    assert.equal(trustedLsofPath("/nonexistent/lsof"), null);
+    assert.equal(trustedLsofPath(process.execPath) === null || process.getuid?.() === 0, true); // node is not root-owned
+  });
+
+  it("5: the env override is test-only: outside the test runner it is ignored", () => {
+    const savedCtx = process.env["NODE_TEST_CONTEXT"];
+    const savedClaude = process.env["CLAUDECODE"];
+    const ttyDesc = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+    try {
+      delete process.env["NODE_TEST_CONTEXT"];
+      process.env["CLAUDECODE"] = "1";
+      Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true, writable: true });
+      // An agent-supplied empty env must not hide the real CLAUDECODE=1.
+      assert.deepEqual(checkTerminal({ env: {} }), { kind: "agent", ancestor: "claude", via: "env" });
+    } finally {
+      if (savedCtx !== undefined) process.env["NODE_TEST_CONTEXT"] = savedCtx;
+      if (savedClaude === undefined) delete process.env["CLAUDECODE"];
+      else process.env["CLAUDECODE"] = savedClaude;
+      if (ttyDesc) Object.defineProperty(process.stderr, "isTTY", ttyDesc);
+      else delete (process.stderr as { isTTY?: boolean }).isTTY;
+    }
+  });
+
+  it("4: the env verdict is marked as coming from the environment", () => {
+    assert.deepEqual(checkTerminal({ stderrIsTTY: true, ancestry: () => [], env: { CLAUDECODE: "1" } }), {
+      kind: "agent",
+      ancestor: "claude",
+      via: "env",
+    });
+  });
+});
+
+describe("forged roots, for real (the reviewer's probe shape: x/login, x/code, x/run.js)", () => {
+  const snapshot = snapshotViaPs();
+  const lsofWorks = realExeOfSelf() !== null;
+  const reason = snapshot === null ? "ps is blocked here" : !lsofWorks ? "lsof is blocked here" : false;
+
+  /** Run a fake `<name>` (a symlink to node, started with that argv[0]) whose child reads the chain and judges its first ancestor. */
+  function forged(name: string): { first: string | null; root: string | null; uid: number | null } {
+    const dir = mkdtempSync(join(tmpdir(), "repo-aegis-forged-root-"));
+    try {
+      mkdirSync(join(dir, "x"));
+      const fake = join(dir, "x", name);
+      symlinkSync(process.execPath, fake);
+      const url = pathToFileURL(join(import.meta.dirname, "process-ancestry.js")).href;
+      const child = `import { readProcessAncestry, positiveRoot, realExeOf, realMultiplexerProbe } from ${JSON.stringify(url)};
+        const r = readProcessAncestry(); const a = r.ancestors[0];
+        console.log(JSON.stringify({ first: a ? a.comm : null, uid: a && a.uid !== undefined ? a.uid : null,
+          root: a ? positiveRoot(a, { probe: () => false, resolveExe: realExeOf }) : null }));`;
+      const parent = `const { spawnSync } = require("node:child_process");
+        const r = spawnSync(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(child)}], { encoding: "utf8" });
+        process.stdout.write(r.stdout);`;
+      const r = spawnSync(fake, ["-e", parent], { encoding: "utf8", argv0: name });
+      assert.equal(r.status, 0, r.stderr);
+      return JSON.parse(r.stdout) as { first: string | null; root: string | null; uid: number | null };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("a copy of node called `login` (and `exec -a login`) runs as the user, so it is no root", { skip: reason }, () => {
+    const r = forged("login");
+    assert.notEqual(r.uid, 0);
+    assert.equal(r.root, null);
+  });
+
+  it("a copy of node called `code` is no root: its real path is not under a root-owned application directory", { skip: reason }, () => {
+    assert.equal(forged("code").root, null);
+  });
+
+  it("a node script run as `run.js` under a forged `Terminal` is no root either", { skip: reason }, () => {
+    assert.equal(forged("Terminal").root, null);
+  });
+});
+
+function realExeOfSelf(): string | null {
+  return snapshotViaPs() === null ? null : realExeOf({ pid: process.pid, ppid: process.ppid, comm: "node", argv: [] });
+}
 
 describe("L4: test seams are inert outside the test runner", () => {
   it("an injected TTY and chain are ignored when NODE_TEST_CONTEXT is absent (the real terminal and tree decide)", () => {
