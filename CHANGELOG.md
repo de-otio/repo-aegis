@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stricter (may refuse what 0.10 allowed)
+
+Egress to an owner nobody registered is now refused, and the rules that keep
+that refusal from being bypassed are stricter too (issue #151). **Run
+`repo-aegis doctor` after upgrading.** It reports the logged-in `gh` accounts
+and organisations that are not registered owners, which is the most likely
+cause of a new refusal, and `OWNERS_UNDECLARED` / `REGISTRY_UNREADABLE` as
+failures. Each refusal below names its code, says whether an approval helps,
+says who runs the fix, and points at `doc/agent-guide.md`. Design:
+`doc/design/egress-guard.md`.
+
+- **Rule h: `UNREGISTERED_OWNER_EGRESS`.** With no person present (no TTY on
+  stderr), a publish whose destination owner is in neither `personalOrgs` nor
+  any engagement's `githubOrgs` is refused at the agent hook, the `gh` shim and
+  the pre-push hook. **No approval satisfies it**, `*` included. The registry
+  alone decides: not the destination cache, a local class or the active `gh`
+  login. It is skipped, with a note, when no registry exists or the registry
+  declares no owners; an encrypted or unparseable registry refuses instead.
+  Owners whose names contain `_` (Enterprise Managed Users) cannot be
+  registered, so an agent is refused there permanently. *Recovery:* a person
+  runs, from a terminal, `repo-aegis engagements add --personal-org <owner>`
+  (or `--github-org <owner>` under the engagement); for a fork's upstream,
+  `repo-aegis upstreams add <owner>/<repo>`. A person at a terminal is never
+  refused by rule h.
+- **Unresolved writes fail closed (D5).** A write whose owner cannot be named
+  offline counts as unregistered: a GraphQL mutation addressed by node id, a
+  `gh api` write to an endpoint with no owner in the path
+  (`repositories/<id>/…`, `gists`, `projects/…`), a target held in a variable
+  (`--repo "$VAR"`, `GH_REPO=$X`), an alias or extension the guard cannot
+  expand, a push URL that does not resolve. A `*` approval therefore **no
+  longer covers a GraphQL mutation**. The parser also now reads `GH_REPO`,
+  URL and `<owner>/<repo>` positionals, `-Ro/r`-style attached flags, gh's
+  own base-repository pick, `insteadOf` / `pushInsteadOf` / `pushurl` and ssh
+  host aliases, so more commands name their real owner. *Recovery:* name the
+  repository literally (`gh issue comment --repo <owner>/<repo> …`, or the
+  `repos/<owner>/<repo>/…` endpoint), or a person runs the command.
+- **`*` approvals cover only `personalOrgs` (D7).** A `*` approval used to match
+  every owner. It now covers repositories under your `personalOrgs` and
+  `npm publish`; with no `personalOrgs` it covers `npm publish` only. A
+  customer org and an allowed upstream are not covered, and neither is a gist
+  or other account-level call. `approve '*'` prints what it covers. *Recovery:*
+  a person runs `repo-aegis approve <org>/*` or `repo-aegis approve
+  <org>/<repo>`.
+- **A non-interactive `gh pr create` must name its target (D10):
+  `GH_PR_CREATE_IMPLICIT_TARGET`.** Without `--repo`, `GH_REPO` or a URL, gh
+  picks the base repository from `remote.*.gh-resolved` and remote order,
+  which an agent can edit. Unconditional; no approval lifts it; `gh pr create`
+  only. *Recovery:* re-issue as `gh pr create --repo <owner>/<repo> …`.
+- **Registering an owner needs a person at a terminal.** `engagements add
+  --personal-org|--github-org`, `upstreams add`, `init --migrate-classify`
+  (which also lists the owners and waits for a typed `y`:
+  `MIGRATION_NOT_CONFIRMED`), `init --force` over a populated registry, and any
+  change that leaves no registered owner refuse with `OWNER_ADD_NEEDS_TTY` or
+  `OWNER_SET_EMPTY_NEEDS_TTY`. No env var or approval lifts them. Scripts and
+  agent runbooks that ran `engagements add --github-org` unattended now fail.
+  Every registry mutator also validates the new registry before writing
+  (`REGISTRY_WOULD_BE_INVALID`) and writes nothing on failure. *Recovery:* run
+  the command yourself in a terminal window. Removing one owner among several,
+  `upstreams remove` and `upstreams list` need no terminal.
+- **A terminal is no longer proof of a person.** `approve` and the owner adds
+  also read the process ancestry: they refuse when an agent host (`claude`,
+  `codex`, `gemini`) or a pty wrapper sits above the process, when
+  `CLAUDECODE=1` is set, or when the chain does not reach a login session,
+  `sshd`, a terminal emulator or an attached multiplexer; an unreadable chain
+  (no `ps`, as in an agent sandbox) means "not a person". Rules g and h refuse
+  on an agent or wrapper ancestor too. New hook refusals:
+  `EGRESS_PTY_WRAPPER` (a publish under `script`, `unbuffer`, `expect`, `tmux`,
+  `ssh -t` and the like), `AGENT_RAN_HUMAN_COMMAND` (a command text that runs
+  `approve`, an owner add, `upstreams add` or `init --migrate-classify|--force`)
+  and `AGENT_DETACHED_SESSION` (`tmux new -d`, `screen -dm`, `setsid`,
+  `daemonize`, `nohup … & disown`). *Recovery:* run the command directly, and
+  run `approve` and owner adds in your own terminal window. A tmux server or
+  shell started from inside an agent keeps `CLAUDECODE=1`; open a fresh
+  terminal, or unset it and `CLAUDE_CODE_ENTRYPOINT`.
+- **Shape rules b′ and b″.** `EGRESS_ENV_OVERRIDE`: a publishing command that
+  sets `REPO_AEGIS_*`, `HOME`, `PATH`, `GIT_CONFIG*`, `GIT_SSH*`, `GH_CONFIG_DIR`,
+  `SRT_*`, `SHELL`, `LD_*` and similar, uses `env -i` / `-u`, `--git-dir` /
+  `--work-tree`, or `git -c remote.*` / `url.*` / `core.sshCommand` /
+  `core.hooksPath`. `EGRESS_AFTER_STATE_CHANGE`: a publish that follows `git
+  remote`, `git config`, `gh repo set-default`, `gh alias set`, `gh auth`,
+  `export` or a write into git or gh config in the same command. Both are
+  unconditional and no approval lifts them. *Recovery:* re-issue the plain
+  command; run a state change as its own call first.
+- **Network paths outside `gh` and `git` (R6).** `GITHUB_API_VIA_HTTP_CLIENT`
+  refuses `curl` / `wget` writing to `api.github.com` or `uploads.github.com`;
+  `GH_AUTH_TOKEN_NETWORK` refuses `gh auth token` in a command that also makes
+  a network call. Speed bumps, not proof: an interpreter's `-c` text still gets
+  through. *Recovery:* use `gh api …` or a `gh` verb with `--repo`.
+- **The pre-push hook script's digest changed.** The only change is a comment
+  (`$2` is the URL after all rewriting, once per push URL), but the digest
+  covers the script text, so installed copies report `HOOKS_SCRIPT_STALE`
+  until `repo-aegis install hooks` is run again. The `gh` shim script is
+  unchanged. *Recovery:* `repo-aegis install hooks`.
+- **`CROSS_ORG_PUSH` no longer names the boundary's owners.** They can be
+  customer names, and a refusal can land in an agent transcript; only the
+  destination owner, which the command already carries, is named.
+
+### Known limits (not refused; stated so nobody assumes coverage)
+
+- **R8.** A `GH_REPO` exported from a shell startup file is invisible to the
+  agent hook; only the `gh` shim sees it. On hook-only installs that gap is
+  open. `doctor` flags the export (`SHELL_STARTUP_OVERRIDES`).
+- **R9.** Any ssh override (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`, a
+  ProxyCommand or ProxyJump) makes ssh hosts unresolved, so inside the Claude
+  Code sandbox, which sets `GIT_SSH_COMMAND`, an agent's ssh push to a
+  non-GitHub host (GitLab, an internal server) needs a person. https pushes and
+  GitHub pushes through aliases are unaffected.
+- **R10.** ssh connection sharing (`ControlMaster`) can carry a later push
+  through a connection an agent opened to github.com under another alias name.
+  Inside the sandbox `ControlPath=none` defeats it.
+- **R11.** On hook-only installs the agent hook cannot see the environment ssh
+  will run with; the pre-push hook can, and refuses. `doctor` warns when it is
+  not installed (`PREPUSH_HOOK_MISSING`).
+- **R12.** Every presence signal (TTY, ancestry, emulator root) can be forged by
+  a same-user agent running outside the agent sandbox, which could also write
+  the approvals file or the registry directly. Inside the sandbox the gates fail
+  closed. A Keychain / Touch ID presence signal is a tracked follow-up.
+
+### Added — registered owners, `upstreams`, and five-part refusals
+
+- **`repo-aegis upstreams add|remove|list <owner>/<repo>`** manages
+  `allowedUpstreams` in the registry: exact repositories whose PRs, issues and
+  comments a fork may target despite the owner not being registered. It never
+  admits `git push`, merge, release, repo or workflow verbs, or `gh api`
+  writes. `add` needs a terminal. The field is additive, with no schema bump;
+  older binaries ignore it.
+- **`approve` says what it covers** when minted, and warns when the
+  destination's owner is not registered (the approval will not help until a
+  person registers it).
+- **Refusals answer five questions**: what was refused, why, whether an
+  approval helps, the fix and who runs it, and where to read more. They name
+  only the destination owner, never registry contents. Each new code has an
+  entry in `doc/agent-guide.md`.
+- **Audit:** an owner or upstream add is recorded as `registry-owner-add` with
+  a kind and a count, never the owner's name.
+
 ### Added — `doctor` owner checks, and a registry write-protection rule
 
 - **`doctor` checks the registered owners** (issue #151): `OWNERS_UNDECLARED`

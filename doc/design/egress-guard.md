@@ -5,7 +5,10 @@ hooks; git-native destination; the `gh` shim, payload rules, `selfIdentity`,
 `doctor` checks). Phase 4 (server-side `audit --pr-body`) is not built. One
 recorded deviation: rule d exempts the agent's session-unique scratchpad under
 the sandboxed `$TMPDIR` root (see `isModeDependentPath`), because that is the
-location the design tells agents to use.
+location the design tells agents to use. Extended in 0.11.0 (issue #151) with
+rule h, which refuses egress to an owner nobody registered, and the shape and
+human-presence rules that protect it; the plan is
+[plan-unregistered-owner-egress.md](../plan-unregistered-owner-egress.md).
 **Author:** (drafted with Claude Code)
 **Scope:** `@de-otio/repo-aegis-core`, `@de-otio/repo-aegis` (CLI), the generated
 git hooks, a new `PATH` shim
@@ -138,32 +141,104 @@ Rules, in evaluation order. **Shape rules need no context and are
 unconditional. Context rules fail open** — the lesson of the spurious
 `CROSS_ORG_WRITE` blocks (doc/bugs/repo-aegis-check-write-flake.md): a
 guardrail must not block on its own inability to determine context. Asking is
-not blocking, so an unknown destination may still `ask`.
+not blocking, so an unknown destination may still `ask`. The one deliberate
+exception is rule h, which fails closed on a write whose owner it cannot name
+(see the 2026-11-02 note on D5 below).
 
 | # | Kind | Rule | Decision | Code |
 |---|---|---|---|---|
+| pty | shape | the egress runs under a pty wrapper, such as `script`, `unbuffer`, `expect`, `socat`, `ssh -t`, `tmux`, `screen`, or an interpreter's pty module (evaluated before a) | deny | `EGRESS_PTY_WRAPPER` |
 | a | shape | `git push` with no `<remote> <refspec>` | deny | `PUSH_IMPLICIT_TARGET` |
 | b | shape | egress verb with `precededByCd` | deny | `EGRESS_AFTER_CD` |
 | c | shape | egress verb with `joinedBy === ";"` (or `\|\|`) | deny | `EGRESS_UNGUARDED_CHAIN` |
 | d | shape | payload path relative, contains `$TMPDIR`, or resolves under `/var/folders/**`, `/tmp/claude-*`, `%TEMP%` | deny | `PAYLOAD_MODE_DEPENDENT_PATH` |
+| b′ | shape | the egress segment (or an earlier `export` in the same command) sets an environment variable or option that steers the shim, the pre-push hook, `gh` or `git` elsewhere: `REPO_AEGIS_*`, `HOME`, `PATH`, `XDG_CONFIG_HOME`, `GH_CONFIG_DIR`, `GH_HOST`, `GIT_CONFIG*`, `GIT_SSH*`, `GIT_DIR`, `GIT_WORK_TREE`, `SRT_*`, `SHELL`, `BASH_ENV`, `BASH_FUNC_*`, `LD_*`, `DYLD_*`; `env -i` / `env -u`; `--git-dir` / `--work-tree`; `git -c remote.*`, `url.*`, `core.sshCommand`, `core.hooksPath` | deny | `EGRESS_ENV_OVERRIDE` |
+| b″ | shape | the egress segment follows, in the same command, a change to state it reads: `git remote`, `git config`, `gh repo set-default`, `gh alias set`, `gh auth`, `export`, or a write into `.git/`, `~/.ssh/config`, `~/.gitconfig` or the gh config | deny | `EGRESS_AFTER_STATE_CHANGE` |
+| a′ | shape | `gh pr create` with no person present and no `--repo`, `GH_REPO` or URL positional (the `gh` counterpart of rule a; D10) | deny | `GH_PR_CREATE_IMPLICIT_TARGET` |
+| h | context | no person present, and the destination's owner is not registered: not in `personalOrgs` or any engagement's `githubOrgs`, and not an exact `allowedUpstreams` entry on a PR / issue verb. A destination whose owner cannot be named offline (D5) counts as unregistered. Runs right after resolution, before e and before the visibility lookup; no approval satisfies it | deny | `UNREGISTERED_OWNER_EGRESS` |
 | e | context | payload file's enclosing working tree has a trust boundary **positively disjoint** from the destination's | deny | `CROSS_ORG_EGRESS` |
 | f | context | payload content matches the destination's deny set (`check --path` with the destination's `RepoConfig`) | deny | `PAYLOAD_MARKER_HIT` |
-| g | context | destination `publicFacing`, or verb ∈ {`gh-pr-merge`, `gh-release-*`, `gh-repo-edit`, `npm-publish`}, and `!humanPresent` | `ask` if `capabilities.ask`, else deny | `PUBLIC_EGRESS_NEEDS_HUMAN` |
+| g | context | destination `publicFacing`, or verb ∈ {`gh-pr-merge`, `gh-release-*`, `gh-repo-edit`, `npm-publish`}, and `!humanPresent` and no live approval that covers it (§4a) | `ask` if `capabilities.ask`, else deny | `PUBLIC_EGRESS_NEEDS_HUMAN` |
 | g′ | context | rule g on a `gh-*` verb with `capabilities.ghShimOnPath === false` | deny | `SHIM_UNREACHABLE_NEEDS_HUMAN` |
-| h | context | destination class `scratch` | allow | — |
-| — | — | otherwise | allow | — |
+| — | — | otherwise (including class `scratch`) | allow | — |
+
+Rule h used to be lettered for "destination class `scratch` → allow". The code
+never special-cased `scratch`, so that row is now the unlettered "otherwise
+allow", and the letter h belongs to the unregistered-owner rule (issue #151).
+Rule h is skipped when no registry file exists or the registry declares no
+owners, and the refusal or the stderr note says which state applied. A
+registry that exists but cannot be read (unparseable, or encrypted at rest) does
+**not** skip it: rule h then refuses every non-interactive egress that has a
+destination, because an agent that can write the file could otherwise switch
+the rule off with one bad line of YAML. A person at a terminal still passes.
+
+Two further shape rules apply to the command text alone and are not part of the
+per-intent table: `GITHUB_API_VIA_HTTP_CLIENT` (`curl` or `wget` writing to
+`api.github.com` or `uploads.github.com`) and `GH_AUTH_TOKEN_NETWORK` (`gh auth
+token` in a command that also makes a network call). They are speed bumps, not
+proofs: an interpreter's `-c` text can still do either.
 
 Reasons name the destination (`<org>/<repo>`, visibility, class) and the
 ref/PR — that is the receipt-before-the-fact a human sees when asked. They
 never include payload content.
 
-Destination resolution is **offline**: `git push <remote>` →
-`remote.<remote>.url` read from `cwd`'s git config → `parseRemoteUrl`; `gh …
---repo o/r` → direct; `gh api repos/o/r/…` → from the API path (`orgs/o/…`
-→ the org, repo `*`; `{owner}`/`{repo}` placeholders → `cwd`'s origin, as
-`gh` itself does); `gh api graphql` → `cwd`'s origin for a read-only
-query, but **UNKNOWN** for a mutation (or a document the guard cannot
-read), see below; other `gh` → `cwd`'s origin. Visibility from the
+Destination resolution is **offline**, and since 0.11.0 it names the owner
+`gh` or git will actually write to, not the one the checkout suggests:
+
+- `git push <remote>` → the remote's push URLs, from `git remote get-url
+  --push --all`, so `insteadOf`, `pushInsteadOf` and `remote.<remote>.pushurl`
+  apply and **every** push URL is a candidate. `parseRemoteUrl` accepts every
+  GitHub form git does (any host case, a port, a trailing dot,
+  `ssh.github.com`, `www.`, any ssh user). An ssh host alias is read with a
+  small pure parser of `~/.ssh/config` (`Host` and `HostName` only; never `ssh
+  -G`, which evaluates `Match exec` from a file an agent can write). The
+  pre-push hook is handed the URL after all rewriting, once per push URL.
+- `gh … --repo o/r` → direct, including the attached forms `-Ro/r` and
+  `-R=o/r`. `GH_REPO` applies when there is no `--repo`, in the shim's own
+  environment and in a leading `GH_REPO=…` or `env GH_REPO=…` at the hook. A
+  PR or issue URL, or an `<o>/<r>` given positionally (`gh pr comment <url>`,
+  `gh repo edit o/r`, `gh issue transfer 5 o/r`, `gh repo sync o/r`), names
+  that repository. When `--repo`, `GH_REPO` and a URL disagree, every one is a
+  candidate and every owner must be registered.
+- a `gh` verb with no explicit target → **gh's own pick**: the checkout's
+  remotes sorted `upstream`, `github`, `origin`, then the rest, with a
+  `remote.<name>.gh-resolved` value (`base`, or an `owner/repo`) honoured first
+  for the verb groups gh resolves that way. A remote the guard cannot read as a
+  clean GitHub URL makes the result unresolved, never "the cwd's origin".
+- `gh api repos/o/r/…` → from the API path (`orgs/o/…` → the org, repo `*`;
+  `{owner}`/`{repo}` placeholders in the owner or repo segment → `cwd`'s
+  origin, as `gh` itself does). A path with `..`, `%2f` or an empty segment, an
+  endpoint with no owner in it (`repositories/<id>/…`, `gists`, `projects/…`),
+  or a placeholder anywhere else in the owner or repo segment is
+  **unresolved**. `user`, `user/…` and `gh gist create` belong to the
+  authenticated account and are not attributed to any repository (no approval
+  covers them; a person runs them). `gh api graphql` → `cwd`'s origin for a
+  read-only query, but **UNKNOWN** for a mutation (or a document the guard
+  cannot read), see below.
+- a `gh` alias is expanded from `gh`'s own `config.yml` before the verb is
+  classified; a shell alias or an extension the guard cannot expand is an
+  unresolved intent.
+
+The governing rule: a parser that lists the shapes it understands will always
+miss some, so any segment that invokes `gh` or `git push` and whose verb or
+target the parser cannot fully determine yields an **unresolved** intent, never
+"no intent". A raw-text scan of the whole command (heredocs and interpreter
+text included) catches a `gh` or `git push` mention that no parsed intent
+accounts for; its accepted false positive is a quoted mention such as `echo
+"gh issue create"`, refused only for a caller with no person present. A
+resolved or unresolved destination is then judged by rule h before anything
+else.
+
+Known gaps, stated so nobody assumes coverage: the fork parent that `gh` can
+pick through the API for a `gh` write verb other than `gh pr create` (R5; D10
+closes it for `pr create` only, and `gh issue create` and the comment verbs
+resolve through remotes, but that is not proven); a `GH_REPO` exported from a
+shell startup file, which the hook cannot see and only the shim reads (R8, see
+`doctor`'s `SHELL_STARTUP_OVERRIDES`); and, on hook-only installs, an ssh
+redirect from a persistent change the hook cannot see, which the pre-push hook
+still refuses (R11, `PREPUSH_HOOK_MISSING`). Owners whose names contain `_`
+(Enterprise Managed Users) cannot be registered, so rule h refuses them
+permanently for an agent. Visibility from the
 `repo-aegis.visibility` cache. Class from `readRepoConfig(cwd)` when the
 destination is `cwd`'s own origin. When it is not — the command names a
 repository in full from somewhere else — class and visibility come from
@@ -172,8 +247,10 @@ the **machine-wide destination cache** (`$REPO_AEGIS_HOME/destinations.json`):
 when the checkout still exists and from the snapshot otherwise. It is
 written by `classify --apply`, `status`, `doctor`'s sweep, and the guard
 itself on every command judged from inside a repository, so it fills in
-with use. An unparseable remote yields no destination and rules e–h do
-not fire. A parsed destination is public-facing unless its visibility is a
+with use. A remote that is plainly a local path, or a non-GitHub host the
+parser understands, yields no destination and rules e–h do not fire; a
+URL-shaped push target that does not resolve is **unresolved**, which rule h
+refuses (below). A parsed destination is public-facing unless its visibility is a
 recorded `private` (`treatAsPublicDestination`, shared by all three
 enforcement points): `public-eligible` is public-facing whatever the cache
 says, because the class is a declaration and the cache is only an
@@ -215,7 +292,8 @@ destination is `UNKNOWN` (`org`/`repo` `*`, `unresolved:
 "graphql-mutation"`): treated as public-facing, the same fail-closed
 stance as `visibility uncached, treated as public`, so rule g asks the
 agent's human and the shim refuses from a shell with none; only a `*`
-approval covers it; rule e is skipped (a `*` has no boundary to compare);
+approval covers it (since 0.11.0 rule h refuses it first, with no person
+present: see the 2026-11-02 note on D5 below); rule e is skipped (a `*` has no boundary to compare);
 receipts print `UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS
 PUBLIC)`. A document that cannot be read here (stdin, a missing file, a
 non-JSON body, an unexpanded `$(…)` as the hook sees it) counts as a
@@ -223,6 +301,49 @@ mutation. Read-only queries are unchanged. Resolving the node id with a
 live `node(id:)` query was considered and left out: it would put a network
 call on the decision path for a gain (skipping one prompt for a known
 private target) that does not justify it.
+
+*Added 2026-11-02 (issue #151, decision D5): unresolved writes fail closed
+under rule h.* Until 0.10 the guard asked whether a destination was public;
+it never asked whether the owner was anyone it had heard of. A destination
+under an owner in neither `personalOrgs` nor any engagement resolved to
+`private-strict` with unknown visibility, and `gh issue create --body …`, `gh
+pr comment`, `gh api -X POST …/issues -f body=…` or a body file in the session
+scratchpad has no source working tree for rule e to compare and no deny set
+for rule f to scan. Rule g then asked for a person, and a `*` approval
+satisfied it. Rule h closes that: with no person present, an owner that is not
+registered is refused, and **a write whose owner cannot be named offline counts
+as unregistered**. That covers a GraphQL mutation addressed by node id, a `gh
+api` write to an endpoint with no owner in its path (`repositories/<id>/…`,
+`gists`, `projects/…`), an implicit target overridden by an earlier `export
+GH_REPO=…`, a `gh` alias or extension the guard cannot expand, and a target
+held in a variable (`--repo "$VAR"`, `GH_REPO=$X`, `gh pr comment "$URL"`).
+This departs deliberately from "context rules fail open": the context is not
+missing, what is known is that a write goes to an owner nobody has vouched
+for, and #113 took the same stance. The consequence to know: a `*` approval no
+longer covers a GraphQL mutation, because rule h runs before rule g and no
+approval satisfies it. The workarounds are a `gh` verb that names the
+repository literally (`gh issue comment --repo <owner>/<repo> …`), the
+`repos/<owner>/<repo>/…` form of an API endpoint, or a person running the
+command at a terminal. Scripts an agent runs must name their target
+literally, or a person runs them. A later, network-only lookup that resolves
+node ids and can only lift the refusal (never impose one) is possible but not
+built; the refusal ships first so its frequency can be measured.
+
+*Added 2026-11-02 (issue #151, decision D10): a non-interactive `gh pr create`
+must name its target.* From a shell with no person present, `gh pr create`
+must carry `--repo`, a `GH_REPO` assignment or a URL positional, or it is
+refused with `GH_PR_CREATE_IMPLICIT_TARGET`. Without one, gh picks the base
+repository itself, from `remote.*.gh-resolved` and remote priority: config
+the agent can edit with a plain `git config`, read by the guard at a
+different moment than gh reads it. It is the `gh` counterpart of rule a's
+`PUSH_IMPLICIT_TARGET`, and like rule a it is unconditional: it needs no
+registry, and an approval does not lift it, because the fix is to re-issue the
+command, not to get permission. (Without a TTY gh does not consult the API for
+a fork's parent. It does so only when it can prompt, which is one more reason
+a pty wrapper is refused, below.) It covers `gh pr create` only; the other
+`gh` write verbs without `--repo` still rely on gh's own pick, as resolved
+above, and on rule h's check that the owner it lands on is registered. A person
+at a terminal is exempt, since gh can then ask.
 
 Two decisions fixed here so they are not relitigated later:
 
@@ -246,6 +367,12 @@ repo-aegis check --range "$range" --remote-url "$2"
 
 `check` gains, when `--remote-url` is present:
 
+- **`UNREGISTERED_OWNER_EGRESS`** (rule h) — decided first of all, before any
+  cache write or visibility lookup: with no person present, the URL's owner is
+  not registered (or the URL does not resolve to a GitHub repository offline,
+  or the registry is unreadable) → exit 2, whatever approvals exist. It is the
+  same code, the same `registeredOwners()` and the same registry states as the
+  agent hook and the shim.
 - **`CROSS_ORG_PUSH`** — the URL's org is positively disjoint from the repo's
   own trust boundary → exit 2. Deterministic, offline, no TTY involved.
 - **`PUBLIC_PUSH_NEEDS_HUMAN`** — destination `publicFacing` (by the same
@@ -256,6 +383,12 @@ repo-aegis check --range "$range" --remote-url "$2"
   naming the destination and the escapes (`repo-aegis approve <org>/<repo>`).
 - otherwise one stderr line: `repo-aegis: pushing <ref> → <org>/<repo>
   (<visibility>)`.
+
+The 0.11.0 change to the generated hook script is a comment only (it now says
+that `$2` is the URL after all rewriting, once per push URL, and that for a URL
+push `$1` equals `$2`), but the script's digest covers its text, so installed
+copies report `HOOKS_SCRIPT_STALE` until `repo-aegis install hooks` runs again.
+The behaviour that changed is in the CLI the hook calls.
 
 The TTY test is the same one `repo-aegis waive` uses to stop an agent minting
 its own waiver, and the escape variable has the same contract as
@@ -329,9 +462,10 @@ conservative choice), and emits:
   it.
 
 What this layer adds over §2 and §3: it runs **before** anything executes, it
-sees the **whole compound command** — so the shape rules a–c apply here and
-nowhere else, since git and `gh` receive a command the shell has already
-resolved — and on Claude Code it turns "GitHub shared-state mutations need
+sees the **whole compound command** — so the shape rules a–c, b′ and b″
+apply here and nowhere else, since git and `gh` receive a command the shell
+has already resolved (the shim, which sees one `gh` invocation and its real
+environment, also applies a′ and reads `GH_REPO` itself) — and on Claude Code it turns "GitHub shared-state mutations need
 confirmation" from a sentence in an instructions file into a prompt the human
 must answer.
 
@@ -363,8 +497,11 @@ repo-aegis approve --list | --revoke <id|all>
 - **Minting needs a TTY on stderr, and does not honour the env escape.**
   An agent's shell has neither, so an agent cannot mint its own approval —
   the property the env-var rule protected, now enforced rather than
-  instructed. `--list` and `--revoke` publish nothing and need no TTY.
-- **Scoped and short-lived.** `<org>/<repo>`, `<org>/*`, or `*`;
+  instructed. Since 0.11.0 the terminal must also be a person's (see "What
+  counts as a person", below). `--list` and `--revoke` publish nothing and
+  need no TTY.
+- **Scoped and short-lived.** `<org>/<repo>`, `<org>/*`, or `*` (which since
+  0.11.0 is no longer a global wildcard: see the D7 note below);
   optionally one ref (`refs/heads/x` and `x` are the same). Default 15
   minutes, never more than 24 hours. Stored at
   `$REPO_AEGIS_HOME/egress-approvals.json` (0600). Not consumed on use: a
@@ -388,6 +525,74 @@ What this does not change: `REPO_AEGIS_EGRESS_HUMAN` keeps its contract
 (one invocation, a human's hand on the keyboard); the agent-side rule
 stays "never set it, never work around a refusal" — the recovery is now
 "ask the human for an approval" instead of "ask the human to run it".
+
+*Added 2026-11-02 (issue #151, decision D7): `*` covers only your own orgs.*
+A `*` approval used to match every owner, so one minted for a personal release
+window also covered publishing to a customer's public repository. Since 0.11.0
+a `*` approval covers a destination only when its owner is in `personalOrgs`,
+and a destination-less verb (`npm publish`), which was already covered only by
+`*`. A customer's repository needs `approve <org>/*` or `approve <org>/<repo>`;
+an allowed upstream needs `approve <owner>/<repo>`. `<org>/*` and
+`<org>/<repo>` behave as before, but rule h runs first, so no approval, of any
+form, helps with an owner that is not registered. An operator with no
+`personalOrgs` therefore finds that `*` covers `npm publish` only. `approve
+'*'` says what it covers when it is minted, and a refusal that finds a live `*`
+that does not apply names the approval and says why.
+
+| Approval | Personal org repo | Customer org repo | Allowed upstream (PR, issue, comment verbs) | Unregistered owner | `npm publish` |
+|---|---|---|---|---|---|
+| `*` | covered | not covered | not covered | not covered (rule h refuses first) | covered |
+| `<org>/*` | covered | covered | covered, when `<org>` is the upstream's owner | not covered (rule h refuses first) | not covered |
+| `<org>/<repo>` | covered, for that repo | covered, for that repo | covered, for that repo | not covered (rule h refuses first) | not covered |
+
+"Covered" means the approval satisfies rule g for a publish there. It never
+lifts a shape rule, rule e, rule f or rule h. An approval minted for an
+unregistered owner is accepted but inert, and `approve` warns that it will not
+help until a person registers the owner (`engagements add`, or `upstreams add`
+for a fork's upstream). An upstream is never "ours": `git push`, merge,
+release, repo and workflow verbs and `gh api` writes to it stay refused by
+rule h, and rules e–g still apply to the PRs and issues it does admit.
+
+#### What counts as a person
+
+Rules g and h, `approve` and every owner add rest on one question: is a person
+at this terminal? A TTY on stderr is not proof. `script -q /dev/null <cmd>`,
+`unbuffer`, `expect`, `tmux new -d '…'` and `ssh -tt localhost` all hand an
+agent's child a pty. Since 0.11.0 the answer comes from several layers, none
+of which is proof:
+
+- **`EGRESS_PTY_WRAPPER`** refuses a publish run under a pty wrapper, so the
+  command never reaches a layer that would read its pty as a person.
+- **`AGENT_RAN_HUMAN_COMMAND`** refuses any Bash command whose text runs
+  `repo-aegis approve`, `engagements add --personal-org|--github-org`,
+  `upstreams add` or `init --migrate-classify|--force`, wherever it sits
+  (`bash -c`, a heredoc, a multiplexer argument), with or without a terminal.
+  The accepted false positive is a quoted mention next to a repo-aegis word.
+- **`AGENT_DETACHED_SESSION`** refuses starting a detached session in any
+  command: `tmux new -d`, `tmux new-window` / `send-keys`, `screen -dm`,
+  `setsid`, `daemonize`, `nohup … & disown`. A process that outlives the
+  command is re-parented to init, where no ancestry check sees an agent above
+  it.
+- The CLI **reads the process ancestry**. For `approve` and the owner adds,
+  stderr must be a TTY, no agent host (`claude`, `codex`, `gemini`) or pty
+  wrapper may sit above the process, `CLAUDECODE=1` must not be set, and the
+  chain must reach a login session, `sshd`, a terminal emulator or an attached
+  multiplexer. If the chain cannot be read (no `ps`, as in an agent's sandbox)
+  the answer is "not a person". Rules g and h make the opposite choice for an
+  unreadable or unrooted chain, because refusing a person's own publish is the
+  worse failure there; a recognised agent or wrapper ancestor means "not a
+  person" for them too.
+- `REPO_AEGIS_EGRESS_HUMAN` stays honoured for rules g and h only, and never
+  for `approve` or an owner add.
+
+All of this is advisory outside the agent's sandbox: a same-user agent that
+can run code outside it can forge a process name, an environment variable, or
+write the approvals file or the registry directly. Inside the Claude Code
+sandbox no pty can be opened and `ps` is blocked, so the gates fail closed, and
+`install claude-md` merges Edit denies over the registry, approvals, markers,
+hooks and shim into the sandbox's write-deny list. The lasting fix is a signal
+an agent cannot forge, such as a Keychain item with a user-presence (Touch ID)
+ACL; it is a tracked follow-up (R12).
 
 ### 4b. The layers do not degrade into each other — rule g′
 
@@ -551,6 +756,11 @@ every agent and every human, with no repo-aegis involvement at all.
 |---|---|
 | Clean content published to the wrong destination (right bytes, wrong boundary) | Destination-aware egress rules at three enforcement points (pre-push, `gh` shim, agent hooks); shape rules refuse the implicit forms (`git push` with no refspec; egress after `cd`; `;`-chained egress) regardless of context |
 | Agent self-approving a public egress | `ask` on frameworks that have it; TTY gate elsewhere; escape variable is human-only by contract and a visible act |
+| Non-interactive publish to an owner nobody registered (right bytes, a stranger's repository), including via `GH_REPO`, a URL positional, an opaque API endpoint, a GraphQL mutation, `insteadOf` or an ssh alias | Rule h (`UNREGISTERED_OWNER_EGRESS`) at all three layers, judged against `personalOrgs` and engagement `githubOrgs` only (no approval, cache or local class counts); an unresolved destination fails closed; the resolver names the owner gh or git will actually use |
+| Agent registering an owner or upstream, or emptying the owner set, to undo rule h | `engagements add --personal-org\|--github-org`, `upstreams add`, `init --migrate-classify` and any change that leaves zero owners need a person at a terminal (`OWNER_ADD_NEEDS_TTY`, `OWNER_SET_EMPTY_NEEDS_TTY`); `install claude-md` adds Edit denies over the registry; every mutator validates in memory first (`REGISTRY_WOULD_BE_INVALID`) |
+| Agent steering the shim, the pre-push hook, `gh` or `git` through the environment, or through a state change earlier in the same command | Shape rules b′ (`EGRESS_ENV_OVERRIDE`) and b″ (`EGRESS_AFTER_STATE_CHANGE`) at the hook; below the hook this is residual (R2) |
+| Agent faking a person with a pty wrapper, a detached session or a text-level `approve` | `EGRESS_PTY_WRAPPER`, `AGENT_DETACHED_SESSION`, `AGENT_RAN_HUMAN_COMMAND`; process-ancestry check in `approve` and the owner adds. Advisory outside the agent sandbox (R12) |
+| Publishing without `gh` or `git`: a raw HTTP client against the GitHub API, or `gh auth token` next to a network call | `GITHUB_API_VIA_HTTP_CLIENT`, `GH_AUTH_TOKEN_NETWORK`; a speed bump (an interpreter's `-c` text still gets through) |
 | Agent "fixing" a refused command by rewriting it silently | Hook is decision-only; `updatedInput` is never emitted |
 | Own-project material entering a customer repository | `selfIdentity` stem, deny-set-included only for `customer-coupled` destinations; payload scan against the destination's rules |
 | Destination controls silently inert on an unclassified public repo | `doctor` `CLASS_VISIBILITY_UNRESOLVED` / `PERSONAL_ORG_UNREGISTERED`; `public-eligible` treated as public-facing even with no cache; an unknown visibility treated as public at every enforcement point (issue #114) |
@@ -560,8 +770,13 @@ every agent and every human, with no repo-aegis involvement at all.
 | Egress hook is decision-only | `hook guard-egress` returns `allow`/`ask`/`deny`; it never emits `updatedInput`. Rewriting a command reconstructs the implicit-destination defect. |
 | `ask` degrades to `deny` | On a framework without an `ask` decision, `ask` becomes `deny` with a "have a human run or approve this" reason — never `allow`. |
 | An `ask` needs a layer beneath it | Rule g′: on a `gh` verb, where the enforcing framework reports the `gh` shim is not first on its `PATH`, `ask` becomes `deny` (`SHIM_UNREACHABLE_NEEDS_HUMAN`) — an unanswered `ask` with nothing below it is not a refusal. `git push` (pre-push hook) and `npm publish` (no shim) are out of scope; an unknown `PATH` changes nothing. §4b. |
-| Shape rules are unconditional; context rules fail open | Rules that need no registry/class/visibility (`PUSH_IMPLICIT_TARGET`, `EGRESS_AFTER_CD`, `EGRESS_UNGUARDED_CHAIN`, `PAYLOAD_MODE_DEPENDENT_PATH`) always apply. Rules that need context never block on missing context, but may still `ask`. |
-| Human-presence test | `isatty(2)` on stderr, or `REPO_AEGIS_EGRESS_HUMAN=1`. Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`: documented human-only; agents are instructed never to set it. |
+| Shape rules are unconditional; context rules fail open (except rule h) | Rules that need no registry/class/visibility (`PUSH_IMPLICIT_TARGET`, `EGRESS_AFTER_CD`, `EGRESS_UNGUARDED_CHAIN`, `PAYLOAD_MODE_DEPENDENT_PATH`, `EGRESS_ENV_OVERRIDE`, `EGRESS_AFTER_STATE_CHANGE`, `GH_PR_CREATE_IMPLICIT_TARGET`, `EGRESS_PTY_WRAPPER`) always apply. Rules that need context never block on missing context, but may still `ask`. Rule h is the exception: it refuses a write whose owner it cannot name, and an unreadable registry. |
+| Human-presence test | `isatty(2)` on stderr that no agent host or pty wrapper sits above, or `REPO_AEGIS_EGRESS_HUMAN=1` (rules g and h only). Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`: documented human-only; agents are instructed never to set it. `approve` and the owner adds do not honour the env escape and also require the process chain to reach a login session, `sshd`, a terminal emulator or an attached multiplexer. A speed bump, not proof of a person; the sandbox is the boundary. |
+| Rule h: only the registry decides | `owner ∈ personalOrgs ∪ engagements[*].githubOrgs`, or an exact `owner/repo` in `allowedUpstreams` on a PR / issue / comment verb. Not the destination cache, not a local `repo-aegis.class`, not an approval, not the authenticated `gh` login (the active account changes under other sessions; `doctor` reports unregistered logins instead). Missing registry or no owners: skipped, with a note. Unreadable or encrypted registry: refuse. |
+| Unresolved writes fail closed | A write whose owner cannot be named offline is treated as unregistered (D5). The deliberate departure from "context rules fail open". |
+| `*` approvals cover only `personalOrgs` and destination-less verbs | D7. Customer orgs need `<org>/*` or `<org>/<repo>`; upstreams need `<owner>/<repo>`. |
+| A non-interactive `gh pr create` names its target | D10. `GH_PR_CREATE_IMPLICIT_TARGET`, unconditional; `gh pr create` only. |
+| Adding an owner needs a person | D8. No env escape, no approval; the audit record for an add carries a kind and a count, never owner names (owners can be customer names, and the audit log can be read back into a transcript). |
 | Two network calls, neither a condition for refusing | The `gh pr create/edit` read-back runs after the verb has published, cannot block, is best-effort with a timeout, and affects exit status only on a confirmed mismatch. The pre-decision visibility lookup (issue #114) runs only when a destination's visibility is unknown, is best-effort with a 5-second timeout, and can only turn `unknown` into an answer; when it fails the destination stays unknown and is refused without a person. |
 | `_self_identity` scoping | Included in the deny set only when the repo or egress destination is `customer-coupled`; excluded from flat `markers.txt`; part of the deny-set cache key. Mirror of `_private_infra`. |
 

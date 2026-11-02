@@ -604,7 +604,9 @@ export async function buildProgram(): Promise<Command> {
   // without the operator running the command — and without the env escape.
   program
     .command("approve [target]")
-    .description("mint (from a terminal), list, or revoke a time-limited human approval for publishing to <org>/<repo>, <org>/*, or *")
+    .description(
+      "mint (from a person's terminal), list, or revoke a time-limited human approval for publishing to <org>/<repo>, <org>/*, or *. '*' covers only your personalOrgs and npm publish, not customer orgs or allowed upstreams (use <org>/* or <org>/<repo>). No approval helps with an unregistered owner: register it first (engagements add, upstreams add).",
+    )
     .option("--ref <ref>", "approve only this branch or tag")
     .option("--ttl <duration>", "how long the approval lives: 15m (default), 2h, 90s, 1d — never more than 24h")
     .option("--note <text>", "why (audit trail only)")
