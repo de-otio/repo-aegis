@@ -14,6 +14,8 @@ import {
   leakContextFlagPath,
   appendAuditRecord,
   approvalsPath,
+  denySetCachePath,
+  markersDir,
   registryPath,
   repoAegisHome,
   statePath,
@@ -299,11 +301,13 @@ function mergeFirstTouchHook(
 // What is denied is deliberately narrow, because the sandbox enforces it on
 // the agent's own Bash too: the files whose tampering bypasses the guard, and
 // nothing the tools write at run time. Denied: the registry file and its `.age`
-// ciphertext, the approvals store, `hooks/**` (the git hook scripts) and
-// `bin/**` (the `gh` shim). NOT denied, on purpose: `state/` (audit log, lock,
-// caches), `markers/`, and the rest of the home. Denying the whole directory
-// broke audit appends, the state lock, cache writes, and an agent running
-// `install hooks` or `install shim`.
+// ciphertext, the approvals store, `hooks/**` (the git hook scripts), `bin/**`
+// (the `gh` shim) and `markers/**` (the rendered deny set the write scan
+// reads: editing it silently drops markers). NOT denied, on purpose: `state/`
+// (audit log, lock, caches) and the rest of the home. Denying the whole
+// directory broke audit appends, the state lock, cache writes, and an agent
+// running `install hooks` or `install shim`. Denying `markers/**` means an
+// agent-run `render` is refused inside the sandbox; a person runs it.
 // ---------------------------------------------------------------------------
 
 /** What `install claude-md` denies for the current registry location. */
@@ -347,22 +351,35 @@ function riskyDirReason(dir: string): string | null {
   return null;
 }
 
-/** The deny rules for the registry, approvals, hooks and shim at their current locations. */
+/** The deny rules for the registry, approvals, hooks, shim, markers and trusted state files at their current locations. */
 export function registryDenyPlan(): RegistryDenyPlan {
   const home = repoAegisHome();
   const registry = registryPath(home);
-  const files = [registry, `${registry}.age`, approvalsPath(home)];
-  const dirs: string[] = [];
+  // Files an enforcement path trusts. state/deny-set.cache.json is one of them:
+  // it is keyed by a fingerprint an agent can compute, and a forged entry with
+  // empty patterns switches the scanner off. Its write is best-effort, so a
+  // denied write only costs a recompute. The ledger is trusted by uninstall.
+  const files = [
+    registry,
+    `${registry}.age`,
+    approvalsPath(home),
+    denySetCachePath(home),
+    join(statePath(home), DENY_LEDGER_FILE),
+  ];
   const warnings: string[] = [];
 
-  const homeRisk = riskyDirReason(home);
-  if (homeRisk !== null) {
-    warnings.push(
-      `the repo-aegis home (${home}) ${homeRisk}: denying only the files, not hooks/ and bin/ ` +
-        "(moving the home somewhere private restores that protection)",
-    );
+  // hooks/, bin/ and markers/ are narrow subdirectories of the home, so they are
+  // denied wherever the home is (even `$HOME` or a work tree): the risky-directory
+  // test is for BROADER denies only. A markers directory moved OUT of the home is
+  // a path of the operator's choosing and may itself be broad, so that one is tested.
+  const dirs = [join(home, "hooks"), join(home, "bin")];
+  const markers = markersDir(home);
+  if (markers === home || markers.startsWith(home + "/")) {
+    dirs.push(markers);
   } else {
-    dirs.push(join(home, "hooks"), join(home, "bin"));
+    const markersRisk = riskyDirReason(markers);
+    if (markersRisk !== null) warnings.push(`the markers directory (${markers}) ${markersRisk}: not denied`);
+    else dirs.push(markers);
   }
   const regDir = dirname(registry);
   const regRisk = riskyDirReason(regDir);
@@ -384,14 +401,37 @@ export function registryDenyRules(): string[] {
 }
 
 /**
- * Forms an earlier build wrote (never released): an Edit and a Write rule over
- * the whole registry directory. They are removed on upgrade and on uninstall,
- * because the whole-directory rule breaks audit appends and caches, and a
- * `Write(path)` rule is never matched.
+ * The pair an earlier build wrote (never released): an Edit AND a Write rule
+ * over the whole registry directory. They are removed on upgrade and on
+ * uninstall only when BOTH are present, because one alone is indistinguishable
+ * from a rule the user wrote themselves, and a user rule is never removed. The
+ * whole-directory rule broke audit appends and caches, and a `Write(path)` rule
+ * is never matched.
  */
-function legacyDenyRules(): string[] {
+function legacyDenyPair(list: readonly unknown[]): string[] {
   const dir = dirname(registryPath());
-  return [`Edit(/${dir}/**)`, `Write(/${dir}/**)`];
+  const pair = [`Edit(/${dir}/**)`, `Write(/${dir}/**)`];
+  return pair.every(r => list.includes(r)) ? pair : [];
+}
+
+/** Basenames/globs of the paths this install protects, for recognising its own rules. */
+const OUR_RULE_SHAPE =
+  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers)\/\*\*)\)$/;
+
+/**
+ * Whether `rule` is one this install could have written: exactly a rule of the
+ * current plan, or the shape of one (`Edit(//…)` over one of the protected
+ * basenames) under the current repo-aegis home. The ledger lives in a directory
+ * an agent can write, so uninstall removes a ledger entry only if it also has
+ * our shape: a forged ledger cannot make uninstall delete the user's own rules.
+ */
+function isOurRuleShape(rule: string, plan: RegistryDenyPlan): boolean {
+  if (plan.rules.includes(rule)) return true;
+  const m = OUR_RULE_SHAPE.exec(rule);
+  if (m === null) return false;
+  const abs = "/" + m[1]!.replace(/^\/+/, "");
+  const home = repoAegisHome();
+  return abs === home || abs.startsWith(home + "/");
 }
 
 // The ledger: which deny rules THIS install added to which settings.json, so
@@ -480,12 +520,13 @@ function installDenyRules(settings: SettingsJson, settingsPath: string): DenyIns
   const prev = readDenyLedger().settings[settingsPath];
   let list = denyList(settings);
 
-  // First run of this build over an older one: its broad rules go.
+  // First run of this build over an older one: its broad pair goes (both rules
+  // present, or neither is touched: one alone could be the user's own).
   const legacyRemoved: string[] = [];
   if (prev === undefined) {
-    const legacy = legacyDenyRules();
-    for (const r of list) if (typeof r === "string" && legacy.includes(r)) legacyRemoved.push(r);
-    if (legacyRemoved.length > 0) list = list.filter(r => !(typeof r === "string" && legacy.includes(r)));
+    const legacy = legacyDenyPair(list);
+    legacyRemoved.push(...legacy);
+    if (legacy.length > 0) list = list.filter(r => !(typeof r === "string" && legacy.includes(r)));
   }
 
   const added: string[] = [];
@@ -512,8 +553,11 @@ function installDenyRules(settings: SettingsJson, settingsPath: string): DenyIns
  */
 function stripDenyRules(settings: SettingsJson, settingsPath: string): { removed: number; hadRecord: boolean } {
   const record = readDenyLedger().settings[settingsPath];
-  const rules = record ?? legacyDenyRules();
   const list = denyList(settings);
+  // A ledger entry that is not shaped like one of ours is ignored: the ledger is
+  // agent-writable, and it must not be a way to delete the user's own rules.
+  const plan = registryDenyPlan();
+  const rules = record !== undefined ? record.filter(r => isOurRuleShape(r, plan)) : legacyDenyPair(list);
   const kept = list.filter(r => !(typeof r === "string" && rules.includes(r)));
   const removed = list.length - kept.length;
   if (removed > 0) setDenyList(settings, kept);

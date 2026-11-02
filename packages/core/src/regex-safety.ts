@@ -245,10 +245,18 @@ function validatePatternsStrict(
       const r = run.results.get(localIdx);
       if (r) results.set(globalIdx, r);
       else if (run.timedOut && run.inFlight === localIdx) {
-        results.set(globalIdx, {
-          ok: false,
-          reason: "strict validation timed out on this pattern (likely catastrophic backtracking)",
-        });
+        // The in-flight pattern is the likeliest culprit, but on a starved
+        // machine it can be a harmless one that was merely descheduled. Give it
+        // one test ALONE in a fresh child before rejecting it. A catastrophic
+        // pattern hangs again and is rejected; the cost is one more bounded wait.
+        const solo = runStrictChild([toCheckRedos[globalIdx]!], STRICT_STARTUP_ALLOWANCE_MS / 2);
+        results.set(
+          globalIdx,
+          solo.results.get(0) ?? {
+            ok: false,
+            reason: "strict validation timed out on this pattern (likely catastrophic backtracking)",
+          },
+        );
       } else next.push(globalIdx);
     });
     if (!run.timedOut && next.length > 0) {

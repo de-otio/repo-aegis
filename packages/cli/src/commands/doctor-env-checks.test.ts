@@ -57,8 +57,10 @@ describe("watchedVariablesIn", () => {
       "export SRT_LATER",
       "export GIT_SSH=/usr/bin/wrapper",
       "export GH_HOST=ghe.example.test",
+      "export GH_CONFIG_DIR=/x/gh",
     ].join("\n");
     assert.deepEqual(watchedVariablesIn(text), [
+      "GH_CONFIG_DIR",
       "GH_HOST",
       "GH_REPO",
       "GIT_SSH",

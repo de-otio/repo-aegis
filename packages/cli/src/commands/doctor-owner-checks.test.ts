@@ -10,7 +10,7 @@
 // is public.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -18,9 +18,11 @@ import type { Registry } from "@de-otio/repo-aegis-core";
 import { doctor } from "./doctor.js";
 import {
   findRealGh,
+  ghLocationReason,
   ghOwnerChecks,
   parseAuthStatusText,
   registryStateChecks,
+  untrustedDirReason,
   untrustedGhReason,
   type GhCheckOptions,
 } from "./doctor-owner-checks.js";
@@ -42,6 +44,7 @@ import { withStreamTty } from "../_test-utils.js";
  *   user.<token>       login for `api user` acting as <token>  (missing -> exit 1)
  *   orgs.<token>       lines for `api user/orgs`               (missing -> exit 1)
  *   active.user / active.orgs   the same, with NO GH_TOKEN in the environment
+ *   http_unix_socket   stdout of `config get http_unix_socket` (absent -> empty, as a default gh prints)
  *
  * Every call's ARGUMENTS (never its environment) are appended to calls.log, so
  * a case can assert what was run and that no token ever travelled in an argv.
@@ -66,6 +69,9 @@ case "$1 $2" in
     cat "$D/token.$U"; exit 0 ;;
   "auth switch")
     touch "$D/switched"; exit 0 ;;
+  "config get")
+    [ -f "$D/http_unix_socket" ] && cat "$D/http_unix_socket"
+    exit 0 ;;
   "api --hostname")
     # A trap: a careless caller that lets a child's stderr through would print the token.
     [ -n "\${GH_TOKEN:-}" ] && echo "\$GH_TOKEN" >&2
@@ -424,6 +430,9 @@ describe("registryStateChecks", () => {
 
 class ExitSignal extends Error {}
 
+/** Variables that redirect or override gh's config; doctor refuses to read other tokens when any is set. */
+const REDIRECT_VARS = ["GH_CONFIG_DIR", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
+
 interface RunResult {
   stdout: string;
   stderr: string;
@@ -447,6 +456,12 @@ function runDoctor(opts: Parameters<typeof doctor>[0], envOverrides: Record<stri
     throw new ExitSignal();
   };
   const prev: Record<string, string | undefined> = {};
+  // An ambient GH_TOKEN / GH_CONFIG_DIR on a developer machine would (rightly) stop doctor reading other
+  // accounts' tokens; the cases below are about everything else.
+  for (const k of REDIRECT_VARS) {
+    prev[k] = process.env[k];
+    delete process.env[k];
+  }
   for (const [k, v] of Object.entries(envOverrides)) {
     prev[k] = process.env[k];
     process.env[k] = v;
@@ -869,7 +884,9 @@ doctor({ scanRoot: [${JSON.stringify(w.scanRoot)}], claudeHome: ${JSON.stringify
 `,
     );
     for (const mode of ["text", "json"]) {
-      const res = spawnSync(process.execPath, [harness, mode], { env: { ...process.env, ...w.env }, encoding: "utf8" });
+      const clean = { ...process.env };
+      for (const k of REDIRECT_VARS) delete clean[k];
+      const res = spawnSync(process.execPath, [harness, mode], { env: { ...clean, ...w.env }, encoding: "utf8" });
       assert.ok(res.stdout.length > 0, "doctor produced no output");
       for (const [name, text] of [["stdout", res.stdout], ["stderr", res.stderr]] as const) {
         assert.ok(!text.includes("tok_SENTINEL"), `a token reached ${name} in ${mode} mode`);
@@ -877,5 +894,163 @@ doctor({ scanRoot: [${JSON.stringify(w.scanRoot)}], claudeHome: ${JSON.stringify
     }
     // The trap is real: the fake gh did receive tokens in its environment.
     assert.match(stub.calls(), /api --hostname github\.com user/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A link NAMED gh is not a gh; a PATH entry's own directory is vetted too
+// ---------------------------------------------------------------------------
+
+describe("ghLocationReason", () => {
+  it("accepts a standard install path and a Homebrew Cellar/opt gh; refuses links to other programs", () => {
+    assert.equal(ghLocationReason("/usr/bin/gh"), null);
+    assert.equal(ghLocationReason("/opt/homebrew/Cellar/gh/2.102.0/bin/gh"), null);
+    assert.equal(ghLocationReason("/usr/local/opt/gh/bin/gh"), null);
+    assert.equal(ghLocationReason("/home/linuxbrew/.linuxbrew/Cellar/gh/2.1/bin/gh"), null);
+    // The probe: `gh -> /bin/sh` (root-owned target) and `/usr/bin/env`, which runs ./auth from the cwd.
+    assert.match(ghLocationReason(realpathSync("/bin/sh")) ?? "", /not named gh/);
+    assert.match(ghLocationReason(realpathSync("/usr/bin/env")) ?? "", /not named gh/);
+    // Named gh but not where a package manager puts it.
+    assert.match(ghLocationReason("/opt/homebrew/Cellar/other/1/bin/gh") ?? "", /not a standard gh install path/);
+    assert.match(ghLocationReason("/Users/x/bin/gh") ?? "", /not a standard gh install path/);
+    assert.match(ghLocationReason("gh") ?? "", /relative/);
+  });
+});
+
+describe("ghOwnerChecks — links named gh", () => {
+  function evilBin(base: string, target: string): string {
+    const dir = join(base, "evil");
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(target, join(dir, "gh"));
+    return dir;
+  }
+
+  for (const target of ["/bin/sh", "/usr/bin/env"]) {
+    it(`gh -> ${target} is refused and nothing the agent planted in the cwd runs`, () => {
+      const base = join(root, `link-${counter++}`);
+      const { home, bin } = shimDirFor(base);
+      const evil = evilBin(base, target);
+      const repo = join(base, "repo");
+      mkdirSync(repo, { recursive: true });
+      // `sh auth status ...` would run ./auth as a script; `env auth ...` would exec ./auth.
+      writeFileSync(join(repo, "auth"), `#!/bin/sh\ntouch "${base}/agent-code-ran"\n`, { mode: 0o755 });
+      const prev = process.cwd();
+      process.chdir(repo);
+      try {
+        const checks = ghOwnerChecks(
+          registry(["alice"]),
+          { PATH: `${bin}${delimiter}${evil}${delimiter}/usr/bin${delimiter}/bin`, REPO_AEGIS_HOME: home, HOME: base },
+          { confirm: () => true },
+        );
+        assert.ok(checks.filter(c => c.skipped === true).length === 3, JSON.stringify(checks));
+        assert.ok(checks.some(c => c.code === "GH_BINARY_UNTRUSTED"));
+      } finally {
+        process.chdir(prev);
+      }
+      assert.equal(existsSync(join(base, "agent-code-ran")), false, "agent-planted ./auth was executed");
+    });
+  }
+
+  it("the 'is this file a gh' test is wired in on its own: with the directory tests off, gh -> /bin/sh is still refused", () => {
+    const base = join(root, `link-wired-${counter++}`);
+    const { home, bin } = shimDirFor(base);
+    const evil = evilBin(base, "/bin/sh");
+    const checks = ghOwnerChecks(
+      registry(["alice"]),
+      { PATH: `${bin}${delimiter}${evil}${delimiter}/usr/bin${delimiter}/bin`, REPO_AEGIS_HOME: home },
+      { skipDirectoryChecks: true, confirm: () => true },
+    );
+    assert.equal(checks.filter(c => c.skipped === true).length, 3, JSON.stringify(checks));
+    assert.match(checks.find(c => c.code === "GH_BINARY_UNTRUSTED")!.detail, /not named gh/);
+  });
+
+  const brewGh = "/opt/homebrew/bin/gh";
+  it(
+    "a gh in ~/bin linked to the REAL Homebrew gh is refused because of the PATH entry's own directory",
+    { skip: !existsSync(brewGh) },
+    () => {
+      const base = join(root, `homebin-${counter++}`);
+      const { home, bin } = shimDirFor(base);
+      const homeBin = join(base, "bin");
+      mkdirSync(homeBin, { recursive: true });
+      symlinkSync(brewGh, join(homeBin, "gh"));
+      const real = realpathSync(brewGh);
+      // The target alone is fine: that is exactly why the entry's directory has to be vetted too.
+      assert.equal(ghLocationReason(real), null);
+      assert.equal(untrustedGhReason(real, {}), null);
+      assert.match(untrustedDirReason(realpathSync(homeBin), { HOME: base }) ?? "", /your home directory/);
+      const checks = ghOwnerChecks(
+        registry(["alice"]),
+        { PATH: `${bin}${delimiter}${homeBin}${delimiter}/usr/bin${delimiter}/bin`, REPO_AEGIS_HOME: home, HOME: base },
+        { confirm: () => true },
+      );
+      assert.equal(checks.filter(c => c.skipped === true).length, 3, JSON.stringify(checks));
+      assert.match(checks.find(c => c.code === "GH_BINARY_UNTRUSTED")!.detail, /your home directory/);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// A trusted gh can still be steered by its own configuration
+// ---------------------------------------------------------------------------
+
+describe("ghOwnerChecks — a redirected gh never reads another account's token", () => {
+  const twoAccounts = (): Account[] => [
+    { login: "alice", token: TOKEN_ALICE, orgs: ["acme-corp"] },
+    { login: "bob", token: TOKEN_BOB, orgs: ["stranger-org"] },
+  ];
+  function run(stub: Stub, envExtra: Record<string, string> = {}): { checks: DoctorCheck[]; asked: boolean } {
+    let asked = false;
+    const checks = ghOwnerChecks(registry(["alice"], ["acme-corp"]), { ...env(stub.path), ...envExtra }, {
+      policy: "permissive",
+      confirm: () => ((asked = true), true),
+    });
+    return { checks, asked };
+  }
+
+  it("http_unix_socket set in gh's config: no prompt, no token read, a warning, active account still checked", () => {
+    const stub = makeStub(twoAccounts());
+    writeFileSync(join(stub.dir, "http_unix_socket"), "/tmp/agent.sock\n");
+    const { checks, asked } = run(stub);
+    assert.equal(asked, false, "nobody is asked to confirm something unsafe");
+    assert.doesNotMatch(stub.calls(), /--user|auth token/);
+    const warn = checks.find(c => c.code === "GH_CONFIG_REDIRECT")!;
+    assert.equal(warn.ok, false);
+    assert.equal(warn.severity, "warn");
+    assert.match(warn.detail, /http_unix_socket/);
+    assert.doesNotMatch(JSON.stringify(checks), /agent\.sock/, "the socket path is not echoed");
+    assert.equal(byCode(checks, "GH_LOGIN_UNREGISTERED").find(c => c.account === "alice")!.ok, true);
+    assert.equal(byCode(checks, "GH_LOGIN_UNREGISTERED").find(c => c.account === "bob")!.skipped, true);
+  });
+
+  for (const name of ["GH_CONFIG_DIR", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]) {
+    it(`${name} in doctor's environment: other tokens are not read, and the value is never printed`, () => {
+      const stub = makeStub(twoAccounts());
+      const { checks, asked } = run(stub, { [name]: "SENTINEL_VALUE_xyz" });
+      assert.equal(asked, false);
+      assert.doesNotMatch(stub.calls(), /--user|auth token/);
+      const warn = checks.find(c => c.code === "GH_CONFIG_REDIRECT")!;
+      assert.match(warn.detail, new RegExp(name));
+      assert.doesNotMatch(JSON.stringify(checks), /SENTINEL_VALUE_xyz/);
+    });
+  }
+
+  it("no redirect: the question is asked, as before", () => {
+    const stub = makeStub(twoAccounts());
+    const { checks, asked } = run(stub);
+    assert.equal(asked, true);
+    assert.equal(checks.some(c => c.code === "GH_CONFIG_REDIRECT"), false);
+    assert.match(stub.calls(), /auth token .*--user bob/);
+  });
+
+  it("an unreadable http_unix_socket setting fails closed", () => {
+    const stub = makeStub(twoAccounts());
+    // A gh whose `config get` errors.
+    writeFileSync(join(stub.dir, "gh"), readFileSync(join(stub.dir, "gh"), "utf8").replace('"config get")', '"config xxx")'), {
+      mode: 0o755,
+    });
+    const { asked } = run(stub);
+    assert.equal(asked, false);
+    assert.doesNotMatch(stub.calls(), /--user/);
   });
 });

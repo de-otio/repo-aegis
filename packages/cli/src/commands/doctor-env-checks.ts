@@ -49,6 +49,7 @@ function isWatchedVariable(name: string): boolean {
   return (
     name === "GH_REPO" ||
     name === "GH_HOST" ||
+    name === "GH_CONFIG_DIR" ||
     name === "GIT_SSH_COMMAND" ||
     name === "GIT_SSH" ||
     name === "GIT_SSH_VARIANT" ||
@@ -120,7 +121,7 @@ export function checkShellStartupOverrides(home: string = homedir()): DoctorChec
     return {
       code: "SHELL_STARTUP_OVERRIDES",
       ok: true,
-      detail: "no shell startup file exports GH_REPO, GH_HOST, GIT_SSH_COMMAND, SRT_* or REPO_AEGIS_*",
+      detail: "no shell startup file exports GH_REPO, GH_HOST, GH_CONFIG_DIR, GIT_SSH_COMMAND, SRT_* or REPO_AEGIS_*",
     };
   }
   const where = hits.map(h => `~/${h.file} sets ${h.names.join(", ")}`).join("; ");

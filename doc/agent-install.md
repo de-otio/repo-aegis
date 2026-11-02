@@ -430,12 +430,16 @@ written without touching disk. `repo-aegis install claude-md --uninstall`
 removes both again.
 
 It also adds `permissions.deny` **Edit** rules for the registry file and its
-`.age`, the approvals store, `hooks/**` and `bin/**` under the repo-aegis home
+`.age`, the approvals store, `hooks/**`, `bin/**`, `markers/**` (the rendered
+deny set) and `state/deny-set.cache.json` plus the uninstall ledger under the
+repo-aegis home
 (default `~/.config/repo-aegis`), so the agent cannot register an owner by
 editing `engagements.yaml`. Only Edit rules are written (Claude Code never
 matches `Write(path)`), and Claude Code merges them into the sandbox write-deny
 list, so a sandboxed Bash `sed -i` is stopped too: verify once with a sandboxed
-`touch` of the registry file. `state/` stays writable on purpose.
+`touch` of the registry file. `state/` stays writable on purpose. An agent-run
+`repo-aegis render` is therefore refused in the sandbox
+(`MARKERS_WRITE_PROTECTED`): a person runs `render` from their own terminal.
 `--uninstall` removes exactly the rules install added (recorded in
 `state/claude-md-deny-rules.json`), never one you already had. `doctor` warns
 `REGISTRY_AGENT_WRITABLE` until the rules are present.

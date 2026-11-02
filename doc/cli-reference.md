@@ -665,8 +665,14 @@ reports the count per event.
 3. Adds `permissions.deny` **`Edit(...)`** rules to `settings.json` for the
    files whose tampering bypasses the guard, and nothing else: the registry
    file and its `.age` ciphertext, the approvals store
-   (`egress-approvals.json`), `hooks/**` (the git hook scripts) and `bin/**`
-   (the `gh` shim), under `REPO_AEGIS_HOME` (default `~/.config/repo-aegis`).
+   (`egress-approvals.json`), `hooks/**` (the git hook scripts), `bin/**`
+   (the `gh` shim), `markers/**` (the rendered deny set the write scan and
+   the hooks read; editing it silently drops markers) and two files under
+   `state/` that an enforcement path trusts: `deny-set.cache.json` (an
+   unauthenticated cache; a forged entry with no patterns switches the scanner
+   off) and the uninstall ledger, under `REPO_AEGIS_HOME`
+   (default `~/.config/repo-aegis`; the markers directory follows
+   `REPO_AEGIS_MARKERS_DIR`).
    Without them the agent's own file tools can add an owner to
    `engagements.yaml` with no terminal, which undoes the unregistered-owner
    check. Only `Edit` rules are written: Claude Code matches path rules for
@@ -676,13 +682,26 @@ reports the count per event.
    `sed -i` too; verify on your machine with a sandboxed `touch <registry
    file>` (it should fail). `state/` (audit log, lock, caches) is deliberately
    **not** denied: denying the whole home broke audit appends, the state lock,
-   cache writes and an agent running `install hooks` or `install shim`. A
+   cache writes and an agent running `install hooks` or `install shim`. Because
+   `markers/**` is denied, an agent-run `repo-aegis render` is refused inside
+   the sandbox (`MARKERS_WRITE_PROTECTED`: a person runs `render` from their own
+   terminal); the other flows that re-render (`engagements add|end|remove`,
+   `markers add`, `suggest-markers --auto-accept-above`, `init`) already fail
+   earlier, because they rewrite the denied registry file. A
    registry relocated to `$HOME`, `/` or a git work tree is denied as a file
-   only, with a warning; a home in one of those places loses the `hooks/**` and
-   `bin/**` rules, also with a warning. The rules install added are recorded
-   in `state/claude-md-deny-rules.json`; `--uninstall` removes exactly those
-   (a rule you already had before install is never removed), and also removes
-   the broader `Edit`/`Write` forms an earlier build wrote. `doctor` reports
+   only, with a warning. `hooks/**`, `bin/**` and `markers/**` are narrow
+   subdirectories and are denied wherever the home is; only a markers directory
+   moved out of the home (`REPO_AEGIS_MARKERS_DIR`) into `$HOME`, `/` or a work
+   tree is not denied, with a warning. The rest of `state/` is left writable on
+   purpose: the audit log, the lock, `leak-context-mode` (it only changes the
+   `CLAUDE.md` tone; no enforcement path reads it) and the other caches. The rules install added are recorded
+   in `state/claude-md-deny-rules.json`; `--uninstall` removes exactly those,
+   and only ones shaped like ours (`Edit(//…)` over a protected path under the
+   repo-aegis home): the ledger lives in a directory an agent can write, so it
+   cannot be used to delete your own rules. A rule you already had before
+   install is never removed, and nothing is removed on a first install with no
+   ledger, except the `Edit(//<dir>/**)` + `Write(//<dir>/**)` pair an earlier
+   build wrote (both present together, or neither is touched). `doctor` reports
    `REGISTRY_AGENT_WRITABLE` (warn) while they are absent.
 
 No file is written under `~/.claude/hooks/` — the bin command parses
@@ -1246,8 +1265,9 @@ now reports, unless `--no-egress-checks`:
 | `REGISTERED_ORG_NOT_MEMBER` (info) | a registered owner is no checked account's login or organisation (normal for archived engagements) | none required |
 | `REGISTRY_AGENT_WRITABLE` (warn) | Claude Code `settings.json` has no `permissions.deny` `Edit` rule covering the registry file, its `.age`, the approvals store, `hooks/` and `bin/` | `repo-aegis install claude-md`; verify with a sandboxed `touch` |
 | `GH_BINARY_UNTRUSTED` (warn) | the `gh` first on `PATH` is under `$HOME`, the cwd or a temp directory, sits in a group/world-writable or non-root directory, or is not the standard install | install gh from your package manager; keep user-writable directories out of `PATH` ahead of it |
+| `GH_CONFIG_REDIRECT` (warn) | gh is configured to redirect requests (`http_unix_socket`, or a config/host/token environment variable), so other accounts' tokens were not read | unset the variable, or `gh config set http_unix_socket ''` |
 | `PREPUSH_HOOK_MISSING` (warn) | the egress guard hook is registered but the **global** `core.hooksPath` is unset or not the repo-aegis hooks directory, so a repo that does not set it locally has no `pre-push` hook, the only layer that sees the environment git and ssh really run with | `repo-aegis install hooks` |
-| `SHELL_STARTUP_OVERRIDES` (warn) | `~/.zshenv`, `~/.zshrc`, `~/.zprofile`, `~/.zlogin`, `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` or `~/.profile` sets `GH_REPO`, `GH_HOST`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `SRT_*` or `REPO_AEGIS_*`; reported by name and file, never value | remove the export |
+| `SHELL_STARTUP_OVERRIDES` (warn) | `~/.zshenv`, `~/.zshrc`, `~/.zprofile`, `~/.zlogin`, `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` or `~/.profile` sets `GH_REPO`, `GH_HOST`, `GH_CONFIG_DIR`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `SRT_*` or `REPO_AEGIS_*`; reported by name and file, never value | remove the export |
 | `SSH_GITHUB_REDIRECT` (info) | `~/.ssh/config` has a `Host github.com` block whose `HostName` is not GitHub, or that applies a `ProxyCommand` / `ProxyJump` | none if intended |
 
 The `gh`-backed checks (`GH_LOGIN_UNREGISTERED`, `GH_MEMBER_ORG_UNREGISTERED`,
@@ -1261,12 +1281,21 @@ it is handed to, so:
   terminal, or if you decline, only the active account is checked and the
   report says so; the others are `SKIP`.
 - Doctor skips these checks, with a reason, when another `gh` precedes the
-  repo-aegis shim on `PATH`, or when the `gh` it would spawn is not in a
-  trusted place: only absolute `PATH` entries count (an empty or relative one
-  would resolve against the cwd), the resolved real path is what is run, and it
-  is refused under `$HOME`, the cwd or a temp directory, and in a
-  group/world-writable directory or one not owned by root (or by you inside a
-  package-manager prefix such as `/opt/homebrew`). `GH_BINARY_UNTRUSTED` warns.
+  repo-aegis shim on `PATH`, or when the `gh` it would spawn is not trusted:
+  only absolute `PATH` entries count (an empty or relative one would resolve
+  against the cwd), the resolved real path is what is run, and **both the
+  `PATH` entry's own directory and the resolved file's directory** are refused
+  under `$HOME`, the cwd or a temp directory, or when group/world-writable or
+  not owned by root (or by you inside a package-manager prefix such as
+  `/opt/homebrew`). The resolved file must itself be a gh: named `gh` and a
+  standard install path or inside `<prefix>/Cellar/gh/` / `<prefix>/opt/gh/` of
+  `/opt/homebrew`, `/usr/local` or linuxbrew, so a link named `gh` to `/bin/sh`
+  or `/usr/bin/env` is refused. `GH_BINARY_UNTRUSTED` warns.
+- Before any other account's token is read, a gh whose own configuration
+  redirects requests is refused (`GH_CONFIG_REDIRECT`, warn): `http_unix_socket`
+  set in its config (`gh config get http_unix_socket`), or `GH_CONFIG_DIR`,
+  `GH_HOST`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or
+  `GITHUB_ENTERPRISE_TOKEN` in doctor's environment (names only are reported).
 - The token goes to the child `gh` through its environment only; it is never
   printed, logged, stored or put in an argument, and a child's stderr is
   discarded. Doctor never runs `gh auth switch`.

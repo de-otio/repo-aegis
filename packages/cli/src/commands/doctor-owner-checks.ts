@@ -36,16 +36,26 @@
 //     or when the gh we would spawn is not the one the shim would run;
 //   - only absolute PATH entries count (an empty or relative entry resolves
 //     against the cwd), and the resolved real path is what is spawned;
-//   - the real path is refused under $HOME, the cwd or a temp directory, and
-//     when its directory is group/world-writable or not owned by root (or by the
-//     user inside a package-manager prefix such as /opt/homebrew);
+//   - the PATH entry's OWN directory and the resolved real path are each refused
+//     under $HOME, the cwd or a temp directory, and when their directory is
+//     group/world-writable or not owned by root (or by the user inside a
+//     package-manager prefix such as /opt/homebrew). Vetting only the target is
+//     not enough: `~/bin/gh -> /bin/sh` has a root-owned target, and `sh` then
+//     runs `./auth` from the cwd as a script;
+//   - the real path must itself BE a gh: named `gh`, and either a standard
+//     install path or inside `<prefix>/Cellar/gh/` / `<prefix>/opt/gh/` of a
+//     known Homebrew prefix. A symlink to any other program is refused;
+//   - before any non-active token is read, a gh configured to redirect requests
+//     (`http_unix_socket`, GH_CONFIG_DIR, GH_HOST, token variables in the
+//     environment) is refused: it would hand every token to a socket or server
+//     the person did not choose;
 //   - the active account is checked without ever reading a token (`gh api`
 //     runs as the active login); another account's token is read only after a
 //     y/N on a stdin TTY that names the gh binary, and never without a TTY.
 import { spawnSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { delimiter, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { registeredOwners, repoAegisHome, type Registry } from "@de-otio/repo-aegis-core";
 import { PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
@@ -167,17 +177,44 @@ function within(path: string, root: string): boolean {
   return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 
+/** Homebrew prefixes whose `Cellar/gh/` and `opt/gh/` hold a real gh. */
+const BREW_PREFIXES: readonly string[] = ["/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"];
+
 /**
- * Why `realPath` must not be handed a token, or null when it may be. `realPath`
- * is already symlink-resolved. A pure function of the file system and `env`.
+ * Why `real` (already symlink-resolved) is not a gh we know how to recognise, or
+ * null. It must be named `gh` AND be a standard install path or sit inside a
+ * Homebrew `Cellar/gh/` or `opt/gh/`. This is what stops `~/bin/gh -> /bin/sh`
+ * (or `/usr/bin/env`, or a Homebrew interpreter): their targets are root-owned,
+ * so a permissions test alone passes them.
  */
-export function untrustedGhReason(
-  realPath: string,
+export function ghLocationReason(real: string): string | null {
+  if (!isAbsolute(real)) return "its path is relative";
+  if (basename(real) !== "gh") return "the file it resolves to is not named gh (a link to another program)";
+  if (FIXED_GH_PATHS.includes(real) || FIXED_GH_PATHS.map(canonical).includes(real)) return null;
+  for (const prefix of BREW_PREFIXES) {
+    if (real.startsWith(`${prefix}/Cellar/gh/`) || real.startsWith(`${prefix}/opt/gh/`)) return null;
+  }
+  return "it is not a standard gh install path or a Homebrew gh";
+}
+
+/**
+ * Why files in directory `dir` (already symlink-resolved) must not be trusted
+ * with a token, or null: under `$HOME`, the cwd or a temp directory; or
+ * group/world-writable; or owned by neither root nor (inside a package-manager
+ * prefix) the user.
+ */
+export function untrustedDirReason(
+  dir: string,
   env: NodeJS.ProcessEnv,
-  /** Test seam: skip the home/cwd/temp roots so the permission and ownership branches can be exercised from a temp dir. */
-  opts: { skipLocationRoots?: boolean } = {},
+  /**
+   * `skipLocationRoots` is a test seam: skip the home/cwd/temp roots so the
+   * permission and ownership branches can be exercised from a temp dir.
+   * `afterRoots` lets {@link untrustedGhReason} slot the file's own check in
+   * between the location test and the directory's mode and owner.
+   */
+  opts: { skipLocationRoots?: boolean; afterRoots?: () => string | null } = {},
 ): string | null {
-  if (!isAbsolute(realPath)) return "its path is relative";
+  if (!isAbsolute(dir)) return "its path is relative";
 
   const roots: Array<[string, string]> = [];
   const add = (dir: string | undefined, label: string): void => {
@@ -195,24 +232,47 @@ export function untrustedGhReason(
   add(tmpdir(), "a temporary directory");
   for (const t of ["/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"]) add(t, "a temporary directory");
   for (const [root, label] of opts.skipLocationRoots === true ? [] : roots) {
-    if (within(realPath, root)) return `it is under ${label}, which an agent can write to`;
+    if (within(dir, root)) return `it is under ${label}, which an agent can write to`;
   }
+  const between = opts.afterRoots?.() ?? null;
+  if (between !== null) return between;
 
   try {
-    const file = statSync(realPath);
-    if ((file.mode & 0o022) !== 0) return "the file is writable by group or others";
-    const dirPath = dirname(realPath);
-    const dir = statSync(dirPath);
-    if ((dir.mode & 0o022) !== 0) return "its directory is writable by group or others";
+    const st = statSync(dir);
+    if ((st.mode & 0o022) !== 0) return "its directory is writable by group or others";
     const uid = typeof process.getuid === "function" ? process.getuid() : -1;
-    const packageManaged = PACKAGE_PREFIXES.some(prefix => within(dirPath, prefix));
-    if (dir.uid !== 0 && !(packageManaged && dir.uid === uid)) {
+    const packageManaged = PACKAGE_PREFIXES.some(prefix => within(dir, prefix));
+    if (st.uid !== 0 && !(packageManaged && st.uid === uid)) {
       return "its directory is not owned by root or a package manager";
     }
   } catch {
     return "its location could not be inspected";
   }
   return null;
+}
+
+/**
+ * Why `realPath` must not be handed a token, or null when it may be: its
+ * directory fails {@link untrustedDirReason}, or the file itself is writable by
+ * group or others. `realPath` is already symlink-resolved. This does not say
+ * the file IS a gh: see {@link ghLocationReason}.
+ */
+export function untrustedGhReason(
+  realPath: string,
+  env: NodeJS.ProcessEnv,
+  opts: { skipLocationRoots?: boolean } = {},
+): string | null {
+  if (!isAbsolute(realPath)) return "its path is relative";
+  return untrustedDirReason(dirname(realPath), env, {
+    ...opts,
+    afterRoots: () => {
+      try {
+        return (statSync(realPath).mode & 0o022) !== 0 ? "the file is writable by group or others" : null;
+      } catch {
+        return "its location could not be inspected";
+      }
+    },
+  });
 }
 
 export interface GhCheckOptions {
@@ -224,6 +284,13 @@ export interface GhCheckOptions {
    */
   policy?: "default" | "permissive";
   /**
+   * Test seam. Under the default policy, skip the directory tests (home / cwd /
+   * temp, mode, owner) but keep the "is this file a gh" test, so a case can prove
+   * that test is wired in on its own, from a temp directory that the directory
+   * tests would refuse first.
+   */
+  skipDirectoryChecks?: boolean;
+  /**
    * Asked before any NON-active account's token is read. Default: a y/N on a
    * stdin TTY that names the gh binary; false without one.
    */
@@ -231,6 +298,11 @@ export interface GhCheckOptions {
 }
 
 function defaultConfirm(ghPath: string, logins: string[]): boolean {
+  // TODO(#151, PR 2b): reuse the agent-ancestry check here. A bare "stdin and
+  // stderr are TTYs" is a speed bump, not proof of a person: a pty wrapper
+  // gives an agent both. `isHumanTerminal()` in require-terminal.ts is the one
+  // place that hardening lands (PR 2b is not on this branch yet); route this
+  // call through it once both merge.
   if (!process.stdin.isTTY || !process.stderr.isTTY) return false;
   return confirmOnTerminal(
     `doctor will read the stored token of ${logins.length} other logged-in gh account(s) (${logins.join(", ")}) ` +
@@ -254,7 +326,7 @@ function untrusted(detail: string): DoctorCheck {
 }
 
 /** Choose the gh doctor may talk to, or say why none. */
-function resolveGh(env: NodeJS.ProcessEnv, policy: "default" | "permissive"): GhResolution {
+function resolveGh(env: NodeJS.ProcessEnv, policy: "default" | "permissive", skipDirectoryChecks = false): GhResolution {
   // (a) Another gh ahead of the shim: whatever agents run is not what we would spawn.
   if (checkShim(env).some(c => c.code === "SHIM_NOT_FIRST" && !c.ok)) {
     return { kind: "skip", reason: "another `gh` precedes the repo-aegis shim on PATH, so doctor cannot tell which gh would run", extra: [] };
@@ -267,10 +339,16 @@ function resolveGh(env: NodeJS.ProcessEnv, policy: "default" | "permissive"): Gh
   if (policy === "permissive") return { kind: "ok", path: real, extra: [] };
 
   const extra: DoctorCheck[] = [];
-  const bad = untrustedGhReason(real, env);
+  // Three independent questions, any one of which refuses: is the directory it
+  // was found in safe (`~/bin`), is the resolved file in a safe place, and is the
+  // resolved file actually a gh (not `/bin/sh` behind a link named gh).
+  const bad =
+    (skipDirectoryChecks ? null : untrustedDirReason(canonical(dirname(onPath)), env)) ??
+    (skipDirectoryChecks ? null : untrustedGhReason(real, env)) ??
+    ghLocationReason(real);
   const standard = FIXED_GH_PATHS.map(canonical).find(p => {
     try {
-      return statSync(p).isFile() && untrustedGhReason(p, env) === null;
+      return statSync(p).isFile() && untrustedGhReason(p, env) === null && ghLocationReason(p) === null;
     } catch {
       return false;
     }
@@ -295,6 +373,35 @@ function resolveGh(env: NodeJS.ProcessEnv, policy: "default" | "permissive"): Gh
 }
 
 /** Variables that would make a child `gh` act as an account other than the one we mean. */
+/**
+ * Environment variables that make gh talk to a server or account the person did
+ * not pick at the terminal. Names only are ever reported, never values.
+ */
+const GH_REDIRECT_ENV = [
+  "GH_CONFIG_DIR",
+  "GH_HOST",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GH_ENTERPRISE_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
+];
+
+/**
+ * Why gh is configured so that another account's token must not be read with
+ * it, or null. A trusted gh binary is still steerable: `http_unix_socket` in its
+ * config sends every request, token included, to a local socket; `GH_CONFIG_DIR`
+ * points it at a different config (and so a different socket and host list); and
+ * `GH_HOST` or a token variable changes which server or account it means.
+ */
+function redirectReason(gh: string, env: NodeJS.ProcessEnv): string | null {
+  const set = GH_REDIRECT_ENV.filter(k => (env[k] ?? "") !== "");
+  if (set.length > 0) return `these environment variables redirect or override gh's config: ${set.join(", ")}`;
+  const sock = runGh(gh, ["config", "get", "http_unix_socket"], env, undefined);
+  if (!sock.ok) return "gh's http_unix_socket setting could not be read";
+  if (sock.stdout.trim() !== "") return "gh's config sets http_unix_socket, which sends every request, token included, to a local socket";
+  return null;
+}
+
 const GH_IDENTITY_ENV = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_REPO", "GH_HOST"];
 
 interface GhRun {
@@ -512,7 +619,7 @@ export function ghOwnerChecks(
   env: NodeJS.ProcessEnv = process.env,
   opts: GhCheckOptions = {},
 ): DoctorCheck[] {
-  const res = resolveGh(env, opts.policy ?? "default");
+  const res = resolveGh(env, opts.policy ?? "default", opts.skipDirectoryChecks === true);
   if (res.kind === "skip") return [...skippedAll(res.reason), ...res.extra];
   const gh = res.path;
 
@@ -525,7 +632,19 @@ export function ghOwnerChecks(
     if (active.reachable) facts.push(active);
     const others = listing.accounts.filter(a => a.login.toLowerCase() !== active.apiLogin);
     const fetchable = others.filter(a => a.tokenValid);
-    const confirmed = fetchable.length > 0 && (opts.confirm ?? defaultConfirm)(gh, fetchable.map(a => a.login));
+    // A redirected gh is refused BEFORE anyone is asked: there is nothing safe to confirm.
+    const redirect = fetchable.length > 0 ? redirectReason(gh, env) : null;
+    if (redirect !== null) {
+      res.extra.push({
+        code: "GH_CONFIG_REDIRECT",
+        ok: false,
+        severity: "warn",
+        detail: `other accounts' tokens were not read: ${redirect}`,
+        fix: "unset the variable(s), or remove http_unix_socket from gh's config (`gh config set http_unix_socket ''`), then re-run doctor",
+      });
+    }
+    const confirmed =
+      fetchable.length > 0 && redirect === null && (opts.confirm ?? defaultConfirm)(gh, fetchable.map(a => a.login));
     for (const a of others) {
       if (!a.tokenValid || confirmed) facts.push(queryAccount(gh, env, a));
       else {
@@ -535,12 +654,17 @@ export function ghOwnerChecks(
           apiLogin: null,
           orgs: null,
           skipNote:
-            "was not checked: reading another account's token needs a y/N confirmation at a terminal, and there was none (or it was declined)",
+            redirect !== null
+              ? "was not checked: gh is configured to redirect requests (see GH_CONFIG_REDIRECT)"
+              : "was not checked: reading another account's token needs a y/N confirmation at a terminal, and there was none (or it was declined)",
         });
       }
     }
     if (fetchable.length > 0 && !confirmed) {
-      note = " (only the active account was checked: reading another account's token needs a y/N at a terminal)";
+      note =
+        redirect !== null
+          ? " (only the active account was checked: gh is configured to redirect requests)"
+          : " (only the active account was checked: reading another account's token needs a y/N at a terminal)";
     }
   } else {
     // Listing failed, or gh says nobody is logged in for a stored login. Fall
