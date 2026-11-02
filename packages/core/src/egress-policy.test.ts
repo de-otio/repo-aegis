@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it, before, after } from "node:test";
+import { scrubGitEnv } from "./_test-git-env.js";
+
+// Hermetic git env: the destination resolver reads GIT_SSH_COMMAND / core.sshCommand.
+let restoreGitEnv: () => void;
+before(() => {
+  restoreGitEnv = scrubGitEnv();
+});
+after(() => {
+  restoreGitEnv();
+});
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";

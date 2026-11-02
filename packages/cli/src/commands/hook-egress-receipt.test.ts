@@ -5,6 +5,16 @@
 // the one line the agent reads after a command that published — and,
 // just as load-bearing, the line it reads when the command did NOT.
 import { describe, it, before, after } from "node:test";
+import { scrubGitEnv } from "../_test-utils.js";
+
+// Hermetic git env: the destination resolver reads GIT_SSH_COMMAND / core.sshCommand.
+let restoreGitEnv: () => void;
+before(() => {
+  restoreGitEnv = scrubGitEnv();
+});
+after(() => {
+  restoreGitEnv();
+});
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";

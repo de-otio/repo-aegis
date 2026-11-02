@@ -162,6 +162,24 @@ owners.
    Rule h requires every candidate to be registered. A fork checkout whose
    `upstream` belongs to an unregistered owner is refused unless that upstream
    is in `allowedUpstreams`, which is the intended workflow.
+
+   *Superseded after the PR 2c review, which read gh 2.102's source.* Without a
+   TTY, gh does not fail and does not ask: it is deterministic. So the guard
+   judges **gh's own pick**, not a candidate set:
+   - remotes come from `git remote -v`, so after `insteadOf`, fetch URL; hosts
+     are normalised as gh does them (lower-case, `www.` and the port dropped,
+     ssh aliases translated);
+   - they are sorted `upstream`, `github`, `origin`, then the rest;
+   - for the `SmartBaseRepo` groups (`pr`, `issue`, `repo`, `release`, `api`,
+     `label`, `run`, `workflow`, `ruleset`, `cache`, `org`, `discussion`), the
+     first remote with `gh-resolved` wins (`base` → that remote; otherwise its
+     value is parsed as a repository; an invalid value → unresolved);
+     otherwise `remotes[0]`;
+   - for the plain `BaseRepo` groups (`secret`, `variable`, …), `gh-resolved`
+     is ignored and `remotes[0]` is used;
+   - a remote whose URL is not a clean GitHub URL makes the result
+     unresolved; it is never dropped from the list. So does a top position
+     that is a tie among "other" remotes, whose order is unstable in gh.
 4. **`gh api` endpoints with no owner in the path.** `parseApiEndpoint` returns
    null for `repositories/<id>/…`, `gists`, `projects/…` and so on, and the
    resolver then falls back to the cwd's origin. For **mutating** calls, classify
@@ -249,7 +267,10 @@ any of these:
 - `GIT_CONFIG*` (`GIT_CONFIG_COUNT/KEY/VALUE` rewrites the push URL; verified
   by the review), `GIT_SSH*` (including `GIT_SSH_VARIANT`), and
   `SRT_SSH_PROXY_COMMAND`, which the trusted sandbox ssh template evaluates
-  (R9);
+  (R9), and generally `SRT_*`;
+- `SHELL`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `PS4`, and `export -f`:
+  ssh runs a ProxyCommand through `$SHELL`, and macOS `/bin/sh` imports
+  exported functions, so these hijack the sandbox proxy (PR 4 re-review);
 - `GIT_DIR`, `GIT_WORK_TREE` (and the `--git-dir`/`--work-tree` flags on a
   push), which move the repository the remote is read from (PR 2a review);
 - `BASH_ENV`, `ENV`, `ZDOTDIR`;
@@ -617,7 +638,9 @@ Run `test-critic` on the PR 1 and PR 2 suites before merge.
   `personalOrgs` owners, and there are none. Such operators need
   `approve <org>/*` or `approve <org>/<repo>`; `approve '*'` says so when it
   is minted. *(Corrected during PR 3: this line used to say "no change",
-  which contradicted D7.)*
+  which contradicted D7. Operator confirmed 2026-11-02. Reason: deleting the
+  registry file, which an agent can do (R1), already switches rule h off.
+  It must not also turn every `*` approval into "publish anywhere".)*
 - **Older binaries** reading a registry with `allowedUpstreams` ignore it,
   through `.passthrough()`.
 - **Agents:** the guide's new rows tell an agent that `UNREGISTERED_OWNER_EGRESS`
@@ -677,7 +700,9 @@ chosen and ships in PR 2 (§2, D10). It closes S5 for `gh pr create`. Other
 
 | R6 | Paths outside `git`/`gh` entirely: `curl -X POST https://api.github.com/… -H "Authorization: token $(gh auth token)"`, `git credential fill`, and `gh extension install` running arbitrary code. | Out of the guard's verb model. Cheap mitigation in PR 2: a hook rule refusing `curl`/`wget` against `api.github.com` with `-X POST\|PUT\|PATCH\|DELETE` or `-d`/`--data*`, and `gh auth token` in a command that also makes a network call. This is named so nobody assumes coverage. |
 | R8 | **The hook guesses the command's `GH_REPO`.** The agent hook judges with its own environment, but the Bash tool's shell can get `GH_REPO` from startup files the hook never reads: `~/.zshenv` is agent-writable and sourced by every `zsh -c`. A gh write with no explicit target is then judged against the cwd while gh writes to `GH_REPO`. Only the shim sees the real environment (PR 2a review). | With the shim on PATH, the shim catches it. Hook-only installs are weaker here; say so in the design doc. `doctor` should flag `GH_REPO` exported from shell startup files. A stricter option, treating a targetless gh write as unresolved whenever the shim is not on PATH, is deferred: it would refuse every plain `gh issue create` on hook-only installs. |
-| R9 | **ssh overrides.** Any `GIT_SSH_COMMAND`, `GIT_SSH` or `core.sshCommand` that can redirect the connection makes ssh aliases unresolved (PR 4). The one exception is the exact Claude Code sandbox proxy template, taken from the environment only. It passes `%h %p` to `SRT_SSH_PROXY_COMMAND` unchanged, so without it every agent push through an ssh alias would be refused. An agent that can write shell startup files could export its own `SRT_SSH_PROXY_COMMAND` (the R8 class). A literal `github.com` host is never looked up in the ssh config, so a `Host github.com` block that redirects it elsewhere is not seen. That sends bytes to a non-GitHub host, which is outside the guard's model. | Accepted and stated. `doctor` could flag `SRT_SSH_PROXY_COMMAND` or `Host github.com` redirects in startup and ssh files (follow-up). |
+| R9 | **ssh overrides.** An ssh redirect changes which server receives a push, never the repo path. So an ssh host that resolves to GitHub (literal `github.com`/`ssh.github.com`, or an alias whose ssh-config `HostName` is one of those) is judged by the owner in the path. If an override sends it elsewhere, the bytes leave GitHub, which is outside the guard's model. When any override is present (`GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `core.sshCommand`, or a ProxyCommand/ProxyJump in the applying ssh config), every other ssh host is unresolved, because that is exactly what a redirect to GitHub would look like. The Claude Code sandbox sets `GIT_SSH_COMMAND` on every agent command, so it gets no special trust. The premise only holds while the program git runs is ssh itself: git hands that program the `git-receive-pack '<path>'` command, so a wrapper (via `GIT_SSH`, or a non-`ssh` first word or shell metacharacters in `GIT_SSH_COMMAND`/`core.sshCommand`) can rewrite the path. Such an override makes every ssh URL unresolved, literal github.com included (PR 4 re-review, P1). *(PR 4 history: an earlier exception trusted the sandbox proxy template; three review rounds found ways to hijack it, through `SRT_SSH_PROXY_COMMAND`, `SHELL`, exported bash functions and zsh `.zshenv`, so it was removed.)* At the hook, which may not see the agent's ssh environment, a dotless host not found in the ssh config is also unresolved. | Cost: inside the sandbox, an agent's ssh push to a non-GitHub host (e.g. GitLab) needs a person. GitHub pushes through aliases work as before. A literal `github.com` host is never looked up in the ssh config, which sends bytes to a non-GitHub host and is outside the model. |
+| R10 | **ssh connection sharing.** With `ControlMaster`/`ControlPath` in the user's ssh config, an agent can open a master connection to github.com under an alias (`ssh -M -S <path> -o HostName=github.com -fN git@zz`). Later pushes to `git@zz:` then ride it while the guard reads `zz` as non-GitHub. Inside the Claude Code sandbox, the template's `ControlPath=none` defeats this. | Not refused: `Host * / ControlMaster auto` is common, and refusing every alias push under it would be worse. It needs a deliberate extra ssh step. Named so nobody assumes it is covered. |
+| R11 | **Hook-only installs.** The agent hook cannot see the environment ssh will run with, so a dotted non-GitHub host redirected by a persistent change (an agent-written `~/.zshenv` running inside the sandbox ProxyCommand's shell, R8) is judged non-GitHub at the hook. Pre-push sees the real environment and refuses it. Inside the sandbox, agent ssh pushes to non-GitHub hosts (GitLab, internal servers) are refused at pre-push; https pushes to those hosts are unaffected. | PR 6: `doctor` warns when the pre-push hook is not installed in a repo that has GitHub remotes. PR 7 documents both. |
 | R7 | **Registration oracle**: whether a refusal says rule h or rule g reveals whether an owner is registered. | Inherent to giving clear refusals (§3.9). The destination is in the agent's own command, so the oracle answers only "is this one owner registered", never "which owners are". Accepted. |
 
 ### 8.4 Independent review (Fable, 2026-11-02)

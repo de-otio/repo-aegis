@@ -80,7 +80,8 @@ import {
 } from "./refusal.js";
 import { registryPath } from "./paths.js";
 import { homedir } from "node:os";
-import { parseRemoteUrl } from "./remote-url.js";
+import { parseRemoteUrl, parseRemoteUrlResolved, resolveRemoteUrl } from "./remote-url.js";
+import { resolvePushUrls, detectSshOverride } from "./push-urls.js";
 import { readRepoConfig, type RepoClass, type RepoConfig } from "./repo.js";
 import type { Registry } from "./registry.js";
 import { computeTrustBoundary, type TrustBoundary } from "./trust-boundary.js";
@@ -183,16 +184,33 @@ export interface Destination {
    * `assumedPublic`: rule g asks a person, or refuses from a shell with none.
    * Rule e is skipped (there is no boundary to compare against); rule f
    * still scans the payload against a public-facing deny set.
+   *
+   * `opaque-url`: a push whose URL cannot be resolved to a GitHub repository
+   * offline (a URL-shaped value that is not cleanly `github.com/<owner>/<repo>`,
+   * or an ssh alias the pure ssh-config parser cannot resolve). Same treatment.
    */
-  unresolved?: "graphql-mutation" | "self" | IntentUnresolved;
+  unresolved?: "graphql-mutation" | "opaque-url" | "self" | IntentUnresolved;
   /**
-   * Every repository (or org, `repo: "*"`) the command can reach when that is more than one: a checkout
-   * with several GitHub remotes and no `gh-resolved`, or a command naming several repositories
-   * (`gh issue transfer 5 acme/y -R acme/x`). Rule h admits the destination only when EVERY candidate is
-   * admitted (M5). `org`/`repo` are then `*`/`*` with `unresolved: "ambiguous-target"`, so rule g still
-   * wants a person and no approval covers it.
+   * Every repository (or org, `repo: "*"`) a command can reach when that is more than one: a command naming
+   * several repositories (`gh issue transfer 5 acme/y -R acme/x`). Rule h admits the destination only when
+   * EVERY candidate is admitted (M5). `org`/`repo` are then `*`/`*` with `unresolved: "ambiguous-target"`, so
+   * rule g still wants a person and no approval covers it.
    */
   candidates?: ReadonlyArray<{ org: string; repo: string }>;
+  /**
+   * For `opaque-url`: a fixed, content-free phrase saying what could not be
+   * resolved (an ssh Match block, an IP-literal host, an ssh override…), so the
+   * refusal can say why. Never carries part of the URL.
+   */
+  unresolvedWhy?: string;
+  /**
+   * Further, fully classified targets of the same command: a remote with
+   * several push URLs writes to all of them. Every rule judges every target
+   * (rule h requires all to be admitted; rules e–g are run per target and the
+   * most restrictive decision wins), and a receipt names them all. A target
+   * here never carries `alsoTargets` of its own.
+   */
+  alsoTargets?: Destination[];
 }
 
 export type EgressDecision =
@@ -385,7 +403,9 @@ function parseRepoFlag(flag: string): { org: string; repo: string } | null {
 
 function ownOrigin(base: string): { org: string; repo: string } | null {
   const url = gitConfigGet(base, "remote.origin.url");
-  const parsed = url === null ? null : parseRemoteUrl(url);
+  // The same resolution every layer uses, ssh aliases included: an origin
+  // `git@gh-work:acme/x.git` is `acme/x`.
+  const parsed = url === null ? null : parseRemoteUrlResolved(url);
   return parsed ? { org: parsed.org, repo: parsed.repo } : null;
 }
 
@@ -582,12 +602,56 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
 
   if (intent.verb === "git-push") {
     if (intent.remote === undefined) return own ? withLocalClass(own, base, own, registry) : null;
-    const direct = parseRemoteUrl(intent.remote);
-    if (direct) return withLocalClass({ org: direct.org, repo: direct.repo }, base, own, registry);
-    const url = gitConfigGet(base, `remote.${intent.remote}.url`);
-    const parsed = url === null ? null : parseRemoteUrl(url);
-    if (!parsed) return null;
-    return withLocalClass({ org: parsed.org, repo: parsed.repo }, base, own, registry);
+    // Where the push will actually write: `git remote get-url --push --all`
+    // applies pushurl, insteadOf and pushInsteadOf and returns every push URL
+    // (plan §3.3.5). A URL given directly is rewritten the same way.
+    const urls = resolvePushUrls(base, intent.remote);
+    if (urls === null) return null;
+    // Any ssh override (GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT,
+    // core.sshCommand) makes a non-GitHub-looking ssh host unresolved
+    // (resolveRemoteUrl). This process reads its OWN environment and the
+    // config seen from the command's directory. The agent hook may run outside
+    // the sandbox that sets the agent's GIT_SSH_COMMAND, so it cannot know
+    // there is no override: `unknownDotlessUnresolved` also makes a dotless
+    // host the ssh config does not map (`zz`) unresolved. A dotted non-GitHub
+    // host (gitlab.com) stays non-GitHub here; pre-push, which sees the real
+    // environment, catches that override case.
+    const sshOverride = detectSshOverride(base);
+    const targets = urls.map(u =>
+      resolveRemoteUrl(u, undefined, { sshOverride, unknownDotlessUnresolved: true }),
+    );
+    // A push URL nothing offline can name is a write to an unknown owner (D5).
+    // Not marked public-facing: only rule h acts on it, so that a registry that
+    // is missing or declares no owners (rule h skipped) behaves as it did when
+    // such a URL simply had no destination.
+    const doubt = targets.find(t => t.kind === "unresolved");
+    if (doubt !== undefined && doubt.kind === "unresolved") {
+      return {
+        org: "*",
+        repo: "*",
+        class: "private-strict",
+        visibility: "unknown",
+        publicFacing: false,
+        classKnown: false,
+        unresolved: "opaque-url",
+        unresolvedWhy: doubt.why,
+      };
+    }
+    const seen = new Set<string>();
+    const found: { org: string; repo: string }[] = [];
+    for (const t of targets) {
+      if (t.kind !== "github") continue;
+      const key = `${t.org}/${t.repo}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ org: t.org, repo: t.repo });
+    }
+    const [first, ...rest] = found;
+    if (first === undefined) return null;
+    const dest = withLocalClass(first, base, own, registry);
+    return rest.length > 0
+      ? { ...dest, alsoTargets: rest.map(t => withLocalClass(t, base, own, registry)) }
+      : dest;
   }
 
   if (intent.verb === "npm-publish") return null; // registry, not a repo
@@ -792,13 +856,26 @@ export function describeVerb(verb: EgressVerb): string {
   return VERB_LABEL[verb];
 }
 
-/** `<org>/<repo> (<visibility>, class <class>)` — the only way a destination is ever printed. */
+/**
+ * `<org>/<repo> (<visibility>, class <class>)` — the only way a destination is ever printed.
+ * A command with several targets (a remote with several push URLs) names every
+ * one of them, each through the same name validation.
+ */
 export function describeDestination(d: Destination | null | undefined): string {
   if (!d) return "unresolved destination";
+  const more = d.alsoTargets ?? [];
+  const first = describeOneDestination(d);
+  return more.length === 0 ? first : [first, ...more.map(describeOneDestination)].join(" AND ");
+}
+
+function describeOneDestination(d: Destination): string {
   if (d.unresolved === "graphql-mutation") {
     return "UNKNOWN repository (GraphQL mutation: the target is a node id, not resolvable offline; treated as public)";
   }
   if (d.unresolved === "self") return "your own GitHub account (not a repository)";
+  if (d.unresolved === "opaque-url") {
+    return "UNKNOWN repository (the push URL does not resolve to a GitHub repository offline)";
+  }
   if (d.unresolved !== undefined) {
     return `UNKNOWN repository (${d.unresolved}: the target cannot be named offline; treated as public)`;
   }
@@ -816,8 +893,15 @@ export function describeDestination(d: Destination | null | undefined): string {
  */
 export function describeDestinationForReceipt(d: Destination | null | undefined): string {
   if (!d) return "(destination not resolved)";
+  const more = d.alsoTargets ?? [];
+  const first = describeOneDestinationForReceipt(d);
+  return more.length === 0 ? first : [first, ...more.map(describeOneDestinationForReceipt)].join(" AND ");
+}
+
+function describeOneDestinationForReceipt(d: Destination): string {
   if (d.unresolved === "graphql-mutation") return "UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC)";
   if (d.unresolved === "self") return "YOUR OWN GITHUB ACCOUNT (NOT A REPOSITORY)";
+  if (d.unresolved === "opaque-url") return "UNKNOWN (PUSH URL NOT RESOLVED)";
   if (d.unresolved !== undefined) return `UNKNOWN (TARGET NOT RESOLVED: ${d.unresolved.toUpperCase()}, TREATED AS PUBLIC)`;
   if (safeDestination(d.org, d.repo) === null) return INVALID_DESTINATION_LABEL.toUpperCase();
   const vis = d.assumedPublic
@@ -929,6 +1013,12 @@ const UNRESOLVED_REFUSAL: Readonly<Record<NonNullable<Destination["unresolved"]>
       "A GraphQL mutation names its target by node id, so repo-aegis cannot tell offline which owner it writes to",
     reissue: "a gh command that names the repository, such as gh issue comment --repo <owner>/<repo> …",
   },
+  // Normally handled by the dedicated opaque-url branch in unregisteredOwnerReason;
+  // kept here so the table covers every reason.
+  "opaque-url": {
+    why: "The push URL does not resolve offline to a github.com/<owner>/<repo> repository",
+    reissue: "git push <a remote whose URL is https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git> <branch>",
+  },
   "env-override": {
     why:
       "An earlier part of this command line changes GH_REPO (or may, through eval, source, set -a or unset), so the " +
@@ -997,8 +1087,8 @@ const UNRESOLVED_REFUSAL: Readonly<Record<NonNullable<Destination["unresolved"]>
  * destination's own owner/repo, which the command already carries; never
  * another owner, an engagement id or the registry's contents.
  */
-function uncoveredStarSentence(
-  destination: Destination,
+export function uncoveredStarSentence(
+  destination: Pick<Destination, "org" | "repo">,
   star: EgressApproval,
   gap: StarApprovalGap,
   registry: Registry,
@@ -1022,11 +1112,11 @@ function uncoveredStarSentence(
   );
 }
 
-function unregisteredOwnerReason(
-  intent: EgressIntent,
-  destination: Destination,
+export function unregisteredOwnerReason(
+  intent: Pick<EgressIntent, "verb">,
+  destination: Pick<Destination, "org" | "repo" | "unresolved" | "unresolvedWhy" | "candidates">,
   state: RegistryState,
-  registry: Registry,
+  registry: Pick<Registry, "allowedUpstreams"> & Partial<Pick<Registry, "personalOrgs" | "engagements">>,
 ): string {
   const verb = describeVerb(intent.verb);
   const code = "UNREGISTERED_OWNER_EGRESS";
@@ -1069,7 +1159,12 @@ function unregisteredOwnerReason(
 
   // Several candidate repositories (M5): name only the first one that is not admitted, which is in the
   // command or the checkout's remotes, never a registry entry.
-  const unadmitted = firstUnadmittedCandidate(destination, intent, registeredOwners(registry), registry);
+  const unadmitted = firstUnadmittedCandidate(
+    destination,
+    intent,
+    registeredOwners({ engagements: registry.engagements ?? [], personalOrgs: registry.personalOrgs ?? [] } as Registry),
+    registry,
+  );
   if (unadmitted !== null) {
     const safeCandidate = safeDestination(unadmitted.org, unadmitted.repo);
     const candidateOwner = safeCandidate?.org ?? "";
@@ -1089,6 +1184,29 @@ function unregisteredOwnerReason(
           command: `repo-aegis engagements add --personal-org ${candidateOwner}`,
           note: `or --github-org ${candidateOwner} under the engagement, for a customer`,
         },
+      ],
+    });
+  }
+
+  if (destination.unresolved === "opaque-url") {
+    return refusal({
+      code,
+      what,
+      why:
+        `The push URL does not resolve offline to a github.com/<owner>/<repo> repository` +
+        // A fixed phrase naming the doubt (an ssh Match block, an IP-literal
+        // host, an ssh override…); never a piece of the URL.
+        (destination.unresolvedWhy !== undefined ? ` (${destination.unresolvedWhy})` : "") +
+        `, so repo-aegis cannot tell which owner the push writes to, and an unknown owner is treated as unregistered`,
+      approval: "No approval covers this",
+      fixes: [
+        {
+          by: "agent",
+          when: "To push to a GitHub repository",
+          command:
+            "git push <a remote whose URL is https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git> <branch>",
+        },
+        { by: "person" },
       ],
     });
   }
@@ -1313,8 +1431,18 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       refused = true;
     } else if (opts.registryState === "loaded") {
       const owners = registeredOwners(opts.registry);
-      // A registry that declares no owners has nothing to judge against.
-      refused = owners.size > 0 && !ownerAdmitted(destination, intent, owners, opts.registry);
+      // A registry that declares no owners has nothing to judge against. A
+      // remote with several push URLs writes to all of them: every one must be
+      // admitted, and the refusal names the first that is not.
+      if (owners.size > 0) {
+        const rejected = [destination, ...(destination.alsoTargets ?? [])].find(
+          c => !ownerAdmitted(c, intent, owners, opts.registry),
+        );
+        if (rejected !== undefined) {
+          refused = true;
+          if (rejected !== destination) destination = { ...destination, org: rejected.org, repo: rejected.repo };
+        }
+      }
     }
     // "missing": no registry file at all, rule h is skipped.
     if (refused) {
@@ -1329,6 +1457,13 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     }
   }
 
+  // ---- e–g, once per target ----------------------------------------------------
+  // A remote with several push URLs writes to all of them, so every target is
+  // judged by rules e–g, and the most restrictive decision wins (deny over ask
+  // over an approved allow, earliest target first within a severity). Rule h
+  // above has already required every target's owner to be registered.
+  const judgeTarget = (target: Destination | null): EgressDecision => {
+  let destination: Destination | null = target;
   if (destination !== null) {
     destination = refreshDestinationVisibility(destination, effectiveVisibilityLookup(opts.lookupVisibility));
   }
@@ -1553,6 +1688,23 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
 
   // ---- otherwise: allow ------------------------------------------------------
   return { action: "allow" };
+  };
+
+  let askDecision: EgressDecision | null = null;
+  let approvedDecision: EgressDecision | null = null;
+  const single = (d: Destination): Destination => {
+    const { alsoTargets: _dropped, ...rest } = d;
+    return rest;
+  };
+  const targets: (Destination | null)[] =
+    destination === null ? [null] : [single(destination), ...(destination.alsoTargets ?? []).map(single)];
+  for (const t of targets) {
+    const d = judgeTarget(t);
+    if (d.action === "deny") return d;
+    if (d.action === "ask" && askDecision === null) askDecision = d;
+    if (d.action === "allow" && d.approval !== undefined && approvedDecision === null) approvedDecision = d;
+  }
+  return askDecision ?? approvedDecision ?? { action: "allow" };
 }
 
 /**
