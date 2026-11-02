@@ -5,6 +5,32 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { setAncestryReaderForTests, type AncestorInfo } from "@de-otio/repo-aegis-core";
+
+/**
+ * What `ps` shows for a person's own terminal session: zsh <- -zsh <- login <- Terminal. It reaches a
+ * positive root (login), which `approve` and the owner adds now require. Names only; no agent above it.
+ */
+export const PERSON_ANCESTRY: readonly AncestorInfo[] = [
+  { pid: 14, ppid: 13, comm: "zsh", argv: ["/bin/zsh"], exe: "/bin/zsh" },
+  { pid: 13, ppid: 12, comm: "-zsh", argv: ["-zsh"], exe: "-zsh" },
+  { pid: 12, ppid: 11, comm: "login", argv: ["login", "-pf", "me"], exe: "/usr/bin/login", uid: 0 },
+  {
+    pid: 11,
+    ppid: 1,
+    comm: "Terminal",
+    argv: ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"],
+    exe: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+    uid: 501,
+  },
+];
+
+/** What `ps` shows under a Claude Code session: the same shell shape with `claude` between the shell and the login. */
+export const UNDER_CLAUDE_ANCESTRY: readonly AncestorInfo[] = [
+  { pid: 15, ppid: 14, comm: "zsh", argv: ["/bin/zsh"], exe: "/bin/zsh" },
+  { pid: 14, ppid: 13, comm: "claude", argv: ["claude"], exe: "/Users/me/.local/" },
+  ...PERSON_ANCESTRY,
+];
 
 export class ExitError extends Error {
   constructor(public code: number) {
@@ -207,14 +233,20 @@ export function withoutGh<T>(dir: string, fn: () => T): T {
  * stderr/stdin is a terminal depends on how a developer invoked it; pinning it
  * makes both sides of a human-presence gate assertable WITHOUT the
  * `stderrIsTTY` seam, so the default (`process.stderr.isTTY`) path is tested.
+ *
+ * A pinned stderr TTY is also pinned "no agent above this process": the real
+ * process-ancestry walk would otherwise make these tests depend on whether the
+ * developer ran them under an agent host (issue #151, PR 2b).
  */
 export function withStreamTty<T>(stream: "stderr" | "stdin", isTty: boolean, fn: () => T): T {
   const target = process[stream];
   const desc = Object.getOwnPropertyDescriptor(target, "isTTY");
   Object.defineProperty(target, "isTTY", { value: isTty, configurable: true, writable: true });
+  if (stream === "stderr") setAncestryReaderForTests(() => PERSON_ANCESTRY);
   try {
     return fn();
   } finally {
+    if (stream === "stderr") setAncestryReaderForTests(undefined);
     if (desc) Object.defineProperty(target, "isTTY", desc);
     else delete (target as { isTTY?: boolean }).isTTY;
   }
@@ -229,9 +261,11 @@ export async function withStreamTtyAsync<T>(
   const target = process[stream];
   const desc = Object.getOwnPropertyDescriptor(target, "isTTY");
   Object.defineProperty(target, "isTTY", { value: isTty, configurable: true, writable: true });
+  if (stream === "stderr") setAncestryReaderForTests(() => PERSON_ANCESTRY);
   try {
     return await fn();
   } finally {
+    if (stream === "stderr") setAncestryReaderForTests(undefined);
     if (desc) Object.defineProperty(target, "isTTY", desc);
     else delete (target as { isTTY?: boolean }).isTTY;
   }

@@ -208,6 +208,14 @@ export interface EgressIntent {
    * {@link afterStateChange}. Exclusive with it.
    */
   afterLocalStateChange?: string;
+  /**
+   * Set when the segment runs under something that hands its child a pty
+   * (`script`, `unbuffer`, `expect`, `tmux`, `ssh -t`, an interpreter's pty
+   * module, …): a fixed label such as `script`. A terminal is read as a person
+   * by the shim and pre-push hook, so `decideEgress` refuses such an intent
+   * outright (`EGRESS_PTY_WRAPPER`). Never carries part of the command line.
+   */
+  ptyWrapper?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -2199,6 +2207,8 @@ interface ParseCtx {
   inheritedEnvRepo: string | undefined;
   /** Shell aliases defined earlier on this line that mention gh or git; shared by every nested parse. */
   tainted: Map<string, TaintedAlias>;
+  /** Names (aliases, functions, variables, copied binaries) this line bound to a pty wrapper; shared by every nested parse. */
+  ptyNames: Map<string, string>;
   /**
    * This text is the RESULT of a command substitution that becomes a command word or `eval` / `sh -c` text
    * (`eval "$(cat <<'EOF' … EOF)"`): a heredoc inside it is a program, not data.
@@ -2291,6 +2301,7 @@ export function parseEgressIntents(command: string, opts: ParseEgressOptions = {
       envOverridden: false,
       inheritedEnvRepo: undefined,
       tainted: new Map(),
+      ptyNames: new Map(),
       heredocsAreCode: false,
       dangerEnv: new Set(),
       state: { change: undefined, strong: undefined },
@@ -2981,9 +2992,125 @@ function stateChangeLabel(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// pty wrappers (issue #151, PR 2b)
+// ---------------------------------------------------------------------------
+
+/** Commands whose job is to give another command a pseudo-terminal, or that hold one open for it. */
+const PTY_WRAPPER_COMMANDS = new Set([
+  "script", "unbuffer", "expect", "autoexpect", "faketty", "socat", "ttyrec", "winpty", "asciinema",
+  "tmux", "screen", "byobu", "zellij", "dtach", "abduco", "reptyr", "sshpass", "rlwrap", "zpty",
+]);
+
+/** Interpreters whose program text can open a pty. */
+const PTY_INTERPRETER_RE = /^(?:python[\d.]*|perl|ruby|node|nodejs|php|lua|tclsh|bun|deno|awk|gawk)$/;
+
+/**
+ * Text that opens a pty, or runs a wrapper that does: `import pty`, `-rpty`,
+ * `pexpect`, `openpty`, `node-pty`, `IO::Pty`, or `script`/`unbuffer`/`tmux`…
+ * as a word inside a string handed to `os.system` / `subprocess`.
+ */
+const PTY_TEXT_RE = new RegExp(
+  "(?:^|[^A-Za-z])-?r?(?:pty|pexpect|ptyprocess)(?![A-Za-z])|openpty|forkpty|node-pty|IO::Pty|" +
+    `(?:^|[^A-Za-z0-9_./-])(?:${[...PTY_WRAPPER_COMMANDS].join("|")})(?![A-Za-z0-9_-])`,
+);
+
+/** `ssh -t`, `-tt`, `-tq`, `-o RequestTTY=force|yes`: a forced pty on the far side (and `ssh -tt localhost` is local). */
+function sshForcesTty(args: readonly string[]): boolean {
+  return args.some(
+    (a, i) =>
+      /^-[A-Za-z0-9]*t[A-Za-z0-9]*$/.test(a) ||
+      /^-?o?RequestTTY=(?:force|yes)$/i.test(a) ||
+      (a === "-o" && /^RequestTTY[= ](?:force|yes)$/i.test(args[i + 1] ?? "")),
+  );
+}
+
+/**
+ * The label of the pty-providing wrapper this segment runs under, or null.
+ * Looks through the transparent wrappers (`sudo script …`, `env tmux …`), reads
+ * the command word, and for an interpreter reads its program text and heredocs.
+ * For any other command (`find -exec script …`, `xargs`, `parallel`) a pty
+ * wrapper's name as a whole argument counts. `gh`, `git` and the package
+ * managers are exempt from that last rule: their arguments are data (a title
+ * that says "script"), and the parser already models them.
+ */
+function segmentPtyWrapper(seg: Segment, names: Map<string, string>): string | null {
+  try {
+    const raw = seg.funcDef ? seg.tokens.slice(1) : seg.tokens;
+    const assigns: Assignment[] = [];
+    const resolved = resolveCommand(stripRedirections(raw), assigns);
+    // Names this line binds to a pty wrapper (PR 2a's alias / function / `$VAR` resolution, for pty wrappers):
+    // `alias s=script`, `s() { script "$@"; }`, `S=script`, `cp /usr/bin/script /tmp/s`. Recorded after use.
+    const learned: Array<[string, string]> = [];
+    if (seg.funcDef && seg.tokens[0] !== undefined) {
+      const inBody = raw.map(t => wrapperWordIn(t)).find(w => w !== null);
+      if (inBody !== undefined && inBody !== null) learned.push([seg.tokens[0], inBody]);
+    }
+    for (const a of assigns) {
+      const w = wrapperWordIn(a.value) ?? names.get(a.value);
+      if (w !== null && w !== undefined) learned.push([a.name, w]);
+    }
+    try {
+      if (resolved.start >= resolved.tokens.length) return null;
+      const word = resolved.tokens[resolved.start]!;
+      const cmd = baseName(word);
+      const args = resolved.tokens.slice(resolved.start + 1);
+      if (cmd === "alias") {
+        for (const arg of args) {
+          const eq = arg.indexOf("=");
+          const w = eq > 0 ? wrapperWordIn(arg.slice(eq + 1)) : null;
+          if (w !== null) learned.push([arg.slice(0, eq), w]);
+        }
+        return null;
+      }
+      if (cmd === "cp" || cmd === "ln" || cmd === "mv" || cmd === "install") {
+        const positional = args.filter(a => !a.startsWith("-"));
+        const src = positional.slice(0, -1).map(a => baseName(a)).find(a => PTY_WRAPPER_COMMANDS.has(a));
+        const dst = positional[positional.length - 1];
+        if (src !== undefined && dst !== undefined) learned.push([baseName(dst), src]);
+        return null;
+      }
+      if (PTY_WRAPPER_COMMANDS.has(cmd)) return cmd;
+      // `$S …` / `${S} …` where S was bound to a wrapper; an alias or function of that name; `$(which script) …`.
+      const bound = names.get(cmd) ?? names.get(word.replace(/^\$\{?([A-Za-z_]\w*)\}?$/, "$1"));
+      if (bound !== undefined) return bound;
+      if (hasExpansion(word)) {
+        const viaSubst = wrapperWordIn(word);
+        if (viaSubst !== null) return viaSubst;
+      }
+      if (cmd === "ssh" && sshForcesTty(args)) return "ssh -t";
+      if (PTY_INTERPRETER_RE.test(cmd) && PTY_TEXT_RE.test([...args, ...seg.heredocs].join("\n"))) {
+        return "an interpreter's pty module";
+      }
+      if (cmd === "gh" || cmd === "git" || cmd === "npm" || cmd === "pnpm" || cmd === "yarn") return null;
+      const bases = args.map(baseName);
+      const inner = bases.find(a => PTY_WRAPPER_COMMANDS.has(a));
+      if (inner !== undefined) return inner;
+      const viaName = bases.find(a => names.has(a));
+      return viaName !== undefined ? names.get(viaName)! : null;
+    } finally {
+      for (const [n, w] of learned) names.set(n, w);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** A pty wrapper's name as a whole word of `text` (`script`, `/usr/bin/script`, `$(which script)`), else null. */
+function wrapperWordIn(text: string): string | null {
+  for (const w of text.split(/[^A-Za-z0-9_./-]+/)) {
+    if (w === "") continue;
+    const b = baseName(w);
+    if (PTY_WRAPPER_COMMANDS.has(b)) return b;
+  }
+  return null;
+}
+
 function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
   if (typeof command !== "string" || command.length === 0) return [];
   const segments = tokenise(command);
+  // Computed up front: the segment callback below returns early in many places.
+  const ptyBySegment = segments.map(seg => segmentPtyWrapper(seg, ctx.ptyNames));
   const intents: EgressIntent[] = [];
   let precededByCd = false;
   let envOverridden = ctx.envOverridden;
@@ -3193,7 +3320,24 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
     }
   });
 
-  return intents;
+  // A nested parse already flagged its own intents; they now carry this segment's index.
+  if (!ptyBySegment.some(p => p !== null)) return intents;
+  // A pty-wrapped segment that mentions gh / git push in a shape the parser and its backstop did not read
+  // (`socat - EXEC:'gh …',pty`) still gets a fail-closed intent, so the wrapper is refused.
+  ptyBySegment.forEach((pty, idx) => {
+    if (pty === null || intents.some(i => i.segmentIndex === idx)) return;
+    const seg = segments[idx]!;
+    try {
+      const s = sentinelFor([...seg.tokens, ...seg.heredocs].join(" "), { precededByCd: false, joinedBy: seg.joinedBy, segmentIndex: idx });
+      if (s !== null) intents.push(s);
+    } catch {
+      /* the sentinel is best-effort */
+    }
+  });
+  return intents.map(i => {
+    const pty = ptyBySegment[i.segmentIndex];
+    return pty != null && i.ptyWrapper === undefined ? { ...i, ptyWrapper: pty } : i;
+  });
 }
 
 // ---------------------------------------------------------------------------

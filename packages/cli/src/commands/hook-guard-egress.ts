@@ -40,7 +40,12 @@ import {
   recordWorkingTree,
   describeVerb,
   egressParseOptions,
-  isHumanPresent,
+  findHumanOnlyCommand,
+  humanCommandRefusal,
+  AGENT_RAN_HUMAN_COMMAND,
+  AGENT_DETACHED_SESSION,
+  findDetachedStart,
+  detachedStartRefusal,
   isPrintableDestination,
   loadRegistry,
   parseEgressIntents,
@@ -50,11 +55,14 @@ import {
   RegistryEncryptedError,
   RegistryNotFoundError,
   type Destination,
+  type DetachedHit,
   type EgressDecision,
+  type HumanOnlyKind,
   type Registry,
   type RegistryState,
   type RuleHStatus,
 } from "@de-otio/repo-aegis-core";
+import { currentHumanPresent } from "../human-presence.js";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
 
 export interface HookGuardEgressOptions {
@@ -287,6 +295,22 @@ function writeDecisionJson(decision: "ask" | "deny", reason: string): void {
   );
 }
 
+/** Refuse a command line that runs a human-only repo-aegis command. Same channels as every other deny. */
+function denyHumanOnlyCommand(kind: HumanOnlyKind): never {
+  const reason = humanCommandRefusal({ kind });
+  process.stderr.write(JSON.stringify({ code: AGENT_RAN_HUMAN_COMMAND, error: reason, details: { command: kind } }, null, 2) + "\n");
+  writeDecisionJson("deny", reason);
+  process.exit(EXIT_BLOCK);
+}
+
+/** Refuse a command line that starts a detached session. Same channels as every other deny. */
+function denyDetachedStart(hit: DetachedHit): never {
+  const reason = detachedStartRefusal(hit);
+  process.stderr.write(JSON.stringify({ code: AGENT_DETACHED_SESSION, error: reason, details: { start: hit.kind } }, null, 2) + "\n");
+  writeDecisionJson("deny", reason);
+  process.exit(EXIT_BLOCK);
+}
+
 /**
  * `repo-aegis hook guard-egress` — PreToolUse(Bash) egress guard.
  *
@@ -330,6 +354,17 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
       writeDecisionJson("deny", network.reason);
       process.exit(EXIT_BLOCK);
     }
+    // Commands only a person may run (`approve`, owner adds, `upstreams add`,
+    // `init --migrate-classify|--force`): refused in ANY agent Bash text, with
+    // or without a terminal, before the egress parse and its early exit. A pty
+    // wrapper can fake the terminal that those commands' own gate tests, so the
+    // text is the second lock (issue #151, PR 2b).
+    const humanOnly = findHumanOnlyCommand(command);
+    if (humanOnly !== null) denyHumanOnlyCommand(humanOnly.kind);
+    // A detached session start (`tmux new -d`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`)
+    // re-parents a pty to init, where no gate sees an agent above it: refused in any command, egress or not.
+    const detached = findDetachedStart(command);
+    if (detached !== null) denyDetachedStart(detached);
 
     const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit
@@ -339,7 +374,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     const loaded = loadRegistryOrEmpty();
     registryNote = loaded.note;
     ruleH = ruleHStatus(loaded.registryState, loaded.registry);
-    humanPresent = isHumanPresent();
+    humanPresent = currentHumanPresent();
 
     // Write-through: whatever this directory declares about its own origin
     // goes into the machine-wide destination cache, so the next command that

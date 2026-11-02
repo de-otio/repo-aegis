@@ -27,7 +27,6 @@ import {
   describeVerb,
   egressParseOptions,
   formatReceipt,
-  isHumanPresent,
   isPrintableDestination,
   loadRegistry,
   parseEgressIntents,
@@ -42,6 +41,7 @@ import {
   type RegistryState,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, type OutputOptions } from "../format.js";
+import { currentHumanPresent } from "../human-presence.js";
 
 export interface EgressCheckOptions extends OutputOptions {
   cwd?: string;
@@ -144,7 +144,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
 
   const { registry, registryState } = loadRegistryOrEmpty();
   const ruleH = ruleHStatus(registryState, registry);
-  const humanPresent = isHumanPresent();
+  const humanPresent = currentHumanPresent();
   // Write-through into the machine-wide destination cache (see
   // `hook guard-egress`): a command judged from inside a repository leaves
   // that repository's declaration where a later command from elsewhere can

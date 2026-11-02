@@ -19,11 +19,21 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { captureOutput, withEnv, lastJsonLine, scrubGitEnv, hermeticGitEnv } from "../_test-utils.js";
+import {
+  captureOutput,
+  withEnv,
+  lastJsonLine,
+  scrubGitEnv,
+  hermeticGitEnv,
+  PERSON_ANCESTRY,
+  UNDER_CLAUDE_ANCESTRY,
+} from "../_test-utils.js";
 import { check } from "./check.js";
 import {
   approvalsPath,
   mintApproval,
+  setAncestryReaderForTests,
+  type AncestorInfo,
   HOOK_SCRIPTS,
   parseEgressIntents,
   resolveDestinationOffline,
@@ -154,13 +164,19 @@ function urlsGitHandsPrePush(repo: string, remote: string): string[] {
   return readFileSync(record, "utf8").split("\n").filter(Boolean);
 }
 
-/** Pin stderr's TTY-ness: `isHumanPresent` tests it. */
-function withStderrTty<T>(isTty: boolean, fn: () => T): T {
+/**
+ * Pin stderr's TTY-ness: `isHumanPresent` tests it. It also reads the process
+ * ancestry (an agent host above this process means "not a person"), and this
+ * suite may itself run under one, so the ancestry is pinned clear too.
+ */
+function withStderrTty<T>(isTty: boolean, fn: () => T, ancestry: readonly AncestorInfo[] = PERSON_ANCESTRY): T {
   const desc = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
   Object.defineProperty(process.stderr, "isTTY", { value: isTty, configurable: true, writable: true });
+  setAncestryReaderForTests(() => ancestry);
   try {
     return fn();
   } finally {
+    setAncestryReaderForTests(undefined);
     if (desc) Object.defineProperty(process.stderr, "isTTY", desc);
     else delete (process.stderr as { isTTY?: boolean }).isTTY;
   }
@@ -181,7 +197,7 @@ function pushCheck(
   ctx: Ctx,
   repo: string,
   remoteUrl: string,
-  env: { tty?: boolean; human?: string; lookup?: () => null } = {},
+  env: { tty?: boolean; human?: string; lookup?: () => null; ancestry?: readonly AncestorInfo[] } = {},
 ): ReturnType<typeof captureOutput> {
   return withSshDir(ctx, () =>
     withEnv("REPO_AEGIS_HOME", ctx.home, () =>
@@ -198,6 +214,7 @@ function pushCheck(
                   ...(env.lookup !== undefined && { lookupVisibility: env.lookup }),
                 }),
               ),
+              env.ancestry,
             ),
           ),
         ),
@@ -916,5 +933,41 @@ describe("pre-push rule h — the shipped pre-push hook script, end to end (L4)"
     const r = realPush(ctx, repo, "[github.com]:stranger/r.git");
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /UNREGISTERED_OWNER_EGRESS/);
+  });
+});
+
+describe("pre-push: a TTY under an agent is not a person (PR 2b, M3)", () => {
+  it("a push to an unregistered owner from a TTY whose ancestry holds claude is refused by rule h", () => {
+    const ctx = setup("anc-claude");
+    const repo = makeRepo("anc-claude-repo", "git@github.com:acme/x.git");
+    const r = refusalOf(pushCheck(ctx, repo, "git@github.com:stranger/r.git", { tty: true, ancestry: UNDER_CLAUDE_ANCESTRY }));
+    assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
+  });
+
+  it("the same push from a TTY with a person's login chain gets past rule h", () => {
+    const ctx = setup("anc-person");
+    const repo = makeRepo("anc-person-repo", "git@github.com:acme/x.git");
+    const r = pushCheck(ctx, repo, "git@github.com:stranger/r.git", { tty: true, ancestry: PERSON_ANCESTRY });
+    assert.notEqual(r.exitCode === 2 ? lastJsonLine<Refusal>(r.stderr).code : "", "UNREGISTERED_OWNER_EGRESS");
+  });
+
+  it("a pty wrapper above the process is not a person either", () => {
+    const ctx = setup("anc-script");
+    const repo = makeRepo("anc-script-repo", "git@github.com:acme/x.git");
+    const withScript: AncestorInfo[] = [
+      { pid: 20, ppid: 19, comm: "script", argv: ["script", "-q", "/dev/null"], exe: "/usr/bin/script" },
+      ...PERSON_ANCESTRY,
+    ];
+    const r = refusalOf(pushCheck(ctx, repo, "git@github.com:stranger/r.git", { tty: true, ancestry: withScript }));
+    assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
+  });
+
+  it("an unrooted chain keeps the TTY result (a person is not blocked) and says so on stderr", () => {
+    const ctx = setup("anc-unrooted");
+    const repo = makeRepo("anc-unrooted-repo", "git@github.com:acme/x.git");
+    const bare: AncestorInfo[] = [{ pid: 30, ppid: 1, comm: "python3", argv: ["python3", "x.py"], exe: "/opt/homebrew/Ce" }];
+    const r = pushCheck(ctx, repo, "git@github.com:acme/x.git", { tty: true, ancestry: bare });
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.match(r.stderr, /could not confirm from the process list that a person runs this terminal/);
   });
 });

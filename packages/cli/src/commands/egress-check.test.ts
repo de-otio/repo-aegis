@@ -6,10 +6,16 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureOutput, fakeGh, withEnv } from "../_test-utils.js";
+import { captureOutput, fakeGh, withEnv, withStreamTty, PERSON_ANCESTRY, UNDER_CLAUDE_ANCESTRY } from "../_test-utils.js";
 import { cliBuilt, runCli } from "../_subprocess-utils.js";
-import { buildGhCommand, egressReadback, parsePrRef, shellQuote } from "./egress-check.js";
-import { approvalsPath, mintApproval, revokeApprovals } from "@de-otio/repo-aegis-core";
+import { buildGhCommand, egressCheck, egressReadback, parsePrRef, shellQuote } from "./egress-check.js";
+import {
+  approvalsPath,
+  mintApproval,
+  revokeApprovals,
+  setAncestryReaderForTests,
+  type AncestorInfo,
+} from "@de-otio/repo-aegis-core";
 
 // FIXTURE LOCATION, deliberately not the temp dir: rule d refuses a payload
 // path under `/var/folders/**` (macOS's per-user temp, which is exactly what
@@ -618,6 +624,35 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     const r = withEnv("REPO_AEGIS_EGRESS_HUMAN", "1", () => runCli(h, privateRepo, STRANGER_ISSUE));
     assert.equal(r.code, 0, r.stderr);
     assert.equal((JSON.parse(r.stdout) as { action: string }).action, "allow");
+  });
+
+  describe("a TTY under an agent is not a person (PR 2b, M3: the shim layer, in process)", () => {
+    const shim = (name: string, ancestry: readonly AncestorInfo[]) => {
+      const h = registryHome(name, OWNERS_REGISTRY);
+      return withEnv("REPO_AEGIS_HOME", h, () =>
+        withEnv("REPO_AEGIS_VISIBILITY_LOOKUP", "0", () =>
+          withEnv("REPO_AEGIS_EGRESS_HUMAN", undefined, () =>
+            withStreamTty("stderr", true, () => {
+              setAncestryReaderForTests(() => ancestry);
+              return captureOutput(() =>
+                egressCheck(["issue", "create", "--repo", "stranger/repo", "--body", "x"], { cwd: privateRepo, json: true }),
+              );
+            }),
+          ),
+        ),
+      );
+    };
+
+    it("claude above the shim: rule h refuses the unregistered owner", () => {
+      const r = shim("anc-claude", UNDER_CLAUDE_ANCESTRY);
+      assert.equal(r.exitCode, 2, r.stderr);
+      assert.equal((JSON.parse(r.stderr.trim()) as { code: string }).code, "UNREGISTERED_OWNER_EGRESS");
+    });
+
+    it("a person's login chain: rule h is passed", () => {
+      const r = shim("anc-person", PERSON_ANCESTRY);
+      assert.equal(r.exitCode, undefined, r.stderr);
+    });
   });
 });
 

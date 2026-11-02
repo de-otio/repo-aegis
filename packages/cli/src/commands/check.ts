@@ -55,7 +55,6 @@ import {
   findUncoveringStarApproval,
   uncoveredStarSentence,
   type ApprovalScope,
-  isHumanPresent,
   loadRegistry,
   appendAuditRecord,
   RegistryNotFoundError,
@@ -88,6 +87,7 @@ import {
   EXIT_HIT,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, shouldRevealMatches } from "../format.js";
+import { currentHumanPresent } from "../human-presence.js";
 import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
 
 interface CheckOptions extends DenySetFloorOptions {
@@ -498,7 +498,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
 
   const ref = refLabel(opts);
   const loaded = loadRegistryState();
-  const humanPresent = isHumanPresent();
+  const humanPresent = currentHumanPresent();
   const ruleH = ruleHStatus(loaded.state, loaded.registry ?? EMPTY_REGISTRY);
 
   // --- UNREGISTERED_OWNER_EGRESS (rule h) ----------------------------------
@@ -654,7 +654,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   }
 
   // --- PUBLIC_PUSH_NEEDS_HUMAN --------------------------------------------
-  // `isHumanPresent` tests stderr's TTY. stdin is git's ref list on this path
+  // `currentHumanPresent` tests stderr's TTY (and the process ancestry). stdin is git's ref list on this path
   // and is never the signal. A live approval minted at a terminal for this
   // destination (and ref, when scoped) stands in for the person.
   // A `*` approval covers only personalOrgs owners (D7); a push always has a
