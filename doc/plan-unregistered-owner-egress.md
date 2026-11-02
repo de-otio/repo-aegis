@@ -120,6 +120,17 @@ unknown command word or group, an alias the guard cannot expand, `sh -c` or
 refuses it for a caller with no person present (D5). Only an explicit
 read-only allowlist of gh groups yields no intent.
 
+*Backstop (added after the second PR 2a review).* The parser cannot model
+every shell construct: reserved words, `find -exec`, `<(…)`, functions,
+heredocs fed to `sh`, `python -c`. So after parsing, a linear scan of the
+raw command text (heredoc and interpreter text included) looks for a `gh`
+token followed by a gh command word, or `git` followed by `push`,
+`send-pack` or `http-push`. Any such mention that no parsed intent accounts
+for becomes an unresolved intent. The accepted false positive is a literal
+quoted mention such as `echo "gh issue create"`, which is refused only
+for a caller with no person present and only when the registry declares
+owners.
+
 1. **`GH_REPO`.** Leading `GH_REPO=…` assignments and `env GH_REPO=…` are
    currently skipped as "wrappers" (`egress-intent.ts:362`). Capture the value
    as `intent.envRepo`; it applies when there is no `--repo`, which is gh's own
