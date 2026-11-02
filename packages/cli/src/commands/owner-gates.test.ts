@@ -12,7 +12,20 @@
  */
 import { describe, it, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
-import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -729,21 +742,67 @@ describe("H1: a change that empties the owner set needs a terminal", () => {
     assert.deepEqual(readFileSync(env.registryPath), before);
   });
 
-  it("engagements end --purge of the last owner-holding engagement refuses without a TTY; plain end does not", () => {
-    const env = setupEnv("h1-end", LAST_OWNER);
-    const before = readFileSync(env.registryPath);
-    const purge = inHome(env, () =>
-      captureOutput(() => engagementsEnd("only-customer", { registryPath: env.registryPath, purge: true, stderrIsTTY: false, json: true })),
-    );
-    assert.equal(purge.exitCode, 2);
-    assertEmptySetRefusal(purge.stderr, "engagements end only-customer --purge");
-    assert.deepEqual(readFileSync(env.registryPath), before);
+  it("engagements end (and end --purge) removes no githubOrgs, so it never empties the owner set and needs no TTY", () => {
+    for (const purge of [false, true]) {
+      const env = setupEnv(`h1-end-${purge}`, LAST_OWNER);
+      const r = inHome(env, () =>
+        captureOutput(() => engagementsEnd("only-customer", { registryPath: env.registryPath, purge, stderrIsTTY: false, json: true })),
+      );
+      assert.equal(r.exitCode, undefined, r.stderr);
+      // The guard (core registeredOwners) still sees the ended engagement's owner.
+      assert.deepEqual(
+        loadRegistry(env.registryPath).engagements.flatMap(e => e.githubOrgs ?? []),
+        ["only-customer-org"],
+      );
+    }
+  });
 
-    // A plain `end` keeps the engagement within the retention window: its owners stay registered.
-    const plain = inHome(env, () =>
-      captureOutput(() => engagementsEnd("only-customer", { registryPath: env.registryPath, stderrIsTTY: false, json: true })),
+  // Owners held only by engagements that ended past the retention window still
+  // count for the guard (registeredOwners = personalOrgs plus EVERY engagement's
+  // githubOrgs), so removing the last one must be gated, not just the "active" ones.
+  it("removing the last of several long-ended owner-holding engagements refuses without a TTY; earlier ones do not", () => {
+    const LONG_ENDED = `schemaVersion: 2
+always_block: []
+engagements:
+  - id: old1
+    name: Old 1
+    started: 2019-01-01
+    ended: 2020-01-01
+    markers: []
+    githubOrgs:
+      - old1-org
+  - id: old2
+    name: Old 2
+    started: 2019-01-01
+    ended: 2020-06-01
+    markers: []
+    githubOrgs:
+      - old2-org
+`;
+    const env = setupEnv("h1-long-ended", LONG_ENDED);
+    const rm = (id: string, tty: boolean) =>
+      inHome(env, () =>
+        captureOutput(() => engagementsRemove(id, { registryPath: env.registryPath, hard: true, stderrIsTTY: tty, json: true })),
+      );
+    const first = rm("old1", false);
+    assert.equal(first.exitCode, undefined, first.stderr);
+    const before = readFileSync(env.registryPath);
+    const last = rm("old2", false);
+    assert.equal(last.exitCode, 2);
+    assertEmptySetRefusal(last.stderr, "engagements remove old2 --hard");
+    assert.deepEqual(readFileSync(env.registryPath), before);
+    assert.equal(rm("old2", true).exitCode, undefined);
+  });
+
+  it("owner names are compared case-insensitively when counting", () => {
+    const env = setupEnv(
+      "h1-case",
+      "schemaVersion: 2\nengagements:\n  - id: a\n    name: A\n    markers: []\n    githubOrgs: [Shared-Org]\n  - id: b\n    name: B\n    markers: []\n    githubOrgs: [other-org]\n",
     );
-    assert.equal(plain.exitCode, undefined, plain.stderr);
+    const r = inHome(env, () =>
+      captureOutput(() => engagementsRemove("a", { registryPath: env.registryPath, hard: true, stderrIsTTY: false, json: true })),
+    );
+    assert.equal(r.exitCode, undefined, r.stderr);
   });
 
   it("with a TTY the same removals succeed", () => {
@@ -787,6 +846,8 @@ describe("H1: a change that empties the owner set needs a terminal", () => {
       ["owners", REGISTRY],
       ["a lone always_block pattern", "always_block:\n  - SOME-PATTERN\nengagements: []\n"],
       ["a lone allowed upstream", "allowedUpstreams:\n  - upstream-org/lib\nengagements: []\n"],
+      ["an explicit empty alwaysBlockExemptPaths", "alwaysBlockExemptPaths: []\nengagements: []\n"],
+      ["publicRegistries", "publicRegistries:\n  - registry.example.com\nengagements: []\n"],
       ["an engagement with no owners or markers", "engagements:\n  - id: bare\n    name: Bare\n    markers: []\n"],
       ["unparseable content", "engagements: [unclosed\n"],
     ] as const) {
@@ -896,6 +957,42 @@ engagements:
       assert.deepEqual(files(env.home), dir);
     });
   }
+
+  it("a symlinked registry stays a symlink: the real target is rewritten, not replaced", () => {
+    const env = setupEnv("m1-symlink");
+    const realDir = join(tmp, "m1-symlink-real");
+    mkdirSync(realDir, { recursive: true });
+    const real = join(realDir, "engagements.yaml");
+    writeFileSync(real, REGISTRY);
+    rmSync(env.registryPath);
+    symlinkSync(real, env.registryPath);
+    const r = inHome(env, () =>
+      captureOutput(() => upstreamsAdd("link/repo", { registryPath: env.registryPath, stderrIsTTY: true, json: true })),
+    );
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.ok(lstatSync(env.registryPath).isSymbolicLink(), "the link must survive the write");
+    assert.equal(readlinkSync(env.registryPath), real);
+    assert.ok(readFileSync(real, "utf8").includes("link/repo"), "the real target has the edit");
+    assert.deepEqual(readdirSync(realDir), ["engagements.yaml"], "no temp file left next to the target");
+    assert.deepEqual(readdirSync(env.home).filter(f => f.includes(".tmp")), []);
+    // The write keeps the target's permission bits.
+    chmodSync(real, 0o640);
+    inHome(env, () => captureOutput(() => upstreamsRemove("link/repo", { registryPath: env.registryPath })));
+    assert.equal(statSync(real).mode & 0o777, 0o640);
+  });
+
+  it("a registry that cannot be read keeps the code-less { error } payload", () => {
+    const env = setupEnv("m1-unreadable");
+    rmSync(env.registryPath);
+    mkdirSync(env.registryPath); // exists, but reading it fails (EISDIR)
+    const r = inHome(env, () =>
+      captureOutput(() => upstreamsAdd("x/y", { registryPath: env.registryPath, stderrIsTTY: true, json: true })),
+    );
+    assert.equal(r.exitCode, 2);
+    const payload = JSON.parse(r.stderr.trim().split("\n").pop()!) as Record<string, unknown>;
+    assert.equal(payload["code"], undefined);
+    assert.equal(typeof payload["error"], "string");
+  });
 
   it("init --migrate-classify: an invalid result leaves registry and classify.yml untouched", async () => {
     const home = join(tmp, "m1-init");

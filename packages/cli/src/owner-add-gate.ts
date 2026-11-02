@@ -174,7 +174,7 @@ export function ownerSetEmptyRefusal(cmd: EmptyingCommand): string {
   const effect =
     cmd.kind === "init-force"
       ? "This would replace the registry with an empty one, discarding its owners, upstreams, engagements, markers and always-block patterns"
-      : "This change would leave no registered owners (no personalOrgs and no active engagement githubOrgs)";
+      : "This change would leave no registered owners (no personalOrgs and no engagement githubOrgs)";
   return (
     `${command}: refused. ` +
     `${effect}. With no owners registered, the refusal of egress to unregistered owners (rule h) switches itself off, ` +

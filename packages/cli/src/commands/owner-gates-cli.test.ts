@@ -129,8 +129,12 @@ describe("gated commands refuse as a subprocess with piped stderr", { skip }, ()
     refused(makeHome("c-remove-last", LAST_OWNER), ["engagements", "remove", "only-customer", "--hard"], "OWNER_SET_EMPTY_NEEDS_TTY");
   });
 
-  it("engagements end --purge of the last owner-holding engagement (H1)", () => {
-    refused(makeHome("c-end-last", LAST_OWNER), ["engagements", "end", "only-customer", "--purge"], "OWNER_SET_EMPTY_NEEDS_TTY");
+  it("engagements remove --hard of the last of several long-ended owner-holding engagements (H1)", () => {
+    const h = makeHome(
+      "c-remove-last-ended",
+      "schemaVersion: 2\nengagements:\n  - id: old1\n    name: O1\n    ended: 2020-01-01\n    markers: []\n    githubOrgs: [old1-org]\n",
+    );
+    refused(h, ["engagements", "remove", "old1", "--hard"], "OWNER_SET_EMPTY_NEEDS_TTY");
   });
 });
 
@@ -148,6 +152,12 @@ describe("ungated commands still work as a subprocess with piped stderr", { skip
   it("engagements remove --hard when another owner remains", () => {
     const h = makeHome("c-remove-ok", POPULATED);
     const r = run(h, ["engagements", "remove", "existing-customer", "--hard"]);
+    assert.equal(r.code, 0, r.stderr);
+  });
+
+  it("engagements end --purge (removes no owners)", () => {
+    const h = makeHome("c-end-purge", LAST_OWNER);
+    const r = run(h, ["engagements", "end", "only-customer", "--purge"]);
     assert.equal(r.code, 0, r.stderr);
   });
 

@@ -219,7 +219,11 @@ function registryDeclaresContent(text: string): boolean {
     nonEmpty(r["allowedUpstreams"]) ||
     nonEmpty(r["engagements"]) ||
     nonEmpty(r["selfIdentity"]) ||
-    nonEmpty(r["privateInfra"])
+    nonEmpty(r["privateInfra"]) ||
+    nonEmpty(r["publicRegistries"]) ||
+    // An explicit `[]` is a deliberate "no exemptions at all" (see
+    // `alwaysBlockExemptPaths` in the registry schema), so presence counts.
+    (r["alwaysBlockExemptPaths"] !== undefined && r["alwaysBlockExemptPaths"] !== null)
   );
 }
 
