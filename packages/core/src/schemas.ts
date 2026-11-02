@@ -68,6 +68,28 @@ const orgNameSchema = z
   });
 
 /**
+ * An exact `owner/repo` entry for `allowedUpstreams` (issue #151, D6).
+ *
+ * The owner half uses {@link ORG_NAME_REGEX}. The repo half allows GitHub's
+ * repo charset lower-cased (`[a-z0-9._-]`), minus the path-traversal names
+ * `.` and `..`. This deviates from the plan's "orgNameSchema's charset for
+ * both halves": real upstream repos carry dots and underscores (`foo.js`).
+ * No wildcards: an upstream entry names one repo, never an owner.
+ */
+export const OWNER_REPO_REGEX = /^[a-z0-9][a-z0-9-]*\/[a-z0-9._-]+$/;
+
+const ownerRepoSchema = z
+  .string()
+  .regex(OWNER_REPO_REGEX, {
+    message:
+      "upstream must be lowercase 'owner/repo' — owner [a-z0-9-], repo [a-z0-9._-], no wildcards",
+  })
+  .refine(v => {
+    const repo = v.slice(v.indexOf("/") + 1);
+    return repo !== "." && repo !== "..";
+  }, { message: "upstream repo name must not be '.' or '..'" });
+
+/**
  * A bare package-registry host, as it would appear in `URL.host` — optionally
  * with a port, never with a scheme, path, credentials, or wildcard.
  *
@@ -142,6 +164,16 @@ export const registryFileSchema = z
      * Disjoint from any engagement's `githubOrgs`.
      */
     personalOrgs: z.array(orgNameSchema).optional(),
+    /**
+     * Exact `owner/repo` upstreams an agent may open PRs, issues and comments
+     * against without a person present (issue #151, D6). An entry registers
+     * that one repo for rule h — never its owner, and never for push,
+     * release or repo verbs. Adding one requires a terminal (D8).
+     *
+     * **No `schemaVersion` bump**, by the same argument as `selfIdentity`:
+     * older readers have no rule h, so ignoring the key is harmless.
+     */
+    allowedUpstreams: z.array(ownerRepoSchema).optional(),
     /**
      * Extra package-registry hosts treated as public by the egress-hygiene
      * check, in ADDITION to the always-allowed defaults (npmjs, yarnpkg,
@@ -267,6 +299,23 @@ export const registryFileSchema = z
         });
       } else {
         personalSeen.set(org, i);
+      }
+    }
+    // 1b. allowedUpstreams internal duplicates (issue #151).
+    const upstreamSeen = new Map<string, number>();
+    const upstreams = data.allowedUpstreams ?? [];
+    for (let i = 0; i < upstreams.length; i++) {
+      const up = upstreams[i];
+      if (up === undefined) continue;
+      const prev = upstreamSeen.get(up);
+      if (prev !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["allowedUpstreams", i],
+          message: `duplicate upstream "${up}" (also at allowedUpstreams[${prev}])`,
+        });
+      } else {
+        upstreamSeen.set(up, i);
       }
     }
     const personalSet = new Set(personalOrgs);

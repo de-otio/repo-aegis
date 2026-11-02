@@ -671,4 +671,5 @@ agrees with the plan: ship rule h first.
 - Every layer uses the same `registeredOwners()` and the same code, so `doctor`,
   the hook, the shim and pre-push cannot disagree about which owners are ours.
 - "Missing registry", "unreadable registry" and "loaded with no owners" are
-  separate states, and only those three skip rule h.
+  separate states. Per revised D4, only "missing" and "loaded with no owners"
+  skip rule h; "unreadable" (including encrypted) makes rule h refuse.

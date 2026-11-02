@@ -43,6 +43,12 @@ export interface Registry {
    */
   personalOrgs?: string[];
   /**
+   * Exact `owner/repo` upstreams registered for rule h (issue #151, D6):
+   * PR/issue/comment verbs only, never the owner as a whole. Always
+   * populated by `loadRegistry` (`[]` when absent).
+   */
+  allowedUpstreams?: string[];
+  /**
    * Extra registry hosts the egress-hygiene check treats as public, on top of
    * the built-in defaults. Lower-cased by `loadRegistry` so callers can
    * compare directly against `URL.host`. Optional in the type so fixtures
@@ -179,6 +185,7 @@ export function loadRegistry(path: string = registryPath()): Registry {
     engagements,
     alwaysBlock: validated.always_block ?? [],
     personalOrgs: validated.personalOrgs ?? [],
+    allowedUpstreams: validated.allowedUpstreams ?? [],
     // Lower-cased at the boundary: `URL.host` is always lower-case, and
     // `isHostAllowed` compares by exact equality.
     publicRegistries: (validated.publicRegistries ?? []).map(h => h.toLowerCase()),
