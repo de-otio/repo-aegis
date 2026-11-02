@@ -809,7 +809,8 @@ describe("egress-check — an unwritable destination cache never changes the dec
   // public repo would skip rule g). Inside the sandbox the write-through then fails with EACCES.
   // Every writer is best-effort, so the verdict must be the one an unobstructed run gives.
   const ARGS = (cwd: string): string[] => [
-    "egress-check", "--cwd", cwd, "--", "pr", "create", "--title", "t", "--body-file", bodyFile,
+    // `issue create`, not `pr create`: D10 refuses a targetless `gh pr create` before rule g runs.
+    "egress-check", "--cwd", cwd, "--", "issue", "create", "--title", "t", "--body-file", bodyFile,
   ];
 
   /** A home where the write cannot succeed: the target is a non-empty directory, so the rename onto it fails. */
