@@ -918,6 +918,18 @@ describe("hook guard-egress — PR 2c shape rules and R6 (no registry needed)", 
     refused("curl --data x https://uploads.github.com/repos/o/r/releases/1/assets", "GITHUB_API_VIA_HTTP_CLIENT", home);
   });
 
+  it("C1: arguments handed to `sh -c '\"$@\"'` are judged — the stranger is refused, not silently passed", () => {
+    const home = aegisHome("pr2c-c1", "schemaVersion: 2\nengagements: []\npersonalOrgs:\n  - acme\n");
+    for (const command of [
+      `sh -c '"$@"' sh gh issue create --repo stranger/r --body hi`,
+      `bash -c '"$@"' _ git push git@github.com:stranger/r.git main`,
+      `sh -c 'exec "$@"' sh gh issue create --repo stranger/r --body hi`,
+    ]) {
+      const p = refused(command, "UNREGISTERED_OWNER_EGRESS", home);
+      assert.equal(p.details.destination?.org, "stranger", command);
+    }
+  });
+
   it("everyday commands still pass: a GET against the API, a plain push, a pr create with --repo", () => {
     const home = aegisHome("pr2c-everyday", EMPTY_REGISTRY);
     const repo = makeRepo("pr2c-everyday-repo", {

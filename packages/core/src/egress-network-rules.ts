@@ -93,17 +93,60 @@ function wgetWrites(args: readonly string[]): boolean {
   return false;
 }
 
+/** curl reads URLs and options from a config file: `-K file`, `--config file`, `-K -`. */
+function curlUsesConfig(args: readonly string[]): boolean {
+  return args.some(a => a === "--config" || a.startsWith("--config=") || (/^-[A-Za-z]*K/.test(a) && !a.startsWith("--")));
+}
+
+const HTTPIE_COMMANDS: ReadonlySet<string> = new Set(["http", "https", "xh", "xhs"]);
+
+/**
+ * Whether an httpie / xh invocation writes: a method word (`POST`, `PUT`, `PATCH`, `DELETE`) or a data item
+ * (`key=value`, `key:=json`, `key=@file`, `key@file`), but not a query item (`key==value`) or a header
+ * (`Key:Value`), or a body option (`--raw`, `--form`, `--json`, `--multipart`).
+ */
+function httpieWrites(args: readonly string[]): boolean {
+  for (const a of args) {
+    if (WRITE_METHODS.has(a.toUpperCase()) && /^[A-Za-z]+$/.test(a)) return true;
+    if (a === "--raw" || a.startsWith("--raw=") || a === "--form" || a === "--json" || a === "--multipart") return true;
+    if (/^-[A-Za-z]*[fj]/.test(a) && !a.startsWith("--") && a.length <= 3) return true;
+    if (/^[A-Za-z0-9_.\-\[\]]+(?::=|=(?!=)|=@|@)/.test(a) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(a)) return true;
+  }
+  return false;
+}
+
 function writesGithubApi(c: SimpleCommand): boolean {
-  if (!c.args.some(a => GITHUB_API_HOST_RE.test(a))) return false;
-  if (c.cmd === "curl") return curlWrites(c.args);
+  const hostPresent = c.args.some(a => GITHUB_API_HOST_RE.test(a));
+  if (c.cmd === "curl") {
+    // A config file can carry the URL and the body: with no URL on the command line it may be this API.
+    if (curlUsesConfig(c.args) && (hostPresent || !c.args.some(a => /^[a-z][a-z0-9+.-]*:\/\//i.test(a)))) return true;
+    return hostPresent && curlWrites(c.args);
+  }
+  if (!hostPresent) return false;
   if (c.cmd === "wget") return wgetWrites(c.args);
+  if (HTTPIE_COMMANDS.has(c.cmd)) return httpieWrites(c.args);
   return false;
 }
 
 /** Programs that open a network connection of their own. */
 const NETWORK_COMMANDS: ReadonlySet<string> = new Set([
   "curl", "wget", "http", "https", "xh", "xhs", "nc", "ncat", "netcat", "socat", "telnet", "ssh", "scp", "sftp", "ftp",
+  // interpreters and git can open a connection of their own
+  "node", "perl", "ruby", "git",
 ]);
+
+function isNetworkCommand(cmd: string): boolean {
+  return NETWORK_COMMANDS.has(cmd) || /^python[\d.]*$/.test(cmd);
+}
+
+/** `gh auth token`, and `gh auth status --show-token` / `-t`, which prints the same credential. */
+function readsGhToken(c: SimpleCommand): boolean {
+  if (c.cmd !== "gh") return false;
+  const words = ghCommandWords(c.args);
+  if (words === null || words.group !== "auth") return false;
+  if (words.sub === "token") return true;
+  return words.sub === "status" && c.args.some(a => a === "--show-token" || /^-[A-Za-z]*t[A-Za-z]*$/.test(a));
+}
 
 /**
  * R6: the refusal for a command line that sends a write to the GitHub API with a raw HTTP client, or reads
@@ -111,7 +154,7 @@ const NETWORK_COMMANDS: ReadonlySet<string> = new Set([
  */
 export function checkNetworkRules(command: string): NetworkRuleHit | null {
   // Cheap exit: almost every command mentions neither.
-  if (!/github\.com|auth/i.test(command)) return null;
+  if (!/github\.com|auth|(?:^|\s)-[A-Za-z]*K|--config/i.test(command)) return null;
   const commands = simpleCommands(command);
 
   const writer = commands.find(writesGithubApi);
@@ -138,12 +181,8 @@ export function checkNetworkRules(command: string): NetworkRuleHit | null {
     };
   }
 
-  const tokenReader = commands.some(c => {
-    if (c.cmd !== "gh") return false;
-    const words = ghCommandWords(c.args);
-    return words !== null && words.group === "auth" && words.sub === "token";
-  });
-  if (tokenReader && commands.some(c => NETWORK_COMMANDS.has(c.cmd))) {
+  const tokenReader = commands.some(readsGhToken);
+  if (tokenReader && commands.some(c => isNetworkCommand(c.cmd))) {
     return {
       code: "GH_AUTH_TOKEN_NETWORK",
       reason: refusal({

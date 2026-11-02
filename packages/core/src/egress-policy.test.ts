@@ -730,11 +730,11 @@ describe("resolveDestinationOffline — real git config", () => {
     );
   });
 
-  // PR 2c (§3.3 item 3): with no `gh-resolved`, EVERY GitHub remote is a candidate, so the base repository
-  // is the cwd's origin only in a checkout whose origin is its only GitHub remote (`priv`); `repo` also has
-  // a `customer` remote and is ambiguous (see egress-intent-resolve-gh.test.ts).
-  it("gh without --repo → the origin, when it is the checkout's only GitHub remote", () => {
-    const d = resolveDestinationOffline(intent("gh issue create -t x -b y"), priv);
+  // PR 2c (§3.3 item 3): the base repository is gh's own pick: the first remote in gh's order (upstream,
+  // github, origin, the rest). `repo` has origin and an unranked `customer` remote, so origin is the pick;
+  // the other cases (upstream, gh-resolved, ties, URL forms) are in egress-resolve-2c.test.ts.
+  it("gh without --repo → gh's pick: origin outranks an unranked remote", () => {
+    const d = resolveDestinationOffline(intent("gh issue create -t x -b y"), repo);
     assert.equal(d?.org, "acme");
     assert.equal(d?.classKnown, true);
   });
@@ -789,8 +789,8 @@ describe("resolveDestinationOffline — real git config", () => {
   });
 
   it("gh api with {owner}/{repo} placeholders resolves from the cwd, as gh does", () => {
-    const d = resolveDestinationOffline(intent("gh api repos/{owner}/{repo}/issues -f title=x"), priv);
-    assert.equal(d?.repo, "notes");
+    const d = resolveDestinationOffline(intent("gh api repos/{owner}/{repo}/issues -f title=x"), repo);
+    assert.equal(d?.repo, "svc");
     assert.equal(d?.classKnown, true);
   });
 

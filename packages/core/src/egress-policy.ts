@@ -49,7 +49,6 @@ import {
   classifyApiEndpoint,
   graphqlOperationKind,
   intentRepoTargets,
-  parseRepoRef,
   type EgressIntent,
   type EgressVerb,
   type GraphqlOperationKind,
@@ -82,6 +81,7 @@ import { registryPath } from "./paths.js";
 import { homedir } from "node:os";
 import { parseRemoteUrl, parseRemoteUrlResolved, resolveRemoteUrl } from "./remote-url.js";
 import { resolvePushUrls, detectSshOverride } from "./push-urls.js";
+import { ghBaseRepo } from "./gh-base-repo.js";
 import { readRepoConfig, type RepoClass, type RepoConfig } from "./repo.js";
 import type { Registry } from "./registry.js";
 import { computeTrustBoundary, type TrustBoundary } from "./trust-boundary.js";
@@ -685,7 +685,7 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
       return unresolvedDestination("graphql-mutation");
     }
   }
-  return implicitGhDestination(base, own, registry);
+  return implicitGhDestination(base, own, registry, intent.ghPlainBase === true);
 };
 
 /** A destination nothing offline can name: `*`/`*`, treated as public (the fail-closed stance of `assumedPublic`). */
@@ -706,90 +706,20 @@ function unresolvedDestination(
   };
 }
 
-/** gh's own remote priority when it has to choose a base repository: `upstream`, `github`, `origin`, then the rest. */
-function remotePriority(name: string): number {
-  const i = ["upstream", "github", "origin"].indexOf(name);
-  return i === -1 ? 3 : i;
-}
-
-type ImplicitCandidates = { kind: "repos"; repos: Array<{ org: string; repo: string }> } | { kind: "unresolved" };
-
 /**
- * The repositories a `gh` command with no explicit target can write to (§3.3 item 3). gh does not simply
- * use `origin`: it honours `remote.<name>.gh-resolved` (set by `gh repo set-default`, or by anyone with
- * `git config`), which is either `base` (that remote) or `owner/repo` (THAT repository, whatever the
- * remote's URL says). A value of any other shape cannot be read: unresolved. With no `gh-resolved` at
- * all, every GitHub remote is a candidate. Reads the repository config only; never the network. A
- * directory that is not a repository, or a failing `git`, yields no candidates (no destination).
+ * The destination of a `gh` write with no explicit target: gh's OWN pick of the base repository
+ * ({@link ghBaseRepo}), not a candidate set. Unresolved when that pick cannot be read offline.
  */
-function implicitGhCandidates(base: string): ImplicitCandidates {
-  let text: string;
-  try {
-    text = execFileSync("git", ["config", "-z", "--get-regexp", "^remote\\..*\\.(url|gh-resolved)$"], {
-      cwd: base,
-      encoding: "utf8",
-      timeout: 2000,
-      maxBuffer: 256 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-  } catch {
-    return { kind: "repos", repos: [] };
-  }
-  const urls = new Map<string, string[]>();
-  const resolvedValues = new Map<string, string[]>();
-  for (const entry of text.split("\0")) {
-    if (entry === "") continue;
-    const nl = entry.indexOf("\n");
-    const key = nl === -1 ? entry : entry.slice(0, nl);
-    const value = nl === -1 ? "" : entry.slice(nl + 1);
-    const m = /^remote\.(.+)\.(url|gh-resolved)$/.exec(key);
-    if (m === null) continue;
-    const table = m[2] === "url" ? urls : resolvedValues;
-    table.set(m[1]!, [...(table.get(m[1]!) ?? []), value]);
-  }
-  const byPriority = (names: Iterable<string>): string[] =>
-    [...names].sort((a, b) => remotePriority(a) - remotePriority(b) || (a < b ? -1 : a > b ? 1 : 0));
-  const repos = new Map<string, { org: string; repo: string }>();
-  const add = (p: { org: string; repo: string }): void => {
-    repos.set(`${p.org}/${p.repo}`, { org: p.org, repo: p.repo });
-  };
-  const remoteRepos = (name: string): Array<{ org: string; repo: string }> =>
-    (urls.get(name) ?? []).flatMap(u => {
-      const p = parseRemoteUrl(u);
-      return p === null ? [] : [{ org: p.org, repo: p.repo }];
-    });
-
-  if (resolvedValues.size > 0) {
-    for (const name of byPriority(resolvedValues.keys())) {
-      for (const v of resolvedValues.get(name)!) {
-        if (v === "base") {
-          const own = remoteRepos(name);
-          if (own.length === 0) return { kind: "unresolved" }; // `base` on a remote we cannot read
-          own.forEach(add);
-        } else {
-          const p = parseRepoRef(v);
-          if (p === null) return { kind: "unresolved" };
-          add(p);
-        }
-      }
-    }
-  } else {
-    for (const name of byPriority(urls.keys())) remoteRepos(name).forEach(add);
-  }
-  return { kind: "repos", repos: [...repos.values()] };
-}
-
-/** The destination of a `gh` write with no explicit target: the candidate set of {@link implicitGhCandidates}. */
 function implicitGhDestination(
   base: string,
   own: { org: string; repo: string } | null,
-  registry?: Registry,
+  registry: Registry | undefined,
+  plain: boolean,
 ): Destination | null {
-  const found = implicitGhCandidates(base);
-  if (found.kind === "unresolved") return unresolvedDestination("gh-resolved");
-  if (found.repos.length === 0) return null;
-  if (found.repos.length === 1) return withLocalClass(found.repos[0]!, base, own, registry);
-  return unresolvedDestination("ambiguous-target", found.repos);
+  const found = ghBaseRepo(base, plain);
+  if (found.kind === "none") return null;
+  if (found.kind === "unresolved") return unresolvedDestination(found.reason);
+  return withLocalClass({ org: found.org, repo: found.repo }, base, own, registry);
 }
 
 /**
@@ -1063,6 +993,12 @@ const UNRESOLVED_REFUSAL: Readonly<Record<NonNullable<Destination["unresolved"]>
     why:
       "This checkout's remote.<name>.gh-resolved setting is neither base nor an <owner>/<repo>, so repo-aegis cannot tell " +
       "which repository gh will choose",
+    reissue: "the command with a literal --repo <owner>/<repo>",
+  },
+  "opaque-remote": {
+    why:
+      "A git remote of this checkout is not cleanly a github.com/<owner>/<repo> URL, or two remotes of equal rank name " +
+      "different repositories, so repo-aegis cannot tell which repository gh will choose",
     reissue: "the command with a literal --repo <owner>/<repo>",
   },
   // Admitted by rule h before any text is built; present because the table covers every reason.

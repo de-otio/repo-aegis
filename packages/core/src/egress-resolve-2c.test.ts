@@ -23,6 +23,7 @@ import {
 } from "./egress-policy.js";
 import { mintApproval, revokeApprovals } from "./egress-approval.js";
 import type { Registry } from "./registry.js";
+import { scrubGitEnv } from "./_test-git-env.js";
 
 const REGISTRY = {
   engagements: [
@@ -59,7 +60,11 @@ function checkout(remotes: Record<string, string>, config: Record<string, string
   return dir;
 }
 
+let restoreEnv: (() => void) | undefined;
+
 before(() => {
+  // The resolver reads this process's ssh-override variables and git config: make them hermetic.
+  restoreEnv = scrubGitEnv();
   root = mkdtempSync(join(tmpdir(), "egress-2c-"));
   mkdirSync(join(root, "home"));
   priorHome = process.env["REPO_AEGIS_HOME"];
@@ -67,6 +72,7 @@ before(() => {
 });
 
 after(() => {
+  restoreEnv?.();
   if (priorHome === undefined) delete process.env["REPO_AEGIS_HOME"];
   else process.env["REPO_AEGIS_HOME"] = priorHome;
   rmSync(root, { recursive: true, force: true });
@@ -97,114 +103,200 @@ function code(d: ReturnType<typeof decide>): string | undefined {
   return d.action === "allow" ? undefined : d.code;
 }
 
-describe("gh base repository: the candidate set (§3.3 item 3)", () => {
+describe("gh base repository: gh's own pick (§3.3 item 3, superseded after the PR 2c review)", () => {
+  const issue = "gh issue create -b x";
+
   it("a checkout with no GitHub origin but upstream=stranger/r is judged against stranger/r, not skipped", () => {
     // Before PR 2c this resolved to null (no origin), so rule h never ran.
     const dir = checkout({ upstream: "git@github.com:stranger/r.git" });
-    const d = resolve("gh issue create -b x", dir);
+    const d = resolve(issue, dir);
     assert.equal(`${d?.org}/${d?.repo}`, "stranger/r");
-    const decision = decide("gh issue create -b x", dir);
-    assert.equal(code(decision), "UNREGISTERED_OWNER_EGRESS");
+    assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
   });
 
-  it("origin=acme/fork + upstream=stranger/r, no --repo: every remote is a candidate; refused for the stranger", () => {
+  it("the fork checkout origin=acme/lib + upstream=upstream-org/lib is judged upstream-org/lib (gh picks upstream)", () => {
     const dir = checkout({
-      origin: "git@github.com:acme/fork.git",
-      upstream: "https://github.com/stranger/r.git",
+      origin: "git@github.com:acme/lib.git",
+      upstream: "https://github.com/upstream-org/lib.git",
     });
     const d = resolve("gh issue comment 5 -b x", dir);
-    assert.equal(d?.unresolved, "ambiguous-target");
-    assert.deepEqual(
-      d?.candidates?.map(c => `${c.org}/${c.repo}`),
-      ["stranger/r", "acme/fork"],
-      "gh's priority order: upstream, then origin",
-    );
+    assert.equal(`${d?.org}/${d?.repo}`, "upstream-org/lib");
+    assert.equal(d?.unresolved, undefined, "no candidate set, no ambiguity");
+    assert.equal(code(decide("gh issue comment 5 -b x", dir)), "UNREGISTERED_OWNER_EGRESS");
     const decision = decide("gh issue comment 5 -b x", dir);
-    assert.equal(code(decision), "UNREGISTERED_OWNER_EGRESS");
     const reason = decision.action === "deny" ? decision.reason : "";
-    assert.match(reason, /"stranger" is not registered/);
     assert.ok(!reason.includes("acme"), `a registered owner is not named: ${reason}`);
   });
 
-  it("an upstream in allowedUpstreams makes the fork checkout workable for `gh issue comment`", () => {
+  it("an allowed upstream makes that pick workable for `gh issue comment`, and rule g then asks", () => {
     const dir = checkout({
-      origin: "git@github.com:acme/fork.git",
+      origin: "git@github.com:acme/lib.git",
       upstream: "https://github.com/upstream-org/lib.git",
     });
     const registry = { ...REGISTRY, allowedUpstreams: ["upstream-org/lib"] } as unknown as Registry;
     const d = decide("gh issue comment 5 -b x", dir, { registry });
-    assert.notEqual(code(d), "UNREGISTERED_OWNER_EGRESS", "both candidates are admitted");
-    // Still not silently allowed: the target is ambiguous, so rule g wants a person.
-    assert.equal(d.action, "ask");
-  });
-
-  it("both candidates registered: rule h passes, and rule g still wants a person (no single repository)", () => {
-    const dir = checkout({
-      origin: "git@github.com:acme/fork.git",
-      upstream: "git@github.com:acme/x.git",
-    });
-    const d = decide("gh issue create -b x", dir);
     assert.notEqual(code(d), "UNREGISTERED_OWNER_EGRESS");
     assert.equal(d.action, "ask");
   });
 
-  it("gh-resolved=base on origin: the only candidate is origin's owner", () => {
+  it("origin=acme/x + upstream=acme/y is judged acme/y, and a `*` approval covers it (acme is personal)", () => {
+    const dir = checkout({ origin: "git@github.com:acme/x.git", upstream: "git@github.com:acme/y.git" });
+    const d = resolve(issue, dir);
+    assert.equal(`${d?.org}/${d?.repo}`, "acme/y");
+    assert.equal(d?.unresolved, undefined);
+    let seen: string | undefined;
+    mintApproval({ target: { org: "*", repo: "*" } });
+    try {
+      const decision = decide(issue, dir, {
+        findApproval: (dest, ref, scope) => {
+          seen = dest === null ? "null" : `${dest.org}/${dest.repo}`;
+          return findApprovalDefault(dest, ref, scope);
+        },
+        // acme/y is not this checkout's origin and has no cached class: assumed public, so rule g wants an approval.
+      });
+      assert.equal(decision.action, "allow", "the `*` approval covers a personal-org repository");
+      assert.equal(seen, "acme/y");
+    } finally {
+      revokeApprovals("all");
+    }
+  });
+
+  it("gh-resolved=base on origin wins over an upstream remote that sorts first (SmartBaseRepo)", () => {
     const dir = checkout(
       { origin: "git@github.com:acme/fork.git", upstream: "https://github.com/stranger/r.git" },
       { "remote.origin.gh-resolved": "base" },
     );
-    const d = resolve("gh issue create -b x", dir);
+    const d = resolve(issue, dir);
     assert.equal(`${d?.org}/${d?.repo}`, "acme/fork");
-    assert.equal(d?.unresolved, undefined);
-    assert.notEqual(code(decide("gh issue create -b x", dir)), "UNREGISTERED_OWNER_EGRESS");
+    assert.notEqual(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
+  });
+
+  it("gh-resolved=base on origin is IGNORED by the plain BaseRepo groups: `gh variable set` goes to upstream (H3)", () => {
+    const dir = checkout(
+      { origin: "git@github.com:acme/fork.git", upstream: "https://github.com/stranger/r.git" },
+      { "remote.origin.gh-resolved": "base" },
+    );
+    for (const cmd of ["gh variable set NAME --body v", "gh secret set NAME --body v"]) {
+      const d = resolve(cmd, dir);
+      assert.equal(`${d?.org}/${d?.repo}`, "stranger/r", cmd);
+      assert.equal(code(decide(cmd, dir)), "UNREGISTERED_OWNER_EGRESS", cmd);
+    }
   });
 
   it("gh-resolved=stranger/r on origin redirects every implicit gh write to THAT repository (F2)", () => {
     const dir = checkout({ origin: "git@github.com:acme/fork.git" }, { "remote.origin.gh-resolved": "stranger/r" });
-    const d = resolve("gh issue create -b x", dir);
+    const d = resolve(issue, dir);
     assert.equal(`${d?.org}/${d?.repo}`, "stranger/r");
-    assert.equal(code(decide("gh issue create -b x", dir)), "UNREGISTERED_OWNER_EGRESS");
+    assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
+  });
+
+  it("the FIRST remote in gh's order that carries gh-resolved wins", () => {
+    const dir = checkout(
+      { origin: "git@github.com:acme/fork.git", upstream: "https://github.com/acme/up.git" },
+      { "remote.origin.gh-resolved": "stranger/r", "remote.upstream.gh-resolved": "base" },
+    );
+    const d = resolve(issue, dir);
+    assert.equal(`${d?.org}/${d?.repo}`, "acme/up");
   });
 
   it("a gh-resolved of any other shape is unresolved and refused", () => {
     const dir = checkout({ origin: "git@github.com:acme/fork.git" }, { "remote.origin.gh-resolved": "other" });
-    const d = resolve("gh issue create -b x", dir);
+    const d = resolve(issue, dir);
     assert.equal(d?.unresolved, "gh-resolved");
-    assert.equal(code(decide("gh issue create -b x", dir)), "UNREGISTERED_OWNER_EGRESS");
+    assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
   });
 
-  it("gh-resolved=base on a remote with no GitHub URL is unresolved (fail closed)", () => {
-    const dir = checkout({ origin: "/srv/local/repo.git" }, { "remote.origin.gh-resolved": "base" });
-    assert.equal(resolve("gh issue create -b x", dir)?.unresolved, "gh-resolved");
+  it("a remote on a non-GitHub host is filtered out, as gh filters to authenticated hosts", () => {
+    const dir = checkout(
+      { upstream: "https://gitlab.com/stranger/r.git", origin: "git@github.com:acme/svc.git" },
+      { "remote.upstream.gh-resolved": "base" },
+    );
+    const d = resolve(issue, dir);
+    assert.equal(`${d?.org}/${d?.repo}`, "acme/svc");
+    const local = checkout({ origin: "/srv/local/repo.git" }, { "remote.origin.gh-resolved": "base" });
+    assert.equal(resolve(issue, local), null, "no GitHub remote: nothing to judge");
   });
 
   it("everyday: a plain checkout with origin only resolves to origin, and an explicit --repo wins over remotes", () => {
     const dir = checkout({ origin: "git@github.com:acme/svc.git" });
-    const d = resolve("gh issue create -b x", dir);
+    const d = resolve(issue, dir);
     assert.equal(`${d?.org}/${d?.repo}`, "acme/svc");
     assert.equal(d?.unresolved, undefined);
-    assert.notEqual(code(decide("gh issue create -b x", dir)), "UNREGISTERED_OWNER_EGRESS");
+    assert.notEqual(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
     const explicit = checkout({ origin: "git@github.com:acme/svc.git", upstream: "https://github.com/stranger/r.git" });
     const e = decide("gh issue create --repo acme/x -b x", explicit);
     assert.notEqual(code(e), "UNREGISTERED_OWNER_EGRESS");
   });
 
-  it("a directory that is not a git checkout has no candidates: no destination", () => {
+  it("a directory that is not a git checkout has no remotes: no destination", () => {
     const dir = join(root, "plain");
     mkdirSync(dir);
-    assert.equal(resolve("gh issue create -b x", dir), null);
+    assert.equal(resolve(issue, dir), null);
   });
 
-  it("the same repository on two remotes is one candidate", () => {
+  it("the same repository on two remotes is one pick", () => {
     const dir = checkout({ origin: "git@github.com:acme/svc.git", mirror: "https://github.com/ACME/svc.git" });
-    const d = resolve("gh issue create -b x", dir);
+    const d = resolve(issue, dir);
     assert.equal(d?.unresolved, undefined);
     assert.equal(`${d?.org}/${d?.repo}`, "acme/svc");
   });
 
+  it("a top position shared by 'other' remotes naming different repositories is unresolved (gh's order is unstable)", () => {
+    const dir = checkout({ aaa: "git@github.com:acme/one.git", bbb: "git@github.com:stranger/two.git" });
+    assert.equal(resolve(issue, dir)?.unresolved, "opaque-remote");
+    assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
+    // The same two on one repository agree, so there is nothing unstable about it.
+    const same = checkout({ aaa: "git@github.com:acme/one.git", bbb: "https://github.com/acme/one" });
+    assert.equal(`${resolve(issue, same)?.org}/${resolve(issue, same)?.repo}`, "acme/one");
+    // And a ranked name beats the others whatever they are.
+    const ranked = checkout({ aaa: "git@github.com:acme/one.git", bbb: "git@github.com:stranger/two.git", origin: "git@github.com:acme/o.git" });
+    assert.equal(resolve(issue, ranked)?.repo, "o");
+  });
+
+  it("a remote that is URL-shaped but not a clean GitHub URL is never dropped: unresolved when gh could pick it", () => {
+    for (const url of ["https://github.com/acme/svc/extra/segments", "https://192.0.2.7/acme/svc.git", "https://sub.github.com/acme/svc.git"]) {
+      const dir = checkout({ upstream: url, origin: "git@github.com:acme/svc.git" });
+      assert.equal(resolve(issue, dir)?.unresolved, "opaque-remote", url);
+      assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS", url);
+    }
+    // A lower-ranked unclean remote does not matter: gh would take origin.
+    const lower = checkout({ origin: "git@github.com:acme/svc.git", zzz: "https://github.com/acme/svc/extra/segments" });
+    assert.equal(resolve(issue, lower)?.repo, "svc");
+  });
+
+  it("every GitHub URL form gh accepts is read the way gh reads it (H1)", () => {
+    const forms = [
+      "https://GITHUB.COM/stranger/r.git",
+      "https://github.com:443/stranger/r.git",
+      "ssh://git@ssh.github.com:443/stranger/r.git",
+      "https://github.com./stranger/r.git",
+      "https://www.github.com/stranger/r.git",
+      "ssh://deploy@github.com/stranger/r.git",
+      "deploy@github.com:stranger/r.git",
+      "git@github.com:/stranger/r.git",
+      "git@GitHub.com:stranger/r",
+      "https://user:token@github.com/stranger/r",
+    ];
+    for (const url of forms) {
+      const dir = checkout({ origin: url });
+      const d = resolve(issue, dir);
+      assert.equal(`${d?.org}/${d?.repo}`, "stranger/r", url);
+      assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS", url);
+    }
+  });
+
+  it("an insteadOf rewrite set in a separate call redirects the remote, and is read through `git remote -v` (H2)", () => {
+    const dir = checkout({ origin: "git@github.com:acme/svc.git" });
+    assert.equal(resolve(issue, dir)?.org, "acme");
+    git(dir, "config", "url.git@github.com:stranger/.insteadOf", "git@github.com:acme/");
+    const d = resolve(issue, dir);
+    assert.equal(`${d?.org}/${d?.repo}`, "stranger/svc");
+    assert.equal(code(decide(issue, dir)), "UNREGISTERED_OWNER_EGRESS");
+  });
+
   it("the refusal for a gh-resolved junk value carries no remote URL or owner from the checkout", () => {
     const dir = checkout({ origin: "git@github.com:secret-org/secret-repo.git" }, { "remote.origin.gh-resolved": "other" });
-    const d = decide("gh issue create -b x", dir);
+    const d = decide(issue, dir);
     const reason = d.action === "deny" ? d.reason : "";
     assert.ok(reason.length > 0);
     for (const leaked of ["secret-org", "secret-repo"]) assert.ok(!reason.includes(leaked), reason);

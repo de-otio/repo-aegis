@@ -315,8 +315,9 @@ describe("b″ EGRESS_AFTER_STATE_CHANGE (§3.4, F6)", () => {
   });
 
   it("export, eval and source before an egress", () => {
-    assertRefused("export X=1 && gh issue create --repo acme/x --body x", "EGRESS_AFTER_STATE_CHANGE");
-    assertRefused(`export X=1 && ${PUSH}`, "EGRESS_AFTER_STATE_CHANGE");
+    // (An export of an unrelated literal, `export FOO=1`, is not a state change since the L1 narrowing.)
+    assertRefused("export GH_REPO=a/b && gh issue create --repo acme/x --body x", "EGRESS_AFTER_STATE_CHANGE");
+    assertRefused(`export GIT_AUTHOR_NAME=x && ${PUSH}`, "EGRESS_AFTER_STATE_CHANGE");
     assertRefused(`source ./env.sh && ${PUSH}`, "EGRESS_AFTER_STATE_CHANGE");
     assertRefused(`. ./env.sh && ${PUSH}`, "EGRESS_AFTER_STATE_CHANGE");
     assertRefused(`eval "$(./setup)" && ${PUSH}`, "EGRESS_AFTER_STATE_CHANGE");
