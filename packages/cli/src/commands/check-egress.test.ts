@@ -448,6 +448,56 @@ describe("check --remote-url — a human approval stands in for the TTY", () => 
     assert.equal(j.code, "PUBLIC_PUSH_NEEDS_HUMAN");
     assert.match(j.error, /repo-aegis approve acme\/x/);
   });
+
+  // D7 (issue #151): a `*` approval covers personalOrgs owners only.
+  it("a `*` approval covers a push to a personal org, and not a customer's org", () => {
+    const personal = setup("approval-star-personal");
+    const personalRepo = makeRepo("approval-star-personal-repo", { class: "public-eligible", visibility: "public" });
+    const star = mintApproval({ target: { org: "*", repo: "*" }, path: approvalsPath(personal.home) });
+    const ok = run(personal, {
+      cwd: personalRepo,
+      pushRef: "refs/heads/main",
+      remoteUrl: "git@github.com:acme/x.git",
+      json: true,
+    });
+    assert.equal(ok.exitCode, undefined, ok.stderr);
+    assert.match(ok.stderr, new RegExp(`human approval ${star.id} stands in`));
+
+    const customer = setup("approval-star-customer");
+    const customerRepo = makeRepo("approval-star-customer-repo", {
+      class: "public-eligible",
+      visibility: "public",
+      originUrl: "git@github.com:customer-a-org/x.git",
+    });
+    // Put the customer's org inside the repo's trust boundary, so CROSS_ORG_PUSH does not fire first.
+    execFileSync("git", ["config", "repo-aegis.engagement", "customer-a"], { cwd: customerRepo });
+    mintApproval({ target: { org: "*", repo: "*" }, path: approvalsPath(customer.home) });
+    const refused = run(customer, {
+      cwd: customerRepo,
+      pushRef: "refs/heads/main",
+      remoteUrl: "git@github.com:customer-a-org/x.git",
+      json: true,
+    });
+    assert.equal(refused.exitCode, 2, refused.stderr);
+    assert.equal(lastJsonLine<{ code: string }>(refused.stderr).code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    assert.doesNotMatch(refused.stderr, /stands in/);
+
+    // The narrower approvals the refusal's remedy names do cover it.
+    for (const target of [
+      { org: "customer-a-org", repo: "*" },
+      { org: "customer-a-org", repo: "x" },
+    ]) {
+      const home = setup(`approval-narrow-${target.repo === "*" ? "org" : "repo"}`);
+      mintApproval({ target, path: approvalsPath(home.home) });
+      const covered = run(home, {
+        cwd: customerRepo,
+        pushRef: "refs/heads/main",
+        remoteUrl: "git@github.com:customer-a-org/x.git",
+        json: true,
+      });
+      assert.equal(covered.exitCode, undefined, `${target.org}/${target.repo}: ${covered.stderr}`);
+    }
+  });
 });
 
 describe("check --remote-url — a destination that is not this repo's origin", () => {

@@ -10,6 +10,7 @@ import { parseEgressIntents, type EgressIntent } from "./egress-intent.js";
 import {
   decideEgress,
   describeDestination,
+  findApprovalDefault,
   formatReceipt,
   isHumanPresent,
   isModeDependentPath,
@@ -23,7 +24,7 @@ import {
 import type { Registry } from "./registry.js";
 import type { TrustBoundary } from "./trust-boundary.js";
 import { recordWorkingTree } from "./destination-cache.js";
-import type { EgressApproval } from "./egress-approval.js";
+import { mintApproval, type EgressApproval } from "./egress-approval.js";
 
 const REGISTRY: Registry = {
   engagements: [
@@ -828,15 +829,17 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.equal(shell.action === "deny" && shell.destination?.unresolved, "graphql-mutation");
     assert.ok(shell.action === "deny" && shell.reason.includes("UNKNOWN repository"), shell.action === "deny" ? shell.reason : "");
     assert.ok(shell.action === "deny" && !shell.reason.includes("acme/notes"));
-    // Only a wildcard approval could cover a destination nobody can name.
-    assert.ok(shell.action === "deny" && shell.reason.includes("`repo-aegis approve '*'`"));
+    // Since #151 (D7) no approval, `*` included, covers a destination nobody can
+    // name, so none is offered: it would be a dead end.
+    assert.ok(shell.action === "deny" && !shell.reason.includes("repo-aegis approve"), shell.action === "deny" ? shell.reason : "");
+    assert.ok(shell.action === "deny" && shell.reason.includes("re-run it from a terminal"));
     assert.deepEqual(askedFor, { org: "*", repo: "*" });
 
     const agent = decideEgress({ ...opts, capabilities: { ask: true } });
     assert.equal(agent.action, "ask");
   });
 
-  it("… an approval for the cwd's repository does not cover it; a wildcard one does", () => {
+  it("… an approval for the cwd's repository does not cover it, and neither does a `*` one (D7)", () => {
     const base = {
       intents: parseEgressIntents(ENQUEUE),
       cwd: priv,
@@ -858,8 +861,21 @@ describe("resolveDestinationOffline — real git config", () => {
       findApproval: dst => (dst?.org === "acme" && dst.repo === "notes" ? approval("acme", "notes") : null),
     });
     assert.equal(cwdOnly.action, "deny");
-    const wildcard = decideEgress({ ...base, findApproval: () => approval("*", "*") });
-    assert.equal(wildcard.action, "allow");
+    // Through the REAL matcher over a real store: a live `*` approval is not a
+    // global wildcard, and the `*`/`*` sentinel of an unresolved target is not
+    // a destination-less call, so it does not cover the mutation either.
+    const home = mkdtempSync(join(tmpdir(), "egress-policy-gql-"));
+    const prior = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = home;
+    try {
+      mintApproval({ target: { org: "*", repo: "*" } });
+      const wildcard = decideEgress({ ...base, findApproval: findApprovalDefault });
+      assert.equal(wildcard.action, "deny");
+    } finally {
+      if (prior === undefined) delete process.env["REPO_AEGIS_HOME"];
+      else process.env["REPO_AEGIS_HOME"] = prior;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("… and a person at the terminal is allowed through, with no cross-org verdict on the `*`", () => {

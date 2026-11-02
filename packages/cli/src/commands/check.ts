@@ -35,6 +35,7 @@ import {
   resolveCachedDestination,
   getRemoteUrl,
   findApproval,
+  approvalScopeOf,
   isHumanPresent,
   EGRESS_HUMAN_ENV,
   loadRegistry,
@@ -493,7 +494,13 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   // `isHumanPresent` tests stderr's TTY. stdin is git's ref list on this path
   // and is never the signal. A live approval minted at a terminal for this
   // destination (and ref, when scoped) stands in for the person.
-  const approval = dest.publicFacing && !isHumanPresent() ? findApproval(parsed, opts.pushRef) : null;
+  // A `*` approval covers only personalOrgs owners (D7); a push always has a
+  // destination, and a registry that could not be loaded has no personal orgs,
+  // so `*` then covers nothing (fail closed).
+  const approval =
+    dest.publicFacing && !isHumanPresent()
+      ? findApproval(parsed, opts.pushRef, approvalScopeOf(registry ?? {}))
+      : null;
   if (approval !== null) {
     try {
       appendAuditRecord({

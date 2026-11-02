@@ -316,7 +316,8 @@ export {
   INVALID_DESTINATION_LABEL,
 } from "./refusal.js";
 export type { RefusalInput, RefusalFix } from "./refusal.js";
-export { findApprovalDefault, SHAPE_RULE_CODES } from "./egress-policy.js";
+export { findApprovalDefault, findUncoveredStarDefault, SHAPE_RULE_CODES } from "./egress-policy.js";
+export type { UncoveredStarFinder } from "./egress-policy.js";
 // Human-minted, time-limited, destination-scoped approvals that satisfy
 // rule g from a shell with no TTY (`repo-aegis approve`).
 export {
@@ -328,12 +329,22 @@ export {
   mintApproval,
   revokeApprovals,
   findApproval,
+  findUncoveringStarApproval,
+  approvalScopeOf,
+  starApprovalCovers,
   normaliseRef,
   APPROVALS_FILE,
   DEFAULT_APPROVAL_TTL_MS,
   MAX_APPROVAL_TTL_MS,
 } from "./egress-approval.js";
-export type { EgressApproval, ApprovalStore, MintOptions } from "./egress-approval.js";
+export type {
+  EgressApproval,
+  ApprovalStore,
+  MintOptions,
+  ApprovalScope,
+  ApprovalScopeRegistry,
+  StarApprovalGap,
+} from "./egress-approval.js";
 
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";
