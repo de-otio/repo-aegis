@@ -46,9 +46,10 @@ import {
   type VisibilityLookup,
 } from "./visibility-lookup.js";
 import {
+  classifyApiEndpoint,
   graphqlOperationKind,
   intentRepoTargets,
-  parseApiEndpoint,
+  parseRepoRef,
   type EgressIntent,
   type EgressVerb,
   type GraphqlOperationKind,
@@ -63,7 +64,12 @@ import {
   type EgressApproval,
   type StarApprovalGap,
 } from "./egress-approval.js";
-import { ownerAdmitted, registeredOwners, UPSTREAM_ADMITTED_VERBS } from "./registered-owners.js";
+import {
+  firstUnadmittedCandidate,
+  ownerAdmitted,
+  registeredOwners,
+  UPSTREAM_ADMITTED_VERBS,
+} from "./registered-owners.js";
 import {
   refusal,
   safeDestination,
@@ -87,6 +93,9 @@ export type EgressCode =
   | "EGRESS_AFTER_CD"
   | "EGRESS_UNGUARDED_CHAIN"
   | "PAYLOAD_MODE_DEPENDENT_PATH"
+  | "EGRESS_ENV_OVERRIDE"
+  | "EGRESS_AFTER_STATE_CHANGE"
+  | "GH_PR_CREATE_IMPLICIT_TARGET"
   | "CROSS_ORG_EGRESS"
   | "PAYLOAD_MARKER_HIT"
   | "UNREGISTERED_OWNER_EGRESS"
@@ -94,7 +103,7 @@ export type EgressCode =
   | "SHIM_UNREACHABLE_NEEDS_HUMAN";
 
 /**
- * The shape rules (a–d): unconditional, they never reach rule h. Layers use
+ * The shape rules (a–d, b′, b″ and D10's): unconditional, they never reach rule h. Layers use
  * this to leave rule h's standing (`ruleH`, the skip note) out of a refusal
  * that rule h had no part in.
  */
@@ -103,6 +112,9 @@ export const SHAPE_RULE_CODES: ReadonlySet<EgressCode> = new Set<EgressCode>([
   "EGRESS_AFTER_CD",
   "EGRESS_UNGUARDED_CHAIN",
   "PAYLOAD_MODE_DEPENDENT_PATH",
+  "EGRESS_ENV_OVERRIDE",
+  "EGRESS_AFTER_STATE_CHANGE",
+  "GH_PR_CREATE_IMPLICIT_TARGET",
 ]);
 
 export interface Destination {
@@ -172,7 +184,15 @@ export interface Destination {
    * Rule e is skipped (there is no boundary to compare against); rule f
    * still scans the payload against a public-facing deny set.
    */
-  unresolved?: "graphql-mutation" | IntentUnresolved;
+  unresolved?: "graphql-mutation" | "self" | IntentUnresolved;
+  /**
+   * Every repository (or org, `repo: "*"`) the command can reach when that is more than one: a checkout
+   * with several GitHub remotes and no `gh-resolved`, or a command naming several repositories
+   * (`gh issue transfer 5 acme/y -R acme/x`). Rule h admits the destination only when EVERY candidate is
+   * admitted (M5). `org`/`repo` are then `*`/`*` with `unresolved: "ambiguous-target"`, so rule g still
+   * wants a person and no approval covers it.
+   */
+  candidates?: ReadonlyArray<{ org: string; repo: string }>;
 }
 
 export type EgressDecision =
@@ -572,20 +592,28 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
 
   if (intent.verb === "npm-publish") return null; // registry, not a repo
 
+  // A gist belongs to the authenticated account, not to the cwd's origin, and no `*` approval
+  // covers it (§3.3 item 9).
+  if (intent.verb === "gh-gist-create") return unresolvedDestination("self");
+
   // Several distinct targets (`--repo` plus a URL positional, …): no single
-  // destination, so a wildcard approval or a person.
+  // destination, so a person; rule h admits it only when EVERY one is registered (M5).
   const targets = intentRepoTargets(intent);
-  const distinct = new Set(targets.map(t => `${t.org}/${t.repo ?? "*"}`)).size;
-  if (distinct > 1) return unresolvedDestination("ambiguous-target");
+  const distinct = new Map(targets.map(t => [`${t.org}/${t.repo ?? "*"}`, { org: t.org, repo: t.repo ?? "*" }]));
+  if (distinct.size > 1) return unresolvedDestination("ambiguous-target", [...distinct.values()]);
   if (targets[0] !== undefined) {
     return withLocalClass({ org: targets[0].org, repo: targets[0].repo ?? "*" }, base, own, registry);
   }
   if (intent.apiEndpoint !== undefined) {
-    // The destination is in the path. `{owner}/{repo}` placeholders, `graphql`
-    // and the account-level endpoints carry none, and fall through to the
-    // cwd's origin — for the placeholders that is exactly what gh does.
-    const target = parseApiEndpoint(intent.apiEndpoint);
-    if (target !== null) return withLocalClass({ org: target.org, repo: target.repo ?? "*" }, base, own, registry);
+    // The destination is in the path. `{owner}/{repo}` placeholders carry none and fall through to the
+    // base repository — which is exactly where gh fills them in from.
+    const api = classifyApiEndpoint(intent.apiEndpoint);
+    if (api.kind === "named") return withLocalClass({ org: api.org, repo: api.repo ?? "*" }, base, own, registry);
+    // The authenticated account's own resources: not a repository, never covered by `*` (§3.3 item 4).
+    if (api.kind === "self") return unresolvedDestination("self");
+    // No owner in the path (`repositories/<id>/…`, `gists`, `projects/…`): never the cwd's origin.
+    if (api.kind === "opaque-endpoint") return unresolvedDestination("opaque-endpoint");
+    if (api.kind === "opaque") return unresolvedDestination("opaque-repo");
     // A GraphQL mutation's target is a node id, not a path, and not the cwd:
     // an `enqueuePullRequest` run from a private checkout reaches whichever
     // repository owns that PR (issue #113). A read keeps the cwd fallback.
@@ -593,11 +621,14 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
       return unresolvedDestination("graphql-mutation");
     }
   }
-  return own ? withLocalClass(own, base, own, registry) : null;
+  return implicitGhDestination(base, own, registry);
 };
 
 /** A destination nothing offline can name: `*`/`*`, treated as public (the fail-closed stance of `assumedPublic`). */
-function unresolvedDestination(reason: NonNullable<Destination["unresolved"]>): Destination {
+function unresolvedDestination(
+  reason: NonNullable<Destination["unresolved"]>,
+  candidates?: ReadonlyArray<{ org: string; repo: string }>,
+): Destination {
   return {
     org: "*",
     repo: "*",
@@ -607,7 +638,94 @@ function unresolvedDestination(reason: NonNullable<Destination["unresolved"]>): 
     classKnown: false,
     assumedPublic: true,
     unresolved: reason,
+    ...(candidates !== undefined && { candidates: [...candidates] }),
   };
+}
+
+/** gh's own remote priority when it has to choose a base repository: `upstream`, `github`, `origin`, then the rest. */
+function remotePriority(name: string): number {
+  const i = ["upstream", "github", "origin"].indexOf(name);
+  return i === -1 ? 3 : i;
+}
+
+type ImplicitCandidates = { kind: "repos"; repos: Array<{ org: string; repo: string }> } | { kind: "unresolved" };
+
+/**
+ * The repositories a `gh` command with no explicit target can write to (§3.3 item 3). gh does not simply
+ * use `origin`: it honours `remote.<name>.gh-resolved` (set by `gh repo set-default`, or by anyone with
+ * `git config`), which is either `base` (that remote) or `owner/repo` (THAT repository, whatever the
+ * remote's URL says). A value of any other shape cannot be read: unresolved. With no `gh-resolved` at
+ * all, every GitHub remote is a candidate. Reads the repository config only; never the network. A
+ * directory that is not a repository, or a failing `git`, yields no candidates (no destination).
+ */
+function implicitGhCandidates(base: string): ImplicitCandidates {
+  let text: string;
+  try {
+    text = execFileSync("git", ["config", "-z", "--get-regexp", "^remote\\..*\\.(url|gh-resolved)$"], {
+      cwd: base,
+      encoding: "utf8",
+      timeout: 2000,
+      maxBuffer: 256 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return { kind: "repos", repos: [] };
+  }
+  const urls = new Map<string, string[]>();
+  const resolvedValues = new Map<string, string[]>();
+  for (const entry of text.split("\0")) {
+    if (entry === "") continue;
+    const nl = entry.indexOf("\n");
+    const key = nl === -1 ? entry : entry.slice(0, nl);
+    const value = nl === -1 ? "" : entry.slice(nl + 1);
+    const m = /^remote\.(.+)\.(url|gh-resolved)$/.exec(key);
+    if (m === null) continue;
+    const table = m[2] === "url" ? urls : resolvedValues;
+    table.set(m[1]!, [...(table.get(m[1]!) ?? []), value]);
+  }
+  const byPriority = (names: Iterable<string>): string[] =>
+    [...names].sort((a, b) => remotePriority(a) - remotePriority(b) || (a < b ? -1 : a > b ? 1 : 0));
+  const repos = new Map<string, { org: string; repo: string }>();
+  const add = (p: { org: string; repo: string }): void => {
+    repos.set(`${p.org}/${p.repo}`, { org: p.org, repo: p.repo });
+  };
+  const remoteRepos = (name: string): Array<{ org: string; repo: string }> =>
+    (urls.get(name) ?? []).flatMap(u => {
+      const p = parseRemoteUrl(u);
+      return p === null ? [] : [{ org: p.org, repo: p.repo }];
+    });
+
+  if (resolvedValues.size > 0) {
+    for (const name of byPriority(resolvedValues.keys())) {
+      for (const v of resolvedValues.get(name)!) {
+        if (v === "base") {
+          const own = remoteRepos(name);
+          if (own.length === 0) return { kind: "unresolved" }; // `base` on a remote we cannot read
+          own.forEach(add);
+        } else {
+          const p = parseRepoRef(v);
+          if (p === null) return { kind: "unresolved" };
+          add(p);
+        }
+      }
+    }
+  } else {
+    for (const name of byPriority(urls.keys())) remoteRepos(name).forEach(add);
+  }
+  return { kind: "repos", repos: [...repos.values()] };
+}
+
+/** The destination of a `gh` write with no explicit target: the candidate set of {@link implicitGhCandidates}. */
+function implicitGhDestination(
+  base: string,
+  own: { org: string; repo: string } | null,
+  registry?: Registry,
+): Destination | null {
+  const found = implicitGhCandidates(base);
+  if (found.kind === "unresolved") return unresolvedDestination("gh-resolved");
+  if (found.repos.length === 0) return null;
+  if (found.repos.length === 1) return withLocalClass(found.repos[0]!, base, own, registry);
+  return unresolvedDestination("ambiguous-target", found.repos);
 }
 
 /**
@@ -680,6 +798,7 @@ export function describeDestination(d: Destination | null | undefined): string {
   if (d.unresolved === "graphql-mutation") {
     return "UNKNOWN repository (GraphQL mutation: the target is a node id, not resolvable offline; treated as public)";
   }
+  if (d.unresolved === "self") return "your own GitHub account (not a repository)";
   if (d.unresolved !== undefined) {
     return `UNKNOWN repository (${d.unresolved}: the target cannot be named offline; treated as public)`;
   }
@@ -698,6 +817,7 @@ export function describeDestination(d: Destination | null | undefined): string {
 export function describeDestinationForReceipt(d: Destination | null | undefined): string {
   if (!d) return "(destination not resolved)";
   if (d.unresolved === "graphql-mutation") return "UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC)";
+  if (d.unresolved === "self") return "YOUR OWN GITHUB ACCOUNT (NOT A REPOSITORY)";
   if (d.unresolved !== undefined) return `UNKNOWN (TARGET NOT RESOLVED: ${d.unresolved.toUpperCase()}, TREATED AS PUBLIC)`;
   if (safeDestination(d.org, d.repo) === null) return INVALID_DESTINATION_LABEL.toUpperCase();
   const vis = d.assumedPublic
@@ -843,6 +963,23 @@ const UNRESOLVED_REFUSAL: Readonly<Record<NonNullable<Destination["unresolved"]>
       "expansion or stdin, or points git at a directory it cannot name), so it cannot tell what it publishes or where",
     reissue: "a single plain command with literal arguments, such as gh issue comment --repo <owner>/<repo> …",
   },
+  "opaque-endpoint": {
+    why:
+      "The gh api endpoint does not name an owner (it uses a numeric id, or an account-level path such as gists or " +
+      "projects), so repo-aegis cannot check where the write lands",
+    reissue: "the repos/<owner>/<repo>/… form of the endpoint (for example gh api -X POST repos/<owner>/<repo>/issues …)",
+  },
+  "gh-resolved": {
+    why:
+      "This checkout's remote.<name>.gh-resolved setting is neither base nor an <owner>/<repo>, so repo-aegis cannot tell " +
+      "which repository gh will choose",
+    reissue: "the command with a literal --repo <owner>/<repo>",
+  },
+  // Admitted by rule h before any text is built; present because the table covers every reason.
+  self: {
+    why: "This command acts on your own GitHub account rather than on a repository",
+    reissue: "the same command from a terminal",
+  },
 };
 
 /**
@@ -930,6 +1067,32 @@ function unregisteredOwnerReason(
     });
   }
 
+  // Several candidate repositories (M5): name only the first one that is not admitted, which is in the
+  // command or the checkout's remotes, never a registry entry.
+  const unadmitted = firstUnadmittedCandidate(destination, intent, registeredOwners(registry), registry);
+  if (unadmitted !== null) {
+    const safeCandidate = safeDestination(unadmitted.org, unadmitted.repo);
+    const candidateOwner = safeCandidate?.org ?? "";
+    return refusal({
+      code,
+      destination: { verb, org: unadmitted.org, repo: unadmitted.repo },
+      what: `${verb} → (more than one possible repository)`,
+      why:
+        `This command can reach more than one repository, and gh may use either; the owner "${candidateOwner}" is not ` +
+        `registered (in neither personalOrgs nor any engagement), so repo-aegis cannot tell whether it is yours`,
+      approval: "No approval covers this",
+      fixes: [
+        { by: "agent", when: "To act on one repository", command: `${verb} --repo <owner>/<repo> …` },
+        {
+          by: "person",
+          when: `If "${candidateOwner}" is yours or a customer's`,
+          command: `repo-aegis engagements add --personal-org ${candidateOwner}`,
+          note: `or --github-org ${candidateOwner} under the engagement, for a customer`,
+        },
+      ],
+    });
+  }
+
   if (unresolved) {
     const text = UNRESOLVED_REFUSAL[destination.unresolved ?? "unparsed-shape"];
     return refusal({
@@ -993,6 +1156,63 @@ function unregisteredOwnerReason(
   });
 }
 
+/** Up to three labels, then a count: the labels are fixed strings or identifier-shaped variable names, never values. */
+function listLabels(labels: readonly string[]): string {
+  const shown = labels.slice(0, 3).join(", ");
+  return labels.length > 3 ? `${shown} and ${labels.length - 3} more` : shown;
+}
+
+function envOverrideReason(intent: EgressIntent, labels: readonly string[]): string {
+  const verb = describeVerb(intent.verb);
+  return refusal({
+    code: "EGRESS_ENV_OVERRIDE",
+    what: verb,
+    why:
+      `The command changes the environment or options it runs under (${listLabels(labels)}), which can make the gh shim, ` +
+      `the pre-push hook, gh or git read a different registry, config, remote or program than the one this guard judged, ` +
+      `so repo-aegis cannot tell where it would publish`,
+    approval: "No approval covers this",
+    fixes: [
+      {
+        by: "agent",
+        command: `${verb} …`,
+        note: "with no REPO_AEGIS_*, SRT_*, GIT_CONFIG*, GIT_SSH*, LD_*, DYLD_*, BASH_FUNC_*, HOME, PATH, SHELL or similar assignment or export, no env -i or env -u, and no --git-dir, --work-tree or git -c remote.*/url.*/core.sshCommand/core.hooksPath",
+      },
+    ],
+  });
+}
+
+function afterStateChangeReason(intent: EgressIntent, change: string): string {
+  const verb = describeVerb(intent.verb);
+  return refusal({
+    code: "EGRESS_AFTER_STATE_CHANGE",
+    what: verb,
+    why:
+      `An earlier part of this command line changes state that ${verb} reads (${change}), but repo-aegis judges the ` +
+      `command against the state as it is before anything runs, so it would judge a state that no longer holds`,
+    approval: "No approval covers this",
+    fixes: [
+      {
+        by: "agent",
+        command: `${verb} …`,
+        note: "run the change as its own call first, then re-issue the publish alone as the next call, so it is judged against the new state",
+      },
+    ],
+  });
+}
+
+function ghPrCreateImplicitTargetReason(): string {
+  return refusal({
+    code: "GH_PR_CREATE_IMPLICIT_TARGET",
+    what: "gh pr create",
+    why:
+      "Without --repo, gh chooses the base repository from this checkout's remotes and gh-resolved config, which can " +
+      "change between this check and the run",
+    approval: "No approval covers this; nothing is wrong with the destination, only with how it is named",
+    fixes: [{ by: "agent", command: "gh pr create --repo <owner>/<repo> …" }],
+  });
+}
+
 function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecision {
   const verb = describeVerb(intent.verb);
   const deny = (code: EgressCode, reason: string, destination?: Destination): EgressDecision => ({
@@ -1042,6 +1262,33 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           `session-unique path in the session scratchpad and pass that path.`,
       );
     }
+  }
+
+  // ---- b′: environment / option overrides on the egress segment (issue #151, §3.4) ----
+  // A shape rule like a–d: it needs no registry, and no approval lifts it, because the fix is to re-issue the
+  // command, not to get permission. The hook judges with its own environment; the shim and the pre-push hook
+  // read whatever the command's environment says, so an override would steer them elsewhere.
+  if (intent.envOverrides !== undefined && intent.envOverrides.length > 0) {
+    return deny("EGRESS_ENV_OVERRIDE", envOverrideReason(intent, intent.envOverrides));
+  }
+
+  // ---- b″: egress after a persistent state change in the same command (§3.4, F6) ----
+  if (intent.afterStateChange !== undefined) {
+    return deny("EGRESS_AFTER_STATE_CHANGE", afterStateChangeReason(intent, intent.afterStateChange));
+  }
+
+  // ---- D10: a non-interactive `gh pr create` must name its target ------------------
+  // Without --repo (or GH_REPO, or a URL), gh picks the base repository itself from `remote.*.gh-resolved`
+  // and the remote order: config the agent can edit, read at a different moment than this check. The `gh`
+  // counterpart of rule a. Unconditional (no registry needed); a person at a terminal may answer gh's prompts.
+  if (
+    intent.verb === "gh-pr-create" &&
+    !opts.humanPresent &&
+    intent.repoFlag === undefined &&
+    intent.envRepo === undefined &&
+    intent.positionalRepo === undefined
+  ) {
+    return deny("GH_PR_CREATE_IMPLICIT_TARGET", ghPrCreateImplicitTargetReason());
   }
 
   // ---- context ---------------------------------------------------------------
@@ -1280,7 +1527,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         );
       }
       const reason =
-        approveCommand === null
+        destination?.unresolved === "self"
+          ? `${head}: run it from a terminal. No approval covers a command on your own account (a '*' approval never does).${hint}`
+          : approveCommand === null
           ? `${head}: re-issue the command naming a valid owner/repo, or run it from a terminal.${starGap}${hint}`
           : `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.${starGap}${hint}`;
       return {

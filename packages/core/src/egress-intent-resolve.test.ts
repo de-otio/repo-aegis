@@ -156,7 +156,8 @@ describe("resolveDestinationOffline — what the parser now sees", () => {
 
     // The unresolved ones are refused too, naming no repository.
     const unresolved = decideEgress({
-      intents: parseEgressIntents("export GH_REPO=stranger/r && gh issue create --body x"),
+      // (`export` would trip shape rule b″ first, since PR 2c; `set -a` still exports the next assignment.)
+      intents: parseEgressIntents("set -a && GH_REPO=stranger/r && gh issue create --body x"),
       cwd: repo,
       registry: REGISTRY,
       registryState: "loaded",
