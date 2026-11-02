@@ -5,6 +5,7 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { setAncestryReaderForTests } from "@de-otio/repo-aegis-core";
 
 export class ExitError extends Error {
   constructor(public code: number) {
@@ -207,14 +208,20 @@ export function withoutGh<T>(dir: string, fn: () => T): T {
  * stderr/stdin is a terminal depends on how a developer invoked it; pinning it
  * makes both sides of a human-presence gate assertable WITHOUT the
  * `stderrIsTTY` seam, so the default (`process.stderr.isTTY`) path is tested.
+ *
+ * A pinned stderr TTY is also pinned "no agent above this process": the real
+ * process-ancestry walk would otherwise make these tests depend on whether the
+ * developer ran them under an agent host (issue #151, PR 2b).
  */
 export function withStreamTty<T>(stream: "stderr" | "stdin", isTty: boolean, fn: () => T): T {
   const target = process[stream];
   const desc = Object.getOwnPropertyDescriptor(target, "isTTY");
   Object.defineProperty(target, "isTTY", { value: isTty, configurable: true, writable: true });
+  if (stream === "stderr") setAncestryReaderForTests(() => []);
   try {
     return fn();
   } finally {
+    if (stream === "stderr") setAncestryReaderForTests(undefined);
     if (desc) Object.defineProperty(target, "isTTY", desc);
     else delete (target as { isTTY?: boolean }).isTTY;
   }
@@ -229,9 +236,11 @@ export async function withStreamTtyAsync<T>(
   const target = process[stream];
   const desc = Object.getOwnPropertyDescriptor(target, "isTTY");
   Object.defineProperty(target, "isTTY", { value: isTty, configurable: true, writable: true });
+  if (stream === "stderr") setAncestryReaderForTests(() => []);
   try {
     return await fn();
   } finally {
+    if (stream === "stderr") setAncestryReaderForTests(undefined);
     if (desc) Object.defineProperty(target, "isTTY", desc);
     else delete (target as { isTTY?: boolean }).isTTY;
   }

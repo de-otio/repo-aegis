@@ -8,7 +8,8 @@
 // Two properties are load-bearing and must survive every future edit:
 //
 //   1. **Shape rules are unconditional; context rules fail open.** Rules
-//      a–d need no registry, no class and no visibility, so they always
+//      a–d (and the pty-wrapper rule, `EGRESS_PTY_WRAPPER`, which runs before
+//      them) need no registry, no class and no visibility, so they always
 //      apply. Rules e–g read context that may be missing (an unparseable
 //      remote, an unclassified repo, a payload that does not exist); a
 //      guardrail must never block on its own inability to determine
@@ -73,6 +74,12 @@ import {
   type RefusalFix,
 } from "./refusal.js";
 import { registryPath } from "./paths.js";
+import {
+  defaultAncestryReader,
+  judgeAncestry,
+  type AncestryReader,
+  type AncestryVerdict,
+} from "./process-ancestry.js";
 import { homedir } from "node:os";
 import { parseRemoteUrl, parseRemoteUrlResolved, resolveRemoteUrl } from "./remote-url.js";
 import { resolvePushUrls, detectSshOverride } from "./push-urls.js";
@@ -84,6 +91,7 @@ import { computeDenySet } from "./deny-set.js";
 import { scanFile } from "./scan.js";
 
 export type EgressCode =
+  | "EGRESS_PTY_WRAPPER"
   | "PUSH_IMPLICIT_TARGET"
   | "EGRESS_AFTER_CD"
   | "EGRESS_UNGUARDED_CHAIN"
@@ -100,6 +108,7 @@ export type EgressCode =
  * that rule h had no part in.
  */
 export const SHAPE_RULE_CODES: ReadonlySet<EgressCode> = new Set<EgressCode>([
+  "EGRESS_PTY_WRAPPER",
   "PUSH_IMPLICIT_TARGET",
   "EGRESS_AFTER_CD",
   "EGRESS_UNGUARDED_CHAIN",
@@ -211,16 +220,72 @@ export type EgressDecision =
 /** Human-only escape for the "is a person present" test. Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE`. */
 export const EGRESS_HUMAN_ENV = "REPO_AEGIS_EGRESS_HUMAN";
 
+/** What {@link humanPresence} found, so a caller can report the ancestry case. */
+export interface HumanPresence {
+  present: boolean;
+  /**
+   * How the process ancestry bore on a TTY: `skipped` (no TTY, the env
+   * override decided, or the caller injected the TTY answer), `clear`, `agent`
+   * (an agent host or pty wrapper sits above this process: the TTY is not a
+   * person's) or `undeterminable` (the chain could not be read: today's TTY
+   * result stands, and the caller should say so).
+   */
+  ancestry: "skipped" | "clear" | "agent" | "undeterminable";
+  /** For `agent`: a fixed label such as `claude` or `script` (a process name, never an argument). */
+  ancestor?: string;
+}
+
 /**
  * Whether a human is at the keyboard for this invocation: a TTY on stderr
  * (stdin is often a pipe even for humans — git's ref list, a heredoc — so it
- * is never the signal), or the documented human-only override.
+ * is never the signal) that no agent host or pty wrapper sits above, or the
+ * documented human-only override.
+ *
+ * The TTY alone is a speed bump (issue #151, PR 2b, S10): `script -q /dev/null
+ * gh …` gives an agent's child a pty. So with a TTY the process ancestry is
+ * also read ({@link judgeAncestry}). Policy here, for rules g and h: an agent
+ * or pty-wrapper ancestor means NOT a person; an ancestry that cannot be read
+ * keeps today's TTY result (`undeterminable`, reported by the caller), because
+ * refusing a person's own publish is the worse failure. (`approve` and owner
+ * adds make the opposite choice: unreadable means refuse.)
+ *
+ * The ancestry belongs to the real process. A caller that injects
+ * `stderrIsTTY` has injected the whole answer, so no ancestry is read unless it
+ * also injects `ancestry`; tests that pin `process.stderr.isTTY` use
+ * `setAncestryReaderForTests`.
  */
+export function humanPresence(
+  env: NodeJS.ProcessEnv = process.env,
+  stderrIsTTY?: boolean,
+  ancestry?: AncestryReader,
+): HumanPresence {
+  if (env[EGRESS_HUMAN_ENV] === "1") return { present: true, ancestry: "skipped" };
+  const tty = stderrIsTTY ?? !!process.stderr.isTTY;
+  if (!tty) return { present: false, ancestry: "skipped" };
+  const reader = ancestry ?? (stderrIsTTY === undefined ? defaultAncestryReader : undefined);
+  if (reader === undefined) return { present: true, ancestry: "skipped" };
+  let verdict: AncestryVerdict;
+  try {
+    verdict = judgeAncestry(reader());
+  } catch {
+    verdict = { kind: "undeterminable", why: "the ancestry reader failed" };
+  }
+  switch (verdict.kind) {
+    case "agent":
+      return { present: false, ancestry: "agent", ancestor: verdict.ancestor };
+    case "undeterminable":
+      return { present: true, ancestry: "undeterminable" };
+    case "clear":
+      return { present: true, ancestry: "clear" };
+  }
+}
+
 export function isHumanPresent(
   env: NodeJS.ProcessEnv = process.env,
-  stderrIsTTY: boolean = !!process.stderr.isTTY,
+  stderrIsTTY?: boolean,
+  ancestry?: AncestryReader,
 ): boolean {
-  return stderrIsTTY || env[EGRESS_HUMAN_ENV] === "1";
+  return humanPresence(env, stderrIsTTY, ancestry).present;
 }
 
 /** Verbs that need a person regardless of destination: they are hard or impossible to undo. */
@@ -1116,6 +1181,38 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     ...(destination && { destination }),
     intent,
   });
+
+  // ---- pty wrapper (issue #151, PR 2b) -------------------------------------
+  // Unconditional and first: it needs no registry, no destination and no
+  // approval. A publish run under `script`/`unbuffer`/`expect`/`tmux`/`ssh -t`
+  // or an interpreter's pty module is handed a terminal, and every later layer
+  // (shim, pre-push, rules g and h) reads a terminal as a person. Refusing here
+  // keeps the agent from manufacturing that signal. The fix is to re-issue the
+  // command plainly; a person who needs the publish runs it themselves.
+  if (intent.ptyWrapper !== undefined) {
+    return deny(
+      "EGRESS_PTY_WRAPPER",
+      refusal({
+        code: "EGRESS_PTY_WRAPPER",
+        what: verb,
+        why:
+          `Running a publish under ${intent.ptyWrapper} gives it a terminal, and repo-aegis treats a terminal as ` +
+          `a person, so a wrapper like this could stand in for the human who must approve it`,
+        approval: "No approval covers this",
+        fixes: [
+          {
+            by: "agent",
+            command: "the same command run directly, without script, unbuffer, expect, tmux, screen, socat, ssh -t or a pty module",
+          },
+          {
+            by: "person",
+            when: "If it needs a person's go-ahead (an approval or an unregistered owner)",
+            step: "runs it, or mints the approval, from their own terminal",
+          },
+        ],
+      }),
+    );
+  }
 
   // ---- a: bare `git push` --------------------------------------------------
   if (intent.verb === "git-push" && (intent.remote === undefined || intent.refspec === undefined)) {

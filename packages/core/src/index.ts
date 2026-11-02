@@ -293,6 +293,7 @@ export {
   refreshDestinationVisibility,
   scanPayloadAgainstDestination,
   isHumanPresent,
+  humanPresence,
   isModeDependentPath,
   describeVerb,
   describeDestination,
@@ -352,7 +353,26 @@ export {
   SHAPE_RULE_CODES,
   unregisteredOwnerReason,
 } from "./egress-policy.js";
-export type { UncoveredStarFinder } from "./egress-policy.js";
+export type { UncoveredStarFinder, HumanPresence } from "./egress-policy.js";
+// Is a person behind this terminal? The process-ancestry walk (issue #151, PR 2b).
+export {
+  readProcessAncestry,
+  judgeAncestry,
+  classifyAncestor,
+  parsePsLine,
+  parseProcEntry,
+  defaultAncestryReader,
+  setAncestryReaderForTests,
+  MAX_ANCESTRY_DEPTH,
+} from "./process-ancestry.js";
+export type { AncestorInfo, AncestryReader, AncestryVerdict, ProcessLookup } from "./process-ancestry.js";
+// Commands only a person may run, refused in agent Bash text (issue #151, PR 2b).
+export {
+  AGENT_RAN_HUMAN_COMMAND,
+  findHumanOnlyCommand,
+  humanCommandRefusal,
+} from "./human-commands.js";
+export type { HumanOnlyHit, HumanOnlyKind } from "./human-commands.js";
 // Human-minted, time-limited, destination-scoped approvals that satisfy
 // rule g from a shell with no TTY (`repo-aegis approve`).
 export {

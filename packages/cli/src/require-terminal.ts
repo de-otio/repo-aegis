@@ -11,22 +11,87 @@
 // to mint an approval or register an owner would have turned them into a
 // standing grant.
 //
-// SEAM (issue #151, PR 2b): the TTY test is a speed bump, not proof of a
-// person. A pty wrapper (`script`, `tmux new -d`, ...) gives a child a
-// terminal. The planned hardening (walk the process ancestry and refuse when
-// an agent host is an ancestor) belongs in `isHumanTerminal()` below, so every
-// caller picks it up at once. Do not add a second check at a call site.
+// The TTY test is a speed bump, not proof of a person (issue #151, PR 2b): a
+// pty wrapper (`script`, `unbuffer`, `expect`, `python -c 'import pty…'`,
+// `ssh -tt localhost`) gives an agent's child a terminal. So `isHumanTerminal()`
+// below also walks the process ancestry (core/process-ancestry.ts) and says no
+// when an agent host (`claude`, `codex`, `gemini`) or a pty wrapper sits above
+// this process. Every caller picks it up at once; do not add a second check at a
+// call site.
+//
+// Policy for these gates, which differs from rules g/h on purpose: if the
+// ancestry CANNOT be read (no `/proc`, `ps` unavailable or blocked, as inside an
+// agent's sandbox), the answer is "not a person". Minting an approval or
+// registering an owner is the thing an agent must never do for itself, and a
+// person at a normal terminal always has a readable process table. (Rules g/h
+// make the opposite choice, because refusing a person's own publish is the
+// worse failure there.)
+//
+// RESIDUAL: an agent with code execution can still `osascript` / AppleScript
+// `do script` a command into the user's own terminal window, or start a
+// detached process outside its own tree (`launchctl submit`, `at`, cron) that
+// owns a pty with no agent ancestor. `tmux new -d` / `screen -dm` reparent under
+// a server whose parent is init. The agent hook's text-level refusals
+// (`AGENT_RAN_HUMAN_COMMAND`, `EGRESS_PTY_WRAPPER`) cover the shapes it can read;
+// the rest needs a presence signal an agent cannot forge (a Keychain item with a
+// user-presence ACL / Touch ID), which is tracked as a follow-up.
 import { readSync } from "node:fs";
+import { defaultAncestryReader, judgeAncestry, type AncestryReader } from "@de-otio/repo-aegis-core";
 import { emitError, type OutputOptions } from "./format.js";
 
-export interface RequireTerminalOptions extends OutputOptions {
-  /** Test seam: defaults to `process.stderr.isTTY`. */
+export interface HumanTerminalOptions {
+  /** Test seam: defaults to `process.stderr.isTTY`. Injecting it injects the whole answer (no ancestry read) unless `ancestry` is given too. */
   stderrIsTTY?: boolean;
+  /** Test seam: reads the process chain, nearest parent first, or `null` when it cannot be read. Defaults to the real process tree. */
+  ancestry?: AncestryReader;
 }
 
-/** True when this process is attached to a person's terminal. The one place to harden. */
-export function isHumanTerminal(opts: { stderrIsTTY?: boolean } = {}): boolean {
-  return opts.stderrIsTTY ?? !!process.stderr.isTTY;
+export interface RequireTerminalOptions extends OutputOptions, HumanTerminalOptions {}
+
+export type TerminalVerdict =
+  | { human: true }
+  | { human: false; why: "no-tty" }
+  | { human: false; why: "agent-ancestor"; ancestor: string }
+  | { human: false; why: "ancestry-undeterminable" };
+
+/** Why this process is, or is not, behind a person's terminal. */
+export function terminalVerdict(opts: HumanTerminalOptions = {}): TerminalVerdict {
+  const tty = opts.stderrIsTTY ?? !!process.stderr.isTTY;
+  if (!tty) return { human: false, why: "no-tty" };
+  const reader = opts.ancestry ?? (opts.stderrIsTTY === undefined ? defaultAncestryReader : undefined);
+  if (reader === undefined) return { human: true };
+  let verdict;
+  try {
+    verdict = judgeAncestry(reader());
+  } catch {
+    return { human: false, why: "ancestry-undeterminable" };
+  }
+  if (verdict.kind === "agent") return { human: false, why: "agent-ancestor", ancestor: verdict.ancestor };
+  if (verdict.kind === "undeterminable") return { human: false, why: "ancestry-undeterminable" };
+  return { human: true };
+}
+
+/**
+ * True when this process is attached to a person's terminal: stderr is a TTY
+ * and no agent host or pty wrapper is an ancestor. The one place to harden.
+ */
+export function isHumanTerminal(opts: HumanTerminalOptions = {}): boolean {
+  return terminalVerdict(opts).human;
+}
+
+/** The sentence added to a refusal when a terminal IS attached but is not trusted. */
+function ancestryNote(v: TerminalVerdict): string {
+  if (v.human || v.why === "no-tty") return "";
+  if (v.why === "agent-ancestor") {
+    return (
+      ` A terminal is attached, but it runs under ${v.ancestor}, an agent host or terminal wrapper, so it is not ` +
+      `treated as a person's. Run this in your own terminal window.`
+    );
+  }
+  return (
+    " A terminal is attached, but repo-aegis could not read the process list to confirm that no agent runs it " +
+    "(a sandbox without `ps` does this). Run this in your own terminal window, outside any agent sandbox."
+  );
 }
 
 /**
@@ -39,8 +104,9 @@ export function requireTerminal(
   message: string,
   opts: RequireTerminalOptions = {},
 ): void {
-  if (isHumanTerminal(opts)) return;
-  emitError({ code, error: message }, opts);
+  const verdict = terminalVerdict(opts);
+  if (verdict.human) return;
+  emitError({ code, error: message + ancestryNote(verdict) }, opts);
 }
 
 export interface ConfirmOptions extends RequireTerminalOptions {

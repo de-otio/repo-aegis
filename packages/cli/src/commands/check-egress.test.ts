@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv, lastJsonLine, scrubGitEnv } from "../_test-utils.js";
 import { check } from "./check.js";
-import { approvalsPath, mintApproval } from "@de-otio/repo-aegis-core";
+import { approvalsPath, mintApproval, setAncestryReaderForTests } from "@de-otio/repo-aegis-core";
 
 let tmp: string;
 let originalCwd: string;
@@ -102,7 +102,9 @@ function makeRepo(name: string, opts: RepoOpts = {}): string {
  * `isHumanPresent` tests `process.stderr.isTTY`, and whether the test runner's
  * stderr happens to be a terminal depends on how the developer invoked it —
  * exactly the environment dependence CONTRIBUTING forbids. Pinning it makes
- * both sides of the gate assertable.
+ * both sides of the gate assertable. It also reads the process ancestry (an
+ * agent host above this process means "not a person"), which depends on who
+ * ran the suite, so that is pinned clear too.
  */
 function withStderrTty<T>(isTty: boolean, fn: () => T): T {
   const desc = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
@@ -111,9 +113,11 @@ function withStderrTty<T>(isTty: boolean, fn: () => T): T {
     configurable: true,
     writable: true,
   });
+  setAncestryReaderForTests(() => []);
   try {
     return fn();
   } finally {
+    setAncestryReaderForTests(undefined);
     if (desc) Object.defineProperty(process.stderr, "isTTY", desc);
     else delete (process.stderr as { isTTY?: boolean }).isTTY;
   }

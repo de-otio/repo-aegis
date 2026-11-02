@@ -165,6 +165,14 @@ export interface EgressIntent {
   cwdOverride?: string;
   /** Zero-based index of the segment this intent came from. */
   segmentIndex: number;
+  /**
+   * Set when the segment runs under something that hands its child a pty
+   * (`script`, `unbuffer`, `expect`, `tmux`, `ssh -t`, an interpreter's pty
+   * module, …): a fixed label such as `script`. A terminal is read as a person
+   * by the shim and pre-push hook, so `decideEgress` refuses such an intent
+   * outright (`EGRESS_PTY_WRAPPER`). Never carries part of the command line.
+   */
+  ptyWrapper?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -2366,9 +2374,73 @@ function hereStrings(tokens: readonly string[]): string[] {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// pty wrappers (issue #151, PR 2b)
+// ---------------------------------------------------------------------------
+
+/** Commands whose job is to give another command a pseudo-terminal, or that hold one open for it. */
+const PTY_WRAPPER_COMMANDS = new Set([
+  "script", "unbuffer", "expect", "autoexpect", "faketty", "socat", "ttyrec", "winpty", "asciinema",
+  "tmux", "screen", "byobu", "zellij", "dtach", "abduco", "reptyr",
+]);
+
+/** Interpreters whose program text can open a pty. */
+const PTY_INTERPRETER_RE = /^(?:python[\d.]*|perl|ruby|node|nodejs|php|lua|tclsh|bun|deno|awk|gawk)$/;
+
+/**
+ * Text that opens a pty, or runs a wrapper that does: `import pty`, `-rpty`,
+ * `pexpect`, `openpty`, `node-pty`, `IO::Pty`, or `script`/`unbuffer`/`tmux`…
+ * as a word inside a string handed to `os.system` / `subprocess`.
+ */
+const PTY_TEXT_RE = new RegExp(
+  "(?:^|[^A-Za-z])-?r?(?:pty|pexpect|ptyprocess)(?![A-Za-z])|openpty|forkpty|node-pty|IO::Pty|" +
+    `(?:^|[^A-Za-z0-9_./-])(?:${[...PTY_WRAPPER_COMMANDS].join("|")})(?![A-Za-z0-9_-])`,
+);
+
+/** `ssh -t`, `-tt`, `-tq`, `-o RequestTTY=force|yes`: a forced pty on the far side (and `ssh -tt localhost` is local). */
+function sshForcesTty(args: readonly string[]): boolean {
+  return args.some(
+    (a, i) =>
+      /^-[A-Za-z0-9]*t[A-Za-z0-9]*$/.test(a) ||
+      /^-?o?RequestTTY=(?:force|yes)$/i.test(a) ||
+      (a === "-o" && /^RequestTTY[= ](?:force|yes)$/i.test(args[i + 1] ?? "")),
+  );
+}
+
+/**
+ * The label of the pty-providing wrapper this segment runs under, or null.
+ * Looks through the transparent wrappers (`sudo script …`, `env tmux …`), reads
+ * the command word, and for an interpreter reads its program text and heredocs.
+ * For any other command (`find -exec script …`, `xargs`, `parallel`) a pty
+ * wrapper's name as a whole argument counts. `gh`, `git` and the package
+ * managers are exempt from that last rule: their arguments are data (a title
+ * that says "script"), and the parser already models them.
+ */
+function segmentPtyWrapper(seg: Segment): string | null {
+  try {
+    const raw = seg.funcDef ? seg.tokens.slice(1) : seg.tokens;
+    const resolved = resolveCommand(stripRedirections(raw), []);
+    if (resolved.start >= resolved.tokens.length) return null;
+    const cmd = baseName(resolved.tokens[resolved.start]!);
+    const args = resolved.tokens.slice(resolved.start + 1);
+    if (PTY_WRAPPER_COMMANDS.has(cmd)) return cmd;
+    if (cmd === "ssh" && sshForcesTty(args)) return "ssh -t";
+    if (PTY_INTERPRETER_RE.test(cmd) && PTY_TEXT_RE.test([...args, ...seg.heredocs].join("\n"))) {
+      return "an interpreter's pty module";
+    }
+    if (cmd === "gh" || cmd === "git" || cmd === "npm" || cmd === "pnpm" || cmd === "yarn") return null;
+    const inner = args.map(baseName).find(a => PTY_WRAPPER_COMMANDS.has(a));
+    return inner ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
   if (typeof command !== "string" || command.length === 0) return [];
   const segments = tokenise(command);
+  // Computed up front: the segment callback below returns early in many places.
+  const ptyBySegment = segments.map(segmentPtyWrapper);
   const intents: EgressIntent[] = [];
   let precededByCd = false;
   let envOverridden = ctx.envOverridden;
@@ -2523,5 +2595,22 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
     }
   });
 
-  return intents;
+  // A nested parse already flagged its own intents; they now carry this segment's index.
+  if (!ptyBySegment.some(p => p !== null)) return intents;
+  // A pty-wrapped segment that mentions gh / git push in a shape the parser and its backstop did not read
+  // (`socat - EXEC:'gh …',pty`) still gets a fail-closed intent, so the wrapper is refused.
+  ptyBySegment.forEach((pty, idx) => {
+    if (pty === null || intents.some(i => i.segmentIndex === idx)) return;
+    const seg = segments[idx]!;
+    try {
+      const s = sentinelFor([...seg.tokens, ...seg.heredocs].join(" "), { precededByCd: false, joinedBy: seg.joinedBy, segmentIndex: idx });
+      if (s !== null) intents.push(s);
+    } catch {
+      /* the sentinel is best-effort */
+    }
+  });
+  return intents.map(i => {
+    const pty = ptyBySegment[i.segmentIndex];
+    return pty != null && i.ptyWrapper === undefined ? { ...i, ptyWrapper: pty } : i;
+  });
 }

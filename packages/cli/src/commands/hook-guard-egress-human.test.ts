@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Richard Myers and contributors.
+//
+// Subprocess tests for the two PR 2b refusals in `repo-aegis hook guard-egress`
+// (issue #151; plan §8.1 S10 and §8.4 F5):
+//
+//   - AGENT_RAN_HUMAN_COMMAND: any Bash command whose text runs a command only
+//     a person may run (approve, owner adds, upstreams add, init
+//     --migrate-classify/--force), through any wrapper, alias or interpreter,
+//     even with a terminal and even with the human-only env override set;
+//   - EGRESS_PTY_WRAPPER: an egress segment run under a pty-providing wrapper,
+//     with no registry and no approval able to lift it.
+import { describe, it, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { cliBuilt, cliPath } from "../_subprocess-utils.js";
+import { scrubGitEnv } from "../_test-utils.js";
+import { approvalsPath, mintApproval } from "@de-otio/repo-aegis-core";
+
+let restoreGitEnv: () => void;
+let tmp: string;
+before(() => {
+  restoreGitEnv = scrubGitEnv();
+  tmp = realpathSync(mkdtempSync(join(tmpdir(), "repo-aegis-guard-human-test-")));
+});
+after(() => {
+  restoreGitEnv();
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+interface GuardResult {
+  stdout: string;
+  stderr: string;
+  code: number | null;
+}
+
+function aegisHome(name: string, registry?: string): string {
+  const dir = join(tmp, `${name}-aegis`);
+  mkdirSync(join(dir, "markers"), { recursive: true });
+  mkdirSync(join(dir, "state"), { recursive: true });
+  if (registry !== undefined) writeFileSync(join(dir, "engagements.yaml"), registry);
+  return dir;
+}
+
+function runGuard(command: string, home: string, opts: { human?: boolean; agent?: string } = {}): GuardResult {
+  const env: NodeJS.ProcessEnv = { ...process.env, REPO_AEGIS_HOME: home, REPO_AEGIS_VISIBILITY_LOOKUP: "0" };
+  delete env["REPO_AEGIS_EGRESS_HUMAN"];
+  delete env["REPO_AEGIS_ASSUME_PUBLIC"];
+  if (opts.human) env["REPO_AEGIS_EGRESS_HUMAN"] = "1";
+  const r = spawnSync(process.execPath, [cliPath, "hook", "guard-egress", ...(opts.agent ? ["--agent", opts.agent] : [])], {
+    cwd: tmp,
+    env,
+    encoding: "utf8",
+    input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command }, cwd: tmp }),
+  });
+  return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+}
+
+const REGISTRY = "schemaVersion: 2\npersonalOrgs:\n  - acme\nengagements: []\n";
+
+/** The shapes a person-only command can arrive in. Each must be refused. */
+const HUMAN_COMMANDS: ReadonlyArray<readonly [label: string, command: string]> = [
+  ["approve", "repo-aegis approve '*'"],
+  ["approve a repo", "repo-aegis approve acme/svc --ttl 1h"],
+  ["owner add --personal-org", "repo-aegis engagements add --personal-org stranger"],
+  ["owner add --github-org", "repo-aegis engagements add customer-a --github-org customer-a-org"],
+  ["upstreams add", "repo-aegis upstreams add upstream-org/lib"],
+  ["init --migrate-classify", "repo-aegis init --migrate-classify"],
+  ["init --force", "repo-aegis init --force"],
+  // wrappers and shells
+  ["sudo", "sudo -u someone repo-aegis approve '*'"],
+  ["env", "env FOO=1 repo-aegis approve '*'"],
+  ["timeout", "timeout 5 repo-aegis approve '*'"],
+  ["bash -c", "bash -c 'repo-aegis approve *'"],
+  ["eval", `eval "repo-aegis engagements add --personal-org stranger"`],
+  ["&& chain", "ls && repo-aegis approve '*'"],
+  ["command substitution", "echo $(repo-aegis approve '*')"],
+  // pty wrappers and multiplexers
+  ["script", "script -q /dev/null repo-aegis approve '*'"],
+  ["unbuffer", "unbuffer repo-aegis approve '*'"],
+  ["expect", "expect -c 'spawn repo-aegis approve *; interact'"],
+  ["tmux new -d", `tmux new -d "repo-aegis approve '*'"`],
+  ["tmux send-keys", "tmux send-keys -t 0 'repo-aegis approve *' Enter"],
+  ["screen -dm", "screen -dm repo-aegis upstreams add upstream-org/lib"],
+  ["ssh -tt", "ssh -tt localhost repo-aegis approve '*'"],
+  ["socat pty", "socat - EXEC:'repo-aegis approve *',pty"],
+  // interpreters and heredocs
+  ["python subprocess", `python3 -c 'import subprocess; subprocess.run(["repo-aegis","approve","*"])'`],
+  ["python pty", `python3 -c 'import pty; pty.spawn(["repo-aegis","approve","*"])'`],
+  ["heredoc", "cat > mint.sh <<EOF\nrepo-aegis approve '*'\nEOF\nbash mint.sh"],
+  ["node -e", `node -e "require('child_process').execSync('repo-aegis approve *')"`],
+  // aliases, functions, quoting, paths
+  ["alias", "alias ra=repo-aegis; ra approve '*'"],
+  ["function", `ra() { repo-aegis "$@"; }; ra engagements add --github-org x`],
+  ["split quotes", `"repo-""aegis" app\\rove '*'`],
+  ["absolute path", "/opt/homebrew/bin/repo-aegis approve '*'"],
+  ["node dist", "node packages/cli/dist/index.js approve '*'"],
+  ["npx", "npx -y @de-otio/repo-aegis approve '*'"],
+];
+
+describe("hook guard-egress — AGENT_RAN_HUMAN_COMMAND", { skip: !cliBuilt() }, () => {
+  for (const [label, command] of HUMAN_COMMANDS) {
+    it(`refuses: ${label}`, () => {
+      const home = aegisHome("human-cmd", REGISTRY);
+      const r = runGuard(command, home);
+      assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+      const body = JSON.parse(r.stderr) as { code: string; error: string };
+      assert.equal(body.code, "AGENT_RAN_HUMAN_COMMAND");
+      const decision = JSON.parse(r.stdout) as {
+        hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string };
+      };
+      assert.equal(decision.hookSpecificOutput.permissionDecision, "deny");
+      assert.equal(decision.hookSpecificOutput.permissionDecisionReason, body.error);
+    });
+  }
+
+  it("the message answers the five §3.9 questions and carries nothing from the command line", () => {
+    const home = aegisHome("human-msg", REGISTRY);
+    const r = runGuard("repo-aegis engagements add customer-zeta --github-org zeta-org", home);
+    const { error } = JSON.parse(r.stderr) as { error: string };
+    assert.match(error, /^repo-aegis engagements add --personal-org\/--github-org: refused\./); // what
+    assert.match(error, /vouches for a publish or an owner/); // why
+    assert.match(error, /No approval covers this/); // approval
+    assert.match(error, /A person runs it in their own terminal: repo-aegis engagements add/); // fix + who
+    assert.match(error, /Agents: do not run that yourself/);
+    assert.match(error, /\[AGENT_RAN_HUMAN_COMMAND, see doc\/agent-guide\.md#agent_ran_human_command\]/); // where
+    assert.doesNotMatch(error, /customer-zeta|zeta-org/);
+  });
+
+  it("refuses with no registry at all (it needs none)", () => {
+    const home = aegisHome("human-noreg");
+    assert.equal(runGuard("repo-aegis approve '*'", home).code, 2);
+  });
+
+  it("refuses even when a person is declared present (REPO_AEGIS_EGRESS_HUMAN=1)", () => {
+    const home = aegisHome("human-env", REGISTRY);
+    const r = runGuard("repo-aegis approve '*'", home, { human: true });
+    assert.equal(r.code, 2);
+    assert.equal((JSON.parse(r.stderr) as { code: string }).code, "AGENT_RAN_HUMAN_COMMAND");
+  });
+
+  it("refuses for the Codex and Gemini hosts too", () => {
+    const home = aegisHome("human-agents", REGISTRY);
+    for (const agent of ["codex", "gemini"]) {
+      assert.equal(runGuard("repo-aegis approve '*'", home, { agent }).code, 2, agent);
+    }
+  });
+
+  it("leaves ordinary repo-aegis and git commands alone", () => {
+    const home = aegisHome("human-ok", REGISTRY);
+    for (const command of [
+      "repo-aegis status",
+      "repo-aegis scan .",
+      "repo-aegis engagements add customer-a",
+      "repo-aegis upstreams list",
+      "repo-aegis doctor --json",
+      "git commit -m 'refuse repo-aegis approve in agent text'",
+      "cd /x/repo-aegis && git status",
+    ]) {
+      const r = runGuard(command, home);
+      assert.equal(r.code, 0, `${command}\n${r.stderr}`);
+      assert.equal(r.stdout, "");
+    }
+  });
+});
+
+describe("hook guard-egress — EGRESS_PTY_WRAPPER", { skip: !cliBuilt() }, () => {
+  const WRAPPED: ReadonlyArray<readonly [label: string, command: string]> = [
+    ["script (BSD)", "script -q /dev/null gh issue create --repo acme/svc --title x"],
+    ["script (util-linux)", "script -qc 'gh issue create --repo acme/svc --title x' /dev/null"],
+    ["unbuffer", "unbuffer gh issue create --repo acme/svc --title x"],
+    ["expect", "expect -c 'spawn gh issue create --repo acme/svc; interact'"],
+    ["faketty", "faketty git push origin main"],
+    ["socat", "socat - EXEC:'gh issue create --repo acme/svc',pty"],
+    ["ssh -tt", "ssh -tt localhost gh issue create --repo acme/svc"],
+    ["tmux new-session", "tmux new-session -d 'gh issue create --repo acme/svc --title x'"],
+    ["tmux send-keys", "tmux send-keys -t 0 'gh issue create --repo acme/svc' Enter"],
+    ["screen -dm", "screen -dm gh issue create --repo acme/svc --title x"],
+    ["python pty.spawn", `python3 -c 'import pty; pty.spawn(["gh","issue","create","--repo","acme/svc"])'`],
+    ["perl IO::Pty", "perl -MIO::Pty -e 'system(q(gh issue create --repo acme/svc))'"],
+    ["ruby PTY", `ruby -rpty -e 'PTY.spawn("gh issue create --repo acme/svc")'`],
+    ["inside bash -c", `bash -c "script -q /dev/null gh issue create --repo acme/svc"`],
+  ];
+
+  for (const [label, command] of WRAPPED) {
+    it(`refuses: ${label}`, () => {
+      const home = aegisHome("pty", REGISTRY);
+      const r = runGuard(command, home);
+      assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+      const body = JSON.parse(r.stderr) as { code: string; error: string };
+      assert.equal(body.code, "EGRESS_PTY_WRAPPER");
+      assert.match(body.error, /No approval covers this/);
+      assert.match(body.error, /\[EGRESS_PTY_WRAPPER, see doc\/agent-guide\.md#egress_pty_wrapper\]/);
+    });
+  }
+
+  it("needs no registry", () => {
+    const home = aegisHome("pty-noreg");
+    const r = runGuard("script -q /dev/null gh issue create --repo acme/svc --title x", home);
+    assert.equal(r.code, 2);
+    assert.equal((JSON.parse(r.stderr) as { code: string }).code, "EGRESS_PTY_WRAPPER");
+  });
+
+  it("is not lifted by a live '*' approval or by REPO_AEGIS_EGRESS_HUMAN=1", () => {
+    const home = aegisHome("pty-approved", REGISTRY);
+    mintApproval({ target: { org: "*", repo: "*" }, ttlMs: 15 * 60_000, by: "test", path: approvalsPath(home) });
+    for (const human of [false, true]) {
+      const r = runGuard("script -q /dev/null gh issue create --repo acme/svc --title x", home, { human });
+      assert.equal(r.code, 2, `human=${human}\n${r.stderr}`);
+      assert.equal((JSON.parse(r.stderr) as { code: string }).code, "EGRESS_PTY_WRAPPER");
+    }
+  });
+
+  it("does not touch a plain gh command or a title that says 'script'", () => {
+    const home = aegisHome("pty-plain", REGISTRY);
+    const r = runGuard("gh issue create --repo acme/svc --title script --body 'tmux and screen'", home, { human: true });
+    assert.equal(r.code, 0, r.stderr);
+  });
+});

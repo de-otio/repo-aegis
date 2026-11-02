@@ -24,6 +24,7 @@ import { check } from "./check.js";
 import {
   approvalsPath,
   mintApproval,
+  setAncestryReaderForTests,
   HOOK_SCRIPTS,
   parseEgressIntents,
   resolveDestinationOffline,
@@ -154,13 +155,19 @@ function urlsGitHandsPrePush(repo: string, remote: string): string[] {
   return readFileSync(record, "utf8").split("\n").filter(Boolean);
 }
 
-/** Pin stderr's TTY-ness: `isHumanPresent` tests it. */
+/**
+ * Pin stderr's TTY-ness: `isHumanPresent` tests it. It also reads the process
+ * ancestry (an agent host above this process means "not a person"), and this
+ * suite may itself run under one, so the ancestry is pinned clear too.
+ */
 function withStderrTty<T>(isTty: boolean, fn: () => T): T {
   const desc = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
   Object.defineProperty(process.stderr, "isTTY", { value: isTty, configurable: true, writable: true });
+  setAncestryReaderForTests(() => []);
   try {
     return fn();
   } finally {
+    setAncestryReaderForTests(undefined);
     if (desc) Object.defineProperty(process.stderr, "isTTY", desc);
     else delete (process.stderr as { isTTY?: boolean }).isTTY;
   }
