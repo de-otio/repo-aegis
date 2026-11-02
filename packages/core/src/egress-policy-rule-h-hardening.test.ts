@@ -6,7 +6,17 @@
 //   - the repair hint names the resolved registry path;
 //   - nothing but the registry's own owner lists moves rule h (§8.3): not a
 //     destination-cache entry, not a local `repo-aegis.class`.
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
+import { scrubGitEnv } from "./_test-git-env.js";
+
+// Hermetic git env: the destination resolver reads GIT_SSH_COMMAND / core.sshCommand.
+let restoreGitEnv: () => void;
+before(() => {
+  restoreGitEnv = scrubGitEnv();
+});
+after(() => {
+  restoreGitEnv();
+});
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
