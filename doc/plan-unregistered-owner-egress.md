@@ -617,7 +617,9 @@ Run `test-critic` on the PR 1 and PR 2 suites before merge.
   `personalOrgs` owners, and there are none. Such operators need
   `approve <org>/*` or `approve <org>/<repo>`; `approve '*'` says so when it
   is minted. *(Corrected during PR 3: this line used to say "no change",
-  which contradicted D7.)*
+  which contradicted D7. Operator confirmed 2026-11-02. Reason: deleting the
+  registry file, which an agent can do (R1), already switches rule h off.
+  It must not also turn every `*` approval into "publish anywhere".)*
 - **Older binaries** reading a registry with `allowedUpstreams` ignore it,
   through `.passthrough()`.
 - **Agents:** the guide's new rows tell an agent that `UNREGISTERED_OWNER_EGRESS`
