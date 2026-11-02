@@ -436,6 +436,23 @@ function pushRefusal(
 }
 
 /**
+ * The "does an approval help?" sentence of the PUBLIC_PUSH_NEEDS_HUMAN refusal.
+ *
+ * TODO(pr3-approval-scoping, plan D7 / §3.9): once `*` approvals cover only
+ * `personalOrgs` owners, the hook says so when a live `*` approval exists but
+ * does not cover the destination ("A '*' approval (<id>, until <time>) is live,
+ * but since 0.11.0 '*' covers only personalOrgs owners; <owner> is not one.").
+ * Add that sentence HERE, with the same wording as the hook's rule g refusal,
+ * so the two layers do not drift. It needs a lookup of live `*` approvals made
+ * after `findApproval` (below) returns null; `findApproval`'s call in
+ * `evaluateDestination` stays as it is until PR 3 changes its signature. Name
+ * only the destination owner and the approval id/expiry, never registry contents.
+ */
+function publicPushApprovalSentence(dest: { org: string; repo: string }): string {
+  return `A live approval for ${dest.org}/${dest.repo} would cover this, and none exists`;
+}
+
+/**
  * Run the destination checks for `--remote-url` and return what `--json`
  * should report. Refusals exit through `emitError` (exit 2) and never return.
  *
@@ -641,7 +658,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
           `The destination ${parsed.org}/${parsed.repo} (${visLabel}, ${cls}) is public-facing, and no person is ` +
             `present` +
             (assumedPublic ? `.${UNKNOWN_VISIBILITY_HINT}` : ""),
-          `A live approval for ${parsed.org}/${parsed.repo} would cover this, and none exists`,
+          publicPushApprovalSentence(parsed),
           [
             {
               by: "person",
