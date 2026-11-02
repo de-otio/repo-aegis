@@ -192,7 +192,7 @@ describe("gh-env — GH_REPO and the gh alias file", () => {
 
   it("reads aliases from $GH_CONFIG_DIR/config.yml", () => {
     const dir = configDir({ "config.yml": "git_protocol: ssh\naliases:\n    ic: issue create\n    sh: '!echo hi'\n" });
-    const aliases = loadGhAliases({ GH_CONFIG_DIR: dir }, "/nonexistent");
+    const aliases = loadGhAliases({ GH_CONFIG_DIR: dir }, "/nonexistent")!;
     assert.equal(aliases.get("ic"), "issue create");
     assert.equal(aliases.get("sh"), "!echo hi");
     assert.equal(aliases.size, 2);
@@ -210,17 +210,23 @@ describe("gh-env — GH_REPO and the gh alias file", () => {
       "aliases.yml": "ic: old\nonly-legacy: issue close\n",
       "config.yml": "aliases:\n  ic: issue create\n",
     });
-    const aliases = loadGhAliases({ GH_CONFIG_DIR: dir }, "/nonexistent");
+    const aliases = loadGhAliases({ GH_CONFIG_DIR: dir }, "/nonexistent")!;
     assert.equal(aliases.get("ic"), "issue create");
     assert.equal(aliases.get("only-legacy"), "issue close");
   });
 
-  it("a missing, broken or non-map file contributes nothing and never throws", () => {
-    assert.equal(loadGhAliases({ GH_CONFIG_DIR: join(tmpdir(), "does-not-exist-gh") }, "/x").size, 0);
-    for (const text of [": : :\n  - [", "just a string", "- a\n- b\n", "aliases: [1, 2]\n", "aliases:\n  n: 5\n"]) {
+  it("a missing file defines nothing (known empty); an unusable one makes the aliases UNKNOWN (null); neither throws", () => {
+    assert.equal(loadGhAliases({ GH_CONFIG_DIR: join(tmpdir(), "does-not-exist-gh") }, "/x")?.size, 0);
+    // A valid config with no usable alias map is known-empty.
+    for (const text of ["", "aliases: [1, 2]\n", "aliases:\n  n: 5\n", "editor: vim\n"]) {
+      const dir = configDir({ "config.yml": text });
+      assert.equal(loadGhAliases({ GH_CONFIG_DIR: dir }, "/x")?.size, 0, JSON.stringify(text));
+    }
+    // A config that cannot be used says nothing about the aliases.
+    for (const text of [": : :\n  - [", "just a string", "- a\n- b\n"]) {
       const dir = configDir({ "config.yml": text });
       assert.doesNotThrow(() => loadGhAliases({ GH_CONFIG_DIR: dir }, "/x"), text);
-      assert.equal(loadGhAliases({ GH_CONFIG_DIR: dir }, "/x").size, 0, text);
+      assert.equal(loadGhAliases({ GH_CONFIG_DIR: dir }, "/x"), null, JSON.stringify(text));
     }
   });
 

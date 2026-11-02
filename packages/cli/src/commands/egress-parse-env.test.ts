@@ -199,4 +199,24 @@ describe("agent hook — the same parser, the hook's own environment", { skip: !
     const r = hook("gh ic -Rstranger/r --title t --body b", { GH_CONFIG_DIR: ghConfig });
     assert.match(r.stdout + r.stderr, /stranger\/r/);
   });
+
+  it("a git alias from the checkout's config is read in the payload's cwd: `git pp <url> main` is a push", () => {
+    execFileSync("git", ["-C", repo, "config", "alias.pp", "push"], { stdio: "ignore" });
+    try {
+      const r = hook("git pp https://github.com/stranger/r.git main");
+      assert.match(r.stdout + r.stderr, /stranger\/r/);
+      // …and a non-push alias, or a built-in, is silent.
+      execFileSync("git", ["-C", repo, "config", "alias.ss", "status"], { stdio: "ignore" });
+      assert.equal(hook("git ss").stdout, "");
+    } finally {
+      execFileSync("git", ["-C", repo, "config", "--unset", "alias.pp"], { stdio: "ignore" });
+      execFileSync("git", ["-C", repo, "config", "--unset", "alias.ss"], { stdio: "ignore" });
+    }
+  });
+
+  it("the backstop reaches the hook: a python -c text that runs gh is not silent", () => {
+    const r = hook(`python3 -c "import os; os.system('gh issue create -R stranger/r -b x')"`);
+    assert.notEqual(r.stdout + r.stderr, "");
+    assert.match(r.stdout + r.stderr, /unparsed-shape|could not take this command line apart/);
+  });
 });

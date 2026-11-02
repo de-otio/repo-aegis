@@ -2,10 +2,12 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 //
 // The I/O edge of egress-intent parsing (issue #151, §3.3 item 1 and S11): the
-// two facts about the environment `gh` will run in that change where a write
-// lands — `GH_REPO` and the user's `gh` aliases. `parseEgressIntents` itself
-// is pure and takes them as `ParseEgressOptions`; this module reads them.
+// facts about the environment `gh` and `git` will run in that change where a
+// write lands — `GH_REPO`, the user's `gh` aliases and their git aliases.
+// `parseEgressIntents` itself is pure and takes them as `ParseEgressOptions`;
+// this module reads them.
 
+import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -27,11 +29,23 @@ export function ghConfigDir(env: NodeJS.ProcessEnv = process.env, home: string =
   return join(home, ".config", "gh");
 }
 
-function readYamlObject(path: string): Record<string, unknown> | null {
+/**
+ * A YAML file as an object: `"absent"` when the file does not exist (it defines nothing); `null` when it
+ * exists but cannot be used (too large, unparseable, an alias bomb, not a mapping), in which case what is
+ * in it is UNKNOWN, which is not the same as empty.
+ */
+function readYamlObject(path: string): Record<string, unknown> | null | "absent" {
+  let size: number;
   try {
-    if (statSync(path).size > GH_CONFIG_MAX) return null;
+    size = statSync(path).size;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : null;
+  }
+  try {
+    if (size > GH_CONFIG_MAX) return null;
     const doc: unknown = parseYaml(readFileSync(path, "utf8"));
-    return doc !== null && typeof doc === "object" && !Array.isArray(doc) ? (doc as Record<string, unknown>) : null;
+    if (doc === null || doc === undefined) return {}; // an empty file
+    return typeof doc === "object" && !Array.isArray(doc) ? (doc as Record<string, unknown>) : null;
   } catch {
     return null;
   }
@@ -45,35 +59,80 @@ function stringEntries(obj: unknown): Array<[string, string]> {
 /**
  * The user's `gh` aliases (alias name → expansion): the `aliases:` map of
  * `config.yml`, plus the legacy `aliases.yml`, which `config.yml` wins over.
- * A missing, oversized or unparseable file contributes nothing — gh itself
- * fails on a broken config, so there is nothing to expand. Never throws.
+ * A file that does not exist defines nothing. A file that exists but cannot
+ * be used (oversized, unparseable, hitting the YAML alias limit) makes the
+ * aliases UNKNOWN: `null`, which the parser reads as "any word that is not a
+ * built-in may be an alias". Never throws.
  */
 export function loadGhAliases(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
-): ReadonlyMap<string, string> {
+): ReadonlyMap<string, string> | null {
   const dir = ghConfigDir(env, home);
   const out = new Map<string, string>();
   const legacy = readYamlObject(join(dir, "aliases.yml"));
-  if (legacy !== null) {
+  if (legacy === null) return null;
+  if (legacy !== "absent") {
     for (const [k, v] of stringEntries(legacy["aliases"] ?? legacy)) out.set(k, v);
   }
   const config = readYamlObject(join(dir, "config.yml"));
-  if (config !== null) {
+  if (config === null) return null;
+  if (config !== "absent") {
     for (const [k, v] of stringEntries(config["aliases"])) out.set(k, v);
   }
   return out;
 }
 
+/** Upper bound on the answer of `git config`, and the time it may take. */
+const GIT_ALIAS_MAX_BYTES = 256 * 1024;
+const GIT_ALIAS_TIMEOUT_MS = 2000;
+
+/** Parse `alias.<name> <expansion>` lines (the name has no spaces; the expansion is the rest of the line). */
+export function parseGitAliasLines(text: string): ReadonlyMap<string, string> {
+  const out = new Map<string, string>();
+  for (const line of text.split("\n")) {
+    const m = /^alias\.(\S+)(?: ([\s\S]*))?$/.exec(line);
+    if (m !== null) out.set(m[1]!.toLowerCase(), m[2] ?? "");
+  }
+  return out;
+}
+
 /**
- * `ParseEgressOptions` for a command that will run in `env`: `GH_REPO` as the
- * real `gh` will see it, and the aliases, loaded lazily (only when a command
- * line has a `gh` call whose first argument is not a built-in).
+ * The git aliases in effect from `cwd` (name lower-cased → expansion), read the way git reads them:
+ * `git config --get-regexp '^alias\.'`, which applies system, global, local and environment config. No
+ * alias defined is an empty map (git exits 1); git missing, a timeout, an oversized answer or any other
+ * failure is `null` (unknown). Bounded; never throws.
  */
-export function egressParseOptions(env: NodeJS.ProcessEnv = process.env): ParseEgressOptions {
+export function loadGitAliases(
+  cwd: string = process.cwd(),
+  env: NodeJS.ProcessEnv = process.env,
+): ReadonlyMap<string, string> | null {
+  try {
+    const text = execFileSync("git", ["config", "--get-regexp", "^alias\\."], {
+      cwd,
+      env,
+      encoding: "utf8",
+      timeout: GIT_ALIAS_TIMEOUT_MS,
+      maxBuffer: GIT_ALIAS_MAX_BYTES,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return parseGitAliasLines(text);
+  } catch (err) {
+    // `git config --get-regexp` exits 1 when nothing matches.
+    if ((err as { status?: number }).status === 1) return new Map();
+    return null;
+  }
+}
+
+/**
+ * `ParseEgressOptions` for a command that will run in `env` from `cwd`: `GH_REPO` as the real `gh` will
+ * see it, and the gh and git aliases, each loaded lazily (only when a command line needs them).
+ */
+export function egressParseOptions(env: NodeJS.ProcessEnv = process.env, cwd?: string): ParseEgressOptions {
   const envRepo = env["GH_REPO"];
   return {
     ...(envRepo !== undefined && envRepo !== "" && { envRepo }),
     ghAliases: () => loadGhAliases(env),
+    gitAliases: () => loadGitAliases(cwd, env),
   };
 }

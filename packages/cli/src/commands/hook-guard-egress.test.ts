@@ -729,12 +729,29 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
     assert.match(p.error, /not a literal <owner>\/<repo>/);
   });
 
-  it("a registered owner with a hostile repo is refused as unresolved; no name, no approve command (re-review)", () => {
-    // Before PR 2a such a repo resolved to a named destination and reached rule g, where the
-    // name was dropped from the ask. A repository with an expansion or a control character is
-    // not a literal name, so it now stops at rule h; the rule-g path for a hostile name that
-    // does resolve is pinned at the policy level (egress-policy-rule-h-hardening.test.ts).
+  it("a registered owner with a hostile repo in a gh api path: the rule g ask carries no name and no approve command (re-review)", () => {
+    // A `gh api` path names its repository literally, whatever characters the segment holds, so it is the
+    // route that takes a hostile name past the parser to rule g. (A --repo value or URL with such a name is
+    // an unresolved destination since PR 2a; see the test above.)
     const home = aegisHome("h-hostile-repo", OWNERS_REGISTRY);
+    for (const repo of ["r‮gpj", "r​x", "r\u0007x"]) {
+      const command = `gh api -X POST 'repos/acme/${repo}/issues' -f body=x`;
+      const r = runGuard(claudePayload(command), { home, shimOnPath: true });
+      assert.equal(r.code, 0, r.stderr);
+      const reason = (JSON.parse(r.stdout) as DecisionJson).hookSpecificOutput.permissionDecisionReason;
+      assert.ok(!reason.includes(repo), JSON.stringify(reason));
+      for (const frag of ["‮", "​", "\u0007"]) assert.ok(!reason.includes(frag), JSON.stringify(reason));
+      assert.ok(!reason.includes("repo-aegis approve"), reason);
+      assert.match(reason, /invalid owner\/repo name/);
+    }
+    // The deny channel (no ask on Codex) drops the destination from `details` as well.
+    const d = denied(runGuard(codexPayload("gh api -X POST 'repos/acme/r‮gpj/issues' -f body=x"), { home, agent: "codex" }));
+    assert.equal(d.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    assert.equal(d.details.destination, undefined);
+  });
+
+  it("a registered owner with a hostile --repo value is refused as unresolved; no name, no approve command", () => {
+    const home = aegisHome("h-hostile-repo-flag", OWNERS_REGISTRY);
     for (const repo of ["acme/r$(id)", "acme/r‮gpj"]) {
       const r = runGuard(claudePayload(`gh issue create --repo '${repo}' --body x`), { home, shimOnPath: true });
       const d = denied(r);
@@ -745,9 +762,6 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
         assert.ok(!text.includes("repo-aegis approve"), text);
       }
     }
-    const d = denied(runGuard(codexPayload("gh issue create --repo 'acme/r$(id)' --body x"), { home, agent: "codex" }));
-    assert.equal(d.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.equal(d.details.destination?.org, "*");
   });
 
   it("an unparseable registry REFUSES (one bad YAML line must not switch rule h off), and says how to repair", () => {

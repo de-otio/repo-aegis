@@ -275,7 +275,7 @@ export type {
   RepoTarget,
   SegmentJoin,
 } from "./egress-intent.js";
-export { egressParseOptions, loadGhAliases, ghConfigDir } from "./gh-env.js";
+export { egressParseOptions, loadGhAliases, loadGitAliases, parseGitAliasLines, ghConfigDir } from "./gh-env.js";
 export {
   decideEgress,
   resolveDestinationOffline,

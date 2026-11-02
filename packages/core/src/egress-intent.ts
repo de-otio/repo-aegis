@@ -174,6 +174,10 @@ export interface EgressIntent {
 interface Segment {
   tokens: string[];
   joinedBy: SegmentJoin;
+  /** Bodies of heredocs (`<<WORD`) opened on this segment's line, which the tokeniser otherwise skips. */
+  heredocs: string[];
+  /** The segment is a function definition (`name() {` …): its first token is the function's name, not a command. */
+  funcDef: boolean;
 }
 
 /**
@@ -223,27 +227,28 @@ function decodeAnsiCEscape(text: string, at: number): [string, number] {
  */
 function tokenise(command: string): Segment[] {
   const segments: Segment[] = [];
-  let tokens: string[] = [];
+  let cur: Segment = { tokens: [], joinedBy: null, heredocs: [], funcDef: false };
   let word = "";
   let inWord = false;
-  let joinedBy: SegmentJoin = null;
   // Heredoc bodies must not be parsed as commands. When `<<WORD` is seen,
-  // the delimiter is queued; at the next newline the body is skipped up to
-  // (and including) the line that equals the delimiter.
-  const pendingHeredocs: string[] = [];
+  // the delimiter is queued with the segment that opened it; at the next
+  // newline the body is skipped up to (and including) the line that equals
+  // the delimiter, and kept on that segment for callers that feed it to a shell.
+  const pendingHeredocs: Array<{ delim: string; owner: Segment }> = [];
+  // `(` nesting, so the `)` that closes a process substitution `<(…)` / `>(…)` ends its command.
+  const parens: Array<"proc" | "sub"> = [];
 
   const pushWord = (): void => {
     if (inWord) {
-      tokens.push(word);
+      cur.tokens.push(word);
       word = "";
       inWord = false;
     }
   };
   const endSegment = (nextJoin: SegmentJoin): void => {
     pushWord();
-    if (tokens.length > 0) segments.push({ tokens, joinedBy });
-    tokens = [];
-    joinedBy = nextJoin;
+    if (cur.tokens.length > 0) segments.push(cur);
+    cur = { tokens: [], joinedBy: nextJoin, heredocs: [], funcDef: false };
   };
 
   const n = command.length;
@@ -369,13 +374,21 @@ function tokenise(command: string): Segment[] {
       if (pendingHeredocs.length > 0) {
         // Skip heredoc bodies, one per queued delimiter, in order.
         while (pendingHeredocs.length > 0) {
-          const delim = pendingHeredocs.shift()!;
+          const { delim, owner } = pendingHeredocs.shift()!;
+          const bodyStart = i;
+          let bodyEnd = i;
           for (;;) {
             const nl = command.indexOf("\n", i);
             const line = nl === -1 ? command.slice(i) : command.slice(i, nl);
+            const lineStart = i;
             i = nl === -1 ? n : nl + 1;
-            if (line.replace(/^\t+/, "") === delim || nl === -1) break;
+            if (line.replace(/^\t+/, "") === delim || nl === -1) {
+              // The body is the lines before the terminator (all of it when there is none).
+              bodyEnd = line.replace(/^\t+/, "") === delim ? lineStart : i;
+              break;
+            }
           }
+          owner.heredocs.push(command.slice(bodyStart, Math.max(bodyStart, bodyEnd)));
         }
       }
       continue;
@@ -412,10 +425,39 @@ function tokenise(command: string): Segment[] {
       i++;
       continue;
     }
+    // Process substitution `<(cmd)` / `>(cmd)`: `cmd` runs as a command of its own, like a pipe stage.
+    if ((c === "<" || c === ">") && command[i + 1] === "(") {
+      endSegment("|");
+      parens.push("proc");
+      i += 2;
+      continue;
+    }
     if (c === "(" || c === ")") {
-      // Subshell / group delimiters: word boundaries, otherwise ignored.
+      // Subshell / group delimiters: word boundaries, otherwise ignored — except `name()`, a function
+      // definition, whose name must not be mistaken for the command that follows.
+      if (c === "(" && command[i + 1] === ")") {
+        const nameFirst = inWord && cur.tokens.length === 0 && /^[A-Za-z_][\w.:-]*$/.test(word);
+        const nameDone = !inWord && cur.tokens.length === 1;
+        if (nameFirst || nameDone) {
+          pushWord();
+          cur.funcDef = true;
+          i += 2;
+          continue;
+        }
+      }
       pushWord();
+      if (c === "(") parens.push("sub");
+      else if (parens.pop() === "proc") endSegment("|");
       i++;
+      continue;
+    }
+
+    // --- here-string `<<<` (its text is the next word; callers read it from the tokens) -----------
+    if (c === "<" && command[i + 1] === "<" && command[i + 2] === "<") {
+      pushWord();
+      word = "<<<";
+      inWord = true;
+      i += 3;
       continue;
     }
 
@@ -440,7 +482,7 @@ function tokenise(command: string): Segment[] {
         }
       }
       if (!quoted) delim = delim.replace(/\\/g, "");
-      if (delim.length > 0) pendingHeredocs.push(delim);
+      if (delim.length > 0) pendingHeredocs.push({ delim, owner: cur });
       i = j;
       continue;
     }
@@ -473,6 +515,11 @@ function stripRedirections(tokens: string[]): string[] {
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!;
     if (t === "{" || t === "}") continue;
+    // A here-string `<<<text`: the text is read from the tokens by the caller, not run as an argument.
+    if (t.startsWith("<<<")) {
+      if (t === "<<<") i++;
+      continue;
+    }
     if (REDIRECT_RE.test(t)) {
       if (REDIRECT_STANDALONE_RE.test(t)) i++; // skip the target too
       continue;
@@ -512,6 +559,10 @@ const WRAPPER_SPECS = new Map<string, WrapperSpec>([
   ["stdbuf", { value: new Set(["-i", "-o", "-e", "--input", "--output", "--error"]) }],
   ["ionice", { value: new Set(["-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid", "--pgid", "--uid"]) }],
   ["caffeinate", { value: new Set(["-t", "-w"]) }],
+  // `busybox sh -c …`: the applet name follows.
+  ["busybox", { value: NO_VALUE_FLAGS }],
+  ["watch", { value: new Set(["-n", "--interval", "-p"]) }],
+  ["flock", { value: new Set(["-w", "-E", "--timeout", "--wait", "--conflict-exit-code"]), positionals: 1 }],
   [
     "xargs",
     {
@@ -546,9 +597,19 @@ interface ResolvedCommand {
    * of `eval`. The caller parses it as a command line of its own.
    */
   nestedText?: string;
+  /** Index (in `tokens`) of the first token that is part of `nestedText`; those tokens are parsed as text, not scanned. */
+  nestedFrom?: number;
   /** The nested text comes from `eval`: it runs in THIS shell, so it can change its variables. */
   isEval: boolean;
+  /** The wrapper loop ran out of iterations: what follows is unknowable. */
+  exhausted: boolean;
 }
+
+/**
+ * Shell reserved words that may open a command: `if gh … ; then gh … ; fi`, `! gh …`, `while`, `until`,
+ * `coproc`. They run the command that follows, so they are transparent.
+ */
+const RESERVED_WORDS = new Set(["if", "then", "elif", "else", "do", "while", "until", "!", "coproc", "{", "}"]);
 
 /**
  * Skip leading `NAME=value` / `NAME+=value` assignments and transparent
@@ -563,6 +624,7 @@ function resolveCommand(input: string[], assigns: Assignment[] = []): ResolvedCo
   let tokens = input;
   let i = 0;
   let viaXargs = false;
+  let settled = false;
   for (let guard = 0; guard < 256; guard++) {
     for (;;) {
       const m = i < tokens.length ? /^([A-Za-z_][A-Za-z0-9_]*)(\+?)=([\s\S]*)$/.exec(tokens[i]!) : null;
@@ -570,10 +632,21 @@ function resolveCommand(input: string[], assigns: Assignment[] = []): ResolvedCo
       assigns.push({ name: m[1]!, value: m[3]!, append: m[2] === "+" });
       i++;
     }
-    if (i >= tokens.length) return { tokens, start: i, viaXargs, isEval: false };
+    if (i >= tokens.length) return { tokens, start: i, viaXargs, isEval: false, exhausted: false };
+    if (RESERVED_WORDS.has(tokens[i]!)) {
+      i++;
+      continue;
+    }
+    if (tokens[i] === "function") {
+      i += 2; // `function name { … }`: the name is not a command
+      continue;
+    }
     const word = baseName(tokens[i]!);
     const spec = WRAPPER_SPECS.get(word);
-    if (spec === undefined) break;
+    if (spec === undefined) {
+      settled = true;
+      break;
+    }
     if (word === "xargs") viaXargs = true;
     i++;
     let restart = false;
@@ -606,9 +679,10 @@ function resolveCommand(input: string[], assigns: Assignment[] = []): ResolvedCo
     if (restart) continue;
     i += spec.positionals ?? 0;
   }
+  if (!settled) return { tokens, start: tokens.length, viaXargs, isEval: false, exhausted: true };
   const word = i < tokens.length ? baseName(tokens[i]!) : "";
   if (word === "eval") {
-    return { tokens, start: i, viaXargs, nestedText: tokens.slice(i + 1).join(" "), isEval: true };
+    return { tokens, start: i, viaXargs, nestedText: tokens.slice(i + 1).join(" "), nestedFrom: i + 1, isEval: true, exhausted: false };
   }
   if (SHELL_INTERPRETERS.has(word)) {
     for (let j = i + 1; j < tokens.length; j++) {
@@ -616,12 +690,14 @@ function resolveCommand(input: string[], assigns: Assignment[] = []): ResolvedCo
       if (t === "--" || !t.startsWith("-")) break;
       if (/^-[A-Za-z]+$/.test(t) && t.includes("c")) {
         const text = tokens[j + 1];
-        if (text !== undefined) return { tokens, start: i, viaXargs, nestedText: text, isEval: false };
+        if (text !== undefined) {
+          return { tokens, start: i, viaXargs, nestedText: text, nestedFrom: j + 1, isEval: false, exhausted: false };
+        }
         break;
       }
     }
   }
-  return { tokens, start: i, viaXargs, isEval: false };
+  return { tokens, start: i, viaXargs, isEval: false, exhausted: false };
 }
 
 function baseName(token: string): string {
@@ -668,15 +744,60 @@ function joinGitDir(current: string | undefined, next: string): string | undefin
   return posix.join(current, next);
 }
 
+/**
+ * git subcommands that publish: `push`, and the two plumbing commands underneath it. `send-pack`
+ * does NOT run the pre-push hook, so for it the hook layer is the only check there is.
+ */
+const GIT_PUSH_LIKE = new Set(["push", "send-pack", "http-push"]);
+
+// Built-in git commands. git ignores an alias that shadows one, so a subcommand on this list is never an
+// alias and needs no config lookup; any OTHER word may be an alias (or an external `git-<name>`).
+const GIT_BUILTINS = new Set([
+  "add", "am", "annotate", "apply", "archive", "bisect", "blame", "branch", "bundle", "cat-file", "check-attr",
+  "check-ignore", "checkout", "cherry", "cherry-pick", "clean", "clone", "column", "commit", "commit-graph",
+  "commit-tree", "config", "count-objects", "credential", "describe", "diff", "diff-files", "diff-index",
+  "diff-tree", "difftool", "fast-export", "fast-import", "fetch", "filter-branch", "fmt-merge-msg",
+  "for-each-ref", "format-patch", "fsck", "gc", "grep", "gui", "hash-object", "help", "init",
+  "interpret-trailers", "log", "ls-files", "ls-remote", "ls-tree", "maintenance", "mailinfo", "merge",
+  "merge-base", "mergetool", "mktree", "mv", "name-rev", "notes", "pack-objects", "prune", "pull", "push",
+  "range-diff", "read-tree", "rebase", "reflog", "remote", "repack", "replace", "request-pull", "reset",
+  "restore", "rev-list", "rev-parse", "revert", "rm", "send-email", "send-pack", "http-push", "shortlog", "show",
+  "show-branch", "show-ref", "sparse-checkout", "stash", "status", "submodule", "subtree", "switch",
+  "symbolic-ref", "tag", "update-index", "update-ref", "var", "verify-commit", "verify-pack", "verify-tag",
+  "version", "whatchanged", "worktree", "write-tree",
+]);
+
+/** The fail-closed git intent: a placeholder remote and refspec keep the implicit-target shape rule out of the way, so rule h judges it. */
+function unresolvedGitIntent(base: Omit<EgressIntent, "verb" | "payloadFiles">, cwdOverride?: string): EgressIntent {
+  return {
+    ...base,
+    verb: "git-push",
+    payloadFiles: [],
+    remote: "<unparsed>",
+    refspec: "<unparsed>",
+    ...(cwdOverride !== undefined && { cwdOverride }),
+    unresolved: "unparsed-shape",
+  };
+}
+
+/** What `classifyGit` needs from the environment. */
+interface GitContext {
+  /** Configured git aliases (null when they could not be read); absent when the caller supplied no loader. */
+  aliases: (() => ReadonlyMap<string, string> | null) | undefined;
+}
+
 function classifyGit(
   args: string[],
   base: Omit<EgressIntent, "verb" | "payloadFiles">,
   assigns: Assignment[],
+  gitCtx: GitContext,
 ): EgressIntent | null {
   let i = 0;
   let cwdOverride: string | undefined;
   let gitDir: string | undefined;
   let opaque = false;
+  // `git -c alias.NAME=… NAME` defines an alias for this one command, invisible in any config file.
+  const cliAliases = new Map<string, string>();
   // Global options precede the subcommand.
   while (i < args.length) {
     const a = args[i]!;
@@ -705,6 +826,20 @@ function classifyGit(
       i++;
       continue;
     }
+    if (a === "-c" || a === "--config-env") {
+      const kv = args[i + 1];
+      const m = kv === undefined ? null : /^alias\.([^=]+)=([\s\S]*)$/i.exec(kv);
+      // `--config-env` takes the value from an environment variable: unknowable, so a shell-style alias.
+      if (m !== null) cliAliases.set(m[1]!.toLowerCase(), a === "-c" ? m[2]! : "!");
+      i += 2;
+      continue;
+    }
+    if (a.startsWith("--config-env=")) {
+      const m = /^--config-env=alias\.([^=]+)=/i.exec(a);
+      if (m !== null) cliAliases.set(m[1]!.toLowerCase(), "!");
+      i++;
+      continue;
+    }
     if (GIT_GLOBAL_WITH_VALUE.has(a)) {
       i += 2;
       continue;
@@ -714,10 +849,32 @@ function classifyGit(
       if (hasExpansion(v)) opaque = true;
       cwdOverride = joinGitDir(cwdOverride, v);
     }
-    i++; // `--no-pager`, `-p`, `--work-tree=…`, `-c k=v`-style inline forms, …
+    i++; // `--no-pager`, `-p`, `--work-tree=…`, inline forms, …
   }
-  if (args[i] !== "push") return null;
-  i++;
+
+  // The subcommand, after any alias (`-c alias.X=…`, or one in the git config). An alias that
+  // expands to a push is a push; a shell alias, a chain too deep, or an unreadable config is unresolved.
+  let sub = args[i];
+  let rest = args.slice(i + 1);
+  for (let depth = 0; ; depth++) {
+    if (sub === undefined) return null;
+    if (GIT_PUSH_LIKE.has(sub)) break;
+    const key = sub.toLowerCase();
+    let value = cliAliases.get(key);
+    if (value === undefined && !GIT_BUILTINS.has(sub)) {
+      if (gitCtx.aliases === undefined) return null; // no alias information was supplied
+      const map = gitCtx.aliases();
+      if (map === null) return unresolvedGitIntent(base, cwdOverride); // aliases exist but cannot be read
+      value = map.get(key);
+    }
+    if (value === undefined) return null;
+    if (depth >= ALIAS_MAX_DEPTH || value.length > ALIAS_MAX_BYTES || value.startsWith("!")) {
+      return unresolvedGitIntent(base, cwdOverride);
+    }
+    const words = shlexSplit(value);
+    sub = words[0];
+    rest = [...words.slice(1), ...rest];
+  }
 
   // `GIT_DIR=` in the command prefix is `--git-dir` (the flag wins, as in git).
   if (gitDir === undefined) {
@@ -732,21 +889,24 @@ function classifyGit(
   if (gitDir !== undefined) cwdOverride = joinGitDir(cwdOverride, gitDir);
 
   const positionals: string[] = [];
-  for (; i < args.length; i++) {
-    const a = args[i]!;
+  for (let k = 0; k < rest.length; k++) {
+    const a = rest[k]!;
     if (a === "--") {
-      positionals.push(...args.slice(i + 1));
+      positionals.push(...rest.slice(k + 1));
       break;
     }
     if (a.startsWith("-")) {
-      if (GIT_PUSH_WITH_VALUE.has(a)) i++;
+      if (GIT_PUSH_WITH_VALUE.has(a)) k++;
       continue;
     }
     positionals.push(a);
   }
 
+  // `git send-pack <url> <ref>…` and `git http-push <url> <ref>…` name their target URL first, like push.
   const remote = positionals[0];
   const refspec = positionals[1];
+  // Arguments forwarded from a function or script (`"$@"`) can carry a different target.
+  const forwarded = rest.some(a => /\$[@*]|\$\{[@*]/.test(a));
   return {
     ...base,
     verb: "git-push",
@@ -754,7 +914,7 @@ function classifyGit(
     ...(remote !== undefined && { remote }),
     ...(refspec !== undefined && { refspec }),
     ...(cwdOverride !== undefined && { cwdOverride }),
-    ...(opaque && { unresolved: "unparsed-shape" as const }),
+    ...((opaque || forwarded) && { unresolved: "unparsed-shape" as const }),
   };
 }
 
@@ -840,12 +1000,21 @@ export type ApiEndpointTarget =
   | { kind: "none" };
 
 /**
- * Classify a `gh api` endpoint. The query string is split off FIRST, and only
- * the owner and repo segments of `repos/<o>/<r>/…` (or the owner of
- * `orgs/<o>/…`) decide the result: a placeholder later in the path or in the
- * query (`repos/o/r/git/refs/heads/{branch}`, `…/issues?ref={branch}`) is
- * filled in by gh but still addressed to the literal `o/r`, so it must not
- * send the guard back to the cwd. Pure; never throws.
+ * Classify the endpoint of a MUTATING `gh api` request. The query string is
+ * split off FIRST. Then:
+ *
+ * - a shell expansion anywhere in the PATH (`$P` can carry `../..`), a `.` or
+ *   `..` or empty segment, or a percent-encoded dot or slash (`%2e`, `%2f`, any
+ *   case) is `opaque`: the request may land in another repository;
+ * - only the owner and repo segments of `repos/<o>/<r>/…` (or the owner of
+ *   `orgs/<o>/…`) decide the rest: a `{placeholder}` later in the path, or
+ *   anything in the query (`…/git/refs/heads/{branch}`, `…/issues?ref={branch}`),
+ *   is still addressed to the literal `o/r`, so it must not send the guard back
+ *   to the cwd; `{owner}` / `{repo}` there is `cwd`; any other placeholder is
+ *   `opaque`.
+ *
+ * A read keeps its leniency: callers analyse mutating requests only.
+ * Pure; never throws.
  */
 export function analyseApiEndpoint(endpoint: string): ApiEndpointTarget {
   let path = endpoint;
@@ -861,8 +1030,13 @@ export function analyseApiEndpoint(endpoint: string): ApiEndpointTarget {
   }
   path = path.replace(/^\/+/, "").replace(/^api\/v3\//i, "");
   const parts = path.split(/[?#]/)[0]!.split("/").filter(Boolean);
-  // The first segment decides what the rest means, so an expansion there (`$EP`, `$KIND/o/r`) hides it.
-  if (parts[0] !== undefined && hasExpansion(parts[0])) return { kind: "opaque" };
+  // The endpoint of a MUTATING request is judged by its whole path: an expansion anywhere in it (`$P` can
+  // carry `../..`), a `.` / `..` / empty segment, or a percent-encoded dot or slash can move the request to
+  // another repository. (Only mutating requests are analysed; a read keeps its leniency.)
+  const pathOnly = path.split(/[?#]/)[0]!;
+  if (hasExpansion(pathOnly) || /%2[ef]/i.test(pathOnly) || /(^|\/)\.{1,2}(\/|$)/.test(pathOnly) || /\/\//.test(pathOnly)) {
+    return { kind: "opaque" };
+  }
   // `repos/<o>/<r>` needs both segments; `orgs/<o>` needs the first. It is matched
   // case-insensitively (`Repos/o/r`): if GitHub routes that spelling it must not be missed, and
   // if it does not the request fails, so nothing is lost by treating every case variant alike.
@@ -873,9 +1047,6 @@ export function analyseApiEndpoint(endpoint: string): ApiEndpointTarget {
   if (segments === null) return { kind: "none" };
   let cwd = false;
   for (const [i, seg] of segments.entries()) {
-    // An expansion in the owner or repo segment (`repos/$O/r`) is unknowable; later segments
-    // cannot change which repository is addressed, so an expansion there is fine.
-    if (hasExpansion(seg)) return { kind: "opaque" };
     if (!seg.includes("{")) continue;
     if (seg === (i === 0 ? "{owner}" : "{repo}")) cwd = true;
     else return { kind: "opaque" };
@@ -1051,25 +1222,40 @@ const GH_BUILTIN_COMMANDS = new Set([
   "workflow",
 ]);
 
-// Built-in groups with no write verb at all. Every OTHER built-in group that has no entry in
-// GH_VERBS (`project`, `agent-task`, `codespace`, `cache`, `ssh-key`, `extension`, …) is a write this
-// parser has no shape for, and is reported unresolved: an unknown command fails closed.
-const GH_READ_GROUPS = new Set([
-  "accessibility",
-  "actions",
-  "alias",
-  "attestation",
-  "auth",
-  "browse",
-  "completion",
-  "config",
-  "help",
-  "licenses",
-  "org",
-  "preview",
-  "search",
-  "status",
-]);
+// Built-in groups with no write verb to an owner's repositories: their subcommands read, or change only
+// local gh state. Each lists its subcommands, so that when the user's aliases are UNKNOWN a subcommand that
+// is not on the list (it might be an alias such as `search ic`) is unresolved. "any": the group's words are
+// arguments (`gh browse 5`), not subcommands.
+const GH_READ_GROUP_SUBS: Readonly<Record<string, ReadonlySet<string> | "any">> = {
+  accessibility: "any",
+  actions: "any",
+  browse: "any",
+  completion: "any",
+  help: "any",
+  licenses: "any",
+  preview: "any",
+  status: "any",
+  alias: new Set(["delete", "import", "list", "set"]),
+  attestation: new Set(["download", "inspect", "trusted-root", "verify", "verify-asset"]),
+  auth: new Set(["login", "logout", "refresh", "setup-git", "status", "switch", "token"]),
+  config: new Set(["clear-cache", "get", "list", "set"]),
+  org: new Set(["list"]),
+  search: new Set(["code", "commits", "issues", "prs", "repos"]),
+};
+
+// Every OTHER built-in group that has no entry in GH_VERBS (`project`, `agent-task`, `codespace`, `cache`,
+// `ssh-key`, `gpg-key`, `copilot`, `extension`) is a write this parser has no shape for, and is reported
+// unresolved ("unknown-shape") — except for these subcommands, which only read.
+const GH_UNMODELLED_READ_SUBS: Readonly<Record<string, ReadonlySet<string>>> = {
+  codespace: new Set(["list", "view", "logs", "status", "watch"]),
+  extension: new Set(["list", "search", "browse", "status", "view", "watch"]),
+  cache: new Set(["list", "view", "status", "watch"]),
+  project: new Set(["list", "view", "field-list", "item-list", "status", "watch"]),
+  "ssh-key": new Set(["list", "view", "status", "watch"]),
+  "gpg-key": new Set(["list", "view", "status", "watch"]),
+  copilot: new Set(["explain", "suggest", "list", "view", "status", "watch"]),
+  "agent-task": new Set(["list", "view", "status", "watch"]),
+};
 
 /** Flags that take a value, for one command: long names (with `--`) and short letters. */
 interface FlagSpec {
@@ -1462,7 +1648,7 @@ function resolveGhAlias(input: string[], ctx: GhContext): AliasResult {
     const first = args[0];
     if (first === undefined || first.startsWith("-") || GH_BUILTIN_COMMANDS.has(first)) return { kind: "args", args };
     if (depth === ALIAS_MAX_DEPTH) return { kind: "unresolved" }; // five expansions done and still not a built-in
-    const expansion = ctx.aliases?.().get(first);
+    const expansion = ctx.aliases?.()?.get(first);
     if (expansion === undefined || expansion.length > ALIAS_MAX_BYTES) return { kind: "unresolved" };
     if (expansion.startsWith("!")) return { kind: "shell" };
     const given = args.slice(1);
@@ -1493,8 +1679,8 @@ interface GhContext {
   envRepo: string | undefined;
   /** True when an earlier segment (or an enclosing `eval`) exports, assigns or unsets `GH_REPO`. */
   envOverridden: boolean;
-  /** Lazily loaded `gh` aliases; absent when the caller supplied none. */
-  aliases: (() => ReadonlyMap<string, string>) | undefined;
+  /** Lazily loaded `gh` aliases: a map, null when they could not be read; absent when the caller supplied none. */
+  aliases: (() => ReadonlyMap<string, string> | null) | undefined;
 }
 
 // Subcommands of the write groups that only read. A subcommand of a write
@@ -1546,6 +1732,7 @@ function classifyGh(
   rawArgs: string[],
   base: Omit<EgressIntent, "verb" | "payloadFiles">,
   ctx: GhContext,
+  aliasDepth = 0,
 ): EgressIntent | null {
   const aliased = resolveGhAlias(rawArgs, ctx);
   if (aliased.kind === "refused") return null;
@@ -1561,6 +1748,21 @@ function classifyGh(
   // Not a built-in: an alias after leading flags, an extension, a brace expansion, `$CMD`. Unknown fails closed.
   if (!GH_BUILTIN_COMMANDS.has(group)) return unresolvedIntent(base, "gh-unknown", "gh-alias");
 
+  // An alias can be keyed on a group and subcommand (`"pr co"`, `"search ic"`): it expands in place. gh never
+  // lets one shadow a built-in subcommand, so the aliases are only consulted for a subcommand this parser
+  // does not already know — which keeps the common path free of any file read.
+  const keyedAlias = (): { intent: EgressIntent | null } | undefined => {
+    if (sub === undefined) return undefined;
+    const expansion = ctx.aliases?.()?.get(`${group} ${sub}`);
+    if (expansion === undefined) return undefined;
+    if (expansion.startsWith("!")) return { intent: unresolvedIntent(base, "gh-alias-shell", "gh-alias") };
+    if (aliasDepth >= ALIAS_MAX_DEPTH || expansion.length > ALIAS_MAX_BYTES) {
+      return { intent: unresolvedIntent(base, "gh-unknown", "gh-alias") };
+    }
+    const others = args.filter((_, idx) => idx !== groupIdx && idx !== subIdx);
+    return { intent: classifyGh([...shlexSplit(expansion), ...others], base, ctx, aliasDepth + 1) };
+  };
+
   let verb: EgressVerb;
   let unresolved: IntentUnresolved | undefined;
   if (group === "api") {
@@ -1568,8 +1770,20 @@ function classifyGh(
   } else {
     const verbs = ownEntry(GH_VERBS, group);
     if (verbs === undefined) {
-      // A built-in group with no shape here: read-only ones are no intent, the rest are writes we cannot name.
-      return GH_READ_GROUPS.has(group) ? null : unresolvedIntent(base, "gh-unknown", "unknown-shape");
+      const readSubs = ownEntry(GH_READ_GROUP_SUBS, group);
+      if (readSubs !== undefined) {
+        if (readSubs === "any" || sub === undefined || readSubs.has(sub)) return null;
+        // Not a known subcommand of this read group: an alias it may be. With the aliases known and none
+        // matching it is an error in gh (nothing is published); with them unknown it may be an alias this
+        // parser cannot expand.
+        const keyed = keyedAlias();
+        if (keyed !== undefined) return keyed.intent;
+        return ctx.aliases?.() ? null : unresolvedIntent(base, "gh-unknown", "gh-alias");
+      }
+      // A built-in group with no shape here: its reads are no intent, the rest are writes we cannot name.
+      if (sub === undefined || GH_UNMODELLED_READ_SUBS[group]?.has(sub)) return null;
+      const keyed = keyedAlias();
+      return keyed !== undefined ? keyed.intent : unresolvedIntent(base, "gh-unknown", "unknown-shape");
     }
     if (sub === undefined) return null;
     const known = ownEntry(verbs, sub);
@@ -1578,6 +1792,8 @@ function classifyGh(
     } else if (GH_READ_SUBS[group]?.has(sub)) {
       return null;
     } else {
+      const keyed = keyedAlias();
+      if (keyed !== undefined) return keyed.intent;
       verb = GH_UNKNOWN_SUB_VERB[group] ?? "gh-repo-edit";
       unresolved = "unknown-shape";
     }
@@ -1651,6 +1867,15 @@ function classifyGh(
         }
       : undefined;
 
+  // Arguments forwarded from a function or script (`"$@"`) or left to a shell expansion in a positional can
+  // carry a repository this parser never sees.
+  if (
+    unresolved === undefined &&
+    (args.some(a => /\$[@*]|\$\{[@*]/.test(a)) || positionals.some((p, idx) => hasExpansion(p) && !(group === "api" && idx === 0)))
+  ) {
+    unresolved = "unparsed-shape";
+  }
+
   // --- the repository this command names ---------------------------------------
   const targets = collectRepoTargets(group, sub, events, positionals);
   let opaque = targets.opaque;
@@ -1708,8 +1933,8 @@ function classifyNpm(
 // ---------------------------------------------------------------------------
 
 /**
- * What the caller knows about the environment the command will run in. Both
- * fields are optional, and the parser stays pure: the caller reads the
+ * What the caller knows about the environment the command will run in. Every
+ * field is optional, and the parser stays pure: the caller reads the
  * environment and the filesystem (see `egressParseOptions`), the parser only
  * uses what it is handed.
  */
@@ -1722,55 +1947,106 @@ export interface ParseEgressOptions {
   envRepo?: string | undefined;
   /**
    * The user's `gh` aliases (alias name → expansion), or a function that
-   * loads them, called at most once and only when a `gh` command's first
-   * argument is not a built-in — so the common path does no I/O. Without
-   * aliases, a `gh` command whose first word is not a built-in is reported
-   * `unresolved` (it may be an alias, an extension, or a typo).
+   * loads them, called at most once and only when a `gh` command needs them.
+   * `null` (or a loader that returns null or throws) means the aliases could
+   * NOT be read: a `gh` word that is not a built-in is then unresolved, as it is
+   * without this option (it may be an alias, an extension, or a typo).
    */
-  ghAliases?: ReadonlyMap<string, string> | (() => ReadonlyMap<string, string>) | undefined;
+  ghAliases?:
+    | ReadonlyMap<string, string>
+    | null
+    | (() => ReadonlyMap<string, string> | null)
+    | undefined;
+  /**
+   * The git aliases in effect (`git config --get-regexp '^alias\.'`, name → expansion), or a loader,
+   * called at most once and only for a git subcommand that is not a built-in. `null` means they could not
+   * be read. Without this option a non-built-in subcommand is treated as not a push.
+   */
+  gitAliases?:
+    | ReadonlyMap<string, string>
+    | null
+    | (() => ReadonlyMap<string, string> | null)
+    | undefined;
 }
 
 /** How deep `sh -c '…'`, `eval`, `$(…)` and backtick text is followed. Deeper text that mentions gh/git is unresolved. */
 const MAX_NEST_DEPTH = 5;
 
+/** An alias the command line defined (`alias gh2='gh …'`): later uses of the name cannot be read. */
+interface TaintedAlias {
+  kind: "gh" | "git";
+  /** The definition itself names a push, so every use of the alias is a push. */
+  push: boolean;
+}
+
 interface ParseCtx {
   opts: ParseEgressOptions;
-  aliases: (() => ReadonlyMap<string, string>) | undefined;
+  aliases: (() => ReadonlyMap<string, string> | null) | undefined;
+  gitAliases: (() => ReadonlyMap<string, string> | null) | undefined;
   depth: number;
   /** An earlier segment (of this or an enclosing command line) changed `GH_REPO` for the ones after it. */
   envOverridden: boolean;
   /** `GH_REPO` as the enclosing command line set it for this text; falls back to `opts.envRepo`. */
   inheritedEnvRepo: string | undefined;
+  /** Shell aliases defined earlier on this line that mention gh or git; shared by every nested parse. */
+  tainted: Map<string, TaintedAlias>;
+}
+
+/** A lazy, memoised, never-throwing loader: a failed load is `null` ("could not be read"). */
+function memoLoader(
+  source: ReadonlyMap<string, string> | null | (() => ReadonlyMap<string, string> | null) | undefined,
+): (() => ReadonlyMap<string, string> | null) | undefined {
+  if (source === undefined) return undefined;
+  let loaded = false;
+  let value: ReadonlyMap<string, string> | null = null;
+  return () => {
+    if (!loaded) {
+      loaded = true;
+      try {
+        value = typeof source === "function" ? source() : source;
+      } catch {
+        value = null;
+      }
+    }
+    return value;
+  };
 }
 
 /**
  * Tokenise (quote-aware), split on shell operators, classify each segment.
  * Pure. Non-egress commands yield an empty list.
  *
- * This parser FAILS CLOSED. A segment that runs `gh`, or `git push`, directly
- * or through a wrapper, interpreter, alias or substitution, and whose verb or
- * target cannot be fully determined, yields an intent with `unresolved` set —
- * never an empty list. It also never throws: an exception while parsing a line
- * that mentions `gh` or `git push` yields such an intent too.
+ * This parser FAILS CLOSED, in two layers.
+ *
+ * 1. Every segment that runs `gh`, or `git push` (also `send-pack`, `http-push`), directly or through a
+ *    wrapper, reserved word, interpreter, alias or substitution, and whose verb or target cannot be fully
+ *    determined, yields an intent with `unresolved` set — never an empty list. An exception while parsing a
+ *    line that mentions `gh` or `git push` yields such an intent too.
+ * 2. A BACKSTOP then reads the command's text again. Every mention of `gh <group>` (a built-in gh command
+ *    word within a few words of a `gh` word, however it is spelled: `gh`, `"gh"`, `g\h`, `/usr/bin/gh`) or
+ *    `git push|send-pack|http-push`, wherever it sits — an interpreter's `-c`/`-e` text, a `find -exec`
+ *    or `parallel` argument, a `case` pattern body, a function body, a heredoc fed to a shell or an
+ *    interpreter, a `<(…)` process substitution — that no intent accounts for becomes an `unparsed-shape`
+ *    intent at that position.
+ *
+ * The accepted false positive: a LITERAL mention in a quoted argument, such as `echo "gh issue create"`,
+ * `printf '%s' 'git push'` or `python3 -c "print('gh pr list')"`, is reported too. (Searches such as
+ * `grep "git push" docs/`, the message of a `git commit -m`, and the value of any flag of a command that
+ * the parser understood (`gh pr create --body "… git push …"`) are not mentioned: those words are data.)
+ * Aliases and functions defined in the user's shell profile are invisible to a pre-command hook; the `gh`
+ * shim, which sees the real argument vector, covers them.
  */
 export function parseEgressIntents(command: string, opts: ParseEgressOptions = {}): EgressIntent[] {
   try {
-    let aliasMap: ReadonlyMap<string, string> | undefined;
-    const source = opts.ghAliases;
-    const aliases =
-      source === undefined
-        ? undefined
-        : (): ReadonlyMap<string, string> => {
-            if (aliasMap === undefined) {
-              try {
-                aliasMap = typeof source === "function" ? source() : source;
-              } catch {
-                aliasMap = new Map();
-              }
-            }
-            return aliasMap;
-          };
-    return parseUnsafe(command, { opts, aliases, depth: 0, envOverridden: false, inheritedEnvRepo: undefined });
+    return parseUnsafe(command, {
+      opts,
+      aliases: memoLoader(opts.ghAliases),
+      gitAliases: memoLoader(opts.gitAliases),
+      depth: 0,
+      envOverridden: false,
+      inheritedEnvRepo: undefined,
+      tainted: new Map(),
+    });
   } catch {
     const s = typeof command === "string" ? sentinelFor(command, { precededByCd: false, joinedBy: null, segmentIndex: 0 }) : null;
     return s === null ? [] : [s];
@@ -1788,34 +2064,46 @@ function mentionedEgress(text: string): "gh" | "git" | null {
 function sentinelFor(text: string, base: Omit<EgressIntent, "verb" | "payloadFiles">): EgressIntent | null {
   const which = mentionedEgress(text);
   if (which === null) return null;
-  return unresolvedIntent(base, which === "gh" ? "gh-unknown" : "git-push", "unparsed-shape");
+  return which === "gh" ? unresolvedIntent(base, "gh-unknown", "unparsed-shape") : unresolvedGitIntent(base);
 }
 
-/** The command texts of `$(…)` and `` `…` `` substitutions inside one word (at most 32). */
-function substitutionTexts(word: string): string[] {
-  const out: string[] = [];
-  if (!word.includes("$(") && !word.includes("`")) return out;
+/**
+ * The command texts of `$(…)` and `` `…` `` substitutions inside one word (at most 32), and the word with
+ * those spans cut out (their text is parsed on its own, so it must not be scanned twice).
+ */
+function splitSubstitutions(word: string): { texts: string[]; rest: string } {
+  if (!word.includes("$(") && !word.includes("`")) return { texts: [], rest: word };
+  const texts: string[] = [];
+  let rest = "";
   let i = 0;
-  while (i < word.length && out.length < 32) {
-    if (word[i] === "$" && word[i + 1] === "(") {
+  while (i < word.length) {
+    if (texts.length < 32 && word[i] === "$" && word[i + 1] === "(") {
       let depth = 0;
       let j = i + 1;
       for (; j < word.length; j++) {
         if (word[j] === "(") depth++;
         else if (word[j] === ")" && --depth === 0) break;
       }
-      out.push(word.slice(i + 2, j));
+      texts.push(word.slice(i + 2, j));
+      rest += " ";
       i = j + 1;
-    } else if (word[i] === "`") {
+    } else if (texts.length < 32 && word[i] === "`") {
       const end = word.indexOf("`", i + 1);
       const j = end === -1 ? word.length : end;
-      out.push(word.slice(i + 1, j));
+      texts.push(word.slice(i + 1, j));
+      rest += " ";
       i = j + 1;
     } else {
+      rest += word[i];
       i++;
     }
   }
-  return out;
+  return { texts, rest };
+}
+
+/** The command texts of `$(…)` and `` `…` `` substitutions inside one word (at most 32). */
+function substitutionTexts(word: string): string[] {
+  return splitSubstitutions(word).texts;
 }
 
 /** Bash brace expansion of the first `{a,b}` group, recursively, at most 64 results. */
@@ -1828,6 +2116,84 @@ function braceCandidates(word: string): string[] {
       out.push(c);
       if (out.length >= 64) return out;
     }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// The backstop: read the text again
+// ---------------------------------------------------------------------------
+
+/** How many words after a `gh` / `git` word a group or `push` may sit and still be one mention (flags and their values come between). */
+const MENTION_WINDOW = 8;
+const WORD_SPLIT = /[\s'"`(){}<>;&|,=\\[\]]+/;
+
+const isGhWord = (w: string): boolean => w === "gh" || w.endsWith("/gh");
+const isGitWord = (w: string): boolean => w === "git" || w.endsWith("/git");
+
+/**
+ * The words of some tokens, split the way a shell and a script's string literals would split them, with
+ * command substitutions cut out. Linear in the text.
+ */
+function flattenWords(tokens: readonly string[]): string[] {
+  const words: string[] = [];
+  for (const t of tokens) {
+    const { rest } = splitSubstitutions(t);
+    for (const w of rest.split(WORD_SPLIT)) if (w !== "") words.push(w);
+  }
+  return words;
+}
+
+/** The `gh <group>` and `git push` mentions in a word list. Linear: each word looks at a bounded window. */
+function countMentions(words: readonly string[]): { gh: number; git: number } {
+  let gh = 0;
+  let git = 0;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (isGhWord(w)) {
+      for (let j = i + 1; j < words.length && j <= i + MENTION_WINDOW; j++) {
+        if (GH_BUILTIN_COMMANDS.has(words[j]!)) {
+          gh++;
+          break;
+        }
+      }
+    } else if (isGitWord(w)) {
+      for (let j = i + 1; j < words.length && j <= i + MENTION_WINDOW; j++) {
+        if (GIT_PUSH_LIKE.has(words[j]!)) {
+          git++;
+          break;
+        }
+      }
+    }
+  }
+  return { gh, git };
+}
+
+/** Commands whose arguments are text to search, never to run. */
+const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack"]);
+
+/** Interpreters that read a program from stdin: a heredoc fed to one is scanned, not skipped. */
+const SCRIPT_INTERPRETER_RE = /^(?:python[\d.]*|perl|ruby|node|nodejs|php|lua|Rscript|osascript|tclsh|expect|awk|gawk)$/;
+
+/**
+ * The tokens of a segment the backstop reads. For a command the parser understood (`gh …`, `git …`) the
+ * flags and their values are data — a PR body, a commit message — and are left out. A search's arguments
+ * are left out. `nestedFrom` onwards is parsed as a command line of its own.
+ */
+function scanTokens(tokens: readonly string[], start: number, cmd: string, nestedFrom: number | undefined): string[] {
+  const end = nestedFrom ?? tokens.length;
+  if (SEARCH_COMMANDS.has(cmd)) return tokens.slice(0, Math.min(start + 1, end));
+  if (cmd !== "gh" && cmd !== "git") return tokens.slice(0, end);
+  const out = tokens.slice(0, start + 1);
+  for (let k = start + 1; k < end; k++) {
+    const t = tokens[k]!;
+    if (t.startsWith("-")) {
+      // An attached value (`--body=…`) is part of the token itself; a bare flag (`-m`, `-am`, `--message`) may
+      // take the next token as its value.
+      if (!t.includes("=")) k++;
+      continue;
+    }
+    out.push(t);
   }
   return out;
 }
@@ -1865,6 +2231,29 @@ function mutatesGhRepo(original: string[], resolved: ResolvedCommand, assigns: A
   }
 }
 
+/** `$GH issue create`, `"${GH}" pr comment 5`, `$(which gh) push`: a command word the parser cannot read, then a gh group or a push. */
+function hiddenCommandKind(args: readonly string[]): "gh" | "git" | null {
+  const window = args.slice(0, 12);
+  if (window.some(a => GH_BUILTIN_COMMANDS.has(a))) return "gh";
+  if (window.some(a => GIT_PUSH_LIKE.has(a))) return "git";
+  return null;
+}
+
+/** Text a shell command line is fed on stdin by `<<<` here-strings (the tokeniser leaves them in the tokens). */
+function hereStrings(tokens: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let k = 0; k < tokens.length; k++) {
+    const t = tokens[k]!;
+    if (t === "<<<") {
+      const next = tokens[k + 1];
+      if (next !== undefined) out.push(next);
+    } else if (t.startsWith("<<<")) {
+      out.push(t.slice(3));
+    }
+  }
+  return out;
+}
+
 function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
   if (typeof command !== "string" || command.length === 0) return [];
   const segments = tokenise(command);
@@ -1873,8 +2262,13 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
   let envOverridden = ctx.envOverridden;
 
   segments.forEach((seg, segmentIndex) => {
-    const tokens = stripRedirections(seg.tokens);
     const base = { precededByCd, joinedBy: seg.joinedBy, segmentIndex };
+    // A function definition's first token is the function's name, not a command.
+    const rawTokens = seg.funcDef ? seg.tokens.slice(1) : seg.tokens;
+    const strings = hereStrings(rawTokens);
+    const tokens = stripRedirections(rawTokens);
+    /** This segment's command word already got a fail-closed intent for what it hides. */
+    let hidden = false;
 
     /** Parse `text` as a command line of its own; its intents take this segment's place in the chain. */
     const nest = (text: string, envRepo: string | undefined): void => {
@@ -1887,6 +2281,11 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
       for (const i of parseUnsafe(text, child)) {
         intents.push({ ...i, segmentIndex, joinedBy: i.joinedBy ?? seg.joinedBy, precededByCd: i.precededByCd || precededByCd });
       }
+    };
+    /** Emit a fail-closed intent for what this segment hides. */
+    const sentinel = (kind: "gh" | "git"): void => {
+      hidden = true;
+      intents.push(kind === "gh" ? unresolvedIntent(base, "gh-unknown", "unparsed-shape") : unresolvedGitIntent(base));
     };
 
     try {
@@ -1905,6 +2304,11 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
         for (const w of tokens) for (const inner of substitutionTexts(w)) nest(inner, envRaw);
       }
 
+      if (resolved.exhausted) {
+        const s = sentinelFor(tokens.join(" "), base);
+        if (s !== null) intents.push(s);
+        return;
+      }
       if (resolved.start >= toks.length) {
         if (mutatesGhRepo(tokens, resolved, assigns)) envOverridden = true;
         return;
@@ -1915,23 +2319,61 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
 
       if (resolved.nestedText !== undefined) {
         nest(resolved.nestedText, envRaw);
+      } else if (cmd === "alias") {
+        // `alias gh2='gh issue create'`: later uses of the name cannot be read. (Aliases from the user's
+        // profile are invisible here; the shim covers them.)
+        for (const a of args) {
+          const eq = a.indexOf("=");
+          if (eq <= 0) continue;
+          const value = a.slice(eq + 1);
+          const words = flattenWords([value]);
+          const kind = words.some(isGhWord) ? "gh" : words.some(isGitWord) ? "git" : null;
+          if (kind !== null) {
+            ctx.tainted.set(a.slice(0, eq), { kind, push: words.some(w => GIT_PUSH_LIKE.has(w)) });
+          }
+        }
+        return;
       } else {
         let intent: EgressIntent | null = null;
-        if (cmd === "git") intent = classifyGit(args, base, assigns);
+        const taint = ctx.tainted.get(word);
+        if (taint !== undefined) {
+          if (taint.kind === "gh" || taint.push || hiddenCommandKind(args) === "git") sentinel(taint.kind);
+        } else if (cmd === "git") intent = classifyGit(args, base, assigns, { aliases: ctx.gitAliases });
         else if (cmd === "gh") {
           intent = classifyGh(args, base, { envRepo: envRaw, envOverridden, aliases: ctx.aliases });
         } else if (cmd === "npm" || cmd === "pnpm" || cmd === "yarn") intent = classifyNpm(cmd, args, base);
-        else if (word.includes("{")) {
-          // `{gh,}` / `g{h,}` is brace-expanded by the shell into the command that actually runs.
+        else if (hasExpansion(word)) {
+          // `$GH issue create`, `$(which gh) pr comment 5`: the command is whatever the expansion yields.
+          const kind = hiddenCommandKind(args);
+          if (kind !== null) sentinel(kind);
+        } else if (word.includes("{")) {
+          // `{gh,} issue create` / `g{h,} …` is brace-expanded by the shell into the command that actually runs.
           const candidates = braceCandidates(word).map(baseName);
-          if (candidates.includes("gh")) intent = unresolvedIntent(base, "gh-unknown", "unparsed-shape");
-          else if (candidates.includes("git") && args.includes("push")) intent = unresolvedIntent(base, "git-push", "unparsed-shape");
+          if (candidates.includes("gh")) sentinel("gh");
+          else if (candidates.includes("git") && args.some(a => GIT_PUSH_LIKE.has(a))) sentinel("git");
         }
         if (intent !== null) {
           // Arguments arriving on stdin are invisible here: the target cannot be named.
           if (resolved.viaXargs && intent.unresolved === undefined) intent = { ...intent, unresolved: "unparsed-shape" };
           intents.push(intent);
         }
+      }
+
+      // Text fed to this command on stdin: a shell runs it as commands; a script interpreter is scanned below.
+      const stdinTexts = [...seg.heredocs, ...strings];
+      const scriptTexts: string[] = [];
+      if (stdinTexts.length > 0 && resolved.nestedText === undefined) {
+        if (SHELL_INTERPRETERS.has(cmd)) for (const t of stdinTexts) nest(t, envRaw);
+        else if (SCRIPT_INTERPRETER_RE.test(cmd)) scriptTexts.push(...stdinTexts);
+      }
+
+      // --- the backstop ---------------------------------------------------------------------------
+      // Re-read this segment's text. A mention of `gh <group>` / `git push` that the parser did not turn
+      // into an intent of its own (the command word's own mention is the one it did) is reported.
+      if (!hidden) {
+        const found = countMentions(flattenWords([...scanTokens(toks, resolved.start, cmd, resolved.nestedFrom), ...scriptTexts]));
+        if (found.gh > (cmd === "gh" ? 1 : 0)) sentinel("gh");
+        if (found.git > (cmd === "git" ? 1 : 0)) sentinel("git");
       }
 
       if (mutatesGhRepo(tokens, resolved, assigns)) envOverridden = true;

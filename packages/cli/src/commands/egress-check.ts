@@ -137,7 +137,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   let intents: EgressIntent[];
   try {
     // The shim's own environment is the real `gh`'s: its GH_REPO and aliases.
-    intents = parseEgressIntents(buildGhCommand(args), egressParseOptions(process.env));
+    intents = parseEgressIntents(buildGhCommand(args), egressParseOptions(process.env, cwd));
   } catch (err) {
     return internalError(`could not parse the gh command line: ${(err as Error).message}`);
   }

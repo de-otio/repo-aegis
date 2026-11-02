@@ -85,7 +85,7 @@ describe("fail closed — unknown gh words and command groups (C1, M4)", () => {
       "gh codespace create -R stranger/r",
       "gh cache delete --all -R stranger/r",
       "gh ssh-key add k.pub",
-      "gh copilot suggest x",
+      "gh copilot agent run x",
       "gh extension install stranger/gh-x",
     ]) {
       const i = only(c, { ghAliases: aliases });
@@ -395,11 +395,13 @@ describe("shell expansions in repository slots (H4)", () => {
     ]) {
       assert.equal(only(c).unresolved, "opaque-repo", c);
     }
-    // After the owner/repo segments an expansion cannot change which repository is addressed.
-    for (const c of ['gh api -X POST "repos/stranger/r/issues/$N/comments" -f a=b', 'gh api -X POST "repos/stranger/r/issues?x=$Y" -f a=b']) {
-      assert.equal(only(c).unresolved, undefined, c);
+    // (In the QUERY an expansion cannot change which repository is addressed; in the path it can.)
+    assert.equal(only('gh api -X POST "repos/stranger/r/issues?x=$Y" -f a=b').unresolved, undefined);
+    for (const c of ['gh api -X POST "repos/stranger/r/issues/$N/comments" -f a=b', 'gh api -X POST "repos/stranger/r/issues/$(cat n)" -f a=b']) {
+      assert.equal(only(c).unresolved, "opaque-repo", c);
     }
-    assert.deepEqual(parseApiEndpoint("repos/stranger/r/issues/$N"), { org: "stranger", repo: "r" });
+    assert.equal(parseApiEndpoint("repos/stranger/r/issues/$N"), null);
+    assert.deepEqual(parseApiEndpoint("repos/stranger/r/issues?x=$N"), { org: "stranger", repo: "r" });
     assert.equal(analyseApiEndpoint("$EP").kind, "opaque");
   });
 
