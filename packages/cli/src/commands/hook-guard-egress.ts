@@ -41,12 +41,15 @@ import {
   isHumanPresent,
   loadRegistry,
   parseEgressIntents,
+  ruleHSkipNote,
+  ruleHStatus,
   RegistryEncryptedError,
   RegistryNotFoundError,
   type Destination,
   type EgressDecision,
   type Registry,
   type RegistryState,
+  type RuleHStatus,
 } from "@de-otio/repo-aegis-core";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
 
@@ -304,6 +307,8 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
 
   let decision: EgressDecision;
   let registryNote: string | undefined;
+  let ruleH: RuleHStatus = "applied";
+  let humanPresent = false;
   try {
     const { command, cwd, toolName } = parseHookInput(stdinText);
     if (toolName !== undefined && !SHELL_TOOL_NAMES.has(toolName.toLowerCase())) process.exit(0);
@@ -316,6 +321,8 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
 
     const loaded = loadRegistryOrEmpty();
     registryNote = loaded.note;
+    ruleH = ruleHStatus(loaded.registryState, loaded.registry);
+    humanPresent = isHumanPresent();
 
     // Write-through: whatever this directory declares about its own origin
     // goes into the machine-wide destination cache, so the next command that
@@ -328,7 +335,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
       cwd: cwd ?? process.cwd(),
       registry: loaded.registry,
       registryState: loaded.registryState,
-      humanPresent: isHumanPresent(),
+      humanPresent,
       // Only Claude Code is assumed to have an "ask". Anything else —
       // including an unrecognised `--agent` value — is treated as a
       // framework without one, so `ask` degrades to `deny`.
@@ -358,7 +365,16 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   // Rule h's own refusal already says the registry could not be read and how
   // to fix it (§3.9); appending the note would only repeat it.
   if (decision.code === "UNREGISTERED_OWNER_EGRESS") registryNote = undefined;
-  const reason = registryNote === undefined ? decision.reason : `${decision.reason} (${registryNote})`;
+  // D4: a skip says which state applied. Only where rule h would have been
+  // judging a destination for a non-interactive command, so a shape-rule deny
+  // (no destination) or a person at the keyboard gets no extra line. No
+  // registry contents, ever.
+  const skipNote =
+    decision.destination !== undefined && !humanPresent && decision.code !== "UNREGISTERED_OWNER_EGRESS"
+      ? ruleHSkipNote(ruleH)
+      : null;
+  const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);
+  const reason = notes.length === 0 ? decision.reason : `${decision.reason} (${notes.join("; ")})`;
 
   if (decision.action === "ask") {
     writeDecisionJson("ask", reason);
@@ -369,6 +385,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   const dest = destinationDetails(decision.destination);
   if (dest !== undefined) details["destination"] = dest;
   if (registryNote !== undefined) details["registry"] = registryNote;
+  if (skipNote !== null) details["ruleH"] = ruleH;
 
   // stderr carries the reason because that is what these frameworks feed
   // back to the model on a non-zero exit (Bug A in

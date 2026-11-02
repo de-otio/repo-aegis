@@ -44,6 +44,33 @@ export function registeredOwners(registry: Registry): Set<string> {
   return owners;
 }
 
+/** Whether rule h is judging, and if not, why not (D4: every skip says which state applied). */
+export type RuleHStatus = "applied" | "skipped:missing" | "skipped:no-owners";
+
+/**
+ * Rule h's standing for a registry state. `unreadable` is `applied`: it
+ * refuses. Layers use this to say so when rule h did NOT run, so an operator
+ * is never left believing an owner check happened when there was nothing to
+ * check against. Carries no registry contents.
+ */
+export function ruleHStatus(state: "loaded" | "missing" | "unreadable", registry: Registry): RuleHStatus {
+  if (state === "missing") return "skipped:missing";
+  if (state === "loaded" && registeredOwners(registry).size === 0) return "skipped:no-owners";
+  return "applied";
+}
+
+/** One-line, content-free note for a skipped rule h; `null` when it applied. */
+export function ruleHSkipNote(status: RuleHStatus): string | null {
+  switch (status) {
+    case "skipped:missing":
+      return "rule h (unregistered-owner check) skipped: no registry file exists";
+    case "skipped:no-owners":
+      return "rule h (unregistered-owner check) skipped: the registry declares no owners";
+    case "applied":
+      return null;
+  }
+}
+
 /** The destination fields {@link ownerAdmitted} reads. */
 export interface OwnerCandidate {
   org: string;

@@ -55,7 +55,9 @@ import {
 import { resolveCachedDestination } from "./destination-cache.js";
 import { findApproval, type EgressApproval } from "./egress-approval.js";
 import { ownerAdmitted, registeredOwners, UPSTREAM_ADMITTED_VERBS } from "./registered-owners.js";
-import { refusal, type RefusalFix } from "./refusal.js";
+import { refusal, safeDestination, INVALID_DESTINATION_LABEL, type RefusalFix } from "./refusal.js";
+import { registryPath } from "./paths.js";
+import { homedir } from "node:os";
 import { parseRemoteUrl } from "./remote-url.js";
 import { readRepoConfig, type RepoClass, type RepoConfig } from "./repo.js";
 import type { Registry } from "./registry.js";
@@ -599,6 +601,8 @@ export function describeDestination(d: Destination | null | undefined): string {
   if (d.unresolved === "graphql-mutation") {
     return "UNKNOWN repository (GraphQL mutation: the target is a node id, not resolvable offline; treated as public)";
   }
+  // The name comes from the agent's command line (see refusal.ts): never print one that is not a GitHub name.
+  if (safeDestination(d.org, d.repo) === null) return INVALID_DESTINATION_LABEL;
   const vis = d.assumedPublic ? "visibility uncached, treated as public" : d.classKnown ? d.visibility : "visibility unknown";
   const cls = d.classKnown ? d.class : "class unknown";
   return `${d.org}/${d.repo} (${vis}, ${cls})`;
@@ -612,6 +616,7 @@ export function describeDestination(d: Destination | null | undefined): string {
 export function describeDestinationForReceipt(d: Destination | null | undefined): string {
   if (!d) return "(destination not resolved)";
   if (d.unresolved === "graphql-mutation") return "UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC)";
+  if (safeDestination(d.org, d.repo) === null) return INVALID_DESTINATION_LABEL.toUpperCase();
   const vis = d.assumedPublic
     ? "VISIBILITY UNCACHED, TREATED AS PUBLIC"
     : d.classKnown
@@ -666,6 +671,23 @@ function positivelyDisjoint(a: ReadonlySet<string>, b: ReadonlySet<string>): boo
  * owner/repo, which the command already carries, and nothing else: never the
  * registered owners, engagement ids or upstreams (the redaction oracle).
  */
+/**
+ * The registry file's path for the repair hint: the resolved path
+ * (`REPO_AEGIS_REGISTRY`, or `<home>/engagements.yaml`), with the home
+ * directory shown as `~`, and only if it is made of plain path characters
+ * (a path with shell metacharacters is described, never printed).
+ */
+function registryPathLabel(): string {
+  try {
+    const p = registryPath();
+    const h = homedir();
+    const shown = h.length > 1 && p.startsWith(`${h}/`) ? `~${p.slice(h.length)}` : p;
+    return /^[A-Za-z0-9_.~/@+:-]+$/.test(shown) ? shown : "the registry file";
+  } catch {
+    return "the registry file";
+  }
+}
+
 function unregisteredOwnerReason(
   intent: EgressIntent,
   destination: Destination,
@@ -675,8 +697,15 @@ function unregisteredOwnerReason(
   const verb = describeVerb(intent.verb);
   const code = "UNREGISTERED_OWNER_EGRESS";
   const unresolved = destination.unresolved !== undefined;
-  const owner = destination.org;
-  const target = `${destination.org}/${destination.repo}`;
+  // Names come from the agent's own command line and end up in text a person
+  // is told to paste. Only validated, lower-cased names are interpolated, and
+  // `refusal()` discards the whole message for an invalid one (it is handed
+  // `subject`), so nothing built from `owner`/`target` below can reach output
+  // when the name is bad.
+  const safe = unresolved ? null : safeDestination(destination.org, destination.repo);
+  const owner = safe?.org ?? "";
+  const target = safe === null ? "" : `${safe.org}/${safe.repo}`;
+  const subject = unresolved ? {} : { destination: { verb, org: destination.org, repo: destination.repo } };
   const what = unresolved
     ? destination.unresolved === "graphql-mutation"
       ? "gh api graphql (mutation)"
@@ -686,6 +715,7 @@ function unregisteredOwnerReason(
   if (state === "unreadable") {
     return refusal({
       code,
+      ...subject,
       what,
       why:
         `The registry could not be read (it is encrypted or damaged), so repo-aegis cannot confirm that ` +
@@ -694,7 +724,11 @@ function unregisteredOwnerReason(
       approval: "No approval covers this",
       fixes: [
         { by: "person", when: "If the registry is encrypted", command: "repo-aegis registry decrypt --identity <key>" },
-        { by: "person", when: "If it is damaged", command: "repair the registry file, then re-run the command" },
+        {
+          by: "person",
+          when: "If it is damaged",
+          step: `repairs ${registryPathLabel()} (\`repo-aegis status\` shows why it fails to load), then re-runs the command`,
+        },
       ],
     });
   }
@@ -723,6 +757,7 @@ function unregisteredOwnerReason(
   if (isUpstream && !UPSTREAM_ADMITTED_VERBS.has(intent.verb)) {
     return refusal({
       code,
+      ...subject,
       what,
       why: `${target} is an allowed upstream, but allowed upstreams accept only PRs, issues and comments, not ${verb}`,
       approval: "No approval covers this",
@@ -739,6 +774,7 @@ function unregisteredOwnerReason(
 
   return refusal({
     code,
+    ...subject,
     what,
     why:
       `The owner "${owner}" is not registered (in neither personalOrgs nor any engagement), so repo-aegis ` +
@@ -843,10 +879,15 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     }
     // "missing": no registry file at all, rule h is skipped.
     if (refused) {
+      // A destination whose name is not a plausible GitHub owner/repo is not
+      // attached to the decision: layers print it as JSON, and the refusal
+      // text deliberately carries no such name either.
+      const nameOk =
+        destination.unresolved !== undefined || safeDestination(destination.org, destination.repo) !== null;
       return deny(
         "UNREGISTERED_OWNER_EGRESS",
         unregisteredOwnerReason(intent, destination, opts.registryState, opts.registry),
-        destination,
+        nameOk ? destination : undefined,
       );
     }
   }
@@ -950,9 +991,17 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           ? `PUBLIC destination`
           : `an operation that is hard to undo`;
     const target = intent.verb === "git-push" && intent.refspec ? `${intent.refspec} → ` : "";
-    const approveCommand = `repo-aegis approve ${
-      destination && destination.unresolved === undefined ? `${destination.org}/${destination.repo}` : "'*'"
-    }`;
+    // The destination's name comes from the agent's command line and this hint
+    // is text a person pastes: interpolate only a validated name. A name that
+    // fails validation gets no approve command at all (see refusal.ts).
+    const approveTarget =
+      destination && destination.unresolved === undefined
+        ? safeDestination(destination.org, destination.repo)
+        : "wildcard";
+    const approveCommand =
+      approveTarget === null
+        ? null
+        : `repo-aegis approve ${approveTarget === "wildcard" ? "'*'" : `${approveTarget.org}/${approveTarget.repo}`}`;
     // Public only because nothing says private (issue #114): say so, and say
     // how the visibility gets recorded, so the refusal is not a dead end. Not
     // for an unresolved GraphQL target — there is no repository to record.
@@ -990,19 +1039,26 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         return deny(
           "SHIM_UNREACHABLE_NEEDS_HUMAN",
           `${head}, and in this shell nothing below this hook can hold the command: the \`gh\` shim is not ` +
-            `the first \`gh\` on PATH, so an unanswered prompt would let it run. Mint an approval from a ` +
-            `terminal (\`${approveCommand}\`) and re-run, or start the agent from a shell where the shim ` +
+            `the first \`gh\` on PATH, so an unanswered prompt would let it run. ` +
+            (approveCommand === null
+              ? `Re-run it from a terminal`
+              : `Mint an approval from a terminal (\`${approveCommand}\`) and re-run`) +
+            `, or start the agent from a shell where the shim ` +
             `comes first (\`repo-aegis doctor\` says which).` +
             hint,
           destination ?? undefined,
         );
       }
-      const reason = `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.${hint}`;
+      const reason =
+        approveCommand === null
+          ? `${head}: re-issue the command naming a valid owner/repo, or run it from a terminal.${hint}`
+          : `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.${hint}`;
       return { action: "ask", code: "PUBLIC_EGRESS_NEEDS_HUMAN", reason, ...(destination && { destination }), intent };
     }
     return deny(
       "PUBLIC_EGRESS_NEEDS_HUMAN",
-      `${head}: re-run it from a terminal, mint an approval first (\`${approveCommand}\`), ` +
+      `${head}: re-run it from a terminal, ` +
+        (approveCommand === null ? "" : `mint an approval first (\`${approveCommand}\`), `) +
         `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).` +
         hint,
       destination ?? undefined,

@@ -2,7 +2,13 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ownerAdmitted, registeredOwners, UPSTREAM_ADMITTED_VERBS } from "./registered-owners.js";
+import {
+  ownerAdmitted,
+  registeredOwners,
+  ruleHSkipNote,
+  ruleHStatus,
+  UPSTREAM_ADMITTED_VERBS,
+} from "./registered-owners.js";
 import type { EgressVerb } from "./egress-intent.js";
 import type { Registry } from "./registry.js";
 
@@ -28,6 +34,22 @@ describe("registeredOwners", () => {
   it("is empty for a registry that declares no owners", () => {
     assert.equal(registeredOwners({ engagements: [], alwaysBlock: [] }).size, 0);
     assert.equal(registeredOwners({ engagements: [{ id: "x", name: "X", markers: [] }], alwaysBlock: [] }).size, 0);
+  });
+});
+
+describe("ruleHStatus / ruleHSkipNote", () => {
+  it("missing and owner-less are skips; loaded-with-owners and unreadable are `applied`", () => {
+    const none = { engagements: [], alwaysBlock: [] } as Registry;
+    assert.equal(ruleHStatus("missing", REG), "skipped:missing");
+    assert.equal(ruleHStatus("loaded", none), "skipped:no-owners");
+    assert.equal(ruleHStatus("loaded", REG), "applied");
+    assert.equal(ruleHStatus("unreadable", none), "applied", "unreadable refuses, it does not skip");
+  });
+
+  it("a skip note says which state applied and never carries registry contents", () => {
+    assert.match(ruleHSkipNote("skipped:missing")!, /no registry file exists/);
+    assert.match(ruleHSkipNote("skipped:no-owners")!, /declares no owners/);
+    assert.equal(ruleHSkipNote("applied"), null);
   });
 });
 

@@ -473,18 +473,41 @@ describe("rule h — unregistered owner", () => {
       };
       const ALNUM = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
       const CHARSET = ALNUM + "-";
-      const registered = new Set(["acme", "customer-a-org"]);
+      const genOwner = (): string => {
+        const len = 1 + next(20);
+        let o = ALNUM[next(ALNUM.length)]!;
+        for (let i = 1; i < len; i++) o += CHARSET[next(CHARSET.length)]!;
+        return o;
+      };
       let checked = 0;
       while (checked < 60) {
-        const len = 1 + next(20);
-        let owner = ALNUM[next(ALNUM.length)]!;
-        for (let i = 1; i < len; i++) owner += CHARSET[next(CHARSET.length)]!;
-        if (registered.has(owner.toLowerCase())) continue;
+        const owner = genOwner();
+        // The registry varies too: a random owner set (split between
+        // personalOrgs and an engagement's githubOrgs) and random upstreams,
+        // none of which names the destination's owner.
+        const others: string[] = [];
+        for (let n = next(5); n > 0; n--) {
+          const o = genOwner().toLowerCase();
+          if (o !== owner.toLowerCase()) others.push(o);
+        }
+        const personal = others.filter((_, i) => i % 2 === 0);
+        const customer = others.filter((_, i) => i % 2 === 1);
+        // Never an empty owner set: rule h is skipped for one (D4).
+        if (personal.length === 0 && customer.length === 0) personal.push("acme");
+        const registry: Registry = {
+          engagements: [
+            { id: "customer-x", name: "Customer X", started: "2026-01-01", markers: [], githubOrgs: customer },
+          ],
+          alwaysBlock: [],
+          personalOrgs: personal,
+          allowedUpstreams: others.map(o => `${o}/lib`),
+          schemaVersion: 2,
+        } as unknown as Registry;
         checked++;
         const d = decideEgress({
           intents: parseEgressIntents(`gh issue create --repo ${owner}/r --body x`),
           cwd: home,
-          registry: H_REGISTRY,
+          registry,
           registryState: "loaded",
           humanPresent: false,
           capabilities: { ask: true },

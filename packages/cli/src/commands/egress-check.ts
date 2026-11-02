@@ -32,6 +32,7 @@ import {
   parseRemoteUrl,
   RegistryNotFoundError,
   resolveDestinationOffline,
+  ruleHStatus,
   type Destination,
   type EgressIntent,
   type Registry,
@@ -132,6 +133,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   }
 
   const { registry, registryState } = loadRegistryOrEmpty();
+  const ruleH = ruleHStatus(registryState, registry);
   // Write-through into the machine-wide destination cache (see
   // `hook guard-egress`): a command judged from inside a repository leaves
   // that repository's declaration where a later command from elsewhere can
@@ -159,6 +161,8 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
         error: decision.reason,
         details: {
           verb: describeVerb(decision.intent.verb),
+          // D4: say whether rule h judged (`applied`) or was skipped, and why.
+          ruleH,
           ...(decision.destination && { destination: destinationJson(decision.destination) }),
         },
       }) + "\n",
@@ -210,6 +214,8 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
       : `${describeVerb(first.verb)}${first.refspec !== undefined ? ` ${first.refspec}` : ""}`;
   emitJson({
     action: "allow",
+    // Only for a command with egress intents: a plain read stays `{action}`.
+    ...(intents.length > 0 && { ruleH }),
     ...(destination && { destination: destinationJson(destination) }),
     ...(decision.action === "allow" &&
       decision.approval !== undefined && {
