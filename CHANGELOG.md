@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `doctor` owner checks, and a registry write-protection rule
+
+- **`doctor` checks the registered owners** (issue #151): `OWNERS_UNDECLARED`
+  and `REGISTRY_UNREADABLE` (both failures), `GH_LOGIN_UNREGISTERED`,
+  `GH_MEMBER_ORG_UNREGISTERED` and `REGISTERED_ORG_NOT_MEMBER` for **every**
+  `gh` account logged in for github.com (each account's token reaches the child
+  `gh` through its environment only; doctor never switches accounts and never
+  prints a token). Organisation names appear only in `fix` and `--json`.
+  `warn` and `info` findings never change the exit code. Also new:
+  `PREPUSH_HOOK_MISSING`, `SHELL_STARTUP_OVERRIDES` and `SSH_GITHUB_REDIRECT`.
+- **`install claude-md` adds `permissions.deny` `Edit` rules for the registry
+  file (and its `.age`), the approvals store, `hooks/**`, `bin/**` and the
+  rendered `markers/**`** (an agent that edits those drops markers silently; an
+  agent-run `render` is now refused in the sandbox with
+  `MARKERS_WRITE_PROTECTED`, and a person runs it), so the
+  agent's file tools cannot register an owner by editing `engagements.yaml`.
+  Edit rules reach the sandbox, so a sandboxed `sed -i` is stopped too (verify
+  with a sandboxed `touch`); `state/` stays writable. `install claude-md
+  --uninstall` removes exactly the rules install added, recorded under
+  `state/`. To recover from a rule you do not want:
+  `repo-aegis install claude-md --uninstall`.
+- **`doctor` only hands a token to a trusted `gh`.** The active account is
+  checked without reading a token; other accounts' tokens are read only after a
+  y/N at a terminal naming the gh binary. The checks are skipped when another
+  `gh` precedes the shim, when the gh or its `PATH` directory is under `$HOME`,
+  the cwd or a temp directory or in a writable one, or when the file is not
+  really a gh (a link named `gh` to `/bin/sh`): `GH_BINARY_UNTRUSTED`. Other
+  accounts' tokens are not read when gh is configured to redirect requests
+  (`http_unix_socket`, `GH_CONFIG_DIR`, `GH_HOST`, token variables):
+  `GH_CONFIG_REDIRECT`.
+- The `PERSONAL_ORG_UNREGISTERED` fix now says a person runs the owner add from
+  their own terminal.
+
 ## [0.10.3] - 2026-09-23
 
 ### Fixed — an `UNKNOWN` destination visibility let a push through

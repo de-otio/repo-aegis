@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess } from "node:child_process";
+import { cpus } from "node:os";
 import {
   validatePattern,
   validatePatterns,
@@ -135,22 +137,73 @@ describe("validatePatterns({ strict: true })", () => {
     assert.ok(cata, `expected ^(a+)+b$ in invalid; got invalid=${JSON.stringify(r.invalid)}`);
     assert.match(cata!.reason, /timed out|catastrophic|>/i);
 
-    // The third pattern is well-formed *but* may have been trampled by
-    // the kill-on-timeout. It must show up in *one* of the result sets:
-    // valid (if the worker got that far before timeout), or invalid with
-    // a "no result" / "timed out" reason (if truncation hit it).
-    const reported =
-      r.valid.includes("\\d{12}") ||
-      r.invalid.some(x => x.pattern === "\\d{12}");
+    // The third pattern was queued behind the one that hung. Only the
+    // in-flight pattern is blamed; the rest are retried once in a fresh child,
+    // so a well-formed pattern that merely sat behind a bad one is valid.
     assert.ok(
-      reported,
-      `third pattern must be reported in valid or invalid; ` +
+      r.valid.includes("\\d{12}"),
+      `a pattern queued behind the hung one must be retried and accepted; ` +
         `valid=${JSON.stringify(r.valid)} invalid=${JSON.stringify(r.invalid)}`,
     );
 
     // Total accounting: every input pattern must show up exactly once
     // across the two buckets.
     assert.equal(r.valid.length + r.invalid.length, 3);
+  });
+});
+
+/** Start `n` busy-loop processes; returns a function that kills them. */
+function startCpuHogs(n: number): () => void {
+  const hogs: ChildProcess[] = [];
+  for (let i = 0; i < n; i++) {
+    hogs.push(spawn(process.execPath, ["-e", "for (;;) {}"], { stdio: "ignore" }));
+  }
+  return () => {
+    for (const h of hogs) h.kill("SIGKILL");
+  };
+}
+
+describe("validatePatterns({ strict: true }) on a loaded machine", () => {
+  // Wall-clock budgets rejected valid markers whenever the box was busy. The
+  // budget is CPU time now, so contention must change neither verdict.
+  const hogCount = Math.max(4, cpus().length * 2);
+
+  it("accepts ordinary patterns while every core is oversubscribed", () => {
+    const stop = startCpuHogs(hogCount);
+    try {
+      const patterns = Array.from({ length: 40 }, (_, i) => `marker-${i}-[a-z]+\\d{2}`);
+      const r = validatePatterns(patterns, { strict: true });
+      assert.deepEqual(r.invalid, [], `valid markers rejected under load: ${JSON.stringify(r.invalid)}`);
+      assert.equal(r.valid.length, 40);
+    } finally {
+      stop();
+    }
+  });
+
+  it("still rejects a catastrophic pattern under load, and still accepts the patterns around it", () => {
+    const stop = startCpuHogs(hogCount);
+    try {
+      const r = validatePatterns(["before", "^(a+)+b$", "after"], { strict: true });
+      assert.deepEqual(r.valid, ["before", "after"]);
+      assert.equal(r.invalid.length, 1);
+      assert.equal(r.invalid[0]!.pattern, "^(a+)+b$");
+    } finally {
+      stop();
+    }
+  });
+
+  it("the in-process check accepts an ordinary pattern under load (it reads CPU time, not wall-clock)", () => {
+    // The catastrophic side of the in-process check cannot be asserted here: by
+    // its own documentation it is not preemptive, so a truly catastrophic
+    // pattern would hang this test. The strict path above covers rejection.
+    setRegexBackendForTesting("in-process");
+    const stop = startCpuHogs(hogCount);
+    try {
+      for (let i = 0; i < 20; i++) assert.equal(validatePattern(`acme-corp-${i}-[a-z]+`).ok, true);
+    } finally {
+      stop();
+      setRegexBackendForTesting(null);
+    }
   });
 });
 

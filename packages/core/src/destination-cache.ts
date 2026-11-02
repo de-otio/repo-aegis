@@ -28,7 +28,7 @@
 // Every read and write is best-effort: a cache that cannot be read yields
 // "not cached", never an error, and a cache that cannot be written is
 // silently not written. A guardrail must never block on its own bookkeeping.
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readCachedVisibility, type RepoVisibility } from "./egress.js";
 import { repoAegisHome } from "./paths.js";
@@ -148,17 +148,27 @@ export function recordWorkingTree(
   path: string = destinationCachePath(),
   now: () => Date = () => new Date(),
 ): string | null {
+  const tmp = `${path}.${process.pid}.tmp`;
   try {
     const described = describeWorkingTree(workingTree);
     if (described === null) return null;
     const cache = readDestinationCache(path);
     cache.repos[described.key] = { ...described.entry, checkedAt: now().toISOString() };
     mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(cache, null, 2) + "\n", { mode: 0o600 });
     renameSync(tmp, path);
     return described.key;
   } catch {
+    // Best-effort: a write that fails (a read-only home, or the sandbox refusing
+    // the write because `install claude-md` denies agent edits to this file,
+    // which an agent can otherwise forge to make a public repo look private)
+    // costs only a cache miss; no caller depends on it. But the temp file may
+    // already exist, and under a denied target every call would leave one.
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* never created, or already gone */
+    }
     return null;
   }
 }

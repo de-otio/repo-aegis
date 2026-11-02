@@ -662,6 +662,48 @@ neither replaces the other, and both coexist with any user-authored hook
 already in that entry. `--uninstall` removes every repo-aegis entry and
 reports the count per event.
 
+3. Adds `permissions.deny` **`Edit(...)`** rules to `settings.json` for the
+   files whose tampering bypasses the guard, and nothing else: the registry
+   file and its `.age` ciphertext, the approvals store
+   (`egress-approvals.json`), the destination cache (`destinations.json`: rules e-g read a cached entry's class and visibility, so a forged "private" entry for a public repo would skip the person check; every writer treats a failed write as a cache miss), `hooks/**` (the git hook scripts), `bin/**`
+   (the `gh` shim), `markers/**` (the rendered deny set the write scan and
+   the hooks read; editing it silently drops markers) and two files under
+   `state/` that an enforcement path trusts: `deny-set.cache.json` (an
+   unauthenticated cache; a forged entry with no patterns switches the scanner
+   off) and the uninstall ledger, under `REPO_AEGIS_HOME`
+   (default `~/.config/repo-aegis`; the markers directory follows
+   `REPO_AEGIS_MARKERS_DIR`).
+   Without them the agent's own file tools can add an owner to
+   `engagements.yaml` with no terminal, which undoes the unregistered-owner
+   check. Only `Edit` rules are written: Claude Code matches path rules for
+   `Edit` and `Read` only, a `Write(path)` rule is never matched, and an Edit
+   rule covers every built-in editing tool. Claude Code also merges Edit deny
+   rules into the sandbox's write-deny list, so they stop a sandboxed Bash
+   `sed -i` too; verify on your machine with a sandboxed `touch <registry
+   file>` (it should fail). `state/` (audit log, lock, caches) is deliberately
+   **not** denied: denying the whole home broke audit appends, the state lock,
+   cache writes and an agent running `install hooks` or `install shim`. Because
+   `markers/**` is denied, an agent-run `repo-aegis render` is refused inside
+   the sandbox (`MARKERS_WRITE_PROTECTED`: a person runs `render` from their own
+   terminal); the other flows that re-render (`engagements add|end|remove`,
+   `markers add`, `suggest-markers --auto-accept-above`, `init`) already fail
+   earlier, because they rewrite the denied registry file. A
+   registry relocated to `$HOME`, `/` or a git work tree is denied as a file
+   only, with a warning. `hooks/**`, `bin/**` and `markers/**` are narrow
+   subdirectories and are denied wherever the home is; only a markers directory
+   moved out of the home (`REPO_AEGIS_MARKERS_DIR`) into `$HOME`, `/` or a work
+   tree is not denied, with a warning. The rest of `state/` is left writable on
+   purpose: the audit log, the lock, `leak-context-mode` (it only changes the
+   `CLAUDE.md` tone; no enforcement path reads it) and the other caches. The rules install added are recorded
+   in `state/claude-md-deny-rules.json`; `--uninstall` removes exactly those,
+   and only ones shaped like ours (`Edit(//…)` over a protected path under the
+   repo-aegis home): the ledger lives in a directory an agent can write, so it
+   cannot be used to delete your own rules. A rule you already had before
+   install is never removed, and nothing is removed on a first install with no
+   ledger, except the `Edit(//<dir>/**)` + `Write(//<dir>/**)` pair an earlier
+   build wrote (both present together, or neither is touched). `doctor` reports
+   `REGISTRY_AGENT_WRITABLE` (warn) while they are absent.
+
 No file is written under `~/.claude/hooks/` — the bin command parses
 stdin JSON natively, so `jq` is no longer required.
 
@@ -1215,10 +1257,64 @@ now reports, unless `--no-egress-checks`:
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` | no shim; another `gh` precedes it on `PATH`; the shim on `PATH` is an earlier release's script | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
 | `GUARD_HOOK_UNREGISTERED` | Claude Code `settings.json` has no `guard-egress` entry | `repo-aegis install claude-md` |
 | `CLASS_VISIBILITY_UNRESOLVED` (per repo) | a repo with a GitHub remote has no explicit class or no cached visibility | `repo-aegis classify --apply && repo-aegis status` in that repo |
-| `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`) |
+| `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
+| `REGISTRY_UNREADABLE` (**fail**) | the registry exists but is encrypted at rest or does not parse, so rule h refuses every non-interactive egress that has a destination | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal), or repair the file |
+| `OWNERS_UNDECLARED` (**fail**) | the registry loads but declares no owners, so rule h is inert | `repo-aegis engagements add --personal-org <login>` (a person, at a terminal) |
+| `GH_LOGIN_UNREGISTERED` | a logged-in `gh` account's login is not a registered owner | `--personal-org <login>` (a person, at a terminal) |
+| `GH_MEMBER_ORG_UNREGISTERED` | an organisation a logged-in `gh` account belongs to is not registered | `--personal-org` or `--github-org`, or leave it and let rule h refuse it |
+| `REGISTERED_ORG_NOT_MEMBER` (info) | a registered owner is no checked account's login or organisation (normal for archived engagements) | none required |
+| `REGISTRY_AGENT_WRITABLE` (warn) | Claude Code `settings.json` has no `permissions.deny` `Edit` rule covering the registry file, its `.age`, the approvals store, `hooks/` and `bin/` | `repo-aegis install claude-md`; verify with a sandboxed `touch` |
+| `GH_BINARY_UNTRUSTED` (warn) | the `gh` first on `PATH` is under `$HOME`, the cwd or a temp directory, sits in a group/world-writable or non-root directory, or is not the standard install | install gh from your package manager; keep user-writable directories out of `PATH` ahead of it |
+| `GH_CONFIG_REDIRECT` (warn) | gh is configured to redirect requests (`http_unix_socket`, or a config/host/token environment variable), so other accounts' tokens were not read | unset the variable, or `gh config set http_unix_socket ''` |
+| `PREPUSH_HOOK_MISSING` (warn) | the egress guard hook is registered but the **global** `core.hooksPath` is unset or not the repo-aegis hooks directory, so a repo that does not set it locally has no `pre-push` hook, the only layer that sees the environment git and ssh really run with | `repo-aegis install hooks` |
+| `SHELL_STARTUP_OVERRIDES` (warn) | `~/.zshenv`, `~/.zshrc`, `~/.zprofile`, `~/.zlogin`, `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` or `~/.profile` sets `GH_REPO`, `GH_HOST`, `GH_CONFIG_DIR`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `SRT_*` or `REPO_AEGIS_*`; reported by name and file, never value | remove the export |
+| `SSH_GITHUB_REDIRECT` (info) | `~/.ssh/config` has a `Host github.com` block whose `HostName` is not GitHub, or that applies a `ProxyCommand` / `ProxyJump` | none if intended |
+
+The `gh`-backed checks (`GH_LOGIN_UNREGISTERED`, `GH_MEMBER_ORG_UNREGISTERED`,
+`REGISTERED_ORG_NOT_MEMBER`) cover **every account logged in for
+github.com**, not just the active one. A token is only as safe as the binary
+it is handed to, so:
+
+- The active account is checked **without reading any token** (`gh api`
+  acts as it). Another account's token (`gh auth token --user`) is read only
+  after a **y/N on a stdin terminal that names the gh binary path**. Without a
+  terminal, or if you decline, only the active account is checked and the
+  report says so; the others are `SKIP`.
+- Doctor skips these checks, with a reason, when another `gh` precedes the
+  repo-aegis shim on `PATH`, or when the `gh` it would spawn is not trusted:
+  only absolute `PATH` entries count (an empty or relative one would resolve
+  against the cwd), the resolved real path is what is run, and **both the
+  `PATH` entry's own directory and the resolved file's directory** are refused
+  under `$HOME`, the cwd or a temp directory, or when group/world-writable or
+  not owned by root (or by you inside a package-manager prefix such as
+  `/opt/homebrew`). The resolved file must itself be a gh: named `gh` and a
+  standard install path or inside `<prefix>/Cellar/gh/` / `<prefix>/opt/gh/` of
+  `/opt/homebrew`, `/usr/local` or linuxbrew, so a link named `gh` to `/bin/sh`
+  or `/usr/bin/env` is refused. `GH_BINARY_UNTRUSTED` warns.
+- Before any other account's token is read, a gh whose own configuration
+  redirects requests is refused (`GH_CONFIG_REDIRECT`, warn): `http_unix_socket`
+  set in its config (`gh config get http_unix_socket`), or `GH_CONFIG_DIR`,
+  `GH_HOST`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` or
+  `GITHUB_ENTERPRISE_TOKEN` in doctor's environment (names only are reported).
+- The token goes to the child `gh` through its environment only; it is never
+  printed, logged, stored or put in an argument, and a child's stderr is
+  discarded. Doctor never runs `gh auth switch`.
+
+Each finding names its account. `REGISTERED_ORG_NOT_MEMBER` uses the union of
+all accounts' memberships; its owner list is in `--json` (`names`) only. If the
+accounts cannot be listed, doctor checks the active account and says so. With
+`gh` absent, logged out, untrusted, or an account's token invalid, the check is
+reported `SKIP`, never `FAIL`. Organisation names appear only in a finding's
+`fix` and in `--json`, never in a summary line. `doctor` prints `all clean`
+only when nothing at all was reported; with only warnings, info or skips it
+prints `no failures`.
+
+Only `fail`-severity findings make `doctor` exit 1. `warn` (`WARN`), `info`
+(`INFO`) and `SKIP` lines are reported and never change the exit code; JSON
+checks carry `severity`, `skipped` and, for gh findings, `account`.
 
 JSON gains `machine: DoctorCheck[]` and per-repo `checks: DoctorCheck[]`;
-`summary.failed` counts them. `--claude-home <dir>` points the guard-hook
+`summary.failed` counts the failing ones. `--claude-home <dir>` points the guard-hook
 check at a Claude Code home other than `~/.claude`. The sweep also records
 every checkout with a GitHub origin into the destination cache
 (`summary.destinationsRecorded`; the text output says `recorded N
