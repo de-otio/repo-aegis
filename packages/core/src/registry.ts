@@ -124,9 +124,27 @@ export function loadRegistry(path: string = registryPath()): Registry {
     }
     throw new RegistryNotFoundError(path);
   }
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    throw new RegistryParseError(path, err);
+  }
+  return parseRegistryText(text, path);
+}
+
+/**
+ * Parse and validate registry text exactly as `loadRegistry` does (YAML,
+ * schema, schemaVersion policy), without touching the filesystem. Mutators use
+ * it to prove a candidate document is a valid registry BEFORE writing it, so a
+ * failed edit never leaves an unreadable registry behind. `path` only labels
+ * errors; callers that must not echo registry contents (zod messages can name
+ * orgs and engagement ids) must not print the error's message.
+ */
+export function parseRegistryText(text: string, path: string = "<in-memory>"): Registry {
   let parsed: unknown;
   try {
-    parsed = parse(readFileSync(path, "utf8"));
+    parsed = parse(text);
   } catch (err) {
     throw new RegistryParseError(path, err);
   }

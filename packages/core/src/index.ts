@@ -39,6 +39,7 @@ export type { AuditRecord } from "./audit-log.js";
 // ---- registry ------------------------------------------------------------
 export {
   loadRegistry,
+  parseRegistryText,
   isActive,
   resolveEngagement,
   ALWAYS_BLOCK_RESERVED_ID,
@@ -395,4 +396,4 @@ export type { RepoJson, EngagementJson } from "./types.js";
 // human-readable message" helper. Sibling packages (cli, scan) own their
 // own schemas (classify rules, queries) but import this so error wording
 // is consistent across the surface.
-export { formatZodError, ORG_NAME_REGEX } from "./schemas.js";
+export { formatZodError, ORG_NAME_REGEX, OWNER_REPO_REGEX, upstreamProblem } from "./schemas.js";

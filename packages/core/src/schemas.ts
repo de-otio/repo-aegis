@@ -70,24 +70,36 @@ const orgNameSchema = z
 /**
  * An exact `owner/repo` entry for `allowedUpstreams` (issue #151, D6).
  *
- * The owner half uses {@link ORG_NAME_REGEX}. The repo half allows GitHub's
- * repo charset lower-cased (`[a-z0-9._-]`), minus the path-traversal names
- * `.` and `..`. This deviates from the plan's "orgNameSchema's charset for
- * both halves": real upstream repos carry dots and underscores (`foo.js`).
- * No wildcards: an upstream entry names one repo, never an owner.
+ * The owner half uses {@link ORG_NAME_REGEX} and GitHub's 39-character limit.
+ * The repo half allows GitHub's repo charset lower-cased (`[a-z0-9._-]`) up to
+ * GitHub's 100-character limit, minus the path-traversal names `.` and `..`
+ * and a trailing `.git` (GitHub treats `repo.git` as `repo`, so an entry that
+ * keeps the suffix would never match the destination it was meant for). This
+ * deviates from the plan's "orgNameSchema's charset for both halves": real
+ * upstream repos carry dots and underscores (`foo.js`). No wildcards: an
+ * upstream entry names one repo, never an owner.
  */
-export const OWNER_REPO_REGEX = /^[a-z0-9][a-z0-9-]*\/[a-z0-9._-]+$/;
+export const OWNER_REPO_REGEX = /^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9._-]{1,100}$/;
 
-const ownerRepoSchema = z
-  .string()
-  .regex(OWNER_REPO_REGEX, {
-    message:
-      "upstream must be lowercase 'owner/repo' — owner [a-z0-9-], repo [a-z0-9._-], no wildcards",
-  })
-  .refine(v => {
-    const repo = v.slice(v.indexOf("/") + 1);
-    return repo !== "." && repo !== "..";
-  }, { message: "upstream repo name must not be '.' or '..'" });
+/**
+ * Why `value` is not an acceptable `allowedUpstreams` entry, or null when it
+ * is. The one definition shared by the registry schema and the `upstreams
+ * add` command, so a value the command accepts always loads.
+ */
+export function upstreamProblem(value: string): string | null {
+  if (!OWNER_REPO_REGEX.test(value)) {
+    return "upstream must be lowercase 'owner/repo': owner [a-z0-9-] up to 39 characters, repo [a-z0-9._-] up to 100, no wildcards, URLs or extra segments";
+  }
+  const repo = value.slice(value.indexOf("/") + 1);
+  if (repo === "." || repo === "..") return "upstream repo name must not be '.' or '..'";
+  if (repo.endsWith(".git")) return "upstream repo name must not end in '.git': drop the suffix";
+  return null;
+}
+
+const ownerRepoSchema = z.string().superRefine((v, ctx) => {
+  const problem = upstreamProblem(v);
+  if (problem !== null) ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+});
 
 /**
  * A bare package-registry host, as it would appear in `URL.host` — optionally

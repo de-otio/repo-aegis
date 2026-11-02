@@ -23,6 +23,7 @@ import {
   type EgressApproval,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { requireTerminal } from "../require-terminal.js";
 
 export interface ApproveOptions extends OutputOptions {
   ref?: string;
@@ -74,18 +75,12 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
   }
 
   // ---- mint -----------------------------------------------------------------
-  const isTTY = opts.stderrIsTTY ?? !!process.stderr.isTTY;
-  if (!isTTY) {
-    emitError(
-      {
-        code: "APPROVE_NEEDS_TTY",
-        error:
-          "an egress approval can only be minted from a terminal: this shell has no TTY on stderr. " +
-          "(REPO_AEGIS_EGRESS_HUMAN is not honoured here — an agent must never mint its own approval.)",
-      },
-      opts,
-    );
-  }
+  requireTerminal(
+    "APPROVE_NEEDS_TTY",
+    "an egress approval can only be minted from a terminal: this shell has no TTY on stderr. " +
+      "(REPO_AEGIS_EGRESS_HUMAN is not honoured here — an agent must never mint its own approval.)",
+    opts,
+  );
   if (target === undefined || target.trim() === "") {
     emitError({ code: "USAGE", error: "approve <org>/<repo> | <org>/* | *   (or --list / --revoke <id|all>)" }, opts);
   }

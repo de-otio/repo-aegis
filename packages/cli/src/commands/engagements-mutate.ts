@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
-import { parseDocument, YAMLSeq, YAMLMap, Scalar, isMap } from "yaml";
+import { YAMLSeq, YAMLMap, Scalar, isMap } from "yaml";
 import {
   registryPath as defaultRegistryPath,
   loadRegistry,
   validatePatterns,
   isActive,
   renderMarkers,
-  withLockSync,
-  PatternValidationError,
   RegistryNotFoundError,
-  LockTimeoutError,
   ALWAYS_BLOCK_RESERVED_ID,
   ORG_NAME_REGEX,
   appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { requireTerminalForOwnerAdd, recordOwnerAdd } from "../owner-add-gate.js";
+import {
+  loadDoc,
+  ownerCount,
+  commitRegistry,
+  withRegistryLock,
+  RegistryCliError,
+  type Doc,
+} from "./registry-mutate.js";
 
 interface EngagementsAddOptions extends OutputOptions {
   name?: string;
@@ -36,11 +41,18 @@ interface EngagementsAddOptions extends OutputOptions {
    * `personalOrgs`.
    */
   personalOrg?: string[];
+  /**
+   * Test seam: defaults to `process.stderr.isTTY`. `--personal-org` and
+   * `--github-org` add owners, which only a person at a terminal may do (D8).
+   */
+  stderrIsTTY?: boolean;
 }
 
 interface EngagementsEndOptions extends OutputOptions {
   purge?: boolean;
   registryPath?: string;
+  /** Test seam: defaults to `process.stderr.isTTY`. Consulted only when the change empties the owner set. */
+  stderrIsTTY?: boolean;
 }
 
 interface EngagementsShowOptions extends OutputOptions {
@@ -57,9 +69,9 @@ interface EngagementsRemoveOptions extends OutputOptions {
    * being deleted.
    */
   hard?: boolean;
+  /** Test seam: defaults to `process.stderr.isTTY`. Consulted only when the change empties the owner set. */
+  stderrIsTTY?: boolean;
 }
-
-type Doc = ReturnType<typeof parseDocument>;
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -69,21 +81,6 @@ function backdated13MonthsIso(): string {
   const d = new Date();
   d.setMonth(d.getMonth() - 13);
   return d.toISOString().slice(0, 10);
-}
-
-function loadDoc(path: string): Doc {
-  if (!existsSync(path)) throw new RegistryNotFoundError(path);
-  const raw = readFileSync(path, "utf8");
-  return parseDocument(raw);
-}
-
-function saveDoc(doc: Doc, path: string): void {
-  writeFileSync(path, doc.toString(), { mode: 0o600 });
-  try {
-    chmodSync(path, 0o600);
-  } catch {
-    /* platform-restricted */
-  }
 }
 
 function findEngagementNode(doc: Doc, id: string): YAMLMap | null {
@@ -210,52 +207,6 @@ function appendPersonalOrgs(
 }
 
 /**
- * Load the registry YAML doc or call emitError (which exits 2). Used to
- * collapse the `let doc; try { doc = ... } catch { emitError(...) }`
- * pattern into a single expression so TypeScript flow analysis narrows
- * the result without `!` assertions.
- */
-function loadDocOrExit(path: string, opts: OutputOptions): Doc {
-  try {
-    return loadDoc(path);
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
-      emitError(
-        {
-          code: "REGISTRY_NOT_FOUND",
-          error: "registry not found; run `repo-aegis init` first",
-          details: err.path,
-        },
-        opts,
-      );
-    }
-    emitError({ error: (err as Error).message }, opts);
-  }
-}
-
-/**
- * Run a callback under the registry write lock; map known exception types
- * to their canonical CLI error payloads. Centralises the lock+error dance
- * shared by add / end / remove.
- */
-function withRegistryLock<T>(opts: OutputOptions, fn: () => T): T {
-  try {
-    return withLockSync(fn);
-  } catch (err) {
-    if (err instanceof LockTimeoutError) {
-      emitError({ code: err.code, error: err.message }, opts);
-    }
-    if (err instanceof PatternValidationError) {
-      emitError(
-        { code: "PATTERN_VALIDATION", error: err.message, details: err.invalid },
-        opts,
-      );
-    }
-    emitError({ code: "RENDER_ERROR", error: (err as Error).message }, opts);
-  }
-}
-
-/**
  * stderr writer used for the [SEC M-8] schemaVersion-bump warning. Pulled
  * out so tests can spy / replace if needed.
  */
@@ -267,9 +218,23 @@ export function engagementsAdd(
   id: string | undefined,
   opts: EngagementsAddOptions,
 ): void {
-  // [SEC fix] Reject the conflicting-flag combination up front.
   const githubOrgsRaw = opts.githubOrg ?? [];
   const personalOrgsRaw = opts.personalOrg ?? [];
+
+  // D8: adding an owner tells repo-aegis that publishing there is safe, so it
+  // needs a person at a terminal. Gate first, before any validation (no
+  // oracle for an agent) and before any write. Removing never needs one.
+  if (personalOrgsRaw.length > 0) {
+    requireTerminalForOwnerAdd({ kind: "personal-org", owners: personalOrgsRaw }, opts);
+  }
+  if (githubOrgsRaw.length > 0) {
+    requireTerminalForOwnerAdd(
+      { kind: "github-org", owners: githubOrgsRaw, ...(id !== undefined && { engagementId: id }) },
+      opts,
+    );
+  }
+  // [SEC fix] Reject the conflicting-flag combination up front (after the
+  // owner-add gate above, so a non-terminal caller learns nothing from it).
   if (githubOrgsRaw.length > 0 && personalOrgsRaw.length > 0) {
     emitError(
       {
@@ -312,12 +277,14 @@ export function engagementsAdd(
       );
     }
     const path = opts.registryPath ?? defaultRegistryPath();
-    const doc = loadDocOrExit(path, opts);
 
     const result = withRegistryLock(opts, () => {
+      // Read inside the lock: a stale read would overwrite a concurrent edit.
+      const doc = loadDoc(path);
+      const ownersBefore = ownerCount(doc);
       const bumped = ensureSchemaVersion(doc, 2);
       const { added, skipped } = appendPersonalOrgs(doc, validation.orgs);
-      saveDoc(doc, path);
+      commitRegistry(doc, path, { ...opts, ownersBefore, command: { kind: "engagements-add" } });
       const reg = loadRegistry(path);
       const render = renderMarkers(reg);
       return { added, skipped, bumped, render };
@@ -340,6 +307,9 @@ export function engagementsAdd(
       });
     } catch {
       /* audit log must not break user-facing ops */
+    }
+    if (result.added.length > 0) {
+      recordOwnerAdd({ kind: "personal-org", added: result.added.length, via: "engagements-add" });
     }
 
     if (opts.json) {
@@ -419,20 +389,6 @@ export function engagementsAdd(
     normalisedGithubOrgs = [...new Set(orgValidation.orgs)];
   }
 
-  const doc = loadDocOrExit(path, opts);
-
-  const existing = findEngagementNode(doc, id);
-  if (existing) {
-    emitError(
-      {
-        code: "ENGAGEMENT_EXISTS",
-        error: `engagement "${id}" already exists; use \`engagements show ${id}\` to inspect`,
-      },
-      opts,
-    );
-  }
-
-  const seq = doc.get("engagements") as YAMLSeq;
   const newEntry: Record<string, unknown> = {
     id,
     name: opts.name ?? id,
@@ -444,10 +400,20 @@ export function engagementsAdd(
   }
 
   const result = withRegistryLock(opts, () => {
+    // Read inside the lock: a stale read would overwrite a concurrent edit.
+    const doc = loadDoc(path);
+    const ownersBefore = ownerCount(doc);
+    if (findEngagementNode(doc, id)) {
+      throw new RegistryCliError(
+        "ENGAGEMENT_EXISTS",
+        `engagement "${id}" already exists; use \`engagements show ${id}\` to inspect`,
+      );
+    }
+    const seq = doc.get("engagements") as YAMLSeq;
     const bumped =
       normalisedGithubOrgs.length > 0 ? ensureSchemaVersion(doc, 2) : false;
     seq.add(newEntry);
-    saveDoc(doc, path);
+    commitRegistry(doc, path, { ...opts, ownersBefore, command: { kind: "engagements-add", id } });
     const reg = loadRegistry(path);
     return { bumped, render: renderMarkers(reg) };
   });
@@ -492,6 +458,9 @@ export function engagementsAdd(
   } catch {
     /* audit log must not break user-facing ops */
   }
+  if (normalisedGithubOrgs.length > 0) {
+    recordOwnerAdd({ kind: "github-org", added: normalisedGithubOrgs.length, via: "engagements-add" });
+  }
 
   if (opts.json) {
     emitJson({
@@ -527,18 +496,22 @@ export function engagementsEnd(id: string, opts: EngagementsEndOptions): void {
   }
   const path = opts.registryPath ?? defaultRegistryPath();
 
-  const doc = loadDocOrExit(path, opts);
-
-  const node = findEngagementNode(doc, id);
-  if (!node) {
-    emitError({ code: "ENGAGEMENT_NOT_FOUND", error: `engagement "${id}" not found` }, opts);
-  }
-
   const endedDate = opts.purge ? backdated13MonthsIso() : todayIso();
 
   const renderResult = withRegistryLock(opts, () => {
+    // Read inside the lock: a stale read would overwrite a concurrent edit.
+    const doc = loadDoc(path);
+    const ownersBefore = ownerCount(doc);
+    const node = findEngagementNode(doc, id);
+    if (!node) {
+      throw new RegistryCliError("ENGAGEMENT_NOT_FOUND", `engagement "${id}" not found`);
+    }
     node.set("ended", endedDate);
-    saveDoc(doc, path);
+    commitRegistry(doc, path, {
+      ...opts,
+      ownersBefore,
+      command: { kind: "engagements-end", id, purge: !!opts.purge },
+    });
     const reg = loadRegistry(path);
     return renderMarkers(reg);
   });
@@ -660,25 +633,33 @@ export function engagementsRemove(id: string, opts: EngagementsRemoveOptions): v
 
   const path = opts.registryPath ?? defaultRegistryPath();
 
-  const doc = loadDocOrExit(path, opts);
-
-  const seq = doc.get("engagements") as YAMLSeq | null;
-  let removed = false;
-  if (seq && Array.isArray(seq.items)) {
-    const idx = seq.items.findIndex(item => {
-      if (!isMap(item)) return false;
-      const idNode = (item as YAMLMap).get("id");
-      if (typeof idNode === "string") return idNode === id;
-      if (idNode instanceof Scalar) return idNode.value === id;
-      return false;
-    });
-    if (idx >= 0) {
-      seq.items.splice(idx, 1);
-      removed = true;
+  const outcome = withRegistryLock(opts, () => {
+    // Read inside the lock: a stale read would overwrite a concurrent edit.
+    const doc = loadDoc(path);
+    const ownersBefore = ownerCount(doc);
+    const seq = doc.get("engagements") as YAMLSeq | null;
+    let idx = -1;
+    if (seq && Array.isArray(seq.items)) {
+      idx = seq.items.findIndex(item => {
+        if (!isMap(item)) return false;
+        const idNode = (item as YAMLMap).get("id");
+        if (typeof idNode === "string") return idNode === id;
+        if (idNode instanceof Scalar) return idNode.value === id;
+        return false;
+      });
     }
-  }
+    if (idx < 0 || !seq) return null;
+    seq.items.splice(idx, 1);
+    commitRegistry(doc, path, {
+      ...opts,
+      ownersBefore,
+      command: { kind: "engagements-remove", id },
+    });
+    const reg = loadRegistry(path);
+    return renderMarkers(reg);
+  });
 
-  if (!removed) {
+  if (outcome === null) {
     if (opts.json) {
       emitJson({
         action: "engagements-remove",
@@ -691,12 +672,7 @@ export function engagementsRemove(id: string, opts: EngagementsRemoveOptions): v
     emitText(`engagement ${id} not in registry (already removed?)`);
     return;
   }
-
-  const renderResult = withRegistryLock(opts, () => {
-    saveDoc(doc, path);
-    const reg = loadRegistry(path);
-    return renderMarkers(reg);
-  });
+  const renderResult = outcome;
 
   try {
     appendAuditRecord({

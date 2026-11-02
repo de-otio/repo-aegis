@@ -347,6 +347,9 @@ describe("init --migrate-classify", () => {
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
+          stdinIsTTY: true,
+          readAnswer: () => "y", // and they confirm the owner list
           json: true,
         }),
       ),
@@ -370,6 +373,9 @@ describe("init --migrate-classify", () => {
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
+          stdinIsTTY: true,
+          readAnswer: () => "y", // and they confirm the owner list
         }),
       ),
     );
@@ -409,6 +415,9 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
+          stdinIsTTY: true,
+          readAnswer: () => "y", // and they confirm the owner list
         }),
       ),
     );
@@ -432,6 +441,9 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
+          stdinIsTTY: true,
+          readAnswer: () => "y", // and they confirm the owner list
         }),
       ),
     );
@@ -441,6 +453,9 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
+          stdinIsTTY: true,
+          readAnswer: () => "y", // and they confirm the owner list
           json: true,
         }),
       ),
@@ -464,6 +479,9 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
+          stdinIsTTY: true,
+          readAnswer: () => "y", // and they confirm the owner list
           json: true,
         }),
       ),
@@ -493,6 +511,9 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
+          stdinIsTTY: true,
+          readAnswer: () => "y", // and they confirm the owner list
           json: true,
         }),
       ),
@@ -526,6 +547,9 @@ engagements:
           withHooks: false,
           withClaude: false,
           migrateClassify: true,
+          stderrIsTTY: true, // a person at a terminal (D8)
+          stdinIsTTY: true,
+          readAnswer: () => "y", // and they confirm the owner list
           json: true,
         }),
       ),
