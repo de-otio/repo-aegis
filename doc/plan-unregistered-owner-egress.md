@@ -18,28 +18,12 @@ Every PR was built by a Sonnet builder and reviewed by Opus until only lows rema
 | 4 pre-push, push URLs, ssh | `pr4-prepush-parity` (38b18e2) | merged |
 | 5 registry gates, upstreams | `pr5-registry-gates` (00a86eb) | merged |
 | 6 doctor, deny rules, regex-safety | `pr6-doctor` (6e8064f) | merged |
-| 2b human presence | `pr2b-human-presence` (1edf919) | reviewed, **not merged** |
-| 7 docs | — | not started |
+| 2b human presence | `pr2b-human-presence` (1edf919) | merged (e60ae65); doctor confirm wired (ce5a2f6) |
+| 7 docs | `pr7-docs` (d9b5ee7) | merged (7401a2d) |
+| final review | Fable `security-reviewer` | F1 critical (unbounded `sh -c` positional expansion → guard OOM → fail-open) fixed with expansion bounds and an intent cap; F2 (program written at run time) documented as residual; F3 folded into F1 |
 
-Next steps, in order:
-1. Merge `pr2b-human-presence`. It conflicts in `packages/cli/src/commands/hook-guard-egress.ts`
-   (keep both the R6 `checkNetworkRules` block and 2b's human-only/detached checks, R6 first),
-   and in `packages/core/src/egress-intent.ts`: the `EgressIntent` fields (keep b′/b″ fields and
-   `ptyWrapper`) and one large hunk near the end of the parser (2c's backstop/b′/b″ code vs 2b's
-   pty-wrapper post-pass; both must survive). Rebuild, then run the full suite. The only expected
-   failures are listen-EPERM (ollama, profile, token-extraction, suggest-markers) inside the
-   sandbox.
-2. Wire PR 2b's ancestry check into doctor's `defaultConfirm` (the `TODO(#151, PR 2b)` there).
-3. PR 7, docs (§4 item 7), plus every new code: UNREGISTERED_OWNER_EGRESS, EGRESS_ENV_OVERRIDE,
-   EGRESS_AFTER_STATE_CHANGE, GH_PR_CREATE_IMPLICIT_TARGET, EGRESS_PTY_WRAPPER,
-   AGENT_RAN_HUMAN_COMMAND, AGENT_DETACHED_SESSION, OWNER_ADD_NEEDS_TTY, OWNER_SET_EMPTY_NEEDS_TTY,
-   REGISTRY_WOULD_BE_INVALID, MIGRATION_NOT_CONFIRMED, GITHUB_API_VIA_HTTP_CLIENT,
-   GH_AUTH_TOKEN_NETWORK, MARKERS_WRITE_PROTECTED, GH_BINARY_UNTRUSTED, GH_CONFIG_REDIRECT, plus
-   R8–R12 and the hook-script digest change in the CHANGELOG. PR 6 already edited
-   agent-guide, cli-reference, agent-install and CHANGELOG; extend them, don't duplicate.
-4. Final Fable `security-reviewer` pass over `git diff origin/main..feat/151-unregistered-owner`.
-5. Follow-up issues to file (on the user's go-ahead): Touch ID / Keychain presence signal (R12);
-   pty-wrapper S10 history; doctor flags for R9/R10.
+Next steps: open the PR to `main`, merge when green, release 0.11.0. Follow-up issues to file:
+Touch ID / Keychain presence signal (R12); pty-wrapper S10 history; doctor flags for R9/R10.
 Operator decisions recorded in this plan: D3–D10, audit records without names,
 `--repo "$VAR"` refused, `*` covers only npm publish without personal orgs.
 

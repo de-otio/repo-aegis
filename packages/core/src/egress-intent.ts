@@ -2224,6 +2224,8 @@ interface ParseCtx {
    * and mutable: a change made inside `bash -c '…'` outlives it.
    */
   state: { change: string | undefined; strong: string | undefined };
+  /** Bytes of nested text read so far by this command line's parses; shared and mutable ({@link PARSE_EXPANSION_BUDGET}). */
+  expansion: { bytes: number };
 }
 
 /** A lazy, memoised, never-throwing loader: a failed load is `null` ("could not be read"). */
@@ -2293,7 +2295,7 @@ function memoDirLoader(
  */
 export function parseEgressIntents(command: string, opts: ParseEgressOptions = {}): EgressIntent[] {
   try {
-    return parseUnsafe(command, {
+    return capIntents(command, parseUnsafe(command, {
       opts,
       aliases: memoLoader(opts.ghAliases),
       gitAliases: memoDirLoader(opts.gitAliases),
@@ -2305,11 +2307,33 @@ export function parseEgressIntents(command: string, opts: ParseEgressOptions = {
       heredocsAreCode: false,
       dangerEnv: new Set(),
       state: { change: undefined, strong: undefined },
-    });
+      expansion: { bytes: 0 },
+    }));
   } catch {
     const s = typeof command === "string" ? sentinelFor(command, { precededByCd: false, joinedBy: null, segmentIndex: 0 }) : null;
     return s === null ? [] : [s];
   }
+}
+
+/** More publishing operations than this in one command line are not judged one by one. */
+export const MAX_INTENTS_PER_LINE = 64;
+
+function carriesShapeRule(i: EgressIntent): boolean {
+  return i.ptyWrapper !== undefined || i.envOverrides !== undefined || i.afterStateChange !== undefined || i.afterLocalStateChange !== undefined;
+}
+
+/**
+ * A line that expands to more than {@link MAX_INTENTS_PER_LINE} intents (nested `sh -c '"$@"; "$@"'`
+ * multiplies them; issue #151, F1) keeps its first intents, every shape-rule label among them (so an
+ * unconditional refusal such as `EGRESS_PTY_WRAPPER` still fires), and one fail-closed intent for the rest.
+ */
+function capIntents(command: string, intents: EgressIntent[]): EgressIntent[] {
+  if (intents.length <= MAX_INTENTS_PER_LINE) return intents;
+  const flagged = intents.filter(carriesShapeRule).slice(0, MAX_INTENTS_PER_LINE);
+  const plain = intents.filter(i => !carriesShapeRule(i)).slice(0, MAX_INTENTS_PER_LINE);
+  const base = { precededByCd: false, joinedBy: null, segmentIndex: 0 } as const;
+  const rest = sentinelFor(command, base) ?? unresolvedIntent(base, "gh-unknown", "unparsed-shape");
+  return [...flagged, ...plain, rest];
 }
 
 /** `gh` as a word (not `ghost`, not `my-gh`), or `git` with `push` as a word. */
@@ -2528,25 +2552,55 @@ function quoteWord(w: string): string {
 /** `$@`, `$*`, `$0`…`$9` (also `${…}` and quoted) in the text of an interpreter's `-c`. */
 const POSITIONAL_REF_RE = /"?\$(?:@|\*|\{@\}|\{\*\}|\{\d+\}|\d)"?/g;
 
+/** The most text one positional substitution may produce (the same bound as an alias expansion). */
+export const POSITIONAL_MAX_BYTES = 64 * 1024;
+
+/**
+ * The most text the nested parses of ONE command line may read in total, across every depth. Each
+ * `sh -c` level can multiply its text by its argument count, so without a shared bound a few tens of KB
+ * of input exhaust the heap; the guard process then dies, and a dead hook does not block (issue #151, F1).
+ */
+export const PARSE_EXPANSION_BUDGET = 4 * 1024 * 1024;
+
+/**
+ * Thrown when a substitution or the nested parses would exceed {@link POSITIONAL_MAX_BYTES} or
+ * {@link PARSE_EXPANSION_BUDGET}. The parser catches it per segment and emits the fail-closed intent for
+ * whatever `gh` / `git push` the segment's own (unexpanded) words mention.
+ */
+export class ExpansionLimitError extends Error {
+  constructor() {
+    super("command-line expansion limit exceeded");
+    this.name = "ExpansionLimitError";
+  }
+}
+
 /**
  * `sh -c 'TEXT' ARG0 ARG1 …` runs TEXT with `$0`=ARG0, `$1`=ARG1, …: `"$@"` is every argument after ARG0, so
  * `sh -c '"$@"' sh gh issue create --repo stranger/r` runs `gh issue create --repo stranger/r` (C1). Returns
  * the text with those references replaced by the quoted words, or null when TEXT refers to none of them.
+ * Throws {@link ExpansionLimitError} rather than build more than {@link POSITIONAL_MAX_BYTES}.
  */
 export function substitutePositionals(text: string, args: readonly string[]): string | null {
   let any = false;
+  let size = text.length;
+  const rest = args.slice(1);
+  let words: string | undefined;
+  let star: string | undefined;
   const out = text.replace(POSITIONAL_REF_RE, ref => {
     any = true;
     const bare = ref.replace(/"/g, "");
     const quoted = ref.startsWith('"') && ref.endsWith('"') && ref.length > 1;
+    let r: string;
     if (/^\$\{?[@*]\}?$/.test(bare)) {
-      const rest = args.slice(1);
-      // "$*" is ONE word; "$@" and bare $@ / $* are the words themselves.
-      return bare.includes("*") && quoted ? quoteWord(rest.join(" ")) : rest.map(quoteWord).join(" ");
+      // "$*" is ONE word; "$@" and bare $@ / $* are the words themselves. Each is built once.
+      r = bare.includes("*") && quoted ? (star ??= quoteWord(rest.join(" "))) : (words ??= rest.map(quoteWord).join(" "));
+    } else {
+      const word = args[Number(/\d+/.exec(bare)![0])];
+      r = word === undefined ? "" : quoteWord(word);
     }
-    const n = Number(/\d+/.exec(bare)![0]);
-    const word = args[n];
-    return word === undefined ? "" : quoteWord(word);
+    size += r.length - ref.length;
+    if (size > POSITIONAL_MAX_BYTES) throw new ExpansionLimitError();
+    return r;
   });
   return any ? out : null;
 }
@@ -3146,6 +3200,9 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
 
     /** Parse `text` as a command line of its own; its intents take this segment's place in the chain. */
     const nest = (text: string, envRepo: string | undefined, code = false): void => {
+      // Caught by this segment's catch below, which emits the fail-closed intent for its own words.
+      ctx.expansion.bytes += text.length;
+      if (ctx.expansion.bytes > PARSE_EXPANSION_BUDGET) throw new ExpansionLimitError();
       if (ctx.depth >= MAX_NEST_DEPTH) {
         const s = sentinelFor(text, base);
         if (s !== null) emit(s);
@@ -3356,22 +3413,34 @@ export interface SimpleCommand {
  * here-string, or what `echo` / `printf` / `cat <<EOF` pipes into it), to the parser's nesting depth.
  * Redirections, assignments and wrappers are removed. It makes no judgement about egress. Pure; never throws.
  */
-export function simpleCommands(command: string, depth = 0): SimpleCommand[] {
+export function simpleCommands(command: string, depth = 0, budget: { bytes: number } = { bytes: 0 }): SimpleCommand[] {
   const out: SimpleCommand[] = [];
   if (typeof command !== "string" || command.length === 0 || depth > MAX_NEST_DEPTH) return out;
+  // Every nested text counts against one budget for the whole line (issue #151, F1); past it, nested text
+  // is not read. The egress parse fails closed on the same line, so what this misses is still refused.
+  if (depth > 0) {
+    budget.bytes += command.length;
+    if (budget.bytes > PARSE_EXPANSION_BUDGET) return out;
+  }
   try {
     const segments = tokenise(command);
     segments.forEach((seg, idx) => {
       const rawTokens = seg.funcDef ? seg.tokens.slice(1) : seg.tokens;
       const tokens = stripRedirections(rawTokens);
       const resolved = resolveCommand(tokens);
-      for (const w of tokens) for (const inner of substitutionTexts(w)) out.push(...simpleCommands(inner, depth + 1));
+      for (const w of tokens) for (const inner of substitutionTexts(w)) out.push(...simpleCommands(inner, depth + 1, budget));
       if (resolved.nestedText !== undefined) {
-        const text =
-          resolved.nestedArgs !== undefined && resolved.nestedArgs.length > 0
-            ? (substitutePositionals(resolved.nestedText, resolved.nestedArgs) ?? resolved.nestedText)
-            : resolved.nestedText;
-        out.push(...simpleCommands(text, depth + 1));
+        const args = resolved.nestedArgs ?? [];
+        let text = resolved.nestedText;
+        if (args.length > 0) {
+          try {
+            text = substitutePositionals(resolved.nestedText, args) ?? resolved.nestedText;
+          } catch {
+            // Too large to expand: read the text and, as a command line of its own, the words it would splice in.
+            text = `${resolved.nestedText}\n${args.slice(1).map(quoteWord).join(" ")}`;
+          }
+        }
+        out.push(...simpleCommands(text, depth + 1, budget));
         return;
       }
       if (resolved.start >= resolved.tokens.length) return;
@@ -3384,7 +3453,7 @@ export function simpleCommands(command: string, depth = 0): SimpleCommand[] {
         if (texts.length === 0 && seg.joinedBy === "|" && readsCommandsFromStdin(args) && idx > 0) {
           texts.push(...pipedText(segments[idx - 1]!));
         }
-        for (const t of texts) out.push(...simpleCommands(t, depth + 1));
+        for (const t of texts) out.push(...simpleCommands(t, depth + 1, budget));
       }
     });
   } catch {

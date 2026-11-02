@@ -103,6 +103,14 @@ says who runs the fix, and points at `doc/agent-guide.md`. Design:
 - **`CROSS_ORG_PUSH` no longer names the boundary's owners.** They can be
   customer names, and a refusal can land in an agent transcript; only the
   destination owner, which the command already carries, is named.
+- **The egress parser's expansion is bounded.** `sh -c '"$@" …' sh ARGS…`
+  splices its arguments into its text, and nesting multiplies them: about
+  1 KB of input could exhaust the guard's memory, and a guard process that
+  dies does not block. One positional expansion is now capped at 64 KiB, the
+  nested text of one command line at 4 MiB, and a line with more than 64
+  publishing operations is judged on its first 64, every shape-rule label, and
+  one fail-closed intent for the rest. Past a bound the command is treated as
+  unresolved (refused without a person). *Recovery:* split the command.
 
 ### Known limits (not refused; stated so nobody assumes coverage)
 
@@ -124,6 +132,11 @@ says who runs the fix, and points at `doc/agent-guide.md`. Design:
   a same-user agent running outside the agent sandbox, which could also write
   the approvals file or the registry directly. Inside the sandbox the gates fail
   closed. A Keychain / Touch ID presence signal is a tracked follow-up.
+- **A program written at run time.** The agent hook reads the command text,
+  not files: `bash x.sh`, or a script written and run in one command (`cat >
+  x.sh <<EOF … EOF; bash x.sh`, a `base64 -d` into a file), is not judged
+  there. The `gh` shim and the pre-push hook judge the real `gh` or `git push`
+  when it runs.
 
 ### Added — registered owners, `upstreams`, and five-part refusals
 
