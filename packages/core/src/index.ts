@@ -293,8 +293,30 @@ export type {
   PayloadScanner,
   DecideEgressOptions,
   ApprovalFinder,
+  RegistryState,
 } from "./egress-policy.js";
-export { findApprovalDefault } from "./egress-policy.js";
+// Rule h (issue #151): the one definition of "a registered owner", shared by
+// every layer so the hook, the shim, pre-push and `doctor` cannot disagree.
+export {
+  registeredOwners,
+  ownerAdmitted,
+  ruleHStatus,
+  ruleHSkipNote,
+  UPSTREAM_ADMITTED_VERBS,
+} from "./registered-owners.js";
+export type { OwnerCandidate, RuleHStatus } from "./registered-owners.js";
+// The shared five-part refusal builder (what, why, approval, fix + who, where
+// to read more), so the three enforcement layers cannot drift in wording.
+export {
+  refusal,
+  agentGuideAnchor,
+  safeDestination,
+  isSafeOwner,
+  isPrintableDestination,
+  INVALID_DESTINATION_LABEL,
+} from "./refusal.js";
+export type { RefusalInput, RefusalFix } from "./refusal.js";
+export { findApprovalDefault, SHAPE_RULE_CODES } from "./egress-policy.js";
 // Human-minted, time-limited, destination-scoped approvals that satisfy
 // rule g from a shell with no TTY (`repo-aegis approve`).
 export {
