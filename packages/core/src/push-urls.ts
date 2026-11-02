@@ -85,6 +85,36 @@ export function resolvePushUrls(cwd: string, remote: string): string[] | null {
   return [rewriteForPush(cwd, remote.trim())];
 }
 
+/**
+ * The `GIT_SSH_COMMAND` Claude Code's own sandbox sets for every agent Bash
+ * command, byte for byte. It is trusted as HOST-PRESERVING: the options only
+ * disable connection sharing and route the connection through the sandbox's
+ * network proxy, which receives the host (`%h`) and port (`%p`) unchanged. It
+ * sets no HostName, `-F`, `-J`, identity or user. So ssh aliases resolve
+ * through the ssh config exactly as they would with no override, which matters
+ * because an operator's own remotes are usually aliases.
+ *
+ * Trust is by EXACT match of this string (whitespace runs collapsed, nothing
+ * else): no pattern, no parsing of options, so any added or changed option
+ * (`-o HostName=x`, `-F f`, `-J h`, a changed `%h`) is a different command and
+ * stays fail-closed. It is accepted only from the process environment
+ * (`GIT_SSH_COMMAND`), NEVER from `core.sshCommand`, which is git config an
+ * agent can write.
+ *
+ * Residual: the proxy command comes from `SRT_SSH_PROXY_COMMAND`, which the
+ * sandbox sets. An agent that can write shell startup files could export its
+ * own `SRT_SSH_PROXY_COMMAND` and redirect the connection (the R8 class, plan
+ * §8.2: the environment a hook or hook-guarded command gets is not fully
+ * under the guard's eye).
+ */
+export const SANDBOX_GIT_SSH_COMMAND =
+  "ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand=\"/bin/sh -c 'eval \\\"\\${SRT_SSH_PROXY_COMMAND:?unset, but GIT_SSH_COMMAND needs it}\\\"' sh '%h' %p\"";
+
+/** Is `command` exactly {@link SANDBOX_GIT_SSH_COMMAND}, modulo runs of whitespace? */
+export function isSandboxSshCommand(command: string): boolean {
+  return command.trim().replace(/\s+/g, " ") === SANDBOX_GIT_SSH_COMMAND;
+}
+
 /** `-o HostName=…`, a proxy, `-J` (jump host) or `-F` (another config): ways an ssh command moves a connection. */
 const REDIRECTING_SSH_OPTION_RE = /host\s*name|proxy|(^|\s)-[JF]/i;
 
@@ -99,6 +129,13 @@ export function detectSshOverride(cwd: string, env: NodeJS.ProcessEnv = process.
   const command = (env["GIT_SSH_COMMAND"] ?? "").trim();
   const program = (env["GIT_SSH"] ?? "").trim();
   const variant = (env["GIT_SSH_VARIANT"] ?? "").trim();
+  // The one override we recognise as host-preserving: Claude Code's sandbox
+  // template, taken from the ENVIRONMENT only. With it, git ignores
+  // `core.sshCommand` and `GIT_SSH` (`GIT_SSH_COMMAND` wins over both), so
+  // they cannot change anything; `GIT_SSH_VARIANT` alone is not trusted here.
+  if (command !== "" && isSandboxSshCommand(command) && program === "" && variant === "") {
+    return { present: false, mayRedirect: false };
+  }
   const configured = (gitOut(cwd, ["config", "--get", "core.sshCommand"]) ?? "").trim();
   const present = command !== "" || program !== "" || variant !== "" || configured !== "";
   // A GIT_SSH program is opaque, so it may redirect; a command line can be read.

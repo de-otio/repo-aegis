@@ -15,7 +15,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolvePushUrls, detectSshOverride } from "./push-urls.js";
+import { resolvePushUrls, detectSshOverride, SANDBOX_GIT_SSH_COMMAND } from "./push-urls.js";
 import { hermeticGitEnv, scrubGitEnv } from "./_test-git-env.js";
 import {
   decideEgress,
@@ -516,6 +516,103 @@ describe("an ssh override makes ssh aliases unresolved (H2)", () => {
     } finally {
       delete process.env["GIT_SSH"];
     }
+  });
+
+  describe("Claude Code's sandbox GIT_SSH_COMMAND template is host-preserving, from the environment only", () => {
+    const T = SANDBOX_GIT_SSH_COMMAND;
+
+    it("the constant is the exact template (a literal, not derived from the running environment)", () => {
+      assert.equal(
+        T,
+        `ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand="/bin/sh -c 'eval \\"\\\${SRT_SSH_PROXY_COMMAND:?unset, but GIT_SSH_COMMAND needs it}\\"' sh '%h' %p"`,
+      );
+    });
+
+    it("detectSshOverride: the exact template in the environment is no override", () => {
+      const repo = makeRepo();
+      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: T }), { present: false, mayRedirect: false });
+      // Whitespace runs are normalised, nothing else.
+      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: `  ${T.replace(/ -o /g, "   -o ")}  ` }), {
+        present: false,
+        mayRedirect: false,
+      });
+    });
+
+    it("…and git ignores core.sshCommand when GIT_SSH_COMMAND is set, so a configured one changes nothing", () => {
+      const repo = makeRepo([["core.sshCommand", "ssh -J jump"]]);
+      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T }).present, false);
+    });
+
+    it("the template set via core.sshCommand is NOT trusted (agent-writable git config)", () => {
+      const repo = makeRepo([["core.sshCommand", T]]);
+      assert.equal(detectSshOverride(repo, {}).present, true);
+    });
+
+    it("any change to the template is an override: an added -o HostName, -F, -J, a changed %h, a changed %p", () => {
+      const repo = makeRepo();
+      for (const cmd of [
+        `${T} -o HostName=x`,
+        `${T} -F /x/config`,
+        `${T} -J h`,
+        T.replace("'%h'", "'x'"),
+        T.replace(" %p", " 22"),
+        T.replace("ControlMaster=no", "ControlMaster=yes"),
+        T.replace("sh '%h'", "sh -c '%h'"),
+        `${T} -i /k`,
+        `ssh -o HostName=x ${T.slice(4)}`,
+        T.replace("/bin/sh", "/bin/bash"),
+        `${T};id`,
+      ]) {
+        assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: cmd }).present, true, cmd);
+      }
+    });
+
+    it("the template does not neutralise GIT_SSH or GIT_SSH_VARIANT", () => {
+      const repo = makeRepo();
+      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, GIT_SSH: "/w" }).present, true);
+      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, GIT_SSH_VARIANT: "ssh" }).present, true);
+    });
+
+    function aliasDest(env: Record<string, string>, config: Array<[string, string]> = []): ReturnType<typeof resolveDestinationOffline> {
+      const home = join(root, `home-${n++}`);
+      mkdirSync(join(home, ".ssh"), { recursive: true });
+      writeFileSync(join(home, ".ssh", "config"), "Host gh-work\n  HostName github.com\n");
+      process.env["HOME"] = home;
+      const repo = makeRepo([["remote.origin.url", "git@gh-work:stranger/r.git"], ...config]);
+      for (const [k, v] of Object.entries(env)) process.env[k] = v;
+      try {
+        return resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo);
+      } finally {
+        for (const k of Object.keys(env)) delete process.env[k];
+      }
+    }
+
+    it("with the template in the environment an alias resolves through the ssh config, as with no override", () => {
+      const d = aliasDest({ GIT_SSH_COMMAND: T });
+      assert.equal(d?.org, "stranger");
+      assert.equal(d?.repo, "r");
+      assert.equal(d?.unresolved, undefined);
+    });
+
+    it("the hook layer (no sandbox env) and pre-push (sandbox env) agree for the same repository", () => {
+      const withSandboxEnv = aliasDest({ GIT_SSH_COMMAND: T });
+      const withoutEnv = aliasDest({});
+      assert.deepEqual(
+        [withSandboxEnv?.org, withSandboxEnv?.repo, withSandboxEnv?.unresolved],
+        [withoutEnv?.org, withoutEnv?.repo, withoutEnv?.unresolved],
+      );
+    });
+
+    it("the template via core.sshCommand (no env) leaves the alias unresolved", () => {
+      const d = aliasDest({}, [["core.sshCommand", T]]);
+      assert.equal(d?.unresolved, "opaque-url");
+    });
+
+    it("a changed template in the environment leaves the alias unresolved", () => {
+      for (const cmd of [`${T} -o HostName=x`, `${T} -F f`, `${T} -J h`, T.replace("'%h'", "'x'")]) {
+        assert.equal(aliasDest({ GIT_SSH_COMMAND: cmd })?.unresolved, "opaque-url", cmd);
+      }
+    });
   });
 
   it("detectSshOverride reports nothing when nothing is set", () => {

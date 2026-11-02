@@ -59,7 +59,7 @@ export {
 // URL(s) a `git push <remote>` writes to (pushurl, insteadOf, pushInsteadOf).
 export { lookupSshHost, SSH_INCLUDE_MAX_DEPTH } from "./ssh-config.js";
 export type { SshHostLookup, SshConfigOptions } from "./ssh-config.js";
-export { resolvePushUrls, detectSshOverride } from "./push-urls.js";
+export { resolvePushUrls, detectSshOverride, SANDBOX_GIT_SSH_COMMAND, isSandboxSshCommand } from "./push-urls.js";
 export type { ParsedRemote, RemoteUrlClass, RemoteTarget, SshOverride, RemoteTransport } from "./remote-url.js";
 
 // ---- working-tree resolution (path-aware hook) --------------------------

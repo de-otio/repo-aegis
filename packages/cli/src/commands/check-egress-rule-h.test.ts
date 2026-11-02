@@ -21,7 +21,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { captureOutput, withEnv, lastJsonLine, scrubGitEnv, hermeticGitEnv } from "../_test-utils.js";
 import { check } from "./check.js";
-import { approvalsPath, mintApproval, HOOK_SCRIPTS } from "@de-otio/repo-aegis-core";
+import {
+  approvalsPath,
+  mintApproval,
+  HOOK_SCRIPTS,
+  SANDBOX_GIT_SSH_COMMAND,
+  parseEgressIntents,
+  resolveDestinationOffline,
+} from "@de-otio/repo-aegis-core";
 
 let tmp: string;
 let originalCwd: string;
@@ -651,6 +658,54 @@ describe("pre-push rule h — an ssh override makes aliases unresolved (H2)", ()
     const repo = makeRepo("h2-redirect-gitssh-repo", "git@github.com:acme/x.git");
     const r = refusalOf(withEnv("GIT_SSH", "/nowhere/wrapper", () => pushCheck(ctx, repo, "git@github.com:acme/x.git")));
     assert.equal(r.details.destination, "(unresolved)");
+  });
+
+  describe("Claude Code's sandbox GIT_SSH_COMMAND template (what every agent push runs under)", () => {
+    const T = SANDBOX_GIT_SSH_COMMAND;
+
+    it("in the environment: an alias resolves through the ssh config, so the operator's own remotes still pass", () => {
+      const ctx = setup("h2-sandbox-ok");
+      sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
+      const repo = makeRepo("h2-sandbox-ok-repo", "git@gh-work:acme/x.git");
+      const ok = withEnv("GIT_SSH_COMMAND", T, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git"));
+      assert.equal(ok.exitCode, undefined, ok.stderr);
+      // ...and a stranger behind the same alias is judged as stranger/r, not as "unresolved".
+      const r = refusalOf(withEnv("GIT_SSH_COMMAND", T, () => pushCheck(ctx, repo, "git@gh-work:stranger/r.git")));
+      assert.equal(r.details.destination, "stranger/r");
+    });
+
+    it("the hook layer's resolver (same repository, same env) names the same owner", () => {
+      const ctx = setup("h2-sandbox-agree");
+      sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
+      const repo = makeRepo("h2-sandbox-agree-repo", "git@gh-work:stranger/r.git");
+      const hook = withEnv("HOME", ctx.userHome, () =>
+        withEnv("GIT_SSH_COMMAND", T, () =>
+          resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo),
+        ),
+      );
+      const hookNoEnv = withEnv("HOME", ctx.userHome, () =>
+        resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo),
+      );
+      assert.equal(hook?.org, "stranger");
+      assert.deepEqual([hook?.org, hook?.repo, hook?.unresolved], [hookNoEnv?.org, hookNoEnv?.repo, hookNoEnv?.unresolved]);
+    });
+
+    it("set via core.sshCommand it is NOT trusted: the alias is unresolved", () => {
+      const ctx = setup("h2-sandbox-config");
+      sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
+      const repo = makeRepo("h2-sandbox-config-repo", "git@gh-work:acme/x.git", [["core.sshCommand", T]]);
+      assert.equal(refusalOf(pushCheck(ctx, repo, "git@gh-work:acme/x.git")).details.destination, "(unresolved)");
+    });
+
+    it("with an added -o HostName, -F, -J, or a changed %h it is a different command: unresolved", () => {
+      for (const cmd of [`${T} -o HostName=x`, `${T} -F f`, `${T} -J h`, T.replace("'%h'", "'x'")]) {
+        const ctx = setup(`h2-sandbox-changed-${n++}`);
+        sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
+        const repo = makeRepo(`h2-sandbox-changed-repo-${n}`, "git@gh-work:acme/x.git");
+        const r = refusalOf(withEnv("GIT_SSH_COMMAND", cmd, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git")));
+        assert.equal(r.details.destination, "(unresolved)", cmd);
+      }
+    });
   });
 
   it("https is untouched by an ssh override", () => {
