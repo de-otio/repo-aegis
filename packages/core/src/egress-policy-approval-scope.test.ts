@@ -449,10 +449,9 @@ describe("approval scoping: gh gist create (§3.3 item 9)", () => {
   // A gist belongs to the authenticated account, not to the cwd's origin, so a
   // personal `*` approval must never cover a public paste. Today the resolver
   // attributes it to the cwd's origin (`acme/svc`, a personal org) and `*`
-  // covers it. Fixed by PR 2c (resolver hardening); this pins the target.
+  // covers it. Fixed by PR 2c (resolver hardening, plan §3.3 item 9: a gist is attributed to the account, not the cwd).
   it(
     "is not covered by `*` from a personal checkout",
-    { todo: "fails until PR 2c lands (plan §3.3 item 9: a gist is attributed to the account, not the cwd)" },
     () => {
       const repo = mkdtempSync(join(tmpdir(), "egress-gist-"));
       try {

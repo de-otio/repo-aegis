@@ -581,7 +581,8 @@ describe("unresolved refusals say what is wrong, and carry nothing from the comm
   const cases: Array<{ name: string; command: string; opts?: ParseEgressOptions; unresolved: string; what: RegExp; why: RegExp; fix: RegExp }> = [
     {
       name: "env-override",
-      command: "export GH_REPO=secret-org/secret-repo && gh issue create --body x",
+      // (`export` would trip shape rule b″ first, since PR 2c; `set -a` still exports the next assignment.)
+      command: "set -a && GH_REPO=secret-org/secret-repo && gh issue create --body x",
       unresolved: "env-override",
       what: /^gh issue create \(unresolved destination\): refused\./,
       why: /changes GH_REPO/,
@@ -611,14 +612,9 @@ describe("unresolved refusals say what is wrong, and carry nothing from the comm
       why: /writes somewhere repo-aegis has no way to read/,
       fix: /a built-in command that repo-aegis models/,
     },
-    {
-      name: "ambiguous-target",
-      command: "gh issue transfer 5 secret-org/secret-repo --repo acme/x",
-      unresolved: "ambiguous-target",
-      what: /^gh issue edit \(unresolved destination\): refused\./,
-      why: /names more than one repository/,
-      fix: /the command naming a single repository/,
-    },
+    // "ambiguous-target" is not in this table since PR 2c (M5): the resolver now attaches the candidate
+    // repositories, and rule h's refusal names the one unregistered candidate like the named-owner refusal
+    // does. See egress-resolve-2c.test.ts.
     {
       name: "unparsed-shape",
       command: "xargs gh pr close -R secret-org/secret-repo",

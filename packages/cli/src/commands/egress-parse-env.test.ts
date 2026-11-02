@@ -173,10 +173,16 @@ describe("agent hook — the same parser, the hook's own environment", { skip: !
     assert.match(r.stdout + r.stderr, /stranger\/r/);
   });
 
-  it("an export in an earlier segment is refused as unresolved", () => {
-    const r = hook("export GH_REPO=stranger/r && gh issue create --title t --body b");
+  it("an env change in an earlier segment is refused as unresolved", () => {
+    // (`export` itself is refused earlier since PR 2c, by shape rule b″; `set -a` exports the next assignment.)
+    const r = hook("set -a && GH_REPO=stranger/r && gh issue create --title t --body b");
     assert.notEqual(r.stdout + r.stderr, "", "must not pass silently");
     assert.match(r.stdout + r.stderr, /env-override/);
+  });
+
+  it("an export in an earlier segment is refused by shape rule b″", () => {
+    const r = hook("export GH_REPO=stranger/r && gh issue create --title t --body b");
+    assert.match(r.stdout + r.stderr, /EGRESS_AFTER_STATE_CHANGE/);
   });
 
   it("the hook's inherited GH_REPO applies too", () => {

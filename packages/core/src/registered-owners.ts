@@ -77,6 +77,8 @@ export interface OwnerCandidate {
   repo: string;
   /** Set when nothing offline can name the repository (e.g. a GraphQL mutation). */
   unresolved?: string;
+  /** Several repositories the command can reach (M5): every one must be admitted. */
+  candidates?: ReadonlyArray<{ org: string; repo: string }>;
 }
 
 /**
@@ -95,10 +97,33 @@ export function ownerAdmitted(
   owners: ReadonlySet<string>,
   registry: Pick<Registry, "allowedUpstreams">,
 ): boolean {
+  // The authenticated account's own resources (`gh gist create`, `gh api user/…`) belong to no registered
+  // owner and to no stranger: exempt (§3.3 items 4 and 9). Rule g still wants a person for them.
+  if (destination.unresolved === "self") return true;
+  // Several candidate repositories (M5): all of them, or none.
+  if (destination.candidates !== undefined && destination.candidates.length > 0) {
+    return destination.candidates.every(c => ownerAdmitted({ org: c.org, repo: c.repo }, intent, owners, registry));
+  }
   if (destination.unresolved !== undefined) return false;
   const org = destination.org.toLowerCase();
   if (owners.has(org)) return true;
   if (!UPSTREAM_ADMITTED_VERBS.has(intent.verb)) return false;
   const key = `${org}/${destination.repo.toLowerCase()}`;
   return (registry.allowedUpstreams ?? []).some(u => u.toLowerCase() === key);
+}
+
+/**
+ * The first candidate of a multi-repository destination that rule h does not admit, for the refusal text
+ * (which names that one owner and no other). Null when there are no candidates or all are admitted.
+ */
+export function firstUnadmittedCandidate(
+  destination: OwnerCandidate,
+  intent: { verb: EgressVerb },
+  owners: ReadonlySet<string>,
+  registry: Pick<Registry, "allowedUpstreams">,
+): { org: string; repo: string } | null {
+  for (const c of destination.candidates ?? []) {
+    if (!ownerAdmitted({ org: c.org, repo: c.repo }, intent, owners, registry)) return c;
+  }
+  return null;
 }

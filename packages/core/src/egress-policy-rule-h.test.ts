@@ -456,7 +456,7 @@ describe("rule h — unregistered owner", () => {
   it("rule h on any intent denies the command line", () => {
     const resolver: DestinationResolver = intent =>
       intent.verb === "git-push" ? unknownDest("stranger", "r") : dest();
-    const d = decide("gh pr create -t x -b y && git push git@github.com:stranger/r.git main", {
+    const d = decide("gh issue create -t x -b y && git push git@github.com:stranger/r.git main", {
       resolveDestination: resolver,
     });
     assert.equal(d.action === "deny" && d.code, "UNREGISTERED_OWNER_EGRESS");

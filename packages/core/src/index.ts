@@ -271,12 +271,18 @@ export {
   parseEgressIntents,
   parseApiEndpoint,
   analyseApiEndpoint,
+  classifyApiEndpoint,
+  isEgressOverrideVariable,
+  simpleCommands,
   parseRepoRef,
   intentRepoTargets,
   isGraphqlEndpoint,
   graphqlOperationKind,
 } from "./egress-intent.js";
+export { checkNetworkRules } from "./egress-network-rules.js";
+export type { NetworkRuleCode, NetworkRuleHit } from "./egress-network-rules.js";
 export type {
+  ApiEndpointClass,
   ApiEndpointTarget,
   EgressIntent,
   EgressVerb,
@@ -329,6 +335,7 @@ export type {
 export {
   registeredOwners,
   ownerAdmitted,
+  firstUnadmittedCandidate,
   ruleHStatus,
   ruleHSkipNote,
   UPSTREAM_ADMITTED_VERBS,

@@ -341,7 +341,7 @@ describe("decideEgress — context rules", () => {
       findApproval: () => approval,
     });
     assert.equal(cross.action === "deny" && cross.code, "CROSS_ORG_EGRESS");
-    const hit = decide("gh pr create -t x --body-file /abs/b.md", {
+    const hit = decide("gh issue create -t x --body-file /abs/b.md", {
       resolveDestination: () => PUBLIC,
       scanPayload: () => 1,
       findApproval: () => approval,
@@ -384,12 +384,12 @@ describe("decideEgress — context rules", () => {
     const opts = { resolveDestination: () => PUBLIC, findApproval: () => null };
     // The shim is first on PATH: something below the hook can still refuse,
     // so the ask is a real refusal and the decision is unchanged.
-    const asked = decide("gh pr create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: true } });
+    const asked = decide("gh issue create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: true } });
     assert.equal(asked.action, "ask");
     assert.equal(asked.action === "ask" && asked.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
     // The shim is not first: nothing below this decision can hold the
     // command, so asking would be theatre.
-    const denied = decide("gh pr create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: false } });
+    const denied = decide("gh issue create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: false } });
     assert.equal(denied.action, "deny");
     assert.equal(denied.action === "deny" && denied.code, "SHIM_UNREACHABLE_NEEDS_HUMAN");
     assert.ok(denied.action === "deny" && denied.reason.includes("not the first `gh` on PATH"));
@@ -401,7 +401,7 @@ describe("decideEgress — context rules", () => {
   });
 
   it("g: an unanswerable PATH lookup changes nothing — the capability is left unset", () => {
-    const d = decide("gh pr create -t x -b y", {
+    const d = decide("gh issue create -t x -b y", {
       resolveDestination: () => PUBLIC,
       findApproval: () => null,
       capabilities: { ask: true },
@@ -449,7 +449,7 @@ describe("decideEgress — context rules", () => {
     });
     assert.equal(shaped.action === "deny" && shaped.code, "EGRESS_AFTER_CD");
     // And a private, reversible `gh` verb is still allowed: rule g never fired.
-    assert.equal(decide("gh pr create -t x -b y", { capabilities }).action, "allow");
+    assert.equal(decide("gh issue create -t x -b y", { capabilities }).action, "allow");
   });
 
   it("g: irreversible verb fires even with no resolved destination", () => {
@@ -460,7 +460,7 @@ describe("decideEgress — context rules", () => {
 
   it("private destination, ordinary verb, no human → allow (fail open on context)", () => {
     assert.equal(decide("git push origin main").action, "allow");
-    assert.equal(decide("gh pr create -t x -b y").action, "allow");
+    assert.equal(decide("gh issue create -t x -b y").action, "allow");
   });
 
   it("unresolvable destination, ordinary verb → allow", () => {
@@ -491,7 +491,7 @@ describe("decideEgress — severity across intents", () => {
       resolveDestination: resolver,
     });
     assert.equal(d.action, "deny"); // rule d on the second intent beats the ask on the first
-    const a = decide("git push origin main && gh pr create -t x -b y", { resolveDestination: resolver });
+    const a = decide("git push origin main && gh issue create -t x -b y", { resolveDestination: resolver });
     assert.equal(a.action, "ask");
     assert.equal(decideEgress({ ...baseOpts(), intents: [] }).action, "allow");
   });
@@ -730,8 +730,11 @@ describe("resolveDestinationOffline — real git config", () => {
     );
   });
 
-  it("gh without --repo → cwd's origin", () => {
-    const d = resolveDestinationOffline(intent("gh pr create -t x -b y"), repo);
+  // PR 2c (§3.3 item 3): the base repository is gh's own pick: the first remote in gh's order (upstream,
+  // github, origin, the rest). `repo` has origin and an unranked `customer` remote, so origin is the pick;
+  // the other cases (upstream, gh-resolved, ties, URL forms) are in egress-resolve-2c.test.ts.
+  it("gh without --repo → gh's pick: origin outranks an unranked remote", () => {
+    const d = resolveDestinationOffline(intent("gh issue create -t x -b y"), repo);
     assert.equal(d?.org, "acme");
     assert.equal(d?.classKnown, true);
   });

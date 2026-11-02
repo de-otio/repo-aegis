@@ -79,7 +79,16 @@ export type EgressVerb =
  *   intent names more than one distinct repository;
  * - `unparsed-shape`: the command line could not be taken apart (a parse
  *   failure, nesting deeper than the parser follows, `xargs`-fed arguments, a
- *   brace-expanded command word, a `-C`/`--git-dir` the parser cannot name).
+ *   brace-expanded command word, a `-C`/`--git-dir` the parser cannot name);
+ * - `opaque-endpoint`: a mutating `gh api` endpoint that names no owner
+ *   (`repositories/<id>/…`, `gists`, `projects/…`): the write cannot be
+ *   attributed to a repository offline (§3.3 item 4);
+ * - `gh-resolved`: produced by the resolver (not the parser) when a remote's
+ *   `gh-resolved` config holds something other than `base` or `owner/repo`
+ *   (§3.3 item 3);
+ * - `opaque-remote`: produced by the resolver when a remote that gh could pick
+ *   is not cleanly a github.com URL, or the top position is a tie between
+ *   remotes naming different repositories (gh's order there is unstable).
  *
  * `gh-alias` also covers any first word that is not a built-in `gh` command
  * and not an alias the parser can resolve: an extension, a typo, an alias
@@ -91,7 +100,10 @@ export type IntentUnresolved =
   | "opaque-repo"
   | "unknown-shape"
   | "ambiguous-target"
-  | "unparsed-shape";
+  | "unparsed-shape"
+  | "opaque-endpoint"
+  | "gh-resolved"
+  | "opaque-remote";
 
 /** The shell operator that joined a segment to its predecessor. */
 export type SegmentJoin = ";" | "&&" | "||" | "|" | "&" | "\n" | null;
@@ -125,6 +137,11 @@ export interface EgressIntent {
   extraRepos?: string[];
   /** Set when the destination cannot be named offline; see {@link IntentUnresolved}. */
   unresolved?: IntentUnresolved;
+  /**
+   * The command group uses gh's plain `BaseRepo` (`secret`, `variable`, …), which ignores a remote's
+   * `gh-resolved` and takes the first remote, unlike the `SmartBaseRepo` groups (`pr`, `issue`, …).
+   */
+  ghPlainBase?: true;
   /**
    * `gh api`: the endpoint positional, verbatim (`repos/o/r/pulls/12/merge`,
    * `orgs/o/repos`, `graphql`, a full URL). For a REST call the destination
@@ -165,6 +182,32 @@ export interface EgressIntent {
   cwdOverride?: string;
   /** Zero-based index of the segment this intent came from. */
   segmentIndex: number;
+  /**
+   * Shape rule b′ (§3.4): the environment or option overrides in force on this
+   * egress segment, or assigned earlier in the same command line, that would
+   * make the `gh` shim, the pre-push hook, `gh` or `git` read a different
+   * registry, config, remote or program than this guard judged. Fixed labels
+   * or validated variable names only (`REPO_AEGIS_REGISTRY`, `env -i`,
+   * `--git-dir`, `git -c remote.*`); never a value.
+   */
+  envOverrides?: string[];
+  /**
+   * Shape rule b″ (§3.4): a fixed label for the first persistent state change
+   * (`git config`, `git remote set-url`, `gh repo set-default`, `gh alias
+   * set`, `gh auth switch`, `export`, a write into `.git/` …) that an earlier
+   * part of the same command line makes. The guard judges the egress against
+   * the state as it is BEFORE the command runs, so the judgement would be
+   * about a state that no longer holds.
+   */
+  afterStateChange?: string;
+  /**
+   * Shape rule b″, L2: the first earlier state change when ALL of them are checkout- or remote-kind
+   * (`gh pr checkout`, `git remote`, a `remote.*` / `branch.*` config key, `git branch -u`). They move where an
+   * IMPLICIT target lands but cannot change a literal one, so a `gh` intent that names its repository
+   * (`--repo`, a URL, `repos/<o>/<r>/…`) is exempt; any other egress is refused as for
+   * {@link afterStateChange}. Exclusive with it.
+   */
+  afterLocalStateChange?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +446,12 @@ function tokenise(command: string): Segment[] {
       i += 2;
       continue;
     }
+    // `>|` is the clobbering redirect, not a pipe.
+    if (c === "|" && inWord && /^(?:\d+|&)?>$/.test(word)) {
+      word += c;
+      i++;
+      continue;
+    }
     if (c === "|") {
       endSegment("|");
       i += command[i + 1] === "&" ? 2 : 1;
@@ -430,6 +479,22 @@ function tokenise(command: string): Segment[] {
       endSegment("|");
       parens.push("proc");
       i += 2;
+      continue;
+    }
+    // `NAME=(a b c)`: an array assignment, one word (not a subshell).
+    if (c === "(" && inWord && /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=$/.test(word)) {
+      let depth = 0;
+      let j = i;
+      while (j < n) {
+        if (command[j] === "(") depth++;
+        else if (command[j] === ")" && --depth === 0) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      word += command.slice(i, j);
+      i = j;
       continue;
     }
     if (c === "(" || c === ")") {
@@ -599,6 +664,11 @@ interface ResolvedCommand {
   nestedText?: string;
   /** Index (in `tokens`) of the first token that is part of `nestedText`; those tokens are parsed as text, not scanned. */
   nestedFrom?: number;
+  /**
+   * `sh -c 'TEXT' ARG0 ARG1 …`: the words after TEXT. They become `$0`, `$1`, … of TEXT, so `"$@"` in it runs
+   * them (C1). Absent for `eval`, whose arguments are all TEXT.
+   */
+  nestedArgs?: string[];
   /** The nested text comes from `eval`: it runs in THIS shell, so it can change its variables. */
   isEval: boolean;
   /** The wrapper loop ran out of iterations: what follows is unknowable. */
@@ -620,14 +690,16 @@ const RESERVED_WORDS = new Set(["if", "then", "elif", "else", "do", "while", "un
  * interpreter's `-c` text and the arguments of `eval` are returned as
  * `nestedText` for the caller to parse.
  */
-function resolveCommand(input: string[], assigns: Assignment[] = []): ResolvedCommand {
+function resolveCommand(input: string[], assigns: Assignment[] = [], envFlags: string[] = []): ResolvedCommand {
   let tokens = input;
   let i = 0;
   let viaXargs = false;
   let settled = false;
   for (let guard = 0; guard < 256; guard++) {
     for (;;) {
-      const m = i < tokens.length ? /^([A-Za-z_][A-Za-z0-9_]*)(\+?)=([\s\S]*)$/.exec(tokens[i]!) : null;
+      // (`BASH_FUNC_name%%=…` is not a shell assignment, but `env` passes it on, and shape rule b′ must see it.)
+      // (`NAME[0]=x` is an array element assignment: read as an assignment to NAME, the safe direction.)
+      const m = i < tokens.length ? /^([A-Za-z_][A-Za-z0-9_]*(?:%%)?)(?:\[[^\]]*\])?(\+?)=([\s\S]*)$/.exec(tokens[i]!) : null;
       if (m === null) break;
       assigns.push({ name: m[1]!, value: m[3]!, append: m[2] === "+" });
       i++;
@@ -674,9 +746,23 @@ function resolveCommand(input: string[], assigns: Assignment[] = []): ResolvedCo
           break;
         }
       }
+      // `env -i` / `env -u NAME` change the environment the program sees: shape rule b′ refuses them.
+      if (word === "env") {
+        if (t === "--ignore-environment" || /^-[A-Za-z]*i[A-Za-z]*$/.test(t)) envFlags.push("env -i");
+        if (t === "--unset" || t.startsWith("--unset=") || /^-[A-Za-z]*u/.test(t)) envFlags.push("env -u");
+        // `env -C <dir>` / `--chdir=<dir>` runs the command in another directory: the checkout it judged is not the one it uses.
+        if (t === "--chdir" || t.startsWith("--chdir=") || (!t.startsWith("--") && /^-[A-Za-z]*C/.test(t))) {
+          envFlags.push("env -C");
+        }
+      }
       i += spec.value.has(t) ? 2 : 1;
     }
     if (restart) continue;
+    // `env - cmd`: a lone dash is `-i`.
+    if (word === "env" && tokens[i] === "-") {
+      envFlags.push("env -i");
+      i++;
+    }
     i += spec.positionals ?? 0;
   }
   if (!settled) return { tokens, start: tokens.length, viaXargs, isEval: false, exhausted: true };
@@ -691,7 +777,16 @@ function resolveCommand(input: string[], assigns: Assignment[] = []): ResolvedCo
       if (/^-[A-Za-z]+$/.test(t) && t.includes("c")) {
         const text = tokens[j + 1];
         if (text !== undefined) {
-          return { tokens, start: i, viaXargs, nestedText: text, nestedFrom: j + 1, isEval: false, exhausted: false };
+          return {
+            tokens,
+            start: i,
+            viaXargs,
+            nestedText: text,
+            nestedFrom: j + 1,
+            nestedArgs: tokens.slice(j + 2),
+            isEval: false,
+            exhausted: false,
+          };
         }
         break;
       }
@@ -768,7 +863,11 @@ const GIT_BUILTINS = new Set([
 ]);
 
 /** The fail-closed git intent: a placeholder remote and refspec keep the implicit-target shape rule out of the way, so rule h judges it. */
-function unresolvedGitIntent(base: Omit<EgressIntent, "verb" | "payloadFiles">, cwdOverride?: string): EgressIntent {
+function unresolvedGitIntent(
+  base: Omit<EgressIntent, "verb" | "payloadFiles">,
+  cwdOverride?: string,
+  overrides: readonly string[] = [],
+): EgressIntent {
   return {
     ...base,
     verb: "git-push",
@@ -776,8 +875,27 @@ function unresolvedGitIntent(base: Omit<EgressIntent, "verb" | "payloadFiles">, 
     remote: "<unparsed>",
     refspec: "<unparsed>",
     ...(cwdOverride !== undefined && { cwdOverride }),
+    ...(overrides.length > 0 && { envOverrides: [...overrides] }),
     unresolved: "unparsed-shape",
   };
+}
+
+/**
+ * `git -c KEY=…` keys that move where a push goes or what runs around it (shape rule b′, F7): the
+ * remote's URLs and rewrites, the ssh program, the hooks directory. Returns the fixed label.
+ */
+function gitConfigOverrideLabel(kv: string | undefined): string | null {
+  if (kv === undefined) return null;
+  const key = kv.split("=")[0]!.toLowerCase();
+  if (key.startsWith("remote.")) return "git -c remote.*";
+  if (key.startsWith("url.")) return "git -c url.*";
+  if (key === "core.sshcommand") return "git -c core.sshCommand";
+  if (key === "core.hookspath") return "git -c core.hooksPath";
+  // `include.path` / `includeIf.<cond>.path` pull in a whole file of the settings above.
+  if (key.startsWith("include.") || key.startsWith("includeif.")) return "git -c include.*";
+  // A CA override (with a proxy) lets a middleman read the credential on the wire.
+  if (/^http\.(?:.*\.)?sslca(?:info|path)$/.test(key)) return "git -c http.sslCAInfo";
+  return null;
 }
 
 /** What `classifyGit` needs from the environment. */
@@ -801,10 +919,17 @@ function classifyGit(
   let opaque = false;
   // `git -c alias.NAME=… NAME` defines an alias for this one command, invisible in any config file.
   const cliAliases = new Map<string, string>();
+  // Shape rule b′: options that move the repository or rewrite where a push goes.
+  const overrides: string[] = [];
   // Global options precede the subcommand.
   while (i < args.length) {
     const a = args[i]!;
     if (!a.startsWith("-")) break;
+    if (a === "--work-tree" || a.startsWith("--work-tree=") || a === "--git-dir" || a.startsWith("--git-dir=")) {
+      overrides.push(a.startsWith("--work-tree") ? "--work-tree" : "--git-dir");
+    }
+    // `git --exec-path=<dir>` runs git's helpers (git-remote-https, hooks' git) from another directory.
+    if (a === "--exec-path" || a.startsWith("--exec-path=")) overrides.push("--exec-path");
     if (a === "-C") {
       const v = args[i + 1];
       if (v !== undefined) {
@@ -831,6 +956,8 @@ function classifyGit(
     }
     if (a === "-c" || a === "--config-env") {
       const kv = args[i + 1];
+      const label = gitConfigOverrideLabel(kv);
+      if (label !== null) overrides.push(label);
       const m = kv === undefined ? null : /^alias\.([^=]+)=([\s\S]*)$/i.exec(kv);
       // `--config-env` takes the value from an environment variable: unknowable, so a shell-style alias.
       if (m !== null) cliAliases.set(m[1]!.toLowerCase(), a === "-c" ? m[2]! : "!");
@@ -838,7 +965,9 @@ function classifyGit(
       continue;
     }
     if (a.startsWith("--config-env=")) {
-      const m = /^--config-env=alias\.([^=]+)=/i.exec(a);
+      const label = gitConfigOverrideLabel(a.slice("--config-env=".length));
+      if (label !== null) overrides.push(label);
+      const m =/^--config-env=alias\.([^=]+)=/i.exec(a);
       if (m !== null) cliAliases.set(m[1]!.toLowerCase(), "!");
       i++;
       continue;
@@ -880,14 +1009,14 @@ function classifyGit(
       if (gitCtx.aliases === undefined) return null; // no alias information was supplied
       // The aliases in effect are those of the repository git will use: `-C`, `--git-dir` and `GIT_DIR`
       // move it. A directory the parser cannot name has aliases it cannot read.
-      if (opaque) return unresolvedGitIntent(base, cwdOverride);
+      if (opaque) return unresolvedGitIntent(base, cwdOverride, overrides);
       const map = gitCtx.aliases(cwdOverride);
-      if (map === null) return unresolvedGitIntent(base, cwdOverride); // aliases exist but cannot be read
+      if (map === null) return unresolvedGitIntent(base, cwdOverride, overrides); // aliases exist but cannot be read
       value = map.get(key);
     }
     if (value === undefined) return null;
     if (depth >= ALIAS_MAX_DEPTH || value.length > ALIAS_MAX_BYTES || value.startsWith("!")) {
-      return unresolvedGitIntent(base, cwdOverride);
+      return unresolvedGitIntent(base, cwdOverride, overrides);
     }
     const words = shlexSplit(value);
     sub = words[0];
@@ -920,6 +1049,7 @@ function classifyGit(
     ...(remote !== undefined && { remote }),
     ...(refspec !== undefined && { refspec }),
     ...(cwdOverride !== undefined && { cwdOverride }),
+    ...(overrides.length > 0 && { envOverrides: [...new Set(overrides)] }),
     ...((opaque || forwarded) && { unresolved: "unparsed-shape" as const }),
   };
 }
@@ -1080,6 +1210,49 @@ export function analyseApiEndpoint(endpoint: string): ApiEndpointTarget {
 export function parseApiEndpoint(endpoint: string): { org: string; repo: string | null } | null {
   const t = analyseApiEndpoint(endpoint);
   return t.kind === "named" ? { org: t.org, repo: t.repo } : null;
+}
+
+/** How a MUTATING `gh api` endpoint is attributed (§3.3 item 4); see {@link classifyApiEndpoint}. */
+export type ApiEndpointClass =
+  | Exclude<ApiEndpointTarget, { kind: "none" }>
+  | { kind: "graphql" }
+  /** `user`, `user/…`: the authenticated account's own resources, not a repository. */
+  | { kind: "self" }
+  /** `markdown`, `markdown/raw`: renders text, writes nothing. */
+  | { kind: "markdown" }
+  /** Any other endpoint: it names no owner (`repositories/<id>/…`, `gists`, `projects/…`), or lives on a host this guard does not model. */
+  | { kind: "opaque-endpoint" };
+
+/**
+ * {@link analyseApiEndpoint}, with the endpoints that name no repository sorted by what they are:
+ * the GraphQL endpoint, the account's own resources (`user`, `user/…`), the read-only `markdown`
+ * renderer, and everything else, which cannot be attributed to an owner offline and is reported
+ * `opaque-endpoint` (the old code fell back to the cwd's origin for these). Callers classify
+ * MUTATING requests only. Pure; never throws.
+ */
+export function classifyApiEndpoint(endpoint: string): ApiEndpointClass {
+  const t = analyseApiEndpoint(endpoint);
+  if (t.kind !== "none") return t;
+  if (isGraphqlEndpoint(endpoint)) return { kind: "graphql" };
+  let path = endpoint;
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      const u = new URL(path);
+      // Only github.com's own API hosts: a request to any other host is not an attributable write.
+      if (!/^(?:api\.|uploads\.)?github\.com$/i.test(u.hostname)) return { kind: "opaque-endpoint" };
+      path = u.pathname;
+    } catch {
+      return { kind: "opaque-endpoint" };
+    }
+  }
+  path = path.replace(/^\/+/, "").replace(/^api\/v3\//i, "");
+  const parts = path.split(/[?#]/)[0]!.split("/").filter(Boolean);
+  const first = parts[0]?.toLowerCase();
+  if (first === "user") return { kind: "self" };
+  if (first === "markdown" && (parts.length === 1 || (parts.length === 2 && parts[1]!.toLowerCase() === "raw"))) {
+    return { kind: "markdown" };
+  }
+  return { kind: "opaque-endpoint" };
 }
 
 /**
@@ -1689,6 +1862,15 @@ interface GhContext {
   aliases: (() => ReadonlyMap<string, string> | null) | undefined;
 }
 
+/**
+ * The gh command groups whose base repository comes from gh's `SmartBaseRepoFunc`, which honours a remote's
+ * `gh-resolved`. Every other group (`secret`, `variable`, …) uses the plain `BaseRepoFunc`: the first remote.
+ */
+const SMART_BASE_REPO_GROUPS: ReadonlySet<string> = new Set([
+  "pr", "issue", "repo", "release", "api", "label", "run", "workflow", "ruleset", "cache", "org", "discussion",
+  "browse", "agent-task",
+]);
+
 // Subcommands of the write groups that only read. A subcommand of a write
 // group that is in neither this table nor GH_VERBS is a write verb this
 // parser has no shape for, and is reported `unresolved: "unknown-shape"`.
@@ -1818,6 +2000,8 @@ function classifyGh(
   let gqlQuery: string | undefined;
   let gqlQueryFile: string | undefined;
   let gqlInputFile: string | undefined;
+  /** `gh api --hostname <not github.com> markdown`: not the exempt github.com renderer (M3). */
+  let foreignMarkdownHost = false;
 
   for (const { flag, value } of events) {
     if (flag === "--body-file" || flag === "--notes-file" || flag === "--input") {
@@ -1862,6 +2046,14 @@ function classifyGh(
     const mutating =
       method !== undefined ? MUTATING_METHODS.has(method) : hasFields || payloadFiles.length > 0;
     if (!mutating) return null;
+    // `markdown` / `markdown/raw` only render text on github.com: not egress (§3.3 item 4). With a
+    // `--hostname` that is not github.com the request goes to another server, which is a mutating
+    // intent (below) whose payload is scanned (M3).
+    if (apiEndpoint !== undefined && classifyApiEndpoint(apiEndpoint).kind === "markdown") {
+      const host = lastValue(events, "--hostname");
+      if (host === undefined || host.toLowerCase().replace(/\.$/, "") === "github.com") return null;
+      foreignMarkdownHost = true;
+    }
   }
 
   const graphql =
@@ -1905,6 +2097,15 @@ function classifyGh(
   // Precedence of the reasons: an opaque slot, then an overridden environment, then an unknown shape.
   if (envApplies && ctx.envOverridden) unresolved = "env-override";
   if (opaque) unresolved = "opaque-repo";
+  // A mutating `gh api` endpoint that names no owner (`repositories/<id>/…`, `gists`, `projects/…`) cannot be
+  // attributed to one: it is NOT the cwd's origin. `user/…` and the GraphQL endpoint have their own handling.
+  if (
+    !opaque &&
+    apiEndpoint !== undefined &&
+    (foreignMarkdownHost || classifyApiEndpoint(apiEndpoint).kind === "opaque-endpoint")
+  ) {
+    unresolved = "opaque-endpoint";
+  }
 
   const [positionalRepo, ...extraRepos] = targets.repos;
   return {
@@ -1918,6 +2119,7 @@ function classifyGh(
     ...(apiEndpoint !== undefined && { apiEndpoint }),
     ...(graphql !== undefined && { graphql }),
     ...(unresolved !== undefined && { unresolved }),
+    ...(!SMART_BASE_REPO_GROUPS.has(group) && { ghPlainBase: true as const }),
   };
 }
 
@@ -2002,6 +2204,16 @@ interface ParseCtx {
    * (`eval "$(cat <<'EOF' … EOF)"`): a heredoc inside it is a program, not data.
    */
   heredocsAreCode: boolean;
+  /**
+   * Shape rule b′: labels of the overriding variables and `env` flags in force for this text (assigned by
+   * the enclosing command's prefix or by an earlier `export` / assignment). Flows DOWN into nested text.
+   */
+  dangerEnv: ReadonlySet<string>;
+  /**
+   * Shape rule b″: the first persistent state change seen so far in this command line (any depth). Shared
+   * and mutable: a change made inside `bash -c '…'` outlives it.
+   */
+  state: { change: string | undefined; strong: string | undefined };
 }
 
 /** A lazy, memoised, never-throwing loader: a failed load is `null` ("could not be read"). */
@@ -2080,6 +2292,8 @@ export function parseEgressIntents(command: string, opts: ParseEgressOptions = {
       inheritedEnvRepo: undefined,
       tainted: new Map(),
       heredocsAreCode: false,
+      dangerEnv: new Set(),
+      state: { change: undefined, strong: undefined },
     });
   } catch {
     const s = typeof command === "string" ? sentinelFor(command, { precededByCd: false, joinedBy: null, segmentIndex: 0 }) : null;
@@ -2295,6 +2509,37 @@ function scanTokens(tokens: readonly string[], start: number, cmd: string, neste
   return out;
 }
 
+/** Single-quote one word for the tokeniser (the same way a shell would read it back). */
+function quoteWord(w: string): string {
+  return `'${w.split("'").join(`'\\''`)}'`;
+}
+
+/** `$@`, `$*`, `$0`…`$9` (also `${…}` and quoted) in the text of an interpreter's `-c`. */
+const POSITIONAL_REF_RE = /"?\$(?:@|\*|\{@\}|\{\*\}|\{\d+\}|\d)"?/g;
+
+/**
+ * `sh -c 'TEXT' ARG0 ARG1 …` runs TEXT with `$0`=ARG0, `$1`=ARG1, …: `"$@"` is every argument after ARG0, so
+ * `sh -c '"$@"' sh gh issue create --repo stranger/r` runs `gh issue create --repo stranger/r` (C1). Returns
+ * the text with those references replaced by the quoted words, or null when TEXT refers to none of them.
+ */
+export function substitutePositionals(text: string, args: readonly string[]): string | null {
+  let any = false;
+  const out = text.replace(POSITIONAL_REF_RE, ref => {
+    any = true;
+    const bare = ref.replace(/"/g, "");
+    const quoted = ref.startsWith('"') && ref.endsWith('"') && ref.length > 1;
+    if (/^\$\{?[@*]\}?$/.test(bare)) {
+      const rest = args.slice(1);
+      // "$*" is ONE word; "$@" and bare $@ / $* are the words themselves.
+      return bare.includes("*") && quoted ? quoteWord(rest.join(" ")) : rest.map(quoteWord).join(" ");
+    }
+    const n = Number(/\d+/.exec(bare)![0]);
+    const word = args[n];
+    return word === undefined ? "" : quoteWord(word);
+  });
+  return any ? out : null;
+}
+
 /** True when this segment changes — or may change — `GH_REPO` for the segments after it. */
 function mutatesGhRepo(original: string[], resolved: ResolvedCommand, assigns: Assignment[]): boolean {
   if (original.some((t, i) => (t === "GH_REPO" && (original[i - 1] === "-u" || original[i - 1] === "--unset")) || t === "--unset=GH_REPO" || t === "-uGH_REPO")) {
@@ -2366,15 +2611,405 @@ function hereStrings(tokens: readonly string[]): string[] {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Shape rules b′ and b″ (issue #151, §3.4)
+// ---------------------------------------------------------------------------
+
+const OVERRIDE_ENV_NAMES: ReadonlySet<string> = new Set([
+  "HOME",
+  "PATH",
+  "XDG_CONFIG_HOME",
+  "GH_CONFIG_DIR",
+  "GH_HOST",
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "BASH_ENV",
+  "ENV",
+  "ZDOTDIR",
+  // ssh runs a ProxyCommand through `$SHELL`, and bash (and macOS /bin/sh) imports exported functions and
+  // honours these option variables, so each can hijack the sandbox's ssh proxy.
+  "SHELL",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "PS4",
+  // Another repository, another git helper directory, code loaded into node-based tools.
+  "GIT_COMMON_DIR",
+  "GIT_EXEC_PATH",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  // A CA override plus a proxy lets a middleman read the token gh sends.
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+]);
+// `REPO_AEGIS_*` picks the registry and approvals; `SRT_*` is the sandbox's own (its trusted ssh template
+// evals `SRT_SSH_PROXY_COMMAND`, R9); `GIT_CONFIG*` rewrites URLs; `GIT_SSH*` (`GIT_SSH`, `GIT_SSH_COMMAND`,
+// `GIT_SSH_VARIANT`) picks the ssh program.
+// `BASH_FUNC_name%%` is how bash exports a function through the environment.
+// `LD_*` and `DYLD_*` (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, …) load code into
+// the program, `git` and `ssh` included.
+const OVERRIDE_ENV_PREFIXES: readonly string[] = [
+  "REPO_AEGIS_",
+  "SRT_",
+  "GIT_CONFIG",
+  "GIT_SSH",
+  "BASH_FUNC_",
+  "LD_",
+  "DYLD_",
+];
+
+/**
+ * Whether a variable name is one of those shape rule b′ refuses on, or before, an egress segment (§3.4):
+ * `REPO_AEGIS_*`, `SRT_*`, `GIT_CONFIG*`, `GIT_SSH*`, `HOME`, `PATH`, `XDG_CONFIG_HOME`, `GH_CONFIG_DIR`,
+ * `GH_HOST`, `GIT_DIR`, `GIT_WORK_TREE`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `SHELL`, `SHELLOPTS`, `BASHOPTS`, `PS4`,
+ * `BASH_FUNC_*`, `LD_*`, `DYLD_*`. Pure.
+ */
+export function isEgressOverrideVariable(name: string): boolean {
+  return OVERRIDE_ENV_NAMES.has(name) || OVERRIDE_ENV_PREFIXES.some(p => name.startsWith(p));
+}
+
+/** The label printed for an overriding variable: its (already identifier-shaped) name, never its value. */
+function overrideLabel(name: string): string {
+  return name.length <= 64 ? name : `${name.slice(0, 40)}…`;
+}
+
+function assignmentOverrideLabels(assigns: readonly Assignment[]): string[] {
+  return assigns.filter(a => isEgressOverrideVariable(a.name)).map(a => overrideLabel(a.name));
+}
+
+/** `export NAME=…`, `declare NAME=…`: the overriding variables a command assigns for the rest of the line. */
+function exportedOverrideLabels(cmd: string, args: readonly string[]): string[] {
+  if (cmd !== "export" && cmd !== "declare" && cmd !== "typeset" && cmd !== "readonly" && cmd !== "local") return [];
+  const out: string[] = [];
+  // `export -f name` / `declare -fx name`: the function travels in the environment to every child shell.
+  const flags = args.filter(a => /^-[A-Za-z]+$/.test(a)).join("");
+  if (cmd === "export" ? flags.includes("f") : flags.includes("f") && flags.includes("x")) {
+    out.push(cmd === "export" ? "export -f" : "declare -fx");
+  }
+  for (const a of args) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*(?:%%)?)(?:\[[^\]]*\])?\+?=/.exec(a);
+    if (m !== null && isEgressOverrideVariable(m[1]!)) out.push(overrideLabel(m[1]!));
+  }
+  return out;
+}
+
+const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * The other ways a shell line assigns a variable for the segments after it (H6), beyond `NAME=value` and
+ * `export`: `printf -v NAME`, `read [-r…] NAME`, `mapfile`/`readarray NAME`, `let NAME=…`, `for NAME in`,
+ * `select NAME in`, `${NAME:=…}` / `${NAME=…}` anywhere in the segment, and `unset NAME` (the shell analogue
+ * of `env -u`). Returns the labels of those that name a variable shape rule b′ refuses.
+ */
+function shellAssignedOverrideLabels(
+  rawTokens: readonly string[],
+  cmd: string,
+  args: readonly string[],
+): string[] {
+  const names: string[] = [];
+  const takesValue = (flags: ReadonlySet<string>) => (a: string) => flags.has(a);
+  switch (cmd) {
+    case "printf":
+      for (let i = 0; i < args.length - 1; i++) if (args[i] === "-v") names.push(args[i + 1]!);
+      break;
+    case "read": {
+      const valued = takesValue(new Set(["-d", "-i", "-n", "-N", "-p", "-t", "-u"]));
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i]!;
+        if (a === "-a") {
+          if (args[i + 1] !== undefined) names.push(args[++i]!);
+        } else if (a.startsWith("-")) {
+          if (valued(a)) i++;
+        } else {
+          names.push(a);
+        }
+      }
+      break;
+    }
+    case "mapfile":
+    case "readarray": {
+      const valued = takesValue(new Set(["-d", "-n", "-O", "-s", "-u", "-C", "-c"]));
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i]!;
+        if (a.startsWith("-")) {
+          if (valued(a)) i++;
+        } else {
+          names.push(a);
+        }
+      }
+      break;
+    }
+    case "let":
+      for (const a of args) {
+        const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?\s*(?:[-+*/%&|^]|<<|>>)?=/.exec(a);
+        if (m !== null) names.push(m[1]!);
+      }
+      break;
+    case "unset":
+      for (const a of args) if (!a.startsWith("-")) names.push(a.replace(/\[.*$/, ""));
+      break;
+    case "for":
+    case "select":
+      if (args[0] !== undefined) names.push(args[0]);
+      break;
+    default:
+      break;
+  }
+  const labels = names
+    .filter(n => IDENT_RE.test(n) && isEgressOverrideVariable(n))
+    .map(n => (cmd === "unset" ? `unset ${overrideLabel(n)}` : overrideLabel(n)));
+  // `${NAME:=default}` / `${NAME=default}` assigns as a side effect of expanding.
+  for (const t of rawTokens) {
+    for (const m of t.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*):?=/g)) {
+      if (isEgressOverrideVariable(m[1]!)) labels.push(overrideLabel(m[1]!));
+    }
+  }
+  return labels;
+}
+
+/** git global options that take the next token as their value. */
+const GIT_VALUE_GLOBALS: ReadonlySet<string> = new Set([
+  "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env", "--attr-source",
+]);
+
+/** The git subcommand and the arguments after it, skipping global options; null when there is none. */
+function gitSubcommandOf(args: readonly string[]): { sub: string; rest: string[] } | null {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (!a.startsWith("-")) return { sub: a, rest: args.slice(i + 1) };
+    if (GIT_VALUE_GLOBALS.has(a)) i++;
+  }
+  return null;
+}
+
+const GIT_CONFIG_VALUE_FLAGS: ReadonlySet<string> = new Set(["-f", "--file", "--blob", "--default", "--type", "-t", "--comment"]);
+const GIT_CONFIG_READ_FLAGS: ReadonlySet<string> = new Set(["-l", "--list", "--show-origin", "--show-scope"]);
+const GIT_CONFIG_WRITE_FLAGS: ReadonlySet<string> = new Set([
+  "--add", "--unset", "--unset-all", "--replace-all", "--rename-section", "--remove-section", "-e", "--edit",
+]);
+
+/**
+ * The config keys (or sections) that decide where a `gh` or `git` write goes or what runs around it, so
+ * that changing one earlier in the line makes the guard's judgement stale (L1 narrows b″ to these):
+ * `remote.*`, `url.*`, `core.*` (`sshCommand`, `hooksPath`, `fsmonitor`, …), `include*` / `includeIf*`,
+ * `branch.*`, `push.*`, `credential.*`, `http.*`, and `alias.*` (an alias can expand to a push). A key that
+ * is not a literal (`$KEY`) counts. `user.email` and the like do not.
+ */
+const ROUTING_CONFIG_KEY_RE = /^(?:remote|url|core|include|includeif|branch|push|credential|http|alias)\./i;
+
+function isRoutingConfigKey(key: string): boolean {
+  return /[$`]/.test(key) || ROUTING_CONFIG_KEY_RE.test(key);
+}
+
+/**
+ * Whether `git config <rest>` changes a routing key (a read: `--get*`, `--list`, or a lone key). A write
+ * of a key that cannot be read, or whose form is unclear (`--edit`), counts.
+ */
+function gitConfigChanges(rest: readonly string[]): boolean {
+  return gitConfigChange(rest) !== null;
+}
+
+/**
+ * {@link gitConfigChanges} with the kind: `local` when the key is `remote.*` or `branch.*` (the
+ * remote's URL, its `gh-resolved`, upstream tracking: they move an implicit target only), else `other`.
+ */
+function gitConfigChange(rest: readonly string[]): "local" | "other" | null {
+  if (rest.some(a => a === "-e" || a === "--edit")) return "other"; // opens the whole file
+  if (rest.some(a => a.startsWith("--get") || GIT_CONFIG_READ_FLAGS.has(a))) return null;
+  const positionals: string[] = [];
+  let explicitWrite = false;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a.startsWith("-")) {
+      if (GIT_CONFIG_WRITE_FLAGS.has(a)) explicitWrite = true;
+      if (GIT_CONFIG_VALUE_FLAGS.has(a)) i++;
+      continue;
+    }
+    positionals.push(a);
+  }
+  if (positionals.length === 0) return null;
+  let key = positionals[0]!;
+  let written = explicitWrite || positionals.length >= 2;
+  // The newer subcommand forms: `git config set KEY VALUE`, `git config unset KEY`, `git config get KEY`.
+  if (["set", "unset", "rename-section", "remove-section"].includes(key)) {
+    key = positionals[1] ?? "";
+    written = true;
+  } else if (key === "edit") {
+    return "other";
+  } else if (key === "get" || key === "list") {
+    return null;
+  }
+  if (!written || !isRoutingConfigKey(key)) return null;
+  return /^(?:remote|branch)\./i.test(key) && !/[$`]/.test(key) ? "local" : "other";
+}
+
+/** Whether `git remote <rest>` changes a remote. Reads: no subcommand, `show`, `get-url`, `update`, `prune`. */
+function gitRemoteChanges(rest: readonly string[]): boolean {
+  const sub = rest.find(a => !a.startsWith("-"));
+  return sub !== undefined && !["show", "get-url", "update", "prune"].includes(sub);
+}
+
+const PROTECTED_PATH_RE =
+  // Case-insensitive: the default macOS filesystem is, so `.GIT/config` is `.git/config`.
+  /(?:^|\/)\.git(?:\/|$)|(?:^|\/)\.gitconfig$|(?:^|\/)\.ssh\/config(?:\.d\/|$)|(?:^|\/)\.config\/(?:git|gh)(?:\/|$)|(?:^|\/)gh\/(?:config|hosts)\.yml$/i;
+const WRITE_COMMANDS: ReadonlySet<string> = new Set([
+  "tee", "cp", "mv", "ln", "install", "rm", "touch", "truncate", "dd", "chmod", "rsync",
+  // editors that write the file they are given
+  "ed", "ex", "vi", "vim", "nvim",
+]);
+const IN_PLACE_EDITORS: ReadonlySet<string> = new Set(["sed", "perl", "ruby"]);
+
+/** The same paths, found anywhere inside program text (`open('.git/config', 'w')`). */
+const PROTECTED_TEXT_RE = /\.git\/|\.gitconfig|\.ssh\/config|\.config\/(?:git|gh)\/|\bgh\/(?:config|hosts)\.yml/i;
+
+/** State changes that only move where an implicit target lands (L2). */
+const LOCAL_STATE_LABELS: ReadonlySet<string> = new Set([
+  "gh pr checkout",
+  "git remote",
+  "git branch upstream",
+  "git config (remote or branch)",
+]);
+
+const PROTECTED_WRITE_LABEL = "a write into git, ssh or gh configuration";
+
+/** A redirect (`>`, `>>`, `2>`, `&>`) whose target is a protected configuration path. */
+function redirectsIntoProtectedPath(rawTokens: readonly string[]): boolean {
+  for (let i = 0; i < rawTokens.length; i++) {
+    const m = /^(?:\d+|&)?(?:>>|>\||&>>?|>)(.*)$/.exec(rawTokens[i]!);
+    if (m === null) continue;
+    const target = m[1] !== "" ? m[1]! : (rawTokens[i + 1] ?? "");
+    if (!target.startsWith("&") && PROTECTED_PATH_RE.test(target)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether an `export` / `declare -x` assignment changes state the guard judged (L1 narrows b″ to this): a
+ * variable that `gh`, `git` or ssh read (`GH_*`, `GIT_*`, `GITHUB_*`, `SSH_*`, or one of b′'s), or a
+ * name or value that is not a literal (`$NAME=…`, `FOO=$(cmd)`). `export FOO=1` does not.
+ */
+function exportChangesState(args: readonly string[]): boolean {
+  const flags = args.filter(a => /^-[A-Za-z]+$/.test(a)).join("");
+  if (flags.includes("f")) return true; // an exported function
+  for (const a of args) {
+    if (a.startsWith("-") && /^-[A-Za-z]+$/.test(a)) continue;
+    const eq = a.indexOf("=");
+    const name = (eq === -1 ? a : a.slice(0, eq)).replace(/(?:\+|%%)$/, "");
+    const value = eq === -1 ? undefined : a.slice(eq + 1);
+    if (/[$`]/.test(name) || !/^[A-Za-z_][A-Za-z0-9_]*(?:%%)?$/.test(name)) return true;
+    if (/^(?:GH_|GIT_|GITHUB_|SSH_)/.test(name) || isEgressOverrideVariable(name)) return true;
+    if (value !== undefined && /[$`]/.test(value)) return true;
+  }
+  return false;
+}
+
+/**
+ * Shape rule b″: the fixed label of the persistent state change this segment makes, or null. Persistent
+ * state is configuration that `gh`, `git` and the shim read when they run: a routing key of `git config`
+ * (`remote.*`, `url.*`, `core.*`, `include*`, `branch.*`, `push.*`, `credential.*`, `http.*`, `alias.*`),
+ * `git remote add|set-url|…`, `gh repo set-default`, `gh alias set`, `gh auth switch`, `gh config set`; a
+ * new or re-pointed checkout (`git clone`, `git init`, `gh repo clone`, `gh repo fork --clone`, `gh pr
+ * checkout`, which adds remotes); the shell environment (`export` of a variable gh, git or ssh read); anything a
+ * sourced file or `eval` may do; and a write into `.git/`, `~/.ssh/config`, `~/.gitconfig` or the gh
+ * config, by redirect, a writing command, an editor, or an interpreter's `-c` / `-e` text or heredoc.
+ * Reads (`git config --get`, `git remote -v`, `export FOO=1`, `git config user.email x`) are not changes.
+ */
+function stateChangeLabel(
+  rawTokens: readonly string[],
+  cmd: string,
+  args: readonly string[],
+  stdinTexts: readonly string[] = [],
+): string | null {
+  if (redirectsIntoProtectedPath(rawTokens)) return PROTECTED_WRITE_LABEL;
+  if (cmd === "export") return exportChangesState(args) ? "export" : null;
+  if ((cmd === "declare" || cmd === "typeset") && args.some(a => /^-[A-Za-z]*x/.test(a))) {
+    return exportChangesState(args) ? "export" : null;
+  }
+  if (cmd === "eval" || cmd === "source" || cmd === ".") return "eval or source";
+  if (cmd === "git") {
+    const g = gitSubcommandOf(args);
+    if (g === null) return null;
+    if (g.sub === "config") {
+      const kind = gitConfigChange(g.rest);
+      return kind === null ? null : kind === "local" ? "git config (remote or branch)" : "git config";
+    }
+    if (g.sub === "remote") return gitRemoteChanges(g.rest) ? "git remote" : null;
+    // A fresh or re-pointed checkout: the egress after it may run in it.
+    if (g.sub === "clone" || g.sub === "init") return `git ${g.sub}`;
+    // Upstream tracking (`branch.<name>.remote`), another working tree, a submodule's URL.
+    if (g.sub === "branch" && g.rest.some(a => a === "-u" || a.startsWith("--set-upstream") || a === "--unset-upstream")) {
+      return "git branch upstream";
+    }
+    if (g.sub === "worktree" && ["add", "move", "remove", "prune"].includes(g.rest.find(a => !a.startsWith("-")) ?? "")) {
+      return "git worktree";
+    }
+    if (g.sub === "submodule" && ["add", "set-url", "set-branch", "sync", "update"].includes(g.rest.find(a => !a.startsWith("-")) ?? "")) {
+      return "git submodule";
+    }
+    return null;
+  }
+  if (cmd === "gh") {
+    const found = findGhCommand([...args]);
+    if (found !== null && found.subIdx !== undefined) {
+      const group = args[found.groupIdx];
+      const sub = args[found.subIdx];
+      if (group === "repo" && sub === "set-default") return "gh repo set-default";
+      if (group === "repo" && sub === "clone") return "gh repo clone";
+      if (group === "repo" && sub === "fork" && args.some(a => a === "--clone" || a === "--clone=true")) return "gh repo fork --clone";
+      if (group === "pr" && sub === "checkout") return "gh pr checkout"; // adds a remote for a fork's branch
+      if (group === "alias" && (sub === "set" || sub === "import" || sub === "delete")) return "gh alias";
+      if (group === "auth" && sub !== undefined && ["switch", "login", "logout", "refresh", "setup-git"].includes(sub)) {
+        return "gh auth";
+      }
+      if (group === "config" && sub === "set") return "gh config";
+      if ((group === "extension" || group === "ext") && ["install", "upgrade", "remove"].includes(sub ?? "")) return "gh extension";
+    }
+    return null;
+  }
+  if (WRITE_COMMANDS.has(cmd) && args.some(a => PROTECTED_PATH_RE.test(a.replace(/^of=/, "")))) return PROTECTED_WRITE_LABEL;
+  if (IN_PLACE_EDITORS.has(cmd) && args.some(a => /^-[A-Za-z]*i/.test(a) || a === "--in-place") && args.some(a => PROTECTED_PATH_RE.test(a))) {
+    return PROTECTED_WRITE_LABEL;
+  }
+  // `awk -i inplace` (gawk).
+  if ((cmd === "awk" || cmd === "gawk") && args.includes("inplace") && args.some(a => PROTECTED_PATH_RE.test(a))) {
+    return PROTECTED_WRITE_LABEL;
+  }
+  // An interpreter's `-c` / `-e` text or program on stdin: any mention of a protected path counts.
+  if (SCRIPT_INTERPRETER_RE.test(cmd) && [...args, ...stdinTexts].some(t => PROTECTED_TEXT_RE.test(t))) {
+    return PROTECTED_WRITE_LABEL;
+  }
+  return null;
+}
+
 function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
   if (typeof command !== "string" || command.length === 0) return [];
   const segments = tokenise(command);
   const intents: EgressIntent[] = [];
   let precededByCd = false;
   let envOverridden = ctx.envOverridden;
+  // Shape rule b′: overriding variables assigned for the rest of the line (`export PATH=…`, a bare `HOME=…`).
+  let dangerEnv: ReadonlySet<string> = ctx.dangerEnv;
 
   segments.forEach((seg, segmentIndex) => {
     const base = { precededByCd, joinedBy: seg.joinedBy, segmentIndex };
+    /** Overrides in force on THIS segment: the enclosing/earlier ones plus its own prefix assignments and `env -i/-u`. */
+    let segDanger: ReadonlySet<string> = dangerEnv;
+    /** What this segment leaves behind for the ones after it; applied in `finally`. */
+    let pendingDanger: string[] = [];
+    let pendingState: string | null = null;
+    /** Record an intent of THIS segment, with the b′ / b″ facts that apply to it. */
+    const emit = (i: EgressIntent): void => {
+      const overrides = new Set([...segDanger, ...(i.envOverrides ?? [])]);
+      intents.push({
+        ...i,
+        ...(overrides.size > 0 && { envOverrides: [...overrides] }),
+        // The first change that can alter even a literal target; else (L2) the first, local-kind one.
+        ...(i.afterStateChange === undefined && ctx.state.strong !== undefined && { afterStateChange: ctx.state.strong }),
+        ...(i.afterStateChange === undefined &&
+          ctx.state.strong === undefined &&
+          ctx.state.change !== undefined && { afterLocalStateChange: ctx.state.change }),
+      });
+    };
     // A function definition's first token is the function's name, not a command.
     const rawTokens = seg.funcDef ? seg.tokens.slice(1) : seg.tokens;
     const strings = hereStrings(rawTokens);
@@ -2386,10 +3021,17 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
     const nest = (text: string, envRepo: string | undefined, code = false): void => {
       if (ctx.depth >= MAX_NEST_DEPTH) {
         const s = sentinelFor(text, base);
-        if (s !== null) intents.push(s);
+        if (s !== null) emit(s);
         return;
       }
-      const child: ParseCtx = { ...ctx, depth: ctx.depth + 1, envOverridden, inheritedEnvRepo: envRepo, heredocsAreCode: code };
+      const child: ParseCtx = {
+        ...ctx,
+        depth: ctx.depth + 1,
+        envOverridden,
+        inheritedEnvRepo: envRepo,
+        heredocsAreCode: code,
+        dangerEnv: segDanger,
+      };
       for (const i of parseUnsafe(text, child)) {
         intents.push({ ...i, segmentIndex, joinedBy: i.joinedBy ?? seg.joinedBy, precededByCd: i.precededByCd || precededByCd });
       }
@@ -2397,13 +3039,15 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
     /** Emit a fail-closed intent for what this segment hides. */
     const sentinel = (kind: "gh" | "git"): void => {
       hidden = true;
-      intents.push(kind === "gh" ? unresolvedIntent(base, "gh-unknown", "unparsed-shape") : unresolvedGitIntent(base));
+      emit(kind === "gh" ? unresolvedIntent(base, "gh-unknown", "unparsed-shape") : unresolvedGitIntent(base));
     };
 
     try {
       const assigns: Assignment[] = [];
-      const resolved = resolveCommand(tokens, assigns);
+      const envFlags: string[] = [];
+      const resolved = resolveCommand(tokens, assigns, envFlags);
       const toks = resolved.tokens;
+      segDanger = new Set([...dangerEnv, ...assignmentOverrideLabels(assigns), ...envFlags]);
 
       // `GH_REPO` as gh will see it: the command's own prefix over the enclosing environment.
       let envRaw = ctx.inheritedEnvRepo ?? ctx.opts.envRepo;
@@ -2422,19 +3066,32 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
 
       if (resolved.exhausted) {
         const s = sentinelFor(tokens.join(" "), base);
-        if (s !== null) intents.push(s);
+        if (s !== null) emit(s);
         return;
       }
       if (resolved.start >= toks.length) {
         if (mutatesGhRepo(tokens, resolved, assigns)) envOverridden = true;
+        // `PATH=/x` on its own: the variable is set for every later segment.
+        pendingDanger = [...assignmentOverrideLabels(assigns), ...shellAssignedOverrideLabels(rawTokens, "", [])];
+        pendingState = redirectsIntoProtectedPath(rawTokens) ? PROTECTED_WRITE_LABEL : null;
         return;
       }
       const word = toks[resolved.start]!;
       const cmd = baseName(word);
       const args = toks.slice(resolved.start + 1);
+      // Applied when the segment is done, so the segment itself is not "after" its own change (b′ / b″).
+      pendingDanger = [...exportedOverrideLabels(cmd, args), ...shellAssignedOverrideLabels(rawTokens, cmd, args)];
+      pendingState = stateChangeLabel(rawTokens, cmd, args, [...seg.heredocs, ...strings]);
 
+      // `sh -c '"$@"' sh gh issue create …`: the words after the text are `$0`, `$1`, … of the text (C1).
+      let positionalsRun = false;
       if (resolved.nestedText !== undefined) {
-        nest(resolved.nestedText, envRaw);
+        const substituted =
+          resolved.nestedArgs !== undefined && resolved.nestedArgs.length > 0
+            ? substitutePositionals(resolved.nestedText, resolved.nestedArgs)
+            : null;
+        positionalsRun = substituted !== null;
+        nest(substituted ?? resolved.nestedText, envRaw);
       } else if (cmd === "alias") {
         // `alias gh2='gh issue create'`: later uses of the name cannot be read. (Aliases from the user's
         // profile are invisible here; the shim covers them.)
@@ -2471,7 +3128,7 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
         if (intent !== null) {
           // Arguments arriving on stdin are invisible here: the target cannot be named.
           if (resolved.viaXargs && intent.unresolved === undefined) intent = { ...intent, unresolved: "unparsed-shape" };
-          intents.push(intent);
+          emit(intent);
         }
       }
 
@@ -2506,7 +3163,13 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
       if (!hidden) {
         // `GIT_PAGER='gh …' git log`: a variable assigned for this command can name a program too.
         const found = countMentions(
-          flattenWords([...scanTokens(toks, resolved.start, cmd, resolved.nestedFrom), ...assigns.map(a => a.value), ...scriptTexts]),
+          flattenWords([
+            ...scanTokens(toks, resolved.start, cmd, resolved.nestedFrom),
+            // The words after `-c TEXT` that TEXT does not run are still words of this command line.
+            ...(positionalsRun ? [] : (resolved.nestedArgs ?? [])),
+            ...assigns.map(a => a.value),
+            ...scriptTexts,
+          ]),
         );
         if (found.gh > (cmd === "gh" ? 1 : 0)) sentinel("gh");
         if (found.git > (cmd === "git" ? 1 : 0)) sentinel("git");
@@ -2519,9 +3182,91 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
       if (cmd === "cd" || cmd === "pushd") precededByCd = true;
     } catch {
       const s = sentinelFor(tokens.join(" "), base);
-      if (s !== null) intents.push(s);
+      if (s !== null) emit(s);
+    } finally {
+      // What this segment changed is seen by the segments AFTER it (shape rules b′ and b″).
+      if (pendingDanger.length > 0) dangerEnv = new Set([...dangerEnv, ...pendingDanger]);
+      if (pendingState !== null) {
+        if (ctx.state.change === undefined) ctx.state.change = pendingState;
+        if (ctx.state.strong === undefined && !LOCAL_STATE_LABELS.has(pendingState)) ctx.state.strong = pendingState;
+      }
     }
   });
 
   return intents;
+}
+
+// ---------------------------------------------------------------------------
+// A plain list of the commands a line runs (used by the R6 network rules)
+// ---------------------------------------------------------------------------
+
+/** One command a line runs: its command word (base name) and arguments, wrappers (`env`, `sudo`, …) removed. */
+export interface SimpleCommand {
+  cmd: string;
+  args: string[];
+}
+
+/**
+ * Every command a shell line runs, in order, including those inside `sh -c '…'` (with its `$@` / `$1`
+ * arguments substituted), `eval`, `$(…)`, backticks, and the text a shell is fed on stdin (a heredoc, a
+ * here-string, or what `echo` / `printf` / `cat <<EOF` pipes into it), to the parser's nesting depth.
+ * Redirections, assignments and wrappers are removed. It makes no judgement about egress. Pure; never throws.
+ */
+export function simpleCommands(command: string, depth = 0): SimpleCommand[] {
+  const out: SimpleCommand[] = [];
+  if (typeof command !== "string" || command.length === 0 || depth > MAX_NEST_DEPTH) return out;
+  try {
+    const segments = tokenise(command);
+    segments.forEach((seg, idx) => {
+      const rawTokens = seg.funcDef ? seg.tokens.slice(1) : seg.tokens;
+      const tokens = stripRedirections(rawTokens);
+      const resolved = resolveCommand(tokens);
+      for (const w of tokens) for (const inner of substitutionTexts(w)) out.push(...simpleCommands(inner, depth + 1));
+      if (resolved.nestedText !== undefined) {
+        const text =
+          resolved.nestedArgs !== undefined && resolved.nestedArgs.length > 0
+            ? (substitutePositionals(resolved.nestedText, resolved.nestedArgs) ?? resolved.nestedText)
+            : resolved.nestedText;
+        out.push(...simpleCommands(text, depth + 1));
+        return;
+      }
+      if (resolved.start >= resolved.tokens.length) return;
+      const cmd = baseName(resolved.tokens[resolved.start]!);
+      const args = resolved.tokens.slice(resolved.start + 1);
+      out.push({ cmd, args });
+      // Text fed to a shell on stdin is a program.
+      if (SHELL_INTERPRETERS.has(cmd)) {
+        const texts = [...seg.heredocs, ...hereStrings(rawTokens)];
+        if (texts.length === 0 && seg.joinedBy === "|" && readsCommandsFromStdin(args) && idx > 0) {
+          texts.push(...pipedText(segments[idx - 1]!));
+        }
+        for (const t of texts) out.push(...simpleCommands(t, depth + 1));
+      }
+    });
+  } catch {
+    /* total: a line that cannot be taken apart contributes what was read before the problem */
+  }
+  return out;
+}
+
+/** What the segment before a `| sh` feeds it: its heredocs and here-strings, and the words of `echo` / `printf`. */
+function pipedText(prev: Segment): string[] {
+  const raw = prev.funcDef ? prev.tokens.slice(1) : prev.tokens;
+  const texts = [...prev.heredocs, ...hereStrings(raw)];
+  const resolved = resolveCommand(stripRedirections(raw));
+  if (resolved.start < resolved.tokens.length) {
+    const cmd = baseName(resolved.tokens[resolved.start]!);
+    const words = resolved.tokens.slice(resolved.start + 1).filter(a => !a.startsWith("-"));
+    if (cmd === "echo") texts.push(words.join(" "));
+    // printf: the format and each argument can be the program (`printf '%s' 'curl …'`, `printf 'curl …'`).
+    else if (cmd === "printf") texts.push(...words);
+  }
+  return texts;
+}
+
+/** The command group and subcommand of `gh <args>` (`auth`, `token`), found the way cobra finds them; null when absent. */
+export function ghCommandWords(args: readonly string[]): { group: string; sub: string | undefined } | null {
+  const found = findGhCommand([...args]);
+  if (found === null) return null;
+  return { group: args[found.groupIdx]!, sub: found.subIdx === undefined ? undefined : args[found.subIdx] };
 }

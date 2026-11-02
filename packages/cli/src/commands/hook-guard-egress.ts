@@ -35,6 +35,7 @@
 //      output and no registry read.
 import {
   appendAuditRecord,
+  checkNetworkRules,
   decideEgress,
   recordWorkingTree,
   describeVerb,
@@ -318,6 +319,17 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     const { command, cwd, toolName } = parseHookInput(stdinText);
     if (toolName !== undefined && !SHELL_TOOL_NAMES.has(toolName.toLowerCase())) process.exit(0);
     if (command === undefined) process.exit(0);
+
+    // R6 (plan §8.2): a raw HTTP client writing to the GitHub API, or `gh auth token` next to a network
+    // call. Shape rules on the command text: no registry, no approval, and no `ask`.
+    const network = checkNetworkRules(command);
+    if (network !== null) {
+      process.stderr.write(
+        JSON.stringify({ code: network.code, error: network.reason, details: { verb: "(raw network call)" } }, null, 2) + "\n",
+      );
+      writeDecisionJson("deny", network.reason);
+      process.exit(EXIT_BLOCK);
+    }
 
     const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit

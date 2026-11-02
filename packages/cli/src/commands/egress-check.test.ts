@@ -170,6 +170,8 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
       "t",
       "--body-file",
       "-",
+      "--repo",
+      "acme/internal",
     ]);
     assert.equal(r.code, 0);
     const payload = JSON.parse(r.stdout) as { action: string; readback?: unknown };
@@ -189,6 +191,8 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
       "t",
       "--body-file",
       bodyFile,
+      "--repo",
+      "acme/svc",
     ]);
     assert.equal(r.code, 2);
     const payload = JSON.parse(r.stderr.trim()) as {
@@ -214,6 +218,8 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
         "t",
         "--body-file",
         bodyFile,
+        "--repo",
+        "acme/svc",
       ]),
     );
     assert.equal(r.code, 0);
@@ -239,14 +245,14 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
     mkdirSync(join(home2, "markers"), { recursive: true });
     writeFileSync(join(home2, "markers", "_always.txt"), "");
     const a = mintApproval({ target: { org: "acme", repo: "svc" }, path: approvalsPath(home2) });
-    const r = runCli(home2, publicRepo, ["egress-check", "--cwd", publicRepo, "--", "pr", "create", "--title", "t", "--body", "b"]);
+    const r = runCli(home2, publicRepo, ["egress-check", "--cwd", publicRepo, "--", "pr", "create", "--title", "t", "--body", "b", "--repo", "acme/svc"]);
     assert.equal(r.code, 0, r.stderr);
     const payload = JSON.parse(r.stdout) as { action: string; approval?: { id: string } };
     assert.equal(payload.action, "allow");
     assert.equal(payload.approval?.id, a.id);
     // The same command without one is a deny on this path (a shell has no ask).
     revokeApprovals("all", approvalsPath(home2));
-    const r2 = runCli(home2, publicRepo, ["egress-check", "--cwd", publicRepo, "--", "pr", "create", "--title", "t", "--body", "b"]);
+    const r2 = runCli(home2, publicRepo, ["egress-check", "--cwd", publicRepo, "--", "pr", "create", "--title", "t", "--body", "b", "--repo", "acme/svc"]);
     assert.equal(r2.code, 2);
     assert.match(r2.stderr, /repo-aegis approve acme\/svc/);
   });
