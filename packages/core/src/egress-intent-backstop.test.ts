@@ -15,7 +15,7 @@ import {
   type EgressIntent,
   type ParseEgressOptions,
 } from "./egress-intent.js";
-import { loadGitAliases, parseGitAliasLines } from "./gh-env.js";
+import { loadGitAliases, parseGitAliasEntries } from "./gh-env.js";
 
 function all(command: string, opts?: ParseEgressOptions): EgressIntent[] {
   return parseEgressIntents(command, opts);
@@ -188,9 +188,11 @@ describe("stdin-fed shells", () => {
     assert.deepEqual(all(`tee notes.md <<EOF\n${body}\nEOF`), []);
   });
 
-  it("echo … | sh: the text is in the line, so it is reported", () => {
-    unresolved(`echo ${q(body)} | sh`);
-    unresolved(`printf '%s\\n' ${q(body)} | bash`);
+  it("echo … | sh: the text is in the line, and a shell reading a pipe is unresolved: both are reported", () => {
+    for (const c of [`echo ${q(body)} | sh`, `printf '%s\\n' ${q(body)} | bash`]) {
+      const intents = all(c);
+      assert.ok(intents.length >= 1 && intents.every(i => i.unresolved === "unparsed-shape"), c);
+    }
   });
 
   it("sh -s <<< \"…\" (a here-string) is parsed as commands", () => {
@@ -266,7 +268,9 @@ describe("git aliases and plumbing", () => {
   });
 
   it("git -c alias.X='!shell' X, and --config-env alias, are unresolved", () => {
-    assert.equal(only("git -c alias.p='!git push https://github.com/stranger/r main' p").unresolved, "unparsed-shape");
+    // (The `-c` value of the first also names a push, which the backstop reports as well.)
+    const shell = all("git -c alias.p='!git push https://github.com/stranger/r main' p");
+    assert.ok(shell.length >= 1 && shell.every(i => i.unresolved === "unparsed-shape"));
     assert.equal(only("git --config-env=alias.p=PUSHCMD p").unresolved, "unparsed-shape");
     assert.equal(only("git --config-env alias.p=PUSHCMD p").unresolved, "unparsed-shape");
   });
@@ -319,8 +323,10 @@ describe("git aliases and plumbing", () => {
     assert.equal(only("sudo git send-pack https://github.com/stranger/r main").verb, "git-push");
   });
 
-  it("parseGitAliasLines reads `git config --get-regexp` output", () => {
-    const m = parseGitAliasLines("alias.p push\nalias.Pf push --force-with-lease\nalias.sh !echo a b\nalias.empty\nnotalias.x y\n");
+  it("parseGitAliasEntries reads `git config -z --get-regexp` output", () => {
+    const m = parseGitAliasEntries(
+      "alias.p\npush\0alias.Pf\npush --force-with-lease\0alias.sh\n!echo a b\0alias.empty\0notalias.x\ny\0",
+    );
     assert.equal(m.get("p"), "push");
     assert.equal(m.get("pf"), "push --force-with-lease");
     assert.equal(m.get("sh"), "!echo a b");

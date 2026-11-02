@@ -782,8 +782,11 @@ function unresolvedGitIntent(base: Omit<EgressIntent, "verb" | "payloadFiles">, 
 
 /** What `classifyGit` needs from the environment. */
 interface GitContext {
-  /** Configured git aliases (null when they could not be read); absent when the caller supplied no loader. */
-  aliases: (() => ReadonlyMap<string, string> | null) | undefined;
+  /**
+   * Configured git aliases, as seen from `dir` (the `-C` / `--git-dir` / `GIT_DIR` directory; undefined: the
+   * caller's cwd): null when they could not be read; the function is absent when the caller supplied no loader.
+   */
+  aliases: ((dir?: string) => ReadonlyMap<string, string> | null) | undefined;
 }
 
 function classifyGit(
@@ -852,30 +855,6 @@ function classifyGit(
     i++; // `--no-pager`, `-p`, `--work-tree=…`, inline forms, …
   }
 
-  // The subcommand, after any alias (`-c alias.X=…`, or one in the git config). An alias that
-  // expands to a push is a push; a shell alias, a chain too deep, or an unreadable config is unresolved.
-  let sub = args[i];
-  let rest = args.slice(i + 1);
-  for (let depth = 0; ; depth++) {
-    if (sub === undefined) return null;
-    if (GIT_PUSH_LIKE.has(sub)) break;
-    const key = sub.toLowerCase();
-    let value = cliAliases.get(key);
-    if (value === undefined && !GIT_BUILTINS.has(sub)) {
-      if (gitCtx.aliases === undefined) return null; // no alias information was supplied
-      const map = gitCtx.aliases();
-      if (map === null) return unresolvedGitIntent(base, cwdOverride); // aliases exist but cannot be read
-      value = map.get(key);
-    }
-    if (value === undefined) return null;
-    if (depth >= ALIAS_MAX_DEPTH || value.length > ALIAS_MAX_BYTES || value.startsWith("!")) {
-      return unresolvedGitIntent(base, cwdOverride);
-    }
-    const words = shlexSplit(value);
-    sub = words[0];
-    rest = [...words.slice(1), ...rest];
-  }
-
   // `GIT_DIR=` in the command prefix is `--git-dir` (the flag wins, as in git).
   if (gitDir === undefined) {
     const prefixed = assigns.filter(a => a.name === "GIT_DIR").pop();
@@ -887,6 +866,33 @@ function classifyGit(
   // The repository's config — and so its remotes — comes from the git dir, relative to `-C`. A dir
   // the parser cannot name (`$DIR`) is unresolved, never silently the cwd.
   if (gitDir !== undefined) cwdOverride = joinGitDir(cwdOverride, gitDir);
+
+  // The subcommand, after any alias (`-c alias.X=…`, or one in the git config). An alias that
+  // expands to a push is a push; a shell alias, a chain too deep, or an unreadable config is unresolved.
+  let sub = args[i];
+  let rest = args.slice(i + 1);
+  for (let depth = 0; ; depth++) {
+    if (sub === undefined) return null;
+    if (GIT_PUSH_LIKE.has(sub)) break;
+    const key = sub.toLowerCase();
+    let value = cliAliases.get(key);
+    if (value === undefined && !GIT_BUILTINS.has(sub)) {
+      if (gitCtx.aliases === undefined) return null; // no alias information was supplied
+      // The aliases in effect are those of the repository git will use: `-C`, `--git-dir` and `GIT_DIR`
+      // move it. A directory the parser cannot name has aliases it cannot read.
+      if (opaque) return unresolvedGitIntent(base, cwdOverride);
+      const map = gitCtx.aliases(cwdOverride);
+      if (map === null) return unresolvedGitIntent(base, cwdOverride); // aliases exist but cannot be read
+      value = map.get(key);
+    }
+    if (value === undefined) return null;
+    if (depth >= ALIAS_MAX_DEPTH || value.length > ALIAS_MAX_BYTES || value.startsWith("!")) {
+      return unresolvedGitIntent(base, cwdOverride);
+    }
+    const words = shlexSplit(value);
+    sub = words[0];
+    rest = [...words.slice(1), ...rest];
+  }
 
   const positionals: string[] = [];
   for (let k = 0; k < rest.length; k++) {
@@ -1958,14 +1964,15 @@ export interface ParseEgressOptions {
     | (() => ReadonlyMap<string, string> | null)
     | undefined;
   /**
-   * The git aliases in effect (`git config --get-regexp '^alias\.'`, name → expansion), or a loader,
-   * called at most once and only for a git subcommand that is not a built-in. `null` means they could not
-   * be read. Without this option a non-built-in subcommand is treated as not a push.
+   * The git aliases in effect (`git config -z --get-regexp '^alias\.'`, name → expansion), or a loader that
+   * is given the directory git will use (`-C`, `--git-dir`, `GIT_DIR`; undefined: the cwd). Called only for a
+   * git subcommand that is not a built-in, once per directory. `null` means they could not be read. Without
+   * this option a non-built-in subcommand is treated as not a push.
    */
   gitAliases?:
     | ReadonlyMap<string, string>
     | null
-    | (() => ReadonlyMap<string, string> | null)
+    | ((dir?: string) => ReadonlyMap<string, string> | null)
     | undefined;
 }
 
@@ -1982,7 +1989,7 @@ interface TaintedAlias {
 interface ParseCtx {
   opts: ParseEgressOptions;
   aliases: (() => ReadonlyMap<string, string> | null) | undefined;
-  gitAliases: (() => ReadonlyMap<string, string> | null) | undefined;
+  gitAliases: ((dir?: string) => ReadonlyMap<string, string> | null) | undefined;
   depth: number;
   /** An earlier segment (of this or an enclosing command line) changed `GH_REPO` for the ones after it. */
   envOverridden: boolean;
@@ -1990,6 +1997,11 @@ interface ParseCtx {
   inheritedEnvRepo: string | undefined;
   /** Shell aliases defined earlier on this line that mention gh or git; shared by every nested parse. */
   tainted: Map<string, TaintedAlias>;
+  /**
+   * This text is the RESULT of a command substitution that becomes a command word or `eval` / `sh -c` text
+   * (`eval "$(cat <<'EOF' … EOF)"`): a heredoc inside it is a program, not data.
+   */
+  heredocsAreCode: boolean;
 }
 
 /** A lazy, memoised, never-throwing loader: a failed load is `null` ("could not be read"). */
@@ -2009,6 +2021,27 @@ function memoLoader(
       }
     }
     return value;
+  };
+}
+
+/** Like {@link memoLoader}, for a loader that takes a directory: memoised per directory. */
+function memoDirLoader(
+  source: ReadonlyMap<string, string> | null | ((dir?: string) => ReadonlyMap<string, string> | null) | undefined,
+): ((dir?: string) => ReadonlyMap<string, string> | null) | undefined {
+  if (source === undefined) return undefined;
+  if (typeof source !== "function") return () => source;
+  const cache = new Map<string | undefined, ReadonlyMap<string, string> | null>();
+  return dir => {
+    if (!cache.has(dir)) {
+      let value: ReadonlyMap<string, string> | null;
+      try {
+        value = source(dir);
+      } catch {
+        value = null;
+      }
+      cache.set(dir, value);
+    }
+    return cache.get(dir) ?? null;
   };
 }
 
@@ -2041,11 +2074,12 @@ export function parseEgressIntents(command: string, opts: ParseEgressOptions = {
     return parseUnsafe(command, {
       opts,
       aliases: memoLoader(opts.ghAliases),
-      gitAliases: memoLoader(opts.gitAliases),
+      gitAliases: memoDirLoader(opts.gitAliases),
       depth: 0,
       envOverridden: false,
       inheritedEnvRepo: undefined,
       tainted: new Map(),
+      heredocsAreCode: false,
     });
   } catch {
     const s = typeof command === "string" ? sentinelFor(command, { precededByCd: false, joinedBy: null, segmentIndex: 0 }) : null;
@@ -2124,12 +2158,37 @@ function braceCandidates(word: string): string[] {
 // The backstop: read the text again
 // ---------------------------------------------------------------------------
 
-/** How many words after a `gh` / `git` word a group or `push` may sit and still be one mention (flags and their values come between). */
+/**
+ * How many ordinary words after a `gh` / `git` word a group or `push` may sit and still be one mention. Flag
+ * words (starting with `-`) and the one word after each (its value) are free, so `gh -R a/b -R a/b … issue
+ * create` is found however many flags come between; the whole look-ahead is also capped at
+ * {@link MENTION_MAX_WORDS} words, which keeps the scan linear.
+ */
 const MENTION_WINDOW = 8;
-const WORD_SPLIT = /[\s'"`(){}<>;&|,=\\[\]]+/;
+const MENTION_MAX_WORDS = 64;
+// `!` so that `credential.helper=!gh auth git-credential` exposes its `gh`.
+const WORD_SPLIT = /[\s'"`(){}<>;&|,=!\\[\]]+/;
 
 const isGhWord = (w: string): boolean => w === "gh" || w.endsWith("/gh");
 const isGitWord = (w: string): boolean => w === "git" || w.endsWith("/git");
+
+/** Whether `hit` matches a word after `words[from]` within the mention window (flags and their values are free). */
+function findAfter(words: readonly string[], from: number, hit: (w: string) => boolean): boolean {
+  let counted = 0;
+  let afterFlag = false;
+  for (let j = from + 1; j < words.length && j <= from + MENTION_MAX_WORDS; j++) {
+    const w = words[j]!;
+    if (hit(w)) return true;
+    if (w.startsWith("-")) {
+      afterFlag = true;
+    } else if (afterFlag) {
+      afterFlag = false;
+    } else if (++counted >= MENTION_WINDOW) {
+      return false;
+    }
+  }
+  return false;
+}
 
 /**
  * The words of some tokens, split the way a shell and a script's string literals would split them, with
@@ -2139,7 +2198,12 @@ function flattenWords(tokens: readonly string[]): string[] {
   const words: string[] = [];
   for (const t of tokens) {
     const { rest } = splitSubstitutions(t);
-    for (const w of rest.split(WORD_SPLIT)) if (w !== "") words.push(w);
+    for (const w of rest.split(WORD_SPLIT)) {
+      if (w === "") continue;
+      words.push(w);
+      // `-Ogh` / `-xgh`: a short flag with its value attached; the value is a word of its own too.
+      if (w.length > 2 && w[0] === "-" && w[1] !== "-") words.push(w.slice(2));
+    }
   }
   return words;
 }
@@ -2151,19 +2215,9 @@ function countMentions(words: readonly string[]): { gh: number; git: number } {
   for (let i = 0; i < words.length; i++) {
     const w = words[i]!;
     if (isGhWord(w)) {
-      for (let j = i + 1; j < words.length && j <= i + MENTION_WINDOW; j++) {
-        if (GH_BUILTIN_COMMANDS.has(words[j]!)) {
-          gh++;
-          break;
-        }
-      }
+      if (findAfter(words, i, x => GH_BUILTIN_COMMANDS.has(x))) gh++;
     } else if (isGitWord(w)) {
-      for (let j = i + 1; j < words.length && j <= i + MENTION_WINDOW; j++) {
-        if (GIT_PUSH_LIKE.has(words[j]!)) {
-          git++;
-          break;
-        }
-      }
+      if (findAfter(words, i, x => GIT_PUSH_LIKE.has(x))) git++;
     }
   }
   return { gh, git };
@@ -2176,21 +2230,64 @@ const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack"]);
 const SCRIPT_INTERPRETER_RE = /^(?:python[\d.]*|perl|ruby|node|nodejs|php|lua|Rscript|osascript|tclsh|expect|awk|gawk)$/;
 
 /**
- * The tokens of a segment the backstop reads. For a command the parser understood (`gh …`, `git …`) the
- * flags and their values are data — a PR body, a commit message — and are left out. A search's arguments
- * are left out. `nestedFrom` onwards is parsed as a command line of its own.
+ * Flags whose value is a message or a posted field — text, never a command. `git -c`, `--exec`, `-x`,
+ * `--upload-pack`, `--receive-pack`, `-O`, `--extcmd` and the like are NOT here: those values run.
+ */
+const GH_DATA_FLAGS = new Set([
+  "-b", "--body", "-t", "--title", "-n", "--notes", "-d", "--description", "--subject", "--comment",
+  "--message", "-m", "-f", "-F", "--field", "--raw-field",
+]);
+// (`--grep`, `-S`, `-G` and the like take a search pattern; `git log --grep='git push'` is a search.)
+const GIT_DATA_FLAGS = new Set(["-m", "--message", "--grep", "-S", "-G", "--author", "--committer", "--since", "--until"]);
+
+/** How a token relates to a message flag of `cmd`: its value is the NEXT token, is ATTACHED to it, or it is no message flag. */
+function messageFlag(cmd: "gh" | "git", t: string): "next" | "attached" | null {
+  const flags = cmd === "gh" ? GH_DATA_FLAGS : GIT_DATA_FLAGS;
+  if (flags.has(t)) return "next";
+  const eq = t.indexOf("=");
+  if (t.startsWith("--") && eq > 0 && flags.has(t.slice(0, eq))) return "attached";
+  if (!t.startsWith("--") && t.length > 2) {
+    // `-mTEXT` (attached); and for git a group ending in `m` (`-am TEXT`).
+    if (flags.has(t.slice(0, 2)) && t[1] !== undefined) return "attached";
+    if (cmd === "git" && /^-[A-Za-z]+m$/.test(t)) return "next";
+  }
+  return null;
+}
+
+/** Search commands: only these flags can run something, and only these values. */
+const SEARCH_RUN_FLAGS = new Set(["--pager", "--pre"]);
+
+/**
+ * The tokens of a segment the backstop reads. Everything is read, except:
+ *
+ * - for `gh` and `git`, the value of a MESSAGE flag (`-m`, `--message`, `--body`, `--title`, …), which is
+ *   text; the value of `-c`, `--config-env`, `--exec`, `-x`, `-O`, `--extcmd`, `--upload-pack`, … is a command
+ *   in disguise and is read;
+ * - for a search (`grep`, `rg`, `ag`, `ack`), the positional pattern and path arguments, but not the flags
+ *   or the values of `--pager` / `--pre`, which run a command.
+ *
+ * `nestedFrom` onwards is parsed as a command line of its own.
  */
 function scanTokens(tokens: readonly string[], start: number, cmd: string, nestedFrom: number | undefined): string[] {
   const end = nestedFrom ?? tokens.length;
-  if (SEARCH_COMMANDS.has(cmd)) return tokens.slice(0, Math.min(start + 1, end));
+  if (SEARCH_COMMANDS.has(cmd)) {
+    const out = tokens.slice(0, Math.min(start + 1, end));
+    for (let k = start + 1; k < end; k++) {
+      const t = tokens[k]!;
+      if (!t.startsWith("-")) continue;
+      out.push(t);
+      if (SEARCH_RUN_FLAGS.has(t) && k + 1 < end) out.push(tokens[++k]!);
+    }
+    return out;
+  }
   if (cmd !== "gh" && cmd !== "git") return tokens.slice(0, end);
   const out = tokens.slice(0, start + 1);
   for (let k = start + 1; k < end; k++) {
     const t = tokens[k]!;
-    if (t.startsWith("-")) {
-      // An attached value (`--body=…`) is part of the token itself; a bare flag (`-m`, `-am`, `--message`) may
-      // take the next token as its value.
-      if (!t.includes("=")) k++;
+    const kind = t.startsWith("-") ? messageFlag(cmd, t) : null;
+    if (kind === "attached") continue;
+    if (kind === "next") {
+      k++;
       continue;
     }
     out.push(t);
@@ -2233,10 +2330,25 @@ function mutatesGhRepo(original: string[], resolved: ResolvedCommand, assigns: A
 
 /** `$GH issue create`, `"${GH}" pr comment 5`, `$(which gh) push`: a command word the parser cannot read, then a gh group or a push. */
 function hiddenCommandKind(args: readonly string[]): "gh" | "git" | null {
-  const window = args.slice(0, 12);
-  if (window.some(a => GH_BUILTIN_COMMANDS.has(a))) return "gh";
-  if (window.some(a => GIT_PUSH_LIKE.has(a))) return "git";
+  const words = ["", ...args];
+  if (findAfter(words, 0, a => GH_BUILTIN_COMMANDS.has(a))) return "gh";
+  if (findAfter(words, 0, a => GIT_PUSH_LIKE.has(a))) return "git";
   return null;
+}
+
+/** True when the whole token is one command substitution (`$(…)` or `` `…` ``), so its result IS the word. */
+function isWholeSubstitution(word: string): boolean {
+  const { texts, rest } = splitSubstitutions(word);
+  return texts.length > 0 && rest.trim() === "";
+}
+
+/** Commands that run a program read from stdin, whatever fed it. */
+const STDIN_RUNNERS = new Set(["source", ".", "make", "gmake", "at", "batch"]);
+
+/** A shell invoked with no `-c` and no script argument reads its commands from stdin. */
+function readsCommandsFromStdin(args: readonly string[]): boolean {
+  if (args.some(a => /^-[A-Za-z]*s[A-Za-z]*$/.test(a) && !a.startsWith("--"))) return true; // `sh -s`
+  return !args.some(a => !a.startsWith("-")); // `-` alone is stdin, not a script
 }
 
 /** Text a shell command line is fed on stdin by `<<<` here-strings (the tokeniser leaves them in the tokens). */
@@ -2271,13 +2383,13 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
     let hidden = false;
 
     /** Parse `text` as a command line of its own; its intents take this segment's place in the chain. */
-    const nest = (text: string, envRepo: string | undefined): void => {
+    const nest = (text: string, envRepo: string | undefined, code = false): void => {
       if (ctx.depth >= MAX_NEST_DEPTH) {
         const s = sentinelFor(text, base);
         if (s !== null) intents.push(s);
         return;
       }
-      const child: ParseCtx = { ...ctx, depth: ctx.depth + 1, envOverridden, inheritedEnvRepo: envRepo };
+      const child: ParseCtx = { ...ctx, depth: ctx.depth + 1, envOverridden, inheritedEnvRepo: envRepo, heredocsAreCode: code };
       for (const i of parseUnsafe(text, child)) {
         intents.push({ ...i, segmentIndex, joinedBy: i.joinedBy ?? seg.joinedBy, precededByCd: i.precededByCd || precededByCd });
       }
@@ -2301,7 +2413,11 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
       // Command substitutions run whatever their text says, wherever they sit in the line. (The text
       // of `bash -c` / `eval` is parsed whole below, substitutions included.)
       if (resolved.nestedText === undefined) {
-        for (const w of tokens) for (const inner of substitutionTexts(w)) nest(inner, envRaw);
+        for (const w of tokens) {
+          // A substitution that IS the command word runs its output: a heredoc inside it is a program.
+          const code = isWholeSubstitution(w) && w === toks[resolved.start];
+          for (const inner of substitutionTexts(w)) nest(inner, envRaw, code);
+        }
       }
 
       if (resolved.exhausted) {
@@ -2359,19 +2475,39 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
         }
       }
 
-      // Text fed to this command on stdin: a shell runs it as commands; a script interpreter is scanned below.
+      // Text fed to this command on stdin. A shell runs it as commands. It is also read (for mentions) when
+      // the command is a script interpreter or a runner of stdin (`source`, `make`, `at`, `batch`), when the
+      // segment pipes onward (`cat <<EOF | sh`, `tee >(sh) <<EOF`), or when this whole text is a command
+      // substitution's result that becomes a command word or `eval` / `sh -c` text. Otherwise a heredoc is data
+      // (`cat <<EOF > notes.md`, `git commit -F - <<EOF`, `git commit -m "$(cat <<EOF … EOF)"`).
       const stdinTexts = [...seg.heredocs, ...strings];
       const scriptTexts: string[] = [];
       if (stdinTexts.length > 0 && resolved.nestedText === undefined) {
+        const pipesOnward = segments[segmentIndex + 1]?.joinedBy === "|";
         if (SHELL_INTERPRETERS.has(cmd)) for (const t of stdinTexts) nest(t, envRaw);
-        else if (SCRIPT_INTERPRETER_RE.test(cmd)) scriptTexts.push(...stdinTexts);
+        else if (ctx.heredocsAreCode || pipesOnward || STDIN_RUNNERS.has(cmd) || SCRIPT_INTERPRETER_RE.test(cmd)) {
+          scriptTexts.push(...stdinTexts);
+        }
+      }
+      // A shell that reads its commands from a pipe: whatever feeds it can be anything.
+      if (
+        seg.joinedBy === "|" &&
+        SHELL_INTERPRETERS.has(cmd) &&
+        resolved.nestedText === undefined &&
+        stdinTexts.length === 0 &&
+        readsCommandsFromStdin(args)
+      ) {
+        sentinel("gh");
       }
 
       // --- the backstop ---------------------------------------------------------------------------
       // Re-read this segment's text. A mention of `gh <group>` / `git push` that the parser did not turn
       // into an intent of its own (the command word's own mention is the one it did) is reported.
       if (!hidden) {
-        const found = countMentions(flattenWords([...scanTokens(toks, resolved.start, cmd, resolved.nestedFrom), ...scriptTexts]));
+        // `GIT_PAGER='gh …' git log`: a variable assigned for this command can name a program too.
+        const found = countMentions(
+          flattenWords([...scanTokens(toks, resolved.start, cmd, resolved.nestedFrom), ...assigns.map(a => a.value), ...scriptTexts]),
+        );
         if (found.gh > (cmd === "gh" ? 1 : 0)) sentinel("gh");
         if (found.git > (cmd === "git" ? 1 : 0)) sentinel("git");
       }

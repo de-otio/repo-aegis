@@ -10,7 +10,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { ParseEgressOptions } from "./egress-intent.js";
 
@@ -87,19 +87,27 @@ export function loadGhAliases(
 const GIT_ALIAS_MAX_BYTES = 256 * 1024;
 const GIT_ALIAS_TIMEOUT_MS = 2000;
 
-/** Parse `alias.<name> <expansion>` lines (the name has no spaces; the expansion is the rest of the line). */
-export function parseGitAliasLines(text: string): ReadonlyMap<string, string> {
+/**
+ * Parse the output of `git config -z --get-regexp '^alias\.'`: entries end with NUL, and inside an entry the
+ * key and the value are separated by the FIRST newline. A newline inside an alias VALUE therefore stays in
+ * that value; with newline-separated output it could forge a second alias.
+ */
+export function parseGitAliasEntries(text: string): ReadonlyMap<string, string> {
   const out = new Map<string, string>();
-  for (const line of text.split("\n")) {
-    const m = /^alias\.(\S+)(?: ([\s\S]*))?$/.exec(line);
-    if (m !== null) out.set(m[1]!.toLowerCase(), m[2] ?? "");
+  for (const entry of text.split("\0")) {
+    if (entry === "") continue;
+    const nl = entry.indexOf("\n");
+    const key = nl === -1 ? entry : entry.slice(0, nl);
+    const value = nl === -1 ? "" : entry.slice(nl + 1);
+    const m = /^alias\.(.+)$/.exec(key);
+    if (m !== null) out.set(m[1]!.toLowerCase(), value);
   }
   return out;
 }
 
 /**
  * The git aliases in effect from `cwd` (name lower-cased → expansion), read the way git reads them:
- * `git config --get-regexp '^alias\.'`, which applies system, global, local and environment config. No
+ * `git config -z --get-regexp '^alias\.'`, which applies system, global, local and environment config. No
  * alias defined is an empty map (git exits 1); git missing, a timeout, an oversized answer or any other
  * failure is `null` (unknown). Bounded; never throws.
  */
@@ -108,7 +116,7 @@ export function loadGitAliases(
   env: NodeJS.ProcessEnv = process.env,
 ): ReadonlyMap<string, string> | null {
   try {
-    const text = execFileSync("git", ["config", "--get-regexp", "^alias\\."], {
+    const text = execFileSync("git", ["config", "-z", "--get-regexp", "^alias\\."], {
       cwd,
       env,
       encoding: "utf8",
@@ -116,7 +124,7 @@ export function loadGitAliases(
       maxBuffer: GIT_ALIAS_MAX_BYTES,
       stdio: ["ignore", "pipe", "ignore"],
     });
-    return parseGitAliasLines(text);
+    return parseGitAliasEntries(text);
   } catch (err) {
     // `git config --get-regexp` exits 1 when nothing matches.
     if ((err as { status?: number }).status === 1) return new Map();
@@ -133,6 +141,7 @@ export function egressParseOptions(env: NodeJS.ProcessEnv = process.env, cwd?: s
   return {
     ...(envRepo !== undefined && envRepo !== "" && { envRepo }),
     ghAliases: () => loadGhAliases(env),
-    gitAliases: () => loadGitAliases(cwd, env),
+    // `dir` is where git will look (`-C`, `--git-dir`, `GIT_DIR`), relative to the command's cwd.
+    gitAliases: (dir?: string) => loadGitAliases(dir === undefined ? cwd : resolve(cwd ?? process.cwd(), dir), env),
   };
 }

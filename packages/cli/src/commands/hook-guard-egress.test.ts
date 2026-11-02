@@ -726,7 +726,9 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
       assert.ok(!text.includes("$("), text);
       assert.ok(!text.includes("engagements add"), text);
     }
-    assert.match(p.error, /not a literal <owner>\/<repo>/);
+    // The hostile string contains `| sh` inside a substitution: since the backstop, a shell reading a pipe is itself
+    // unresolved, and its intent is reported first. Either unresolved text is the right outcome; what matters is that nothing leaks.
+    assert.match(p.error, /not a literal <owner>\/<repo>|could not take this command line apart/);
   });
 
   it("a registered owner with a hostile repo in a gh api path: the rule g ask carries no name and no approve command (re-review)", () => {
