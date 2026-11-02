@@ -27,9 +27,10 @@
 //     directly or reached through an ssh `HostName`;
 //   - a remote-helper address (`<helper>::<address>`) whose helper is not a
 //     plain http(s)/ftp transport;
-//   - an ssh host the ssh config cannot positively resolve (`ssh-config.ts`),
-//     or ANY ssh-transport URL when an ssh override is in effect
-//     (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`: see `SshOverride`).
+//   - an ssh host the ssh config cannot positively resolve (`ssh-config.ts`);
+//   - a host that is not GitHub-looking while an ssh override is in effect
+//     (`GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `core.sshCommand`, or a
+//     ProxyCommand/ProxyJump in the applying ssh config): see `resolveRemoteUrl`.
 //
 // Brackets: git strips `[` `]` from a host (`[github.com]:o/r`,
 // `ssh://[github.com]/o/r`, `ssh://git@[github.com]/o/r`, `[github.com:22]:o/r`),
@@ -282,25 +283,6 @@ export function parseRemoteUrl(raw: unknown): ParsedRemote | null {
   return null;
 }
 
-/**
- * Whether an ssh override is in effect where the push runs: `GIT_SSH_COMMAND`,
- * `GIT_SSH`, `GIT_SSH_VARIANT`, or `core.sshCommand`. Read by `detectSshOverride`
- * (push-urls.ts), because it needs the real environment and git config.
- *
- * With an override the ssh config this module reads may not be the one ssh
- * uses (`-F`), and an alias can be redirected (`-o HostName=…`, a ProxyCommand).
- * So every ssh-transport URL whose host is not literally github.com or
- * ssh.github.com is unresolved. A LITERAL github.com host stays GitHub unless
- * the override `mayRedirect`: a plain `ssh -i <key>` (the usual reason for an
- * override) cannot move the connection, and refusing every such push would
- * break the common deploy-key setup. `mayRedirect` is true when the override
- * names HostName, a proxy, `-J` or `-F`, or is a `GIT_SSH` program we cannot read.
- */
-export interface SshOverride {
-  present: boolean;
-  mayRedirect: boolean;
-}
-
 /** Where a push URL goes, for rule h. */
 export type RemoteTarget =
   | { kind: "github"; org: string; repo: string }
@@ -318,37 +300,47 @@ function aliasUnresolved(why: string): RemoteTarget {
  * Resolve a remote URL, consulting the user's ssh config for aliases, to a
  * GitHub repository, a non-GitHub host, or UNRESOLVED. Total: never throws.
  *
- * - An alias whose `HostName` is `github.com` or `ssh.github.com` is GitHub.
- * - An alias whose `HostName` is another plain host name is not GitHub.
+ * KEY RULE. An ssh redirect (an override, a proxy) changes which SERVER gets
+ * the push, never the repository path sent to `git-receive-pack`. So:
+ *
+ * - A host that resolves to GitHub (literal github.com / ssh.github.com, or an
+ *   alias whose ssh-config `HostName` is one of those) is GitHub: the owner in
+ *   the path is judged, override or not. If an override really sends the bytes
+ *   to another server, they leave GitHub, which is outside the guard's model.
+ * - Any OTHER ssh host (a plain non-GitHub name, an alias the config does not
+ *   mention, an alias mapped to another host) is "not GitHub" only when no
+ *   override is present. Under an override `ctx.sshOverride`, or a proxy in the
+ *   applying ssh config, it is UNRESOLVED: that is exactly what a redirect to
+ *   GitHub looks like. With no override at all, behaviour is unchanged.
  * - An alias whose `HostName` is an IP address or a github.com subdomain, or
- *   that the ssh-config parser cannot place (a `Match` block, a proxy, an
- *   unreadable config), is unresolved.
- * - An alias the config does not mention is its own host, so not GitHub
- *   (unless it is the `github.com-<alias>` convention).
- * - With an ssh override in effect, see {@link SshOverride}.
+ *   that the ssh-config parser cannot place (a `Match` block that sets
+ *   HostName, an unreadable config), is unresolved.
+ * - The `github.com-<alias>` convention stays GitHub when the config says
+ *   nothing about it.
+ * - `ctx.unknownDotlessUnresolved` (the agent hook sets it): a dotless host the
+ *   ssh config does not map (`zz`) is unresolved whatever the override
+ *   flag says. The hook process may not see the environment the agent's
+ *   command runs in (Claude Code's sandbox sets `GIT_SSH_COMMAND` on every
+ *   agent command, and the hook may run outside it), so it cannot know
+ *   there is no override. A dotted non-GitHub host (gitlab.com) stays
+ *   non-GitHub there; pre-push, which sees the real environment, catches that
+ *   override case.
  */
 export function resolveRemoteUrl(
   raw: unknown,
   lookup: (host: string) => SshHostLookup = lookupSshHost,
-  ctx: { sshOverride?: SshOverride } = {},
+  ctx: { sshOverride?: boolean; unknownDotlessUnresolved?: boolean } = {},
 ): RemoteTarget {
   try {
-    const override = ctx.sshOverride;
     const c = classifyRemoteUrl(raw);
     switch (c.kind) {
       case "github":
-        if (c.transport === "ssh" && override?.present === true && override.mayRedirect) {
-          return { kind: "unresolved", why: "an ssh override (GIT_SSH, GIT_SSH_COMMAND or core.sshCommand) can redirect the connection" };
-        }
         return { kind: "github", org: c.org, repo: c.repo };
       case "non-github":
         return { kind: "non-github" };
       case "opaque":
         return { kind: "unresolved", why: c.why };
       case "alias": {
-        if (override?.present === true) {
-          return { kind: "unresolved", why: "an ssh override (GIT_SSH, GIT_SSH_COMMAND or core.sshCommand) is in effect, so the ssh host alias cannot be resolved" };
-        }
         const found = lookup(c.host);
         const asGithub = (): RemoteTarget => {
           const g = githubOrOpaque(c.path, "ssh");
@@ -356,15 +348,24 @@ export function resolveRemoteUrl(
             ? { kind: "github", org: g.org, repo: g.repo }
             : { kind: "unresolved", why: NOT_CLEAN };
         };
+        if (found.kind === "unresolved") return aliasUnresolved(found.why);
+        const redirected = ctx.sshOverride === true || found.proxied === true;
+        const notGithub = (): RemoteTarget =>
+          redirected
+            ? aliasUnresolved("an ssh override or proxy is in effect, and a host that does not look like GitHub is what a redirect to GitHub looks like")
+            : { kind: "non-github" };
         if (found.kind === "hostname") {
           const h = found.hostName;
           if (GITHUB_SSH_HOSTS.has(h)) return asGithub();
           if (isIpHost(h)) return aliasUnresolved(IP_HOST);
           if (h === "www.github.com" || isOtherGithubHost(h)) return aliasUnresolved(GITHUB_OTHER);
-          return { kind: "non-github" };
+          return notGithub();
         }
-        if (found.kind === "none") return c.legacy ? asGithub() : { kind: "non-github" };
-        return aliasUnresolved(found.why);
+        if (c.legacy) return asGithub();
+        if (ctx.unknownDotlessUnresolved === true && !c.host.includes(".")) {
+          return aliasUnresolved("a host name the ssh config does not map, and this process cannot see the environment ssh runs in");
+        }
+        return notGithub();
       }
     }
   } catch {

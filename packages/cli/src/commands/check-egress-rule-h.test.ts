@@ -25,8 +25,7 @@ import {
   approvalsPath,
   mintApproval,
   HOOK_SCRIPTS,
-  SANDBOX_GIT_SSH_COMMAND,
-  sandboxProxyCommandFor,
+  setDefaultSshDirForTests,
   parseEgressIntents,
   resolveDestinationOffline,
 } from "@de-otio/repo-aegis-core";
@@ -163,6 +162,16 @@ function withStderrTty<T>(isTty: boolean, fn: () => T): T {
   }
 }
 
+/** Point the ssh-config reader at this context's fixture `.ssh` (a test seam; never `$HOME`). */
+function withSshDir<T>(ctx: Ctx, fn: () => T): T {
+  setDefaultSshDirForTests(join(ctx.userHome, ".ssh"));
+  try {
+    return fn();
+  } finally {
+    setDefaultSshDirForTests(undefined);
+  }
+}
+
 /** `check --remote-url <url>` as the pre-push hook runs it, non-interactive unless told otherwise. */
 function pushCheck(
   ctx: Ctx,
@@ -170,7 +179,7 @@ function pushCheck(
   remoteUrl: string,
   env: { tty?: boolean; human?: string; lookup?: () => null } = {},
 ): ReturnType<typeof captureOutput> {
-  return withEnv("HOME", ctx.userHome, () =>
+  return withSshDir(ctx, () =>
     withEnv("REPO_AEGIS_HOME", ctx.home, () =>
       withEnv("REPO_AEGIS_REGISTRY", ctx.registry, () =>
         withEnv("REPO_AEGIS_EGRESS_HUMAN", env.human, () =>
@@ -620,109 +629,89 @@ describe("pre-push rule h — bracketed hosts (C1): git strips the brackets, so 
   });
 });
 
-describe("pre-push rule h — an ssh override makes aliases unresolved (H2)", () => {
-  it("GIT_SSH_COMMAND, GIT_SSH and GIT_SSH_VARIANT each do, for an alias that would resolve to GitHub", () => {
-    for (const name of ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]) {
-      const ctx = setup(`h2-env-${name}`);
-      sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
-      const repo = makeRepo(`h2-env-${name}-repo`, "git@github.com:acme/x.git");
-      const r = refusalOf(withEnv(name, "ssh", () => pushCheck(ctx, repo, "git@gh-work:acme/x.git")));
-      assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS", name);
-      assert.equal(r.details.destination, "(unresolved)");
-      assert.match(r.error, /ssh override/);
-    }
+describe("pre-push rule h — an ssh override: GitHub-resolving hosts are judged by owner, other ssh hosts are unresolved (H2)", () => {
+  // Claude Code's own sandbox sets this on every agent command. It is just an override like any other.
+  // The variable it names is a fake here; no real credential is ever a fixture.
+  const SANDBOX_STYLE =
+    "ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand=\"/bin/sh -c 'eval \\\"\\${SRT_SSH_PROXY_COMMAND:?unset}\\\"' sh '%h' %p\"";
+
+  const OVERRIDES: Array<[string, Record<string, string>, Array<[string, string]>]> = [
+    ["the sandbox GIT_SSH_COMMAND template", { GIT_SSH_COMMAND: SANDBOX_STYLE, SRT_SSH_PROXY_COMMAND: "fake-not-a-real-proxy-command" }, []],
+    ["a plain GIT_SSH_COMMAND", { GIT_SSH_COMMAND: "ssh -i /nowhere/key" }, []],
+    ["GIT_SSH", { GIT_SSH: "/nowhere/wrapper" }, []],
+    ["GIT_SSH_VARIANT", { GIT_SSH_VARIANT: "ssh" }, []],
+    ["core.sshCommand", {}, [["core.sshCommand", "ssh -i /nowhere/key"]]],
+  ];
+  const withVars = <R>(vars: Record<string, string>, fn: () => R): R => {
+    const names = Object.keys(vars);
+    const run = (i: number): R => (i === names.length ? fn() : withEnv(names[i]!, vars[names[i]!], () => run(i + 1)));
+    return run(0);
+  };
+
+  for (const [label, vars, config] of OVERRIDES) {
+    describe(`with ${label}`, () => {
+      it("a non-GitHub-looking host is unresolved: `git@zz:` and `git@gitlab.com:`", () => {
+        for (const url of ["git@zz:stranger/r.git", "git@gitlab.com:x/y.git"]) {
+          const ctx = setup(`h2-unres-${n++}`);
+          const repo = makeRepo(`h2-unres-repo-${n}`, "git@github.com:acme/x.git", config);
+          const r = refusalOf(withVars(vars, () => pushCheck(ctx, repo, url)));
+          assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS", url);
+          assert.equal(r.details.destination, "(unresolved)", url);
+          assert.match(r.error, /ssh override or proxy is in effect|does not map/);
+        }
+      });
+
+      it("a literal github.com host is GitHub: a stranger is refused by name, a registered owner passes", () => {
+        const ctx = setup(`h2-lit-${n++}`);
+        const repo = makeRepo(`h2-lit-repo-${n}`, "git@github.com:acme/x.git", config);
+        assert.equal(
+          refusalOf(withVars(vars, () => pushCheck(ctx, repo, "git@github.com:stranger/r.git"))).details.destination,
+          "stranger/r",
+        );
+        const ok = withVars(vars, () => pushCheck(ctx, repo, "git@github.com:acme/x.git"));
+        assert.equal(ok.exitCode, undefined, ok.stderr);
+      });
+
+      it("an alias with HostName github.com (`gh-work`, `github.com-personal`) is GitHub, owner checked", () => {
+        const ctx = setup(`h2-alias-${n++}`);
+        sshConfig(ctx, "Host gh-work github.com-personal\n  HostName github.com\n");
+        const repo = makeRepo(`h2-alias-repo-${n}`, "git@github.com:acme/x.git", config);
+        for (const alias of ["gh-work", "github.com-personal"]) {
+          assert.equal(
+            refusalOf(withVars(vars, () => pushCheck(ctx, repo, `git@${alias}:stranger/r.git`))).details.destination,
+            "stranger/r",
+            alias,
+          );
+          const ok = withVars(vars, () => pushCheck(ctx, repo, `git@${alias}:acme/x.git`));
+          assert.equal(ok.exitCode, undefined, `${alias}: ${ok.stderr}`);
+        }
+      });
+    });
+  }
+
+  describe("with no override: unchanged", () => {
+    it("a non-GitHub host is out of scope, an alias mapped elsewhere too, and an alias to GitHub is judged", () => {
+      const ctx = setup("h2-none");
+      sshConfig(ctx, "Host gh-work\n  HostName github.com\nHost other\n  HostName git.example.org\n");
+      const repo = makeRepo("h2-none-repo", "git@github.com:acme/x.git");
+      for (const url of ["git@gitlab.com:x/y.git", "git@other:stranger/r.git", "git@zz:stranger/r.git"]) {
+        const r = pushCheck(ctx, repo, url);
+        assert.equal(r.exitCode, undefined, `${url}: ${r.stderr}`);
+      }
+      assert.equal(refusalOf(pushCheck(ctx, repo, "git@gh-work:stranger/r.git")).details.destination, "stranger/r");
+    });
   });
 
-  it("core.sshCommand in the git config does too, even for a REGISTERED owner behind the alias", () => {
-    const ctx = setup("h2-config");
+  it("the hook and pre-push agree on an alias to GitHub, with and without an override", () => {
+    const ctx = setup("h2-agree");
     sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
-    const repo = makeRepo("h2-config-repo", "git@github.com:acme/x.git", [["core.sshCommand", "ssh -i /nowhere/key"]]);
-    assert.equal(refusalOf(pushCheck(ctx, repo, "git@gh-work:acme/x.git")).code, "UNREGISTERED_OWNER_EGRESS");
-  });
-
-  it("a LITERAL github.com host with a plain `ssh -i key` override is still judged (a registered owner passes)", () => {
-    const ctx = setup("h2-literal");
-    const repo = makeRepo("h2-literal-repo", "git@github.com:acme/x.git", [["core.sshCommand", "ssh -i /nowhere/key"]]);
-    const ok = pushCheck(ctx, repo, "git@github.com:acme/x.git");
-    assert.equal(ok.exitCode, undefined, ok.stderr);
-    assert.equal(refusalOf(pushCheck(ctx, repo, "git@github.com:stranger/r.git")).details.destination, "stranger/r");
-  });
-
-  it("…but not when the override can move the connection (-o HostName, a proxy, -J, -F, GIT_SSH)", () => {
-    for (const cmd of ["ssh -o HostName=elsewhere.example", "ssh -o ProxyCommand=nc", "ssh -J jump", "ssh -F /x/config"]) {
-      const ctx = setup(`h2-redirect-${n++}`);
-      const repo = makeRepo(`h2-redirect-repo-${n}`, "git@github.com:acme/x.git", [["core.sshCommand", cmd]]);
-      const r = refusalOf(pushCheck(ctx, repo, "git@github.com:acme/x.git"));
-      assert.equal(r.details.destination, "(unresolved)", cmd);
-    }
-    const ctx = setup("h2-redirect-gitssh");
-    const repo = makeRepo("h2-redirect-gitssh-repo", "git@github.com:acme/x.git");
-    const r = refusalOf(withEnv("GIT_SSH", "/nowhere/wrapper", () => pushCheck(ctx, repo, "git@github.com:acme/x.git")));
-    assert.equal(r.details.destination, "(unresolved)");
-  });
-
-  describe("Claude Code's sandbox GIT_SSH_COMMAND template (what every agent push runs under)", () => {
-    const T = SANDBOX_GIT_SSH_COMMAND;
-    // A FAKE credential and port in the sandbox's shape (never a real value).
-    const S = sandboxProxyCommandFor("ZmFrZS1jcmVkZW50aWFsLW5vdC1yZWFs", 43210);
-    const withSandbox = <R>(ssh: string, srt: string | undefined, fn: () => R): R =>
-      withEnv("GIT_SSH_COMMAND", ssh, () => withEnv("SRT_SSH_PROXY_COMMAND", srt, fn));
-
-    it("R1: the template with a hostile SRT (host github.com hard-coded) or no SRT is an override: unresolved", () => {
-      const hostile = S.replace(/"\$1:\$2"/g, '"github.com:22"');
-      assert.notEqual(hostile, S);
-      for (const srt of [hostile, undefined]) {
-        const ctx = setup(`h2-sandbox-srt-${n++}`);
-        sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
-        const repo = makeRepo(`h2-sandbox-srt-repo-${n}`, "git@gh-work:acme/x.git");
-        const r = refusalOf(withSandbox(T, srt, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git")));
-        assert.equal(r.details.destination, "(unresolved)");
-      }
-    });
-
-    it("in the environment: an alias resolves through the ssh config, so the operator's own remotes still pass", () => {
-      const ctx = setup("h2-sandbox-ok");
-      sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
-      const repo = makeRepo("h2-sandbox-ok-repo", "git@gh-work:acme/x.git");
-      const ok = withSandbox(T, S, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git"));
-      assert.equal(ok.exitCode, undefined, ok.stderr);
-      // ...and a stranger behind the same alias is judged as stranger/r, not as "unresolved".
-      const r = refusalOf(withSandbox(T, S, () => pushCheck(ctx, repo, "git@gh-work:stranger/r.git")));
-      assert.equal(r.details.destination, "stranger/r");
-    });
-
-    it("the hook layer's resolver (same repository, same env) names the same owner", () => {
-      const ctx = setup("h2-sandbox-agree");
-      sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
-      const repo = makeRepo("h2-sandbox-agree-repo", "git@gh-work:stranger/r.git");
-      const hook = withEnv("HOME", ctx.userHome, () =>
-        withSandbox(T, S, () =>
-          resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo),
-        ),
-      );
-      const hookNoEnv = withEnv("HOME", ctx.userHome, () =>
-        resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo),
-      );
-      assert.equal(hook?.org, "stranger");
-      assert.deepEqual([hook?.org, hook?.repo, hook?.unresolved], [hookNoEnv?.org, hookNoEnv?.repo, hookNoEnv?.unresolved]);
-    });
-
-    it("set via core.sshCommand it is NOT trusted: the alias is unresolved", () => {
-      const ctx = setup("h2-sandbox-config");
-      sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
-      const repo = makeRepo("h2-sandbox-config-repo", "git@gh-work:acme/x.git", [["core.sshCommand", T]]);
-      assert.equal(refusalOf(pushCheck(ctx, repo, "git@gh-work:acme/x.git")).details.destination, "(unresolved)");
-    });
-
-    it("with an added -o HostName, -F, -J, or a changed %h it is a different command: unresolved", () => {
-      for (const cmd of [`${T} -o HostName=x`, `${T} -F f`, `${T} -J h`, T.replace("'%h'", "'x'")]) {
-        const ctx = setup(`h2-sandbox-changed-${n++}`);
-        sshConfig(ctx, "Host gh-work\n  HostName github.com\n");
-        const repo = makeRepo(`h2-sandbox-changed-repo-${n}`, "git@gh-work:acme/x.git");
-        const r = refusalOf(withSandbox(cmd, S, () => pushCheck(ctx, repo, "git@gh-work:acme/x.git")));
-        assert.equal(r.details.destination, "(unresolved)", cmd);
-      }
-    });
+    const repo = makeRepo("h2-agree-repo", "git@gh-work:stranger/r.git");
+    const resolve = (): ReturnType<typeof resolveDestinationOffline> =>
+      withSshDir(ctx, () => resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo));
+    const plain = resolve();
+    const overridden = withEnv("GIT_SSH_COMMAND", SANDBOX_STYLE, resolve);
+    assert.equal(plain?.org, "stranger");
+    assert.deepEqual([overridden?.org, overridden?.repo, overridden?.unresolved], [plain?.org, plain?.repo, plain?.unresolved]);
   });
 
   it("https is untouched by an ssh override", () => {
@@ -732,11 +721,12 @@ describe("pre-push rule h — an ssh override makes aliases unresolved (H2)", ()
     assert.equal(r.exitCode, undefined, r.stderr);
   });
 
-  it("an ssh config with a ProxyCommand for the alias is unresolved", () => {
+  it("an ssh config with a ProxyCommand: an alias to GitHub is still judged by owner, any other host is unresolved", () => {
     const ctx = setup("h2-proxy");
-    sshConfig(ctx, "Host gh-work\n  HostName github.com\n  ProxyCommand nc evil.example 22\n");
+    sshConfig(ctx, "Host gh-work\n  HostName github.com\n  ProxyCommand nc evil.example 22\nHost other\n  ProxyJump j\n");
     const repo = makeRepo("h2-proxy-repo", "git@github.com:acme/x.git");
-    assert.equal(refusalOf(pushCheck(ctx, repo, "git@gh-work:acme/x.git")).details.destination, "(unresolved)");
+    assert.equal(refusalOf(pushCheck(ctx, repo, "git@gh-work:stranger/r.git")).details.destination, "stranger/r");
+    assert.equal(refusalOf(pushCheck(ctx, repo, "git@other:stranger/r.git")).details.destination, "(unresolved)");
   });
 
   it("a Match doubt says so in the refusal text", () => {

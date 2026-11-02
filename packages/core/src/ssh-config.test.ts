@@ -250,21 +250,21 @@ describe("splitSshLine / lookupSshHost — tokenizing follows OpenSSH's argv_spl
   });
 });
 
-describe("lookupSshHost — redirection other than HostName is a doubt (H2)", () => {
+describe("lookupSshHost — redirection other than HostName is reported as `proxied` (H2)", () => {
   for (const directive of [
     "ProxyCommand nc evil.example 22",
     "ProxyJump jump.example",
     "CanonicalizeHostname yes",
     "CanonicalDomains example.org",
   ]) {
-    it(`${directive.split(" ")[0]} in an applying block makes the alias unresolved`, () => {
+    it(`${directive.split(" ")[0]} in an applying block is reported as proxied (the HostName is kept)`, () => {
       const sshDir = sshDirWith(`Host gh\n  HostName github.com\n  ${directive}\n`);
-      assert.equal(lookupSshHost("gh", { sshDir }).kind, "unresolved");
+      assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com", proxied: true });
     });
 
-    it(`${directive.split(" ")[0]} under a Host * block applies to every alias`, () => {
+    it(`${directive.split(" ")[0]} under a Host * block applies to every alias: proxied`, () => {
       const sshDir = sshDirWith(`Host gh\n  HostName github.com\nHost *\n  ${directive}\n`);
-      assert.equal(lookupSshHost("gh", { sshDir }).kind, "unresolved");
+      assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com", proxied: true });
     });
 
     it(`${directive.split(" ")[0]} in a block that does not apply is ignored`, () => {
@@ -272,11 +272,16 @@ describe("lookupSshHost — redirection other than HostName is a doubt (H2)", ()
       assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com" });
     });
 
-    it(`${directive.split(" ")[0]} in a Match block is unresolved`, () => {
+    it(`${directive.split(" ")[0]} in a Match block is reported as proxied`, () => {
       const sshDir = sshDirWith(`Host gh\n  HostName github.com\nMatch exec "true"\n  ${directive}\n`);
-      assert.equal(lookupSshHost("gh", { sshDir }).kind, "unresolved");
+      assert.deepEqual(lookupSshHost("gh", { sshDir }), { kind: "hostname", hostName: "github.com", proxied: true });
     });
   }
+
+  it("a proxy for a host with no HostName is reported on `none`", () => {
+    const sshDir = sshDirWith("Host zz\n  ProxyJump j\n");
+    assert.deepEqual(lookupSshHost("zz", { sshDir }), { kind: "none", proxied: true });
+  });
 
   it("`none` values are no-ops", () => {
     const sshDir = sshDirWith("Host gh\n  HostName github.com\n  ProxyCommand none\n  ProxyJump none\n  CanonicalizeHostname no\n");

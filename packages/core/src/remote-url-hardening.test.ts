@@ -296,18 +296,49 @@ describe("only the guard being SURE makes a push non-GitHub (M2, M4, L1)", () =>
     }
   });
 
-  it("an ssh override makes every ssh alias unresolved; a literal github.com only when it can redirect (H2)", () => {
-    const found = ssh("github.com");
-    const plain = { present: true, mayRedirect: false };
-    const redirecting = { present: true, mayRedirect: true };
-    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", found, { sshOverride: plain }).kind, "unresolved");
-    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", found, { sshOverride: redirecting }).kind, "unresolved");
-    assert.equal(resolveRemoteUrl("git@gitlab.example:stranger/r.git", NO_SSH_CONFIG, { sshOverride: plain }).kind, "unresolved");
-    assert.equal(resolveRemoteUrl("git@github.com:stranger/r.git", found, { sshOverride: plain }).kind, "github");
-    assert.equal(resolveRemoteUrl("git@github.com:stranger/r.git", found, { sshOverride: redirecting }).kind, "unresolved");
+  it("under any ssh override, GitHub-resolving hosts are judged by owner and every other ssh host is unresolved (H2)", () => {
+    const toGithub = ssh("github.com");
+    const toOther = ssh("git.example.org");
+    const O = { sshOverride: true };
+    // Resolves to GitHub: the owner in the path is judged (a redirect changes the server, not the path).
+    assert.deepEqual(resolveRemoteUrl("git@github.com:stranger/r.git", NO_SSH_CONFIG, O), { kind: "github", org: "stranger", repo: "r" });
+    assert.deepEqual(resolveRemoteUrl("git@ssh.github.com:stranger/r.git", NO_SSH_CONFIG, O), { kind: "github", org: "stranger", repo: "r" });
+    assert.deepEqual(resolveRemoteUrl("git@gh-work:stranger/r.git", toGithub, O), { kind: "github", org: "stranger", repo: "r" });
+    assert.equal(resolveRemoteUrl("git@github.com-personal:stranger/r.git", toGithub, O).kind, "github");
+    assert.equal(resolveRemoteUrl("git@github.com-personal:stranger/r.git", NO_SSH_CONFIG, O).kind, "github");
+    // Anything else is what a redirect to GitHub looks like.
+    assert.equal(resolveRemoteUrl("git@zz:stranger/r.git", NO_SSH_CONFIG, O).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("git@gitlab.com:x/y.git", NO_SSH_CONFIG, O).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", toOther, O).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("ssh://git@gitlab.example/x/y.git", NO_SSH_CONFIG, O).kind, "unresolved");
+    // No override at all: unchanged.
+    assert.equal(resolveRemoteUrl("git@zz:stranger/r.git", NO_SSH_CONFIG).kind, "non-github");
+    assert.equal(resolveRemoteUrl("git@gitlab.com:x/y.git", NO_SSH_CONFIG).kind, "non-github");
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", toOther).kind, "non-github");
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", toGithub).kind, "github");
     // An override changes nothing for a non-ssh transport.
-    assert.equal(resolveRemoteUrl("https://github.com/stranger/r.git", found, { sshOverride: redirecting }).kind, "github");
-    assert.equal(resolveRemoteUrl("https://gitlab.example/stranger/r.git", found, { sshOverride: redirecting }).kind, "non-github");
+    assert.equal(resolveRemoteUrl("https://github.com/stranger/r.git", toGithub, O).kind, "github");
+    assert.equal(resolveRemoteUrl("https://gitlab.example/stranger/r.git", toGithub, O).kind, "non-github");
+  });
+
+  it("a proxy in the applying ssh config acts as an override for that host only (proxied)", () => {
+    const proxied = (hostName?: string) => (): SshHostLookup =>
+      hostName === undefined ? { kind: "none", proxied: true } : { kind: "hostname", hostName, proxied: true };
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", proxied("github.com")).kind, "github");
+    assert.equal(resolveRemoteUrl("git@gh-work:stranger/r.git", proxied("git.example.org")).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("git@zz:stranger/r.git", proxied()).kind, "unresolved");
+  });
+
+  it("the hook's dotless rule: an unmapped dotless host is unresolved whatever the override flag says; dotted hosts are not (hook vs pre-push split)", () => {
+    const H = { unknownDotlessUnresolved: true };
+    assert.equal(resolveRemoteUrl("git@zz:stranger/r.git", NO_SSH_CONFIG, H).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("zz:stranger/r.git", NO_SSH_CONFIG, H).kind, "unresolved");
+    assert.equal(resolveRemoteUrl("git@gitlab.com:x/y.git", NO_SSH_CONFIG, H).kind, "non-github");
+    // A dotless alias the ssh config maps is not "unmapped".
+    assert.equal(resolveRemoteUrl("git@zz:stranger/r.git", ssh("git.example.org"), H).kind, "non-github");
+    assert.equal(resolveRemoteUrl("git@zz:stranger/r.git", ssh("github.com"), H).kind, "github");
+    // Pre-push passes no such flag.
+    assert.equal(resolveRemoteUrl("git@zz:stranger/r.git", NO_SSH_CONFIG).kind, "non-github");
   });
 });
 

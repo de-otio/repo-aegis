@@ -581,11 +581,19 @@ export const resolveDestinationOffline: DestinationResolver = (intent, cwd, regi
     // (plan §3.3.5). A URL given directly is rewritten the same way.
     const urls = resolvePushUrls(base, intent.remote);
     if (urls === null) return null;
-    // An ssh override (GIT_SSH_COMMAND, GIT_SSH, core.sshCommand) makes ssh
-    // aliases unresolvable: read it from the hook's own environment and the
-    // git config seen from the command's directory.
+    // Any ssh override (GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT,
+    // core.sshCommand) makes a non-GitHub-looking ssh host unresolved
+    // (resolveRemoteUrl). This process reads its OWN environment and the
+    // config seen from the command's directory. The agent hook may run outside
+    // the sandbox that sets the agent's GIT_SSH_COMMAND, so it cannot know
+    // there is no override: `unknownDotlessUnresolved` also makes a dotless
+    // host the ssh config does not map (`zz`) unresolved. A dotted non-GitHub
+    // host (gitlab.com) stays non-GitHub here; pre-push, which sees the real
+    // environment, catches that override case.
     const sshOverride = detectSshOverride(base);
-    const targets = urls.map(u => resolveRemoteUrl(u, undefined, { sshOverride }));
+    const targets = urls.map(u =>
+      resolveRemoteUrl(u, undefined, { sshOverride, unknownDotlessUnresolved: true }),
+    );
     // A push URL nothing offline can name is a write to an unknown owner (D5).
     // Not marked public-facing: only rule h acts on it, so that a registry that
     // is missing or declares no owners (rule h skipped) behaves as it did when

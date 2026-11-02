@@ -23,15 +23,22 @@
 //
 //   - a `Match` block that sets `HostName`, or any other directive that can
 //     move the connection (its condition may be `exec …`, never run here);
-//   - `ProxyCommand`, `ProxyJump`, `CanonicalizeHostname` or `CanonicalDomains`
-//     in a block that applies (or may apply) to the alias: the host named in
-//     the URL is then not necessarily where the bytes go;
 //   - a `HostName` that is not a plain host name (quotes, `%` tokens, spaces,
 //     anything outside letters, digits, `.`, `-`, `_`);
 //   - a config or include file that exists but cannot be read, is huge, is not
 //     a regular file (a fifo would hang the hook), or has an unterminated quote;
 //   - an `Include` it cannot expand (env vars, `%` tokens, a glob in a
 //     directory component, a character class), or one nested too deeply.
+//
+// A `ProxyCommand`, `ProxyJump`, `CanonicalizeHostname` or `CanonicalDomains`
+// in a block that applies (or, in a `Match` block, may apply) to the alias is
+// not a doubt about the HostName; it is reported as `proxied`. The caller
+// treats it as an ssh override: a host that resolves to GitHub is still judged
+// by its owner (a redirect changes the server, never the repository path), and
+// any other host is unresolved (see `resolveRemoteUrl`).
+//
+// The ssh directory defaults to the PASSWD home (`os.userInfo().homedir`), as
+// ssh itself uses, never `$HOME`, which a single command can set.
 //
 // RESIDUAL (known, accepted): connection multiplexing. `ControlMaster` and
 // `ControlPath` are NOT treated as redirecting, on purpose: `Host *` with
@@ -54,21 +61,37 @@
 // checked on the open descriptor, so a swapped-in fifo cannot hang the reader,
 // but the content read is whatever is there at that moment.
 import { constants, closeSync, fstatSync, openSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
 /** What the ssh config says about a host. */
 export type SshHostLookup =
   /** No `HostName` applies: the name is the real host. */
-  | { kind: "none" }
+  | { kind: "none"; proxied?: true }
   /** The first applicable `HostName` (lower-cased, one trailing dot removed). */
-  | { kind: "hostname"; hostName: string }
+  | { kind: "hostname"; hostName: string; proxied?: true }
   /** The config cannot be evaluated purely. Callers must fail closed. */
   | { kind: "unresolved"; why: string };
 
 export interface SshConfigOptions {
-  /** Directory holding `config` and the base for relative `Include`s. Default `~/.ssh`. */
+  /** Directory holding `config` and the base for relative `Include`s. Default: the passwd home's `.ssh`. */
   sshDir?: string;
+}
+
+let defaultSshDirOverride: string | undefined;
+
+/**
+ * Test seam ONLY: make the default ssh directory a temp dir. Deliberately a
+ * module setter and not an environment variable, so nothing a command can set
+ * moves it.
+ */
+export function setDefaultSshDirForTests(dir: string | undefined): void {
+  defaultSshDirOverride = dir;
+}
+
+/** The passwd home's `.ssh`: where ssh reads its config, whatever `$HOME` says. */
+export function defaultSshDir(): string {
+  return defaultSshDirOverride ?? join(userInfo().homedir, ".ssh");
 }
 
 /** `Include` nesting bound. ssh itself allows 16; a sane config needs 1 or 2. */
@@ -89,6 +112,8 @@ interface Walk {
   files: number;
   /** The first applicable HostName, once seen. */
   hostName?: string;
+  /** A redirecting directive (proxy, canonicalisation) applies or may apply. */
+  proxied?: true;
 }
 
 /** `*` and `?` globs, anchored, case-insensitive. */
@@ -226,7 +251,7 @@ function globMatchesName(pattern: string, name: string): boolean {
 function expandInclude(arg: string, w: Walk): string[] | SshHostLookup {
   if (/[$%]/.test(arg)) return unresolved("an Include uses an environment variable or % token");
   let path = arg;
-  if (path === "~" || path.startsWith("~/")) path = join(homedir(), path.slice(1));
+  if (path === "~" || path.startsWith("~/")) path = join(userInfo().homedir, path.slice(1));
   else if (path.startsWith("~")) return unresolved("an Include names another user's home directory");
   if (!isAbsolute(path)) path = join(w.sshDir, path);
   const base = basename(path);
@@ -305,11 +330,7 @@ function walkFile(path: string, depth: number, initial: Block, w: Walk): SshHost
       }
       default:
         if (REDIRECTING.has(parsed.keyword) && block !== "skips" && !isNoOp(parsed.keyword, parsed.args[0])) {
-          return unresolved(
-            block === "match"
-              ? "an ssh Match block sets a connection redirect and cannot be evaluated offline"
-              : `the ssh config sets ${parsed.keyword} for this host, so the named host is not necessarily where the connection goes`,
-          );
+          w.proxied = true;
         }
         break;
     }
@@ -323,11 +344,14 @@ function walkFile(path: string, depth: number, initial: Block, w: Walk): SshHost
  */
 export function lookupSshHost(host: string, opts: SshConfigOptions = {}): SshHostLookup {
   try {
-    const sshDir = opts.sshDir ?? join(homedir(), ".ssh");
+    const sshDir = opts.sshDir ?? defaultSshDir();
     const w: Walk = { host: host.toLowerCase(), sshDir, files: 0 };
     const r = walkFile(join(sshDir, "config"), 0, "applies", w);
     if (r !== null) return r;
-    return w.hostName !== undefined ? { kind: "hostname", hostName: w.hostName } : { kind: "none" };
+    const proxied = w.proxied === true ? ({ proxied: true } as const) : {};
+    return w.hostName !== undefined
+      ? { kind: "hostname", hostName: w.hostName, ...proxied }
+      : { kind: "none", ...proxied };
   } catch {
     return unresolved("the ssh config could not be evaluated");
   }

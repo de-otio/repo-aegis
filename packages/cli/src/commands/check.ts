@@ -490,7 +490,9 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   if (opts.remoteUrl === undefined || opts.remoteUrl.trim() === "") return null;
   // The pre-push hook sees the real environment and git config of the push: an
   // ssh override (GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT, core.sshCommand)
-  // makes ssh aliases unresolvable (see `SshOverride`).
+  // makes a non-GitHub-looking ssh host unresolved (see `resolveRemoteUrl`).
+  // Unlike the agent hook, this layer needs no "dotless unknown host" rule:
+  // it sees the real environment.
   const target = resolveRemoteUrl(opts.remoteUrl, undefined, { sshOverride: detectSshOverride(repo.cwd) });
   if (target.kind === "non-github") return null;
 

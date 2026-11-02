@@ -15,17 +15,9 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  resolvePushUrls,
-  detectSshOverride,
-  SANDBOX_GIT_SSH_COMMAND,
-  isSandboxProxyCommand,
-  sandboxProxyCommandFor,
-  proxyShellEnvIsClean,
-} from "./push-urls.js";
-
-// Captured before the hermetic env scrub: only its SHAPE is ever tested, never printed.
-const LIVE_SRT = process.env["SRT_SSH_PROXY_COMMAND"];
+import { resolvePushUrls, detectSshOverride } from "./push-urls.js";
+import { defaultSshDir, setDefaultSshDirForTests } from "./ssh-config.js";
+import { userInfo } from "node:os";
 import { hermeticGitEnv, scrubGitEnv } from "./_test-git-env.js";
 import {
   decideEgress,
@@ -264,17 +256,15 @@ describe("resolveDestinationOffline for `git push <remote>` uses the push URLs",
 });
 
 describe("resolveDestinationOffline — ssh aliases through a temp HOME", () => {
-  const savedHome = process.env["HOME"];
   after(() => {
-    if (savedHome === undefined) delete process.env["HOME"];
-    else process.env["HOME"] = savedHome;
+    setDefaultSshDirForTests(undefined);
   });
 
   function withHome(sshConfig: string | null): string {
     const home = join(root, `home-${n++}`);
     mkdirSync(join(home, ".ssh"), { recursive: true });
     if (sshConfig !== null) writeFileSync(join(home, ".ssh", "config"), sshConfig);
-    process.env["HOME"] = home;
+    setDefaultSshDirForTests(join(home, ".ssh"));
     return home;
   }
 
@@ -462,288 +452,164 @@ describe("rules e–g judge EVERY push target, and the most restrictive decision
   });
 });
 
-describe("an ssh override makes ssh aliases unresolved (H2)", () => {
-  const savedHome = process.env["HOME"];
+describe("an ssh override: GitHub-resolving hosts are judged by owner, every other ssh host is unresolved (H2)", () => {
   after(() => {
-    if (savedHome === undefined) delete process.env["HOME"];
-    else process.env["HOME"] = savedHome;
+    setDefaultSshDirForTests(undefined);
     for (const k of ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]) delete process.env[k];
   });
 
-  function aliasRepo(config: Array<[string, string]> = []): string {
+  // Claude Code's own sandbox sets this on every agent command. It is just an override like any other.
+  // (It names $SRT_SSH_PROXY_COMMAND but contains no credential; the variable below is a fake.)
+  const SANDBOX_STYLE =
+    "ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand=\"/bin/sh -c 'eval \\\"\\${SRT_SSH_PROXY_COMMAND:?unset}\\\"' sh '%h' %p\"";
+  const FAKE_SRT = "fake-not-a-real-proxy-command";
+
+  /** An ssh dir whose config maps `gh-work` and the `github.com-personal` alias to github.com. */
+  function useSshConfig(text = "Host gh-work github.com-personal\n  HostName github.com\n"): void {
     const home = join(root, `home-${n++}`);
     mkdirSync(join(home, ".ssh"), { recursive: true });
-    writeFileSync(join(home, ".ssh", "config"), "Host gh-work\n  HostName github.com\n");
-    process.env["HOME"] = home;
-    return makeRepo([["remote.origin.url", "git@gh-work:stranger/r.git"], ...config]);
+    writeFileSync(join(home, ".ssh", "config"), text);
+    setDefaultSshDirForTests(join(home, ".ssh"));
   }
-  function dest(repo: string): ReturnType<typeof resolveDestinationOffline> {
+  function dest(url: string, config: Array<[string, string]> = []): ReturnType<typeof resolveDestinationOffline> {
+    const repo = makeRepo([["remote.origin.url", url], ...config]);
     return resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo);
   }
+  /** Run `fn` with the process environment set to `env` (restored after). */
+  function withProcessEnv<T>(env: Record<string, string>, fn: () => T): T {
+    for (const [k, v] of Object.entries(env)) process.env[k] = v;
+    try {
+      return fn();
+    } finally {
+      for (const k of Object.keys(env)) delete process.env[k];
+    }
+  }
 
-  it("control: no override, the alias resolves through the ssh config", () => {
-    assert.equal(dest(aliasRepo())?.org, "stranger");
-  });
+  const OVERRIDES: Array<[string, Record<string, string>, Array<[string, string]>]> = [
+    ["the sandbox GIT_SSH_COMMAND template", { GIT_SSH_COMMAND: SANDBOX_STYLE, SRT_SSH_PROXY_COMMAND: FAKE_SRT }, []],
+    ["a plain GIT_SSH_COMMAND", { GIT_SSH_COMMAND: "ssh -i /nowhere/key" }, []],
+    ["GIT_SSH", { GIT_SSH: "/nowhere/wrapper" }, []],
+    ["GIT_SSH_VARIANT", { GIT_SSH_VARIANT: "ssh" }, []],
+    ["core.sshCommand", {}, [["core.sshCommand", "ssh -i /nowhere/key"]]],
+  ];
 
-  for (const name of ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]) {
-    it(`${name} in the hook's environment makes the alias unresolved`, () => {
-      const repo = aliasRepo();
-      process.env[name] = "ssh";
-      try {
-        assert.equal(dest(repo)?.unresolved, "opaque-url");
-        assert.match(dest(repo)?.unresolvedWhy ?? "", /ssh override/);
-      } finally {
-        delete process.env[name];
-      }
+  for (const [label, env, config] of OVERRIDES) {
+    describe(`with ${label}`, () => {
+      it("a non-GitHub-looking host is unresolved: `git@zz:` and `git@gitlab.com:`", () => {
+        useSshConfig();
+        for (const url of ["git@zz:stranger/r.git", "git@gitlab.com:x/y.git", "ssh://git@gitlab.example/x/y.git"]) {
+          const d = withProcessEnv(env, () => dest(url, config));
+          assert.equal(d?.unresolved, "opaque-url", url);
+        }
+      });
+
+      it("a literal github.com host is GitHub, owner checked", () => {
+        useSshConfig();
+        const d = withProcessEnv(env, () => dest("git@github.com:stranger/r.git", config));
+        assert.equal(d?.org, "stranger");
+        assert.equal(d?.repo, "r");
+        assert.equal(d?.unresolved, undefined);
+      });
+
+      it("an alias with HostName github.com (`gh-work`, `github.com-personal`) is GitHub, owner checked", () => {
+        useSshConfig();
+        for (const url of ["git@gh-work:stranger/r.git", "git@github.com-personal:stranger/r.git"]) {
+          const d = withProcessEnv(env, () => dest(url, config));
+          assert.equal(d?.org, "stranger", url);
+          assert.equal(d?.unresolved, undefined, url);
+        }
+      });
+
+      it("rule h judges the owner: a stranger is refused, a registered owner passes rule h", () => {
+        useSshConfig();
+        const registry = { engagements: [], alwaysBlock: [], personalOrgs: ["acme"], schemaVersion: 2 } as unknown as Registry;
+        const decide = (url: string): ReturnType<typeof decideEgress> =>
+          withProcessEnv(env, () => {
+            const repo = makeRepo([["remote.origin.url", url], ...config]);
+            return decideEgress({
+              intents: parseEgressIntents("git push origin main"),
+              cwd: repo,
+              registry,
+              registryState: "loaded",
+              humanPresent: false,
+              capabilities: { ask: false },
+              lookupVisibility: () => null,
+              findApproval: () => null,
+            });
+          });
+        for (const url of ["git@github.com:stranger/r.git", "git@gh-work:stranger/r.git", "git@zz:stranger/r.git"]) {
+          const d = decide(url);
+          assert.equal(d.action === "deny" && d.code, "UNREGISTERED_OWNER_EGRESS", url);
+        }
+        for (const url of ["git@github.com:acme/x.git", "git@gh-work:acme/x.git", "git@github.com-personal:acme/x.git"]) {
+          const d = decide(url);
+          assert.notEqual(d.action === "allow" ? "allow" : d.code, "UNREGISTERED_OWNER_EGRESS", url);
+        }
+      });
     });
   }
 
-  it("core.sshCommand in the repository's git config makes the alias unresolved", () => {
-    const repo = aliasRepo([["core.sshCommand", "ssh -i /nowhere/key"]]);
-    assert.equal(dest(repo)?.unresolved, "opaque-url");
-  });
-
-  it("a LITERAL github.com host with a plain `ssh -i` override stays GitHub (owner checked)", () => {
-    const repo = makeRepo([
-      ["remote.origin.url", "git@github.com:stranger/r.git"],
-      ["core.sshCommand", "ssh -i /nowhere/key"],
-    ]);
-    assert.equal(dest(repo)?.org, "stranger");
-  });
-
-  it("…but not when the override can redirect (-o HostName, a proxy, -J, -F, or a GIT_SSH program)", () => {
-    for (const cmd of ["ssh -o HostName=elsewhere.example", "ssh -oHostname=x", "ssh -o ProxyCommand=nc", "ssh -J jump", "ssh -F /x/config"]) {
-      const repo = makeRepo([
-        ["remote.origin.url", "git@github.com:stranger/r.git"],
-        ["core.sshCommand", cmd],
-      ]);
-      assert.equal(dest(repo)?.unresolved, "opaque-url", cmd);
-    }
-    const repo = makeRepo([["remote.origin.url", "git@github.com:stranger/r.git"]]);
-    process.env["GIT_SSH"] = "/nowhere/wrapper";
-    try {
-      assert.equal(dest(repo)?.unresolved, "opaque-url");
-    } finally {
-      delete process.env["GIT_SSH"];
-    }
-  });
-
-  describe("Claude Code's sandbox GIT_SSH_COMMAND template is host-preserving, from the environment only", () => {
-    const T = SANDBOX_GIT_SSH_COMMAND;
-    // A FAKE credential and port in the sandbox's shape (never a real value).
-    const S = sandboxProxyCommandFor("ZmFrZS1jcmVkZW50aWFsLW5vdC1yZWFs", 43210);
-
-    it("R1: the template is trusted ONLY with a sandbox-shaped SRT_SSH_PROXY_COMMAND in the same environment", () => {
-      const repo = makeRepo();
-      // SRT unset: untrusted, and it may redirect.
-      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: T }), { present: true, mayRedirect: true });
-      // A different credential and port are fine (only the shape is checked).
-      assert.equal(
-        detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: sandboxProxyCommandFor("QUJD+/RUY=", 1) }).present,
-        false,
-      );
-      // A hostile SRT with host github.com hard-coded instead of "$1": untrusted.
-      const hostile = S.replace(/"\$1:\$2"/g, '"github.com:22"');
-      assert.notEqual(hostile, S);
-      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: hostile }), {
-        present: true,
-        mayRedirect: true,
-      });
+  describe("with no override: unchanged", () => {
+    it("a dotted non-GitHub host and an alias mapped elsewhere are not GitHub", () => {
+      useSshConfig("Host gh-work\n  HostName git.example.org\n");
+      assert.equal(dest("git@gitlab.com:x/y.git"), null);
+      assert.equal(dest("git@gh-work:stranger/r.git"), null);
     });
 
-    it("R1: any deviation from the proxy command's shape is rejected", () => {
-      const variants: string[] = [
-        S.replace("127.0.0.1", "10.0.0.1"),
-        S.replace("/usr/bin/nc", "/tmp/nc"),
-        S.replace("exec /bin/cat <&3", "exec /bin/cat </etc/hosts"),
-        `${S}; true`,
-        `true; ${S}`,
-        S.replace("no bad host", "true"),
-        S.replace(/\$1/g, "github.com"),
-        S.replace("43210", "43210 43211"),
-        S.replace("43210", "not-a-port"),
-        S.replace("ZmFrZS1jcmVkZW50aWFsLW5vdC1yZWFs", "x\nPOST /"),
-        S.replace("ZmFrZS1jcmVkZW50aWFsLW5vdC1yZWFs", ""),
-        "",
-      ];
-      for (const v of variants) assert.equal(isSandboxProxyCommand(v), false, v.slice(0, 80));
-      assert.equal(isSandboxProxyCommand(undefined), false);
-      assert.equal(isSandboxProxyCommand(S), true);
+    it("aliases resolve through the ssh config", () => {
+      useSshConfig();
+      assert.equal(dest("git@gh-work:stranger/r.git")?.org, "stranger");
+      assert.equal(dest("git@github.com-personal:stranger/r.git")?.org, "stranger");
     });
 
-    it("N1/N2: the trusted template needs a clean proxy-shell environment (fake credential throughout)", () => {
-      const repo = makeRepo();
-      const base = { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S };
-      const redirecting = { present: true, mayRedirect: true };
-      // Control: unset SHELL, and the shells the sandbox may use, stay trusted.
-      for (const shell of [undefined, "", "/bin/zsh", "/bin/sh", "/bin/bash", "/bin/dash", "/bin/ksh", "/usr/bin/zsh", "/usr/bin/bash"]) {
-        const env: NodeJS.ProcessEnv = shell === undefined ? { ...base } : { ...base, SHELL: shell };
-        const r = detectSshOverride(repo, env);
-        // A listed path that does not exist here cannot be realpath'd: untrusted, never a crash.
-        if (shell !== undefined && shell !== "" && !existsSync(shell)) assert.deepEqual(r, redirecting, shell);
-        else assert.deepEqual(r, { present: false, mayRedirect: false }, String(shell));
-      }
-      // N2: SHELL is the program ssh runs the proxy with.
-      for (const shell of ["/tmp/x", "/bin/sh ", "/bin/../bin/sh", "sh", "/usr/local/bin/bash", "/bin/zsh-evil"]) {
-        assert.deepEqual(detectSshOverride(repo, { ...base, SHELL: shell }), redirecting, shell);
-      }
-      // N1: an exported bash function hijacks a builtin the script calls.
-      assert.deepEqual(detectSshOverride(repo, { ...base, "BASH_FUNC_printf%%": "() { :; }" }), redirecting);
-      assert.deepEqual(detectSshOverride(repo, { ...base, "BASH_FUNC_x%%": "() { :; }" }), redirecting);
-      // Startup-time hooks of the shell.
-      for (const name of ["SHELLOPTS", "BASHOPTS", "PS4", "BASH_ENV", "ENV"]) {
-        assert.deepEqual(detectSshOverride(repo, { ...base, [name]: "x" }), redirecting, name);
-      }
+    it("the hook's rule: an unmapped DOTLESS host is unresolved even with no override visible (the hook may not see the agent's GIT_SSH_COMMAND)", () => {
+      useSshConfig();
+      assert.equal(dest("git@zz:stranger/r.git")?.unresolved, "opaque-url");
+      assert.match(dest("git@zz:stranger/r.git")?.unresolvedWhy ?? "", /does not map/);
     });
 
-    it("N2: a SHELL symlink that leaves the allowed set is untrusted (realpath), one that stays is fine", (t) => {
-      if (process.platform === "win32") return t.skip("no symlinks");
-      const repo = makeRepo();
-      const out = join(root, `shell-link-${n++}`);
-      symlinkSync("/bin/sh", out);
-      // Not an allowed path in the first place: rejected before realpath is consulted.
-      assert.equal(proxyShellEnvIsClean({ SHELL: out }), false);
-      assert.equal(proxyShellEnvIsClean({ SHELL: "/bin/sh" }), true);
-      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, SHELL: out }).present, true);
-    });
-
-    it("N1/N2 at the resolver: a hijacked shell environment leaves the alias unresolved", () => {
-      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, SHELL: "/tmp/x" })?.unresolved, "opaque-url");
-      assert.equal(
-        aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, "BASH_FUNC_printf%%": "() { :; }" })?.unresolved,
-        "opaque-url",
-      );
-      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, SHELLOPTS: "xtrace" })?.unresolved, "opaque-url");
-      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, SHELL: "/bin/zsh" })?.org, "stranger");
-    });
-
-    it("R1: the shape matches the live sandbox value, when there is one (boolean only, never printed)", (t) => {
-      if (LIVE_SRT === undefined) return t.skip("not running under the sandbox");
-      assert.equal(isSandboxProxyCommand(LIVE_SRT), true, "the live SRT_SSH_PROXY_COMMAND no longer has the expected shape");
-    });
-
-    it("the constant is the exact template (a literal, not derived from the running environment)", () => {
-      assert.equal(
-        T,
-        `ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand="/bin/sh -c 'eval \\"\\\${SRT_SSH_PROXY_COMMAND:?unset, but GIT_SSH_COMMAND needs it}\\"' sh '%h' %p"`,
-      );
-    });
-
-    it("detectSshOverride: the exact template in the environment is no override", () => {
-      const repo = makeRepo();
-      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S }), { present: false, mayRedirect: false });
-      // Whitespace runs are normalised, nothing else.
-      assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: `  ${T.replace(/ -o /g, "   -o ")}  `, SRT_SSH_PROXY_COMMAND: S }), {
-        present: false,
-        mayRedirect: false,
-      });
-    });
-
-    it("…and git ignores core.sshCommand when GIT_SSH_COMMAND is set, so a configured one changes nothing", () => {
-      const repo = makeRepo([["core.sshCommand", "ssh -J jump"]]);
-      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S }).present, false);
-    });
-
-    it("the template set via core.sshCommand is NOT trusted (agent-writable git config)", () => {
-      const repo = makeRepo([["core.sshCommand", T]]);
-      assert.equal(detectSshOverride(repo, {}).present, true);
-    });
-
-    it("any change to the template is an override: an added -o HostName, -F, -J, a changed %h, a changed %p", () => {
-      const repo = makeRepo();
-      for (const cmd of [
-        `${T} -o HostName=x`,
-        `${T} -F /x/config`,
-        `${T} -J h`,
-        T.replace("'%h'", "'x'"),
-        T.replace(" %p", " 22"),
-        T.replace("ControlMaster=no", "ControlMaster=yes"),
-        T.replace("sh '%h'", "sh -c '%h'"),
-        `${T} -i /k`,
-        `ssh -o HostName=x ${T.slice(4)}`,
-        T.replace("/bin/sh", "/bin/bash"),
-        `${T};id`,
-      ]) {
-        assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: cmd, SRT_SSH_PROXY_COMMAND: S }).present, true, cmd);
-      }
-    });
-
-    it("the template does not neutralise GIT_SSH or GIT_SSH_VARIANT", () => {
-      const repo = makeRepo();
-      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, GIT_SSH: "/w" }).present, true);
-      assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S, GIT_SSH_VARIANT: "ssh" }).present, true);
-    });
-
-    function aliasDest(env: Record<string, string>, config: Array<[string, string]> = []): ReturnType<typeof resolveDestinationOffline> {
-      const home = join(root, `home-${n++}`);
-      mkdirSync(join(home, ".ssh"), { recursive: true });
-      writeFileSync(join(home, ".ssh", "config"), "Host gh-work\n  HostName github.com\n");
-      process.env["HOME"] = home;
-      const repo = makeRepo([["remote.origin.url", "git@gh-work:stranger/r.git"], ...config]);
-      for (const [k, v] of Object.entries(env)) process.env[k] = v;
-      try {
-        return resolveDestinationOffline(parseEgressIntents("git push origin main")[0]!, repo);
-      } finally {
-        for (const k of Object.keys(env)) delete process.env[k];
-      }
-    }
-
-    it("with the template in the environment an alias resolves through the ssh config, as with no override", () => {
-      const d = aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S });
-      assert.equal(d?.org, "stranger");
-      assert.equal(d?.repo, "r");
-      assert.equal(d?.unresolved, undefined);
-    });
-
-    it("the hook layer (no sandbox env) and pre-push (sandbox env) agree for the same repository", () => {
-      const withSandboxEnv = aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S });
-      const withoutEnv = aliasDest({});
-      assert.deepEqual(
-        [withSandboxEnv?.org, withSandboxEnv?.repo, withSandboxEnv?.unresolved],
-        [withoutEnv?.org, withoutEnv?.repo, withoutEnv?.unresolved],
-      );
-    });
-
-    it("R1: one-command bypass: a hostile or missing SRT makes an alias unresolved at the resolver", () => {
-      const hostile = S.replace(/"\$1:\$2"/g, '"github.com:22"');
-      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: hostile })?.unresolved, "opaque-url");
-      assert.equal(aliasDest({ GIT_SSH_COMMAND: T })?.unresolved, "opaque-url");
-      assert.equal(aliasDest({ GIT_SSH_COMMAND: T, SRT_SSH_PROXY_COMMAND: S })?.org, "stranger");
-    });
-
-    it("the template via core.sshCommand (no env) leaves the alias unresolved", () => {
-      const d = aliasDest({}, [["core.sshCommand", T]]);
-      assert.equal(d?.unresolved, "opaque-url");
-    });
-
-    it("a changed template in the environment leaves the alias unresolved", () => {
-      for (const cmd of [`${T} -o HostName=x`, `${T} -F f`, `${T} -J h`, T.replace("'%h'", "'x'")]) {
-        assert.equal(aliasDest({ GIT_SSH_COMMAND: cmd, SRT_SSH_PROXY_COMMAND: S })?.unresolved, "opaque-url", cmd);
-      }
+    it("a ProxyCommand in the applying ssh config acts as an override for that alias", () => {
+      useSshConfig("Host gh-work\n  HostName github.com\n  ProxyCommand nc x 22\nHost other\n  HostName git.example.org\n  ProxyJump j\n");
+      assert.equal(dest("git@gh-work:stranger/r.git")?.org, "stranger");
+      assert.equal(dest("git@other:stranger/r.git")?.unresolved, "opaque-url");
     });
   });
 
-  it("detectSshOverride reports nothing when nothing is set", () => {
+  it("detectSshOverride: any of GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT or core.sshCommand, and nothing else", () => {
     const repo = makeRepo();
-    assert.deepEqual(detectSshOverride(repo, {}), { present: false, mayRedirect: false });
-    assert.deepEqual(detectSshOverride(repo, { GIT_SSH_VARIANT: "ssh" }), { present: true, mayRedirect: false });
-    assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: "ssh -i k" }), { present: true, mayRedirect: false });
-    assert.deepEqual(detectSshOverride(repo, { GIT_SSH_COMMAND: "ssh -J h" }), { present: true, mayRedirect: true });
+    assert.equal(detectSshOverride(repo, {}), false);
+    assert.equal(detectSshOverride(repo, { GIT_SSH_COMMAND: "  " }), false);
+    for (const name of ["GIT_SSH_COMMAND", "GIT_SSH", "GIT_SSH_VARIANT"]) {
+      assert.equal(detectSshOverride(repo, { [name]: "ssh" }), true, name);
+    }
+    assert.equal(detectSshOverride(makeRepo([["core.sshCommand", "ssh -i k"]]), {}), true);
+  });
+
+  it("Q2: the default ssh directory is the passwd home's, whatever HOME says", () => {
+    setDefaultSshDirForTests(undefined);
+    const before = defaultSshDir();
+    assert.equal(before, join(userInfo().homedir, ".ssh"));
+    const savedHome = process.env["HOME"];
+    process.env["HOME"] = join(root, "empty-home");
+    try {
+      assert.equal(defaultSshDir(), before);
+    } finally {
+      if (savedHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = savedHome;
+    }
   });
 });
 
 describe("an alias origin counts as own at every layer (L2)", () => {
-  const savedHome = process.env["HOME"];
   after(() => {
-    if (savedHome === undefined) delete process.env["HOME"];
-    else process.env["HOME"] = savedHome;
+    setDefaultSshDirForTests(undefined);
   });
 
   it("`git@gh-work:acme/x.git` is acme/x for the origin lookup and the working-tree helpers", async () => {
     const home = join(root, `home-${n++}`);
     mkdirSync(join(home, ".ssh"), { recursive: true });
     writeFileSync(join(home, ".ssh", "config"), "Host gh-work\n  HostName github.com\n");
-    process.env["HOME"] = home;
+    setDefaultSshDirForTests(join(home, ".ssh"));
     const repo = makeRepo([
       ["remote.origin.url", "git@gh-work:acme/x.git"],
       ["repo-aegis.class", "private-strict"],
