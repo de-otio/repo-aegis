@@ -64,7 +64,7 @@ function install(e: Env, opts: Record<string, unknown> = {}): { stdout: string }
 const LEDGER = "state/claude-md-deny-rules.json";
 
 describe("registryDenyPlan", () => {
-  it("denies Edit on the registry, its .age, the approvals store, the two trusted state files, hooks/**, bin/** and markers/** — and nothing else", () => {
+  it("denies Edit on the registry, its .age, the approvals store, the destination cache, the two trusted state files, hooks/**, bin/** and markers/** — and nothing else", () => {
     const e = makeEnv("plan");
     const h = e.aegisHome;
     const plan = inEnv(e, () => registryDenyPlan());
@@ -72,6 +72,7 @@ describe("registryDenyPlan", () => {
       `Edit(/${h}/engagements.yaml)`,
       `Edit(/${h}/engagements.yaml.age)`,
       `Edit(/${h}/egress-approvals.json)`,
+      `Edit(/${h}/destinations.json)`,
       `Edit(/${h}/state/deny-set.cache.json)`,
       `Edit(/${h}/state/claude-md-deny-rules.json)`,
       `Edit(/${h}/hooks/**)`,
@@ -256,6 +257,15 @@ describe("install claude-md — registry deny rules", () => {
     assert.deepEqual(readSettings(f).permissions?.deny, ["Read(//secrets/**)"], "all five go, the user's rule stays");
   });
 
+  it("the destination-cache rule is recorded and removed by uninstall like the others", () => {
+    const e = makeEnv("dest-cache");
+    const rule = `Edit(/${e.aegisHome}/destinations.json)`;
+    install(e);
+    assert.ok(readSettings(e).permissions!.deny!.includes(rule));
+    install(e, { uninstall: true });
+    assert.equal(readSettings(e).permissions, undefined);
+  });
+
   it("a second install keeps remembering what the first added", () => {
     const e = makeEnv("twice");
     install(e);
@@ -345,6 +355,7 @@ describe("denyRuleCoversPath", () => {
     const audit = join(e.aegisHome, "state", "audit.log");
     assert.equal(rules.some(r => denyRuleCoversPath(r, audit)), false);
     assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "state", "deny-set.cache.json"))), true);
+    assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "destinations.json"))), true);
     assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "state", "leak-context-mode"))), false);
     assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "hooks", "pre-push"))), true);
     assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "markers", "customer-a.txt"))), true);

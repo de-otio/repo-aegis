@@ -3,7 +3,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, fakeGh, withEnv } from "../_test-utils.js";
@@ -793,5 +793,55 @@ describe("egress-readback", () => {
     assert.equal(out.exitCode, 0);
     assert.equal((JSON.parse(out.stderr.trim()) as { code: string }).code, "READBACK_UNAVAILABLE");
     assert.ok(elapsed < 4000, `read-back should have timed out quickly, took ${elapsed}ms`);
+  });
+});
+
+describe("egress-check — an unwritable destination cache never changes the decision (subprocess)", {
+  skip: cliBuilt() ? false : "CLI not built",
+}, () => {
+  // `install claude-md` denies agent writes to destinations.json (a forged "private" entry for a
+  // public repo would skip rule g). Inside the sandbox the write-through then fails with EACCES.
+  // Every writer is best-effort, so the verdict must be the one an unobstructed run gives.
+  const ARGS = (cwd: string): string[] => [
+    "egress-check", "--cwd", cwd, "--", "pr", "create", "--title", "t", "--body-file", bodyFile,
+  ];
+
+  /** A home where the write cannot succeed: the target is a non-empty directory, so the rename onto it fails. */
+  function homeWithDeniedCache(name: string): string {
+    const h = mkdtempSync(join(tmpdir(), `repo-aegis-egress-denied-${name}-`));
+    mkdirSync(join(h, "destinations.json", "keep"), { recursive: true });
+    return h;
+  }
+
+  it("still allows a recorded-private destination", () => {
+    const h = homeWithDeniedCache("private");
+    try {
+      const r = runCli(h, privateRepo, ARGS(privateRepo));
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal((JSON.parse(r.stdout) as { action: string }).action, "allow");
+    } finally {
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  it("still refuses a public destination the same way, and does not crash", () => {
+    const h = homeWithDeniedCache("public");
+    try {
+      const r = runCli(h, publicRepo, ARGS(publicRepo));
+      assert.equal(r.code, 2);
+      assert.equal((JSON.parse(r.stderr.trim()) as { code: string }).code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    } finally {
+      rmSync(h, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves no stray temp file behind when the rename onto the denied target fails", () => {
+    const h = homeWithDeniedCache("litter");
+    try {
+      runCli(h, privateRepo, ARGS(privateRepo));
+      assert.deepEqual(readdirSync(h).filter(f => f.endsWith(".tmp")), []);
+    } finally {
+      rmSync(h, { recursive: true, force: true });
+    }
   });
 });

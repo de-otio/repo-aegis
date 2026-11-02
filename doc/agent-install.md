@@ -430,7 +430,7 @@ written without touching disk. `repo-aegis install claude-md --uninstall`
 removes both again.
 
 It also adds `permissions.deny` **Edit** rules for the registry file and its
-`.age`, the approvals store, `hooks/**`, `bin/**`, `markers/**` (the rendered
+`.age`, the approvals store, the destination cache (`destinations.json`), `hooks/**`, `bin/**`, `markers/**` (the rendered
 deny set) and `state/deny-set.cache.json` plus the uninstall ledger under the
 repo-aegis home
 (default `~/.config/repo-aegis`), so the agent cannot register an owner by

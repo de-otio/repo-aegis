@@ -15,6 +15,7 @@ import {
   appendAuditRecord,
   approvalsPath,
   denySetCachePath,
+  destinationCachePath,
   markersDir,
   registryPath,
   repoAegisHome,
@@ -363,6 +364,11 @@ export function registryDenyPlan(): RegistryDenyPlan {
     registry,
     `${registry}.age`,
     approvalsPath(home),
+    // Rules e-g read a cached entry's class and visibility to decide whether a
+    // destination is public-facing: a forged "private" entry for a public repo
+    // would skip rule g's person check. Every writer treats a failed write as a
+    // cache miss (recordWorkingTree), so denying it costs nothing.
+    destinationCachePath(home),
     denySetCachePath(home),
     join(statePath(home), DENY_LEDGER_FILE),
   ];
@@ -416,7 +422,7 @@ function legacyDenyPair(list: readonly unknown[]): string[] {
 
 /** Basenames/globs of the paths this install protects, for recognising its own rules. */
 const OUR_RULE_SHAPE =
-  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers)\/\*\*)\)$/;
+  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|destinations\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers)\/\*\*)\)$/;
 
 /**
  * Whether `rule` is one this install could have written: exactly a rule of the

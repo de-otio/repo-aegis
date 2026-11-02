@@ -665,7 +665,7 @@ reports the count per event.
 3. Adds `permissions.deny` **`Edit(...)`** rules to `settings.json` for the
    files whose tampering bypasses the guard, and nothing else: the registry
    file and its `.age` ciphertext, the approvals store
-   (`egress-approvals.json`), `hooks/**` (the git hook scripts), `bin/**`
+   (`egress-approvals.json`), the destination cache (`destinations.json`: rules e-g read a cached entry's class and visibility, so a forged "private" entry for a public repo would skip the person check; every writer treats a failed write as a cache miss), `hooks/**` (the git hook scripts), `bin/**`
    (the `gh` shim), `markers/**` (the rendered deny set the write scan and
    the hooks read; editing it silently drops markers) and two files under
    `state/` that an enforcement path trusts: `deny-set.cache.json` (an
