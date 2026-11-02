@@ -111,6 +111,10 @@ says who runs the fix, and points at `doc/agent-guide.md`. Design:
   publishing operations is judged on its first 64, every shape-rule label, and
   one fail-closed intent for the rest. Past a bound the command is treated as
   unresolved (refused without a person). *Recovery:* split the command.
+- **A command larger than 1 MiB is refused at the agent hook** (`HOOK_INPUT_TOO_LARGE`).
+  It used to be truncated, fail to parse, and pass unjudged, which skipped every
+  hook-only rule. A payload for a non-shell tool still passes. *Recovery:* put
+  large content in a file (`--body-file`, `-F`, `-d @file`).
 
 ### Known limits (not refused; stated so nobody assumes coverage)
 

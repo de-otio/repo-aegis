@@ -20,7 +20,7 @@ Every PR was built by a Sonnet builder and reviewed by Opus until only lows rema
 | 6 doctor, deny rules, regex-safety | `pr6-doctor` (6e8064f) | merged |
 | 2b human presence | `pr2b-human-presence` (1edf919) | merged (e60ae65); doctor confirm wired (ce5a2f6) |
 | 7 docs | `pr7-docs` (d9b5ee7) | merged (7401a2d) |
-| final review | Fable `security-reviewer` | F1 critical (unbounded `sh -c` positional expansion → guard OOM → fail-open) fixed with expansion bounds and an intent cap; F2 (program written at run time) documented as residual; F3 folded into F1 |
+| final review | Fable `security-reviewer` | F1 critical (unbounded `sh -c` positional expansion → guard OOM → fail-open) fixed with expansion bounds and an intent cap; F2 (program written at run time) documented as residual; F3 folded into F1. Fix verification found V1 (pre-existing: hook input past 1 MiB was truncated and passed unjudged), fixed with `HOOK_INPUT_TOO_LARGE` |
 
 Next steps: open the PR to `main`, merge when green, release 0.11.0. Follow-up issues to file:
 Touch ID / Keychain presence signal (R12); pty-wrapper S10 history; doctor flags for R9/R10.

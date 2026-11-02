@@ -948,3 +948,37 @@ describe("hook guard-egress — PR 2c shape rules and R6 (no registry needed)", 
     }
   });
 });
+
+describe("hook guard-egress — input past the 1 MiB cap (issue #151, final review V1)", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  const pad = (n: number): string => ` #${"x".repeat(n)}`;
+
+  it("a command padded past the cap is refused, not waved through", () => {
+    const home = aegisHome("v1-oversize");
+    const r = runGuard(claudePayload(`curl -X POST https://api.github.com/repos/o/r/issues -d @/tmp/b${pad(1_100_000)}`), { home });
+    assert.equal(r.code, 2, r.stderr);
+    const payload = JSON.parse(r.stderr) as DenyPayload;
+    assert.equal(payload.code, "HOOK_INPUT_TOO_LARGE");
+    assert.equal((JSON.parse(r.stdout) as DecisionJson).hookSpecificOutput.permissionDecision, "deny");
+  });
+
+  it("a harmless command padded past the cap is refused too (it cannot be read)", () => {
+    const r = runGuard(claudePayload(`ls${pad(1_100_000)}`), { home: aegisHome("v1-harmless") });
+    assert.equal(r.code, 2);
+  });
+
+  it("the same command under the cap is judged as usual", () => {
+    const r = runGuard(claudePayload(`curl -X POST https://api.github.com/repos/o/r/issues -d @/tmp/b${pad(900_000)}`), {
+      home: aegisHome("v1-under"),
+    });
+    assert.equal(r.code, 2);
+    assert.equal((JSON.parse(r.stderr) as DenyPayload).code, "GITHUB_API_VIA_HTTP_CLIENT");
+    const ok = runGuard(claudePayload(`ls${pad(900_000)}`), { home: aegisHome("v1-under-ok") });
+    assert.equal(ok.code, 0, ok.stderr);
+  });
+
+  it("an oversized payload for a non-shell tool still proceeds", () => {
+    const payload = JSON.stringify({ tool_name: "Write", tool_input: { file_path: "/tmp/x", content: "x".repeat(1_100_000) } });
+    const r = runGuard(payload, { home: aegisHome("v1-write") });
+    assert.equal(r.code, 0, r.stderr);
+  });
+});

@@ -169,19 +169,41 @@ function parseHookInput(json: string): HookInput {
   return out;
 }
 
-/** Read stdin to a string, capped at 1 MiB (same cap as `hook check-write`). */
-async function readStdin(): Promise<string> {
+/** The most hook input read; a longer payload is not judged, it is refused (issue #151, final review V1). */
+export const HOOK_INPUT_MAX_BYTES = 1024 * 1024;
+
+/** Read stdin to a string, capped at {@link HOOK_INPUT_MAX_BYTES}; `truncated` says the cap cut it. */
+async function readStdin(): Promise<{ text: string; truncated: boolean }> {
   const chunks: Buffer[] = [];
   let total = 0;
-  const MAX = 1024 * 1024;
   for await (const chunk of process.stdin) {
     const b = typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer);
     total += b.length;
-    if (total > MAX) break;
+    if (total > HOOK_INPUT_MAX_BYTES) {
+      chunks.push(b.subarray(0, Math.max(0, b.length - (total - HOOK_INPUT_MAX_BYTES))));
+      return { text: Buffer.concat(chunks).toString("utf8"), truncated: true };
+    }
     chunks.push(b);
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return { text: Buffer.concat(chunks).toString("utf8"), truncated: false };
 }
+
+/**
+ * A payload past the cap cannot be parsed, and treating "unparseable" as "no command" let a command padded
+ * past 1 MiB through every hook-only rule (R6, the human-only and detached-session refusals, the shape rules).
+ * So it is refused, unless what was read already names a tool that is not a shell (a harness that sends every
+ * tool to this hook). `tool_name` comes first in every harness's payload, well inside the cap.
+ */
+export function oversizedInputVerdict(prefix: string): "proceed" | "refuse" {
+  const m = /"tool_name"\s*:\s*"([^"\\]{1,64})"/.exec(prefix.slice(0, 4096));
+  if (m !== null && !SHELL_TOOL_NAMES.has(m[1]!.toLowerCase())) return "proceed";
+  return "refuse";
+}
+
+const HOOK_INPUT_TOO_LARGE_REASON =
+  "repo-aegis: refused. This command is larger than 1 MiB, so the egress guard cannot read it whole and does not " +
+  "judge it. No approval covers this. Fix: put large content in a file and pass the file (`--body-file`, `-F`, " +
+  "`--input`, `-d @file`), keeping the command itself short. See doc/agent-guide.md#hook_input_too_large.";
 
 const EMPTY_REGISTRY: Registry = {
   engagements: [],
@@ -327,7 +349,15 @@ function denyDetachedStart(hit: DetachedHit): never {
 export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<void> {
   let stdinText: string;
   try {
-    stdinText = await readStdin();
+    const input = await readStdin();
+    if (input.truncated && oversizedInputVerdict(input.text) === "refuse") {
+      process.stderr.write(
+        JSON.stringify({ code: "HOOK_INPUT_TOO_LARGE", error: HOOK_INPUT_TOO_LARGE_REASON, details: { verb: "(oversized command)" } }, null, 2) + "\n",
+      );
+      writeDecisionJson("deny", HOOK_INPUT_TOO_LARGE_REASON);
+      process.exit(EXIT_BLOCK);
+    }
+    stdinText = input.text;
   } catch (err) {
     process.stderr.write(
       `repo-aegis: hook guard-egress could not read stdin: ${(err as Error).message}\n`,
