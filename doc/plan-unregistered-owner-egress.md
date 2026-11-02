@@ -272,6 +272,13 @@ follows, in the same command, any of:
 The fix the message gives is to run the change as its own call; the guard
 then judges the egress against the new state.
 
+b″ only has to cover the same command. A change made in an earlier call,
+such as `git config core.sshCommand …`, `url.*.insteadOf`, a git or gh alias,
+or `GIT_SSH_COMMAND` in a startup file, is visible to the resolver on the next
+call, because the resolver reads it then. *(PR 4 review: the resolver must
+actually read these. An ssh override makes any non-literal-github.com ssh host
+unresolved.)*
+
 Together these close the hook layer. The shim and pre-push cannot distinguish
 an override from a legitimate test environment, which is a residual risk
 (§8, R2).
