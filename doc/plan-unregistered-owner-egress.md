@@ -591,6 +591,9 @@ Run `test-critic` on the PR 1 and PR 2 suites before merge.
 - Non-GitHub hosts, and `--hostname` values other than `github.com`.
 - `gh` invoked by absolute path, `--no-verify`, `-c core.hooksPath=` (existing
   non-goals).
+- Enterprise Managed User owners (names containing `_`). `ORG_NAME_REGEX`
+  cannot register them, so rule h refuses them permanently for agents; a
+  person at a terminal still passes. PR 7 states this as a known limitation.
 
 ## 8. Security review of this plan
 
