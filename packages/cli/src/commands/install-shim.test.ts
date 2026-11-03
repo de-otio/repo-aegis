@@ -3,11 +3,14 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { captureOutput, fakeGh, lastJsonLine, withEnv } from "../_test-utils.js";
 import { checkShim, ghShimIsFirstOnPath, installShim, shimPathFor, type ShimResult } from "./install-shim.js";
-import { GH_SHIM_SCRIPT, SHIM_HEADER_LINE } from "./shim-script.js";
+import type { EnforcementPin } from "@de-otio/repo-aegis-core";
+import { currentEnforcementPin } from "../enforcement-pin.js";
+import { renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
 
 let root: string;
 
@@ -26,9 +29,12 @@ function makeHome(name: string): { home: string; run: <T>(fn: () => T) => T } {
   return { home, run: <T>(fn: () => T): T => withEnv("REPO_AEGIS_HOME", home, fn) };
 }
 
-describe("GH_SHIM_SCRIPT", () => {
+const PIN: EnforcementPin = { node: "/opt/node/bin/node", cli: "/opt/ra/dist/index.js" };
+const SHIM_SCRIPT = renderShimScript(PIN);
+
+describe("the rendered shim script", () => {
   it("is a bash script carrying the generated-by header on its own line", () => {
-    const lines = GH_SHIM_SCRIPT.split("\n");
+    const lines = SHIM_SCRIPT.split("\n");
     assert.equal(lines[0], "#!/usr/bin/env bash");
     assert.equal(lines[1], SHIM_HEADER_LINE);
   });
@@ -37,12 +43,78 @@ describe("GH_SHIM_SCRIPT", () => {
     // macOS ships bash 3.2 and that is where this shim spends most of its
     // life. `readlink -f` is GNU-only; `mapfile` and `declare -A` are bash 4+.
     for (const banned of ["readlink -f", "mapfile", "declare -A", "${var,,}"]) {
-      assert.ok(!GH_SHIM_SCRIPT.includes(banned), `shim must not use ${banned}`);
+      assert.ok(!SHIM_SCRIPT.includes(banned), `shim must not use ${banned}`);
     }
   });
 
   it("never hard-codes a path to the real gh", () => {
-    assert.ok(!/\/usr\/(local\/)?bin\/gh/.test(GH_SHIM_SCRIPT));
+    assert.ok(!/\/usr\/(local\/)?bin\/gh/.test(SHIM_SCRIPT));
+  });
+
+  it("T1: contains the pinned node and CLI paths and no command-position `repo-aegis`", () => {
+    assert.ok(SHIM_SCRIPT.includes("/opt/node/bin/node"), "pinned node path missing");
+    assert.ok(SHIM_SCRIPT.includes("/opt/ra/dist/index.js"), "pinned CLI path missing");
+    const code = SHIM_SCRIPT.split("\n")
+      .filter(l => !/^\s*#/.test(l))
+      .join("\n");
+    assert.ok(!/command -v repo-aegis/.test(code), "still resolves repo-aegis by name");
+    assert.ok(
+      !/(^|[;&|(!`]|\bthen\b|\bdo\b|\$\()\s*repo-aegis(\s|$)/m.test(code),
+      "still calls repo-aegis by name",
+    );
+    // egress-check and egress-readback, the two calls the shim makes, both go through the pin.
+    assert.ok(code.includes('"$__ra_node" "$__ra_cli" egress-check'));
+    assert.ok(code.includes('"$__ra_node" "$__ra_cli" egress-readback'));
+  });
+
+  it("T12: a pin path with a newline or NUL is refused at render time", () => {
+    assert.throws(() => renderShimScript({ ...PIN, cli: "/opt/a\nb/index.js" }), /newline|NUL/i);
+    assert.throws(() => renderShimScript({ ...PIN, node: "/opt/a\0b/node" }), /newline|NUL/i);
+  });
+});
+
+describe("the shim with a pinned binary that is gone (T7: fails closed on publishing verbs)", () => {
+  /** Installs a shim pinned to a CLI path that does not exist, with a fake `gh` after it on PATH. */
+  function setup(name: string): { shim: string; env: NodeJS.ProcessEnv; ghLog: string; missing: string } {
+    const { home, run } = makeHome(name);
+    const missing = join(root, name, "no-such-dist", "index.js");
+    run(() => captureOutput(() => installShim(undefined, { pin: { node: process.execPath, cli: missing } })));
+    const ghLog = join(root, name, "gh-ran.log");
+    const ghDir = fakeGh(join(root, name, "real-gh"), `echo "gh argv: $*"; echo ran >> "${ghLog}"`);
+    return {
+      shim: join(home, "bin", "gh"),
+      missing,
+      ghLog,
+      env: { ...process.env, REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), ghDir, process.env["PATH"] ?? ""].join(delimiter) },
+    };
+  }
+
+  it("refuses `gh pr create` with exit 2, naming the missing path and the installer; the real gh never runs", () => {
+    const { shim, env, ghLog, missing } = setup("t7-refuse");
+    const r = spawnSync("bash", [shim, "pr", "create", "--title", "t"], { env, encoding: "utf8" });
+    assert.equal(r.status, 2, `stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.ok(r.stderr.includes(missing), r.stderr);
+    assert.ok(r.stderr.includes("repo-aegis install shim"), r.stderr);
+    assert.equal(existsSync(ghLog), false, "the real gh ran despite the refusal");
+  });
+
+  it("still passes a non-publishing verb through untouched (`gh --version`)", () => {
+    const { shim, env, ghLog } = setup("t7-passthrough");
+    const r = spawnSync("bash", [shim, "--version"], { env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, "gh argv: --version\n");
+    assert.ok(existsSync(ghLog));
+  });
+
+  it("refuses when the pinned node is gone, too", () => {
+    const { home, run } = makeHome("t7-node");
+    const missingNode = join(root, "t7-node", "no-such-node");
+    run(() => captureOutput(() => installShim(undefined, { pin: { node: missingNode, cli: process.execPath } })));
+    const ghDir = fakeGh(join(root, "t7-node", "real-gh"), "echo ran");
+    const env = { ...process.env, REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), ghDir, process.env["PATH"] ?? ""].join(delimiter) };
+    const r = spawnSync("bash", [join(home, "bin", "gh"), "release", "create", "v1"], { env, encoding: "utf8" });
+    assert.equal(r.status, 2, r.stderr);
+    assert.ok(r.stderr.includes(missingNode), r.stderr);
   });
 });
 
@@ -54,7 +126,7 @@ describe("install shim", () => {
 
     assert.equal(out.exitCode, undefined);
     assert.ok(existsSync(path));
-    assert.equal(readFileSync(path, "utf8"), GH_SHIM_SCRIPT);
+    assert.equal(readFileSync(path, "utf8"), renderShimScript(currentEnforcementPin()));
     assert.equal(statSync(path).mode & 0o777, 0o755);
     assert.ok(out.stdout.includes(`export PATH="${join(home, "bin")}:$PATH"`));
   });
@@ -78,7 +150,7 @@ describe("install shim", () => {
 
     const out = run(() => captureOutput(() => installShim(undefined, {})));
     assert.equal(out.exitCode, undefined);
-    assert.equal(readFileSync(path, "utf8"), GH_SHIM_SCRIPT);
+    assert.equal(readFileSync(path, "utf8"), renderShimScript(currentEnforcementPin()));
   });
 
   it("refuses a file it did not write, and says how to override", () => {
@@ -104,7 +176,7 @@ describe("install shim", () => {
 
     const out = run(() => captureOutput(() => installShim(undefined, { force: true })));
     assert.equal(out.exitCode, undefined);
-    assert.equal(readFileSync(path, "utf8"), GH_SHIM_SCRIPT);
+    assert.equal(readFileSync(path, "utf8"), renderShimScript(currentEnforcementPin()));
   });
 
   it("refuses any tool but gh with USAGE", () => {
@@ -112,6 +184,34 @@ describe("install shim", () => {
     const out = run(() => captureOutput(() => installShim("git", { json: true })));
     assert.equal(out.exitCode, 2);
     assert.equal(lastJsonLine<{ code: string }>(out.stderr).code, "USAGE");
+  });
+
+  it("T12: refuses a pin path with a newline (PIN_PATH_UNSUPPORTED) and writes nothing", () => {
+    const { home, run } = makeHome("pin-newline");
+    const out = run(() =>
+      captureOutput(() => installShim(undefined, { json: true, pin: { node: "/opt/node/bin/node", cli: "/opt/a\nb/index.js" } })),
+    );
+    assert.equal(out.exitCode, 2);
+    assert.equal(lastJsonLine<{ code: string }>(out.stderr).code, "PIN_PATH_UNSUPPORTED");
+    assert.equal(existsSync(join(home, "bin", "gh")), false);
+  });
+
+  it("T12: a pin path with spaces and quotes is written and read back by the shell as given", () => {
+    const { home, run } = makeHome("pin-quotes");
+    const odd = join(root, "pin-quotes", `it's "odd" dir`);
+    mkdirSync(odd, { recursive: true });
+    const cli = join(odd, "stub cli.cjs");
+    writeFileSync(cli, `process.stdout.write("pinned-cli-ran:" + process.argv.slice(2).join(" "));\n`);
+    run(() => captureOutput(() => installShim(undefined, { pin: { node: process.execPath, cli } })));
+    // A `gh` whose first argument is a publishing group, so the shim calls the pinned
+    // CLI; the stub prints what it was asked and exits 0 with no verdict, so the
+    // shim passes the command through to the fake gh.
+    const ghDir = fakeGh(join(root, "pin-quotes", "real-gh"), 'echo "gh argv: $*"');
+    const env = { ...process.env, REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), ghDir, process.env["PATH"] ?? ""].join(delimiter) };
+    const r = spawnSync("bash", [join(home, "bin", "gh"), "pr", "list"], { env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, "gh argv: pr list\n");
+    assert.equal(r.stderr, "", "the pinned stub CLI at a quoted path must have run without a pin error");
   });
 
   it("--json reports the path, the bin dir and the PATH instruction", () => {
@@ -243,6 +343,17 @@ describe("checkShim", () => {
     // And `install shim` is the fix: it rewrites the stale file and the check clears.
     run(() => captureOutput(() => installShim(undefined, {})));
     assert.equal(checkShim({ REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), other].join(delimiter) })[0]?.ok, true);
+  });
+
+  it("SHIM_STALE when the shim was rendered for a different pin (D3)", () => {
+    const { home, run } = makeHome("check-other-pin");
+    run(() => captureOutput(() => installShim(undefined, { pin: { node: "/opt/old-node/bin/node", cli: currentEnforcementPin().cli } })));
+    const other = fakeGh(join(root, "check-other-pin-bin"), "echo real gh");
+    const env = { REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), other].join(delimiter) };
+    assert.equal(checkShim(env)[0]?.code, "SHIM_STALE");
+    // Re-pinning to the current install clears it.
+    run(() => captureOutput(() => installShim(undefined, {})));
+    assert.equal(checkShim(env)[0]?.ok, true);
   });
 
   it("ignores a non-executable gh earlier on PATH", () => {

@@ -10,7 +10,7 @@ import { doctor } from "./doctor.js";
 import { fakeGh, withEnv } from "../_test-utils.js";
 import { destinationCachePath, readDestinationCache, renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
 import { currentEnforcementPin } from "../enforcement-pin.js";
-import { GH_SHIM_SCRIPT } from "./shim-script.js";
+import { renderShimScript } from "./shim-script.js";
 
 // A test seam, deliberately not exported from the core package's public index.
 const { setDefaultSshDirForTests } = (await import(
@@ -75,7 +75,7 @@ function makeFixture(
   const binDir = join(home, "bin");
   if (fxOpts.shim !== false) {
     mkdirSync(binDir, { recursive: true });
-    writeFileSync(join(binDir, "gh"), GH_SHIM_SCRIPT, { mode: 0o755 });
+    writeFileSync(join(binDir, "gh"), renderShimScript(currentEnforcementPin()), { mode: 0o755 });
     chmodSync(join(binDir, "gh"), 0o755);
   }
   if (fxOpts.guardHook !== false) {
