@@ -19,7 +19,8 @@ The generated git hooks (`packages/core/src/hook-scripts.ts`: `PRE_COMMIT_SCRIPT
 | D3 | Staleness: the digest that `hooks-state.ts` compares is the digest of the script **as rendered for the current pin**. A hook rendered for another path, or an old unpinned hook, is reported as installed-but-stale, so `doctor` and `status` show it |
 | D4 | `install claude-md` adds `Edit(//…)` deny rules for the pinned CLI **package directory** and the pinned Node executable, alongside the existing registry rules, so an agent cannot overwrite the code the pin points at. Same ledger, same uninstall path |
 | D5 | `doctor` gains three checks: `ENFORCEMENT_UNPINNED` (an installed hook or shim calls `repo-aegis` by name), `ENFORCEMENT_PIN_MISSING` (a pinned path does not exist), and `MULTIPLE_INSTALLS` (more than one `repo-aegis` reachable on `PATH`, listed with each version; also warns when the first one on `PATH` is not the pinned one) |
-| D6 | The pinned path is shell-quoted when rendered. A path containing a newline or NUL refuses the install |
+| D6 | The pinned path is shell-quoted when rendered. A path containing a newline or NUL refuses the install (`install hooks` **and** `install shim`) |
+| D7 | **The Claude Code hook commands are pinned too** (added after review). `install claude-md` writes each hook as a pinned command that fails closed: if the pinned node or CLI is missing it prints the fix and **exits 2** (a missing command would otherwise exit 127, which Claude Code treats as a non-blocking hook error, i.e. fail open). Existing `repo-aegis hook …` entries are replaced, not duplicated, and recognised by `--uninstall`. Reason: the first `PATH` entry of the agent process on a real machine is `~/.config/repo-aegis/bin`, so a `repo-aegis` file placed there replaces the `guard-egress` hook that judges every agent command |
 
 Out of scope: the shim's existing "a guard fault (exit other than 0/2) does not block `gh`" behaviour, and anything about which `gh` binary is trusted.
 
@@ -38,7 +39,9 @@ Out of scope: the shim's existing "a guard fault (exit other than 0/2) does not 
 | T9 | `doctor` with two `repo-aegis` executables on a test `PATH` reports `MULTIPLE_INSTALLS` naming both | no such check |
 | T10 | `doctor` with an installed unpinned hook reports `ENFORCEMENT_UNPINNED` | no such check |
 | T11 | `install claude-md --dry-run` lists deny rules for the pinned package directory and Node executable | not added |
-| T12 | A pin path containing a newline makes `install hooks` refuse; a path with spaces and quotes round-trips | no pin |
+| T12 | A pin path containing a newline makes `install hooks` and `install shim` refuse; a path with spaces and quotes round-trips | no pin |
+| T13 | `install claude-md` into a temp settings file: every hook command is the pinned form; no `repo-aegis hook` by-name entry remains; re-running adds nothing; an old by-name entry is replaced; `--uninstall` removes both forms | by-name commands |
+| T14 | Run the rendered `guard-egress` hook command with the pinned CLI deleted → exit 2 with the fix on stderr; with an impostor `repo-aegis` first on `PATH` → the pinned CLI still decides | exit 127 / impostor runs |
 
 Existing tests that assert the old fail-open text or the constant-template digest are updated in the same commit as the behaviour they describe, with a note in the commit message.
 
