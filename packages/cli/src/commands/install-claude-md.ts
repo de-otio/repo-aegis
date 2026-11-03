@@ -20,9 +20,11 @@ import {
   registryPath,
   repoAegisHome,
   statePath,
+  type EnforcementPin,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { readIfExists } from "../fs-utils.js";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 
 const CLAUDE_MD_BEGIN = "<!-- repo-aegis: managed block — do not edit between markers -->";
 const CLAUDE_MD_END = "<!-- repo-aegis: end managed block -->";
@@ -154,6 +156,8 @@ interface InstallClaudeMdOptions extends OutputOptions {
    * a no-op.
    */
   uninstall?: boolean;
+  /** Test seam: the pin whose CLI package directory and Node executable are denied. Not reachable from the CLI. */
+  pin?: EnforcementPin;
 }
 
 interface SettingsJson {
@@ -309,6 +313,14 @@ function mergeFirstTouchHook(
 // directory broke audit appends, the state lock, cache writes, and an agent
 // running `install hooks` or `install shim`. Denying `markers/**` means an
 // agent-run `render` is refused inside the sandbox; a person runs it.
+//
+// The code the enforcement pin points at is denied too (doc/plan-pin-enforcement-
+// binary.md D4): the hooks and the shim run the pinned Node executable and CLI
+// by absolute path, so an agent that could overwrite them would own enforcement
+// just as surely as one that could edit a hook. Denied: the pinned CLI's
+// package directory and the pinned Node executable (a file rule). A package
+// directory that is a git work tree (a development checkout) is not denied, for
+// the reason `riskyDirReason` gives; the plan says so in a warning.
 // ---------------------------------------------------------------------------
 
 /** What `install claude-md` denies for the current registry location. */
@@ -352,8 +364,22 @@ function riskyDirReason(dir: string): string | null {
   return null;
 }
 
-/** The deny rules for the registry, approvals, hooks, shim, markers and trusted state files at their current locations. */
-export function registryDenyPlan(): RegistryDenyPlan {
+/**
+ * The directory of the package that holds `cli`: the nearest directory above it
+ * with a package.json, or `<package>/dist/index.js`'s grandparent when there is none.
+ */
+function pinnedPackageDir(cli: string): string {
+  for (let d = dirname(cli), i = 0; i < 6; i++) {
+    if (existsSync(join(d, "package.json"))) return d;
+    const up = dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return dirname(dirname(cli));
+}
+
+/** The deny rules for the registry, approvals, hooks, shim, markers, trusted state files and the pinned code at their current locations. */
+export function registryDenyPlan(pin: EnforcementPin = currentEnforcementPin()): RegistryDenyPlan {
   const home = repoAegisHome();
   const registry = registryPath(home);
   // Files an enforcement path trusts. state/deny-set.cache.json is one of them:
@@ -393,17 +419,36 @@ export function registryDenyPlan(): RegistryDenyPlan {
     warnings.push(`the registry's directory (${regDir}) ${regRisk}: denying only the registry file itself, not its directory`);
   }
 
+  // The code the pin points at (D4): the Node executable as a file rule, the CLI's
+  // package directory as a directory rule unless it is too broad or shared to deny.
+  const pinFiles = [pin.node];
+  const pinDirs: string[] = [];
+  const pkgDir = pinnedPackageDir(pin.cli);
+  const pkgRisk = riskyDirReason(pkgDir);
+  if (pkgRisk !== null) {
+    warnings.push(
+      `the pinned CLI's package directory (${pkgDir}) ${pkgRisk}: not denied, so an agent can edit the code the hooks and shim run`,
+    );
+  } else {
+    pinDirs.push(pkgDir);
+  }
+
   return {
-    rules: [...files.map(f => `Edit(/${f})`), ...dirs.map(d => `Edit(/${d}/**)`)],
-    sampleTargets: [...files, ...dirs.map(d => join(d, "x"))],
+    rules: [
+      ...files.map(f => `Edit(/${f})`),
+      ...dirs.map(d => `Edit(/${d}/**)`),
+      ...pinFiles.map(f => `Edit(/${f})`),
+      ...pinDirs.map(d => `Edit(/${d}/**)`),
+    ],
+    sampleTargets: [...files, ...dirs.map(d => join(d, "x")), ...pinFiles, ...pinDirs.map(d => join(d, "x"))],
     verifyPath: registry,
     warnings,
   };
 }
 
 /** The rules `registryDenyPlan` would add, as a list. */
-export function registryDenyRules(): string[] {
-  return registryDenyPlan().rules;
+export function registryDenyRules(pin?: EnforcementPin): string[] {
+  return registryDenyPlan(pin).rules;
 }
 
 /**
@@ -424,6 +469,9 @@ function legacyDenyPair(list: readonly unknown[]): string[] {
 const OUR_RULE_SHAPE =
   /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|destinations\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers)\/\*\*)\)$/;
 
+/** Shape of the rules `registryDenyPlan` writes for a pin: `<...>/@de-otio/repo-aegis/**`, or a file named `node`. */
+const OUR_PIN_RULE_SHAPE = /^Edit\(\/\/(?:.+\/@de-otio\/repo-aegis\/\*\*|.+\/node)\)$/;
+
 /**
  * Whether `rule` is one this install could have written: exactly a rule of the
  * current plan, or the shape of one (`Edit(//…)` over one of the protected
@@ -433,6 +481,10 @@ const OUR_RULE_SHAPE =
  */
 function isOurRuleShape(rule: string, plan: RegistryDenyPlan): boolean {
   if (plan.rules.includes(rule)) return true;
+  // The pinned-code rules of a PREVIOUS pin (a Node or repo-aegis upgrade moves it): a package
+  // directory named for this package, or a `node` file. Not under the repo-aegis home, so the
+  // home test below does not apply.
+  if (OUR_PIN_RULE_SHAPE.test(rule)) return true;
   const m = OUR_RULE_SHAPE.exec(rule);
   if (m === null) return false;
   const abs = "/" + m[1]!.replace(/^\/+/, "");
@@ -521,8 +573,8 @@ function setDenyList(settings: SettingsJson, list: unknown[]): void {
  * which the ledger remembers): it is reported as present and never newly
  * recorded, so uninstall cannot remove what the user had.
  */
-function installDenyRules(settings: SettingsJson, settingsPath: string): DenyInstall {
-  const plan = registryDenyPlan();
+function installDenyRules(settings: SettingsJson, settingsPath: string, pin?: EnforcementPin): DenyInstall {
+  const plan = registryDenyPlan(pin);
   const prev = readDenyLedger().settings[settingsPath];
   let list = denyList(settings);
 
@@ -557,12 +609,16 @@ function installDenyRules(settings: SettingsJson, settingsPath: string): DenyIns
  * the ledger has no entry for this settings.json, the older build's forms).
  * Returns the removed count and whether a ledger entry existed.
  */
-function stripDenyRules(settings: SettingsJson, settingsPath: string): { removed: number; hadRecord: boolean } {
+function stripDenyRules(
+  settings: SettingsJson,
+  settingsPath: string,
+  pin?: EnforcementPin,
+): { removed: number; hadRecord: boolean } {
   const record = readDenyLedger().settings[settingsPath];
   const list = denyList(settings);
   // A ledger entry that is not shaped like one of ours is ignored: the ledger is
   // agent-writable, and it must not be a way to delete the user's own rules.
-  const plan = registryDenyPlan();
+  const plan = registryDenyPlan(pin);
   const rules = record !== undefined ? record.filter(r => isOurRuleShape(r, plan)) : legacyDenyPair(list);
   const kept = list.filter(r => !(typeof r === "string" && rules.includes(r)));
   const removed = list.length - kept.length;
@@ -641,7 +697,7 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   const firstTouchMerge: MergeResult | null = opts.firstTouch
     ? mergeFirstTouchHook(settings!, FIRST_TOUCH_HOOK_COMMAND)
     : null;
-  const denyInstall = installDenyRules(settings!, settingsPath);
+  const denyInstall = installDenyRules(settings!, settingsPath, opts.pin);
 
   // The ledger first: if it cannot be written, uninstall could not tell our
   // rules from the user's, so no rule is added at all.
@@ -846,7 +902,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   const bashMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, BASH_HOOK_COMMAND);
   const guardEgressMerge = mergePreToolUseHook(settings, BASH_HOOK_MATCHER, GUARD_EGRESS_HOOK_COMMAND);
   const egressReceiptMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, EGRESS_RECEIPT_HOOK_COMMAND);
-  const denyInstall = installDenyRules(settings, settingsPath);
+  const denyInstall = installDenyRules(settings, settingsPath, opts.pin);
   const wouldBeSettings = JSON.stringify(settings, null, 2) + "\n";
 
   // 3. strict-mode flag (read-only check)
@@ -1099,7 +1155,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
       );
     }
     settingsResult = stripHookEntries(settings!);
-    const stripped = stripDenyRules(settings!, settingsPath);
+    const stripped = stripDenyRules(settings!, settingsPath, opts.pin);
     denyRulesRemoved = stripped.removed;
     denyRecordFound = stripped.hadRecord;
     if (settingsResult.removed > 0 || denyRulesRemoved > 0) {
@@ -1323,7 +1379,7 @@ export function checkRegistryAgentWritable(
   const home = claudeHome ?? defaultClaudeHome();
   const settingsPath = join(home, "settings.json");
   const fix =
-    "repo-aegis install claude-md   (adds permissions.deny Edit rules for the registry file, its .age, the approvals store, hooks/ and bin/); " +
+    "repo-aegis install claude-md   (adds permissions.deny Edit rules for the registry file, its .age, the approvals store, hooks/, bin/, and the pinned CLI and node); " +
     `Claude Code applies Edit rules to the sandbox too: verify with a sandboxed \`touch ${plan.verifyPath}\``;
   const warn = (detail: string): import("./doctor-checks.js").DoctorCheck => ({
     code: "REGISTRY_AGENT_WRITABLE",
@@ -1347,13 +1403,13 @@ export function checkRegistryAgentWritable(
   if (uncovered.length > 0) {
     return warn(
       `Claude Code settings have no permissions.deny Edit rule covering ${uncovered.length} of the ${plan.sampleTargets.length} ` +
-        "protected path(s) (registry, approvals, hooks, shim), so an agent can edit them directly, with no terminal, " +
+        "protected path(s) (registry, approvals, hooks, shim, pinned CLI and node), so an agent can edit them directly, with no terminal, " +
         "and register any owner",
     );
   }
   return {
     code: "REGISTRY_AGENT_WRITABLE",
     ok: true,
-    detail: `settings.json at ${settingsPath} denies Edit on the registry, approvals, hooks and shim paths`,
+    detail: `settings.json at ${settingsPath} denies Edit on the registry, approvals, hooks, shim and pinned-code paths`,
   };
 }
