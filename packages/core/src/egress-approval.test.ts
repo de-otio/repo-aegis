@@ -234,7 +234,7 @@ describe("approval form × owner kind (D7, issue #151)", () => {
     const root = mkdtempSync(join(tmpdir(), "egress-approval-matrix-"));
     try {
       for (const [form, covers] of FORMS) {
-        const p = join(root, `${form.org}-${form.repo.replace("*", "star")}.json`);
+        const p = join(root, `${form.org}-${form.repo.replaceAll("*", "star")}.json`);
         const minted = mintApproval({ target: form, path: p, now: T0 });
         for (const [kind, org, repo] of OWNERS) {
           const found = findApproval({ org, repo }, undefined, scope, p, T0);

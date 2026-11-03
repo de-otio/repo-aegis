@@ -16,7 +16,7 @@
 // file, and `SHELL_STARTUP_OVERRIDES` keeps only the variable NAME and the file
 // name: the value of a startup-file assignment can be a token or a path, and
 // doctor output can land in an agent transcript.
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -99,12 +99,18 @@ export function watchedVariablesIn(text: string): string[] {
 }
 
 function readStartupFile(path: string): string | null {
+  // One open: the size and type checks and the read are all on the same file
+  // descriptor, so the file cannot be swapped between the check and the read.
+  let fd: number | undefined;
   try {
-    const st = statSync(path);
+    fd = openSync(path, "r");
+    const st = fstatSync(fd);
     if (!st.isFile() || st.size > MAX_STARTUP_BYTES) return null;
-    return readFileSync(path, "utf8");
+    return readFileSync(fd, "utf8");
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 

@@ -135,7 +135,7 @@ describe("checkSshGithubRedirect", () => {
     const c = checkSshGithubRedirect(sshDirWith("Host github.com\n  HostName git.example.net\n  User git\n"));
     assert.equal(c.ok, false);
     assert.equal(c.severity, "info");
-    assert.doesNotMatch(c.detail, /example\.net/);
+    assert.ok(!c.detail.includes("example.net"), c.detail);
   });
 
   it("is info when `Host github.com` sets a ProxyCommand or ProxyJump", () => {
@@ -144,7 +144,7 @@ describe("checkSshGithubRedirect", () => {
       assert.equal(c.ok, false, line);
       assert.equal(c.severity, "info");
       assert.match(c.detail, /ProxyCommand or ProxyJump/);
-      assert.doesNotMatch(c.detail, /example\.net/);
+      assert.ok(!c.detail.includes("example.net"), c.detail);
     }
   });
 

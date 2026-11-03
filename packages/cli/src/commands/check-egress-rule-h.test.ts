@@ -850,13 +850,22 @@ describe("pre-push rule h — the shipped pre-push hook script, end to end (L4)"
     chmodSync(join(tmp, "shipped-hooks", "pre-push"), 0o755);
   });
 
-  /** Run the REAL `git push` with the shipped hook; returns the exit status and stderr. */
+  /**
+   * Run the REAL `git push` with the shipped hook; returns the exit status and stderr.
+   *
+   * Every push goes to its own branch of the shared bare repo by default. Each
+   * `makeRepo` commits identical content, so two repos made within the same
+   * second share a commit SHA; a push of that SHA to a branch already holding
+   * it is "Everything up-to-date": git runs the pre-push hook with no refs on
+   * stdin, there is nothing to judge, and a refusal test sees exit 0 (seen on
+   * fast CI runners, Node 22/24).
+   */
   function realPush(
     ctx: Ctx,
     repo: string,
     remote: string,
     extraEnv: NodeJS.ProcessEnv = {},
-    dest = "main",
+    dest = `e2e-${n++}`,
   ): { status: number; stderr: string } {
     try {
       execFileSync("git", ["-c", `core.hooksPath=${join(tmp, "shipped-hooks")}`, "push", remote, `main:refs/heads/${dest}`], {

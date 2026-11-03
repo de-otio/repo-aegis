@@ -427,7 +427,7 @@ function tokenise(command: string): Segment[] {
         while (pendingHeredocs.length > 0) {
           const { delim, owner } = pendingHeredocs.shift()!;
           const bodyStart = i;
-          let bodyEnd = i;
+          let bodyEnd: number;
           for (;;) {
             const nl = command.indexOf("\n", i);
             const line = nl === -1 ? command.slice(i) : command.slice(i, nl);
@@ -2867,16 +2867,10 @@ function isRoutingConfigKey(key: string): boolean {
 }
 
 /**
- * Whether `git config <rest>` changes a routing key (a read: `--get*`, `--list`, or a lone key). A write
- * of a key that cannot be read, or whose form is unclear (`--edit`), counts.
- */
-function gitConfigChanges(rest: readonly string[]): boolean {
-  return gitConfigChange(rest) !== null;
-}
-
-/**
- * {@link gitConfigChanges} with the kind: `local` when the key is `remote.*` or `branch.*` (the
- * remote's URL, its `gh-resolved`, upstream tracking: they move an implicit target only), else `other`.
+ * Whether `git config <rest>` changes a routing key, and of which kind; `null` for a read (`--get*`,
+ * `--list`, or a lone key). A write of a key that cannot be read, or whose form is unclear (`--edit`),
+ * counts. `local` when the key is `remote.*` or `branch.*` (the remote's URL, its `gh-resolved`,
+ * upstream tracking: they move an implicit target only), else `other`.
  */
 function gitConfigChange(rest: readonly string[]): "local" | "other" | null {
   if (rest.some(a => a === "-e" || a === "--edit")) return "other"; // opens the whole file
