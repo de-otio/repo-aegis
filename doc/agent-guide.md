@@ -489,14 +489,20 @@ Installed by `repo-aegis install hooks` (or `init`). They live at
 `~/.config/repo-aegis/hooks/pre-commit` and `pre-push`, with
 `core.hooksPath` set per repo.
 
-Pre-commit shells out to `repo-aegis check --staged`. Pre-push reads
+Pre-commit runs `repo-aegis check --staged`. Pre-push reads
 ref-update lines on stdin and runs `repo-aegis check --range` per
 updated ref (force-pushes use the empty-tree SHA so every commit on
 the new branch is scanned).
 
-Both hooks `exit 0` if `repo-aegis` isn't on PATH (fail-open) so the
-git workflow doesn't break for users who haven't installed the CLI
-globally.
+Both hooks run the CLI **pinned at install time** by absolute path (the
+Node executable and the CLI's `dist/index.js`, written into the script by
+`install hooks`), not whatever `repo-aegis` or `node` is first on PATH. They
+**fail closed**: if a pinned file is gone, the hook exits 1 naming the path and
+`repo-aegis install hooks`. There is no environment variable to turn that off;
+a person re-runs the installer, for example after moving or upgrading Node.
+`install shim` pins the `gh` shim the same way (publishing verbs are refused
+with exit 2; other `gh` verbs pass through). See
+[`doc/configuration.md`](configuration.md#the-pinned-enforcement-binary).
 
 ### Claude Code PostToolUse
 
@@ -920,6 +926,9 @@ the row below):
 | `REGISTRY_UNREADABLE` / `OWNERS_UNDECLARED` (`doctor`, failures) | the registry is encrypted or does not parse, so rule h refuses every non-interactive egress with a destination; or it loads with no owners, so rule h is inert | surface the `fix` line. Never run an owner add or `registry decrypt` yourself: both need a person at a terminal. |
 | `GH_LOGIN_UNREGISTERED` / `GH_MEMBER_ORG_UNREGISTERED` / `REGISTERED_ORG_NOT_MEMBER` (`doctor`) | a logged-in `gh` account, or an organisation it belongs to, is not a registered owner (or, for the info check, a registered owner matches no account) | surface the `fix` line (it names the owners; the summary line does not). Which owners are "ours" is the user's decision, and only a person at a terminal can add one. `SKIP` means `gh` was absent or logged out, not that all is well. |
 | `REGISTRY_AGENT_WRITABLE` / `GH_BINARY_UNTRUSTED` / `GH_CONFIG_REDIRECT` / `PREPUSH_HOOK_MISSING` / `SHELL_STARTUP_OVERRIDES` / `SSH_GITHUB_REDIRECT` (`doctor`, warnings and info) | no `permissions.deny` Edit rule for the registry, approvals, hooks, shim and rendered-markers paths; the `gh` first on `PATH` is in an agent-writable or non-standard place; the guard hook is registered but the global `core.hooksPath` is not the repo-aegis hooks directory; a shell startup file exports `GH_REPO`, `GH_HOST`, `GIT_SSH_COMMAND`, `SRT_*` or `REPO_AEGIS_*`; `Host github.com` in the ssh config points elsewhere or is proxied | suggest the `fix` line (`install claude-md` / `install hooks` / remove the export). Never print a startup file's value. |
+| `ENFORCEMENT_UNPINNED` / `ENFORCEMENT_PIN_MISSING` (`doctor`, failures) | an installed hook or the `gh` shim still calls `repo-aegis` by name (written before the pin existed), so a `repo-aegis` or `node` first on `PATH` decides what enforces; or a pinned node or CLI path no longer exists (Node moved or upgraded, install removed), so that hook exits 1 and that shim refuses publishing verbs | surface the `fix` line (`repo-aegis install hooks` and/or `repo-aegis install shim`). A person at a terminal normally runs it; never look for another way to make a hook pass |
+| `MULTIPLE_INSTALLS` (`doctor`, warning) | more than one `repo-aegis` is reachable on `PATH` (listed with each version), or the first one is not the pinned one, so a terminal and an agent's shell can run different versions | surface the list; the user keeps one install, removes the rest, then re-runs `install hooks` and `install shim` so the pin follows it. Doctor never runs the candidates; versions come from `package.json` |
+| `PIN_PATH_UNSUPPORTED` (`install hooks`, `install shim`) | the Node or CLI path contains a newline or NUL, which cannot be written into the generated script | tell the user to install at an ordinary path; there is no override |
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` / `GUARD_HOOK_UNREGISTERED` (`doctor`) | the `gh` shim is absent, shadowed on `PATH`, or left over from an earlier release; the guard hook is not in `settings.json` | suggest `repo-aegis install shim` / fixing `PATH` order / `repo-aegis install claude-md`. A shadowed shim is also why a `gh` verb can be refused with `SHIM_UNREACHABLE_NEEDS_HUMAN`. |
 
 `audit` also emits per-finding diagnostic codes inside its

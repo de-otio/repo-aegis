@@ -208,6 +208,55 @@ waive` itself refuses to run outside a TTY unless
 `engagementsFromOverride: true` when the value came from the
 `.repo-aegis.yml` rather than git config.
 
+## The pinned enforcement binary
+
+The git hooks (`pre-commit`, `pre-push`) and the `gh` shim run the scanner by
+**absolute path**, never by name. `repo-aegis install hooks` and `repo-aegis
+install shim` resolve two paths and write them into the generated scripts:
+
+- the Node executable (`process.execPath`, canonicalised), and
+- the CLI entry (the `dist/index.js` of the install that is running, canonicalised).
+
+Every call in the scripts is `"$__ra_node" "$__ra_cli" …`; no call by name
+remains. The paths are shell-quoted when rendered, and a path containing a
+newline or NUL refuses the install (`PIN_PATH_UNSUPPORTED`).
+
+Why: a name is looked up on the caller's `PATH`, and an agent can usually write
+to a directory in the user's home that comes first on it. A `repo-aegis` (or a
+`node`, which the CLI's `#!/usr/bin/env node` line also resolves by name) that
+exits 0 there would switch off the pre-commit scan, the pre-push scan and the
+shim's egress check. Two installs on one machine also meant the person's
+terminal and the agent's shell enforced different versions.
+
+**Fail closed.** If a pinned file is missing or not usable (a Node upgrade
+through a version manager moves `process.execPath`; an install was removed):
+
+| Script | Result |
+|---|---|
+| `pre-commit`, `pre-push` | exit 1, naming the missing path and `repo-aegis install hooks` |
+| `gh` shim | publishing verbs refused with exit 2, naming the missing path and `repo-aegis install shim`; every other `gh` verb still passes through |
+
+There is no environment variable that turns this off, because an agent could set
+it. A person re-runs the installer from a terminal. **After moving or upgrading
+Node, or reinstalling repo-aegis, re-run `repo-aegis install hooks` and
+`repo-aegis install shim`.**
+
+How it shows up elsewhere:
+
+- `status` and `doctor` compare each installed hook with the script rendered for
+  the **current** pin, so a hook rendered for another path, or an older unpinned
+  one, is `HOOKS_SCRIPT_STALE`; the same comparison gives the shim `SHIM_STALE`.
+- `doctor` reports `ENFORCEMENT_UNPINNED`, `ENFORCEMENT_PIN_MISSING` and
+  `MULTIPLE_INSTALLS` (see `doc/agent-guide.md`).
+- `install claude-md` adds `permissions.deny` Edit rules for the pinned CLI's
+  package directory and the pinned Node executable, so an agent cannot overwrite
+  the code the pin points at. A package directory inside a git work tree (a
+  development checkout) is not denied; the install prints a warning instead.
+
+Not covered: which `gh` binary the shim runs (it still looks for the first `gh`
+on `PATH` that is not itself), and the shim's existing rule that a fault in the
+guard itself (an exit other than 0 or 2) does not block `gh`.
+
 ## Environment variables
 
 | Var | Effect |

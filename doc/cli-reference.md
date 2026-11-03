@@ -1386,6 +1386,9 @@ now reports, unless `--no-egress-checks`:
 |---|---|---|
 | `PUSH_DEFAULT_IMPLICIT` | global `push.default` is unset or not `nothing` | `git config --global push.default nothing` |
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` | no shim; another `gh` precedes it on `PATH`; the shim on `PATH` is an earlier release's script | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
+| `ENFORCEMENT_UNPINNED` (**fail**) | an installed hook or the shim calls `repo-aegis` by name (an install from before the enforcement pin) | `repo-aegis install hooks` / `repo-aegis install shim` |
+| `ENFORCEMENT_PIN_MISSING` (**fail**) | a pinned node or CLI path no longer exists, so that hook exits 1 and that shim refuses publishing verbs | `repo-aegis install hooks` / `repo-aegis install shim` |
+| `MULTIPLE_INSTALLS` (warn) | more than one `repo-aegis` on `PATH` (each listed with its version), or the first one is not the pinned one | keep one install, then re-run `install hooks` and `install shim` |
 | `GUARD_HOOK_UNREGISTERED` | Claude Code `settings.json` has no `guard-egress` entry | `repo-aegis install claude-md` |
 | `CLASS_VISIBILITY_UNRESOLVED` (per repo) | a repo with a GitHub remote has no explicit class or no cached visibility | `repo-aegis classify --apply && repo-aegis status` in that repo |
 | `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |

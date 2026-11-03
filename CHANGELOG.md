@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stricter (may refuse what 0.11 allowed)
+
+The git hooks and the `gh` shim now run the scanner by the absolute path of the
+Node executable and CLI entry that installed them, and fail closed. **After
+moving or upgrading Node (for example through a version manager), or
+reinstalling repo-aegis, re-run `repo-aegis install hooks` and `repo-aegis
+install shim`**: until you do, commits and pushes are blocked and the shim
+refuses `gh` publishing verbs, with a message naming the missing path and the
+command to run. Existing installs keep their old, unpinned scripts until you
+re-run the installers; `repo-aegis doctor` reports them
+(`ENFORCEMENT_UNPINNED`). Design: `doc/plan-pin-enforcement-binary.md`.
+
+- **Pinned enforcement binary.** `pre-commit`, `pre-push` and the `gh` shim called
+  `repo-aegis` (and, through its `#!/usr/bin/env node` line, `node`) by name, so
+  whatever came first on `PATH` decided what enforced: a file named
+  `repo-aegis` that exits 0 in a directory ahead of the real one switched off the
+  scans and the shim's egress check, and two installs meant different versions
+  in the person's terminal and the agent's shell. `install hooks` and `install
+  shim` now write the absolute paths into the scripts (shell-quoted; a path with
+  a newline or NUL refuses the install, `PIN_PATH_UNSUPPORTED`).
+- **Fail closed.** The hooks used to `exit 0`, and the shim to `exec` the real
+  `gh`, when no `repo-aegis` was found. A missing pinned file now makes the hooks
+  exit 1 and the shim refuse publishing verbs (exit 2); other `gh` verbs still
+  pass through. There is no environment variable to turn this off.
+- **Staleness follows the pin.** `status` and `doctor` compare installed hooks and
+  the shim with the script rendered for the current pin: a hook or shim pinned
+  elsewhere, or an old unpinned one, is `HOOKS_SCRIPT_STALE` / `SHIM_STALE`.
+  Library change: `renderHookScript(name, pin)` and `hookScriptDigest(name, pin)`
+  replace the `PRE_COMMIT_SCRIPT`, `PRE_PUSH_SCRIPT` and `HOOK_SCRIPTS` constants,
+  and `resolveHookState` takes the pin.
+- **`doctor`:** `ENFORCEMENT_UNPINNED` and `ENFORCEMENT_PIN_MISSING` (failures),
+  and `MULTIPLE_INSTALLS` (warning: more than one `repo-aegis` on `PATH`, listed
+  with each version, or the first one is not the pinned one; nothing on `PATH` is
+  executed).
+- **`install claude-md`** adds `permissions.deny` Edit rules for the pinned CLI's
+  package directory and the pinned Node executable, in the same ledger as the
+  registry rules, so an agent cannot overwrite the code the pin points at. A
+  package directory inside a git work tree (a development checkout) is warned
+  about and not denied.
+
 ## [0.11.0] - 2026-11-03
 
 ### Stricter (may refuse what 0.10 allowed)
