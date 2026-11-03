@@ -35,15 +35,19 @@ import {
   readCachedVisibility,
   recordWorkingTree,
   loadRegistry,
+  RegistryEncryptedError,
+  RegistryNotFoundError,
   type HookState,
   type HookStateCode,
   type Registry,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { findWorkingTrees, defaultScanRoots } from "../repo-walk.js";
-import type { DoctorCheck } from "./doctor-checks.js";
+import { checkLabel, isFailure, isReportable, PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
-import { checkGuardHook } from "./install-claude-md.js";
+import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
+import { ghOwnerChecks, registryStateChecks, type DoctorRegistryState, type GhCheckOptions } from "./doctor-owner-checks.js";
+import { checkPrePushHook, checkShellStartupOverrides, checkSshGithubRedirect } from "./doctor-env-checks.js";
 
 interface DoctorOptions extends OutputOptions {
   scanRoot?: string[];
@@ -62,6 +66,14 @@ interface DoctorOptions extends OutputOptions {
   egressChecks?: boolean;
   /** Where Claude Code's `settings.json` lives, for `GUARD_HOOK_UNREGISTERED` (default `~/.claude`). */
   claudeHome?: string;
+  /** Home directory whose shell startup files `SHELL_STARTUP_OVERRIDES` reads (default `$HOME`). */
+  homeDir?: string;
+  /** Directory holding the ssh `config` for `SSH_GITHUB_REDIRECT` (default: the passwd home's `.ssh`). */
+  sshDir?: string;
+  /** Test seam for the gh-backed checks (binary policy, confirmation). Not reachable from the CLI. */
+  ghOptions?: GhCheckOptions;
+  /** Test seam: what the global `core.hooksPath` holds, for `PREPUSH_HOOK_MISSING`. */
+  readGlobalHooksPath?: () => string | null;
 }
 
 export interface DoctorRepoResult {
@@ -196,8 +208,40 @@ function checkPushDefault(): DoctorCheck {
 /** Checkouts recorded into the destination cache by this run (reset per `doctor()` call). */
 let recordedDestinations = 0;
 
-function machineChecks(claudeHome?: string): DoctorCheck[] {
-  return [checkPushDefault(), ...checkShim(), ...checkGuardHook(claudeHome)];
+/** How the registry looked to this run, for the owner checks. */
+interface RegistryLoad {
+  state: DoctorRegistryState;
+  registry: Registry | null;
+  /** Unreadable because it is encrypted at rest (changes the fix). */
+  encrypted: boolean;
+}
+
+/**
+ * Best-effort, and the three states are different findings (decision D4): no
+ * file is not a finding (rule h is skipped by design), a file that exists but
+ * cannot be read IS (rule h then refuses everything), a loaded registry is
+ * compared against `gh`. Anything that is not "not found" counts as unreadable,
+ * the same classification the hook, the shim and pre-push use.
+ */
+function loadRegistryForDoctor(): RegistryLoad {
+  try {
+    return { state: "loaded", registry: loadRegistry(), encrypted: false };
+  } catch (err) {
+    if (err instanceof RegistryNotFoundError) return { state: "missing", registry: null, encrypted: false };
+    return { state: "unreadable", registry: null, encrypted: err instanceof RegistryEncryptedError };
+  }
+}
+
+function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
+  const checks = [checkPushDefault(), ...checkShim(), ...checkGuardHook(opts.claudeHome)];
+  checks.push(...registryStateChecks(reg.state, reg.registry, reg.encrypted));
+  // With no registry there is nothing to protect and nothing to compare gh against.
+  if (reg.state !== "missing") checks.push(checkRegistryAgentWritable(opts.claudeHome));
+  if (reg.state === "loaded" && reg.registry !== null) {
+    checks.push(...ghOwnerChecks(reg.registry, process.env, opts.ghOptions));
+  }
+  checks.push(checkShellStartupOverrides(opts.homeDir), checkSshGithubRedirect(opts.sshDir));
+  return checks;
 }
 
 /**
@@ -245,7 +289,9 @@ function repoEgressChecks(wt: string, registry: Registry | null): DoctorCheck[] 
       ...(known
         ? {}
         : {
-            fix: `repo-aegis engagements add --personal-org ${org}   (or --github-org ${org} on the engagement that owns it)`,
+            fix:
+              `repo-aegis engagements add --personal-org ${org}   (or --github-org ${org} on the engagement that owns it; ` +
+              `${PERSON_RUNS_THIS})`,
           }),
     });
   }
@@ -270,18 +316,15 @@ export function doctor(opts: DoctorOptions): void {
 
   // Commander's negation gives `false`; absence gives `undefined` -> ON.
   const egressChecksOn = opts.egressChecks !== false;
-  const machine = egressChecksOn ? machineChecks(opts.claudeHome) : [];
   // Loaded once for the whole sweep, best-effort: a registry that cannot be
-  // read means `PERSONAL_ORG_UNREGISTERED` is simply not answerable, and a
-  // guardrail must not report a failure it cannot substantiate.
-  let registry: Registry | null = null;
-  if (egressChecksOn) {
-    try {
-      registry = loadRegistry();
-    } catch {
-      registry = null;
-    }
-  }
+  // read means `PERSONAL_ORG_UNREGISTERED` is simply not answerable. That is
+  // still reported, once, as `REGISTRY_UNREADABLE` (a failure, decision D4),
+  // but never as a per-repo failure doctor cannot substantiate.
+  const regLoad: RegistryLoad = egressChecksOn
+    ? loadRegistryForDoctor()
+    : { state: "missing", registry: null, encrypted: false };
+  const registry = regLoad.registry;
+  const machine = egressChecksOn ? machineChecks(opts, regLoad) : [];
 
   const results: DoctorRepoResult[] = [];
   let scanned = 0;
@@ -299,7 +342,7 @@ export function doctor(opts: DoctorOptions): void {
       // Healthy on BOTH axes: contributes to `scanned` only, never listed —
       // see module header. A repo whose hooks are live but whose class is
       // unresolved is now listed, because the egress controls are inert there.
-      if (!hookFailing && checks.every(c => c.ok)) continue;
+      if (!hookFailing && !checks.some(isReportable)) continue;
 
       let fixed = false;
       // `--fix` is about `core.hooksPath` and nothing else; a repo listed only
@@ -353,10 +396,21 @@ export function doctor(opts: DoctorOptions): void {
     }
   }
 
-  const machineFailed = machine.filter(c => !c.ok).length;
-  const repoFailed = results.filter(
-    r => !r.ok || r.bypassedRepoHooks.length > 0 || r.checks.some(c => !c.ok),
-  ).length;
+  // R11, after the sweep and any `--fix`: one machine-level setting, not a
+  // per-repo property. `checkGuardHook` is the same answer the machine checks
+  // above reported, so a missing guard hook is not double-reported.
+  if (egressChecksOn) {
+    const guardRegistered = checkGuardHook(opts.claudeHome).every(c => c.ok);
+    const prePush = checkPrePushHook(guardRegistered, opts.readGlobalHooksPath);
+    if (prePush !== null) machine.push(prePush);
+  }
+
+  // Only `fail`-severity findings count. A warning or an info line is reported
+  // and never changes the exit code, so it cannot turn a green CI job red.
+  const machineFailed = machine.filter(isFailure).length;
+  const repoIsFailing = (r: DoctorRepoResult): boolean =>
+    !r.ok || r.bypassedRepoHooks.length > 0 || r.checks.some(isFailure);
+  const repoFailed = results.filter(repoIsFailing).length;
   const failed = repoFailed + machineFailed;
 
   if (opts.json) {
@@ -374,22 +428,28 @@ export function doctor(opts: DoctorOptions): void {
       emitText(`doctor: recorded ${recordedDestinations} checkout(s) into the destination cache`);
     }
     for (const c of machine) {
-      if (c.ok) continue;
-      emitText(`  FAIL ${c.code} — ${c.detail}`);
+      if (!isReportable(c)) continue;
+      emitText(`  ${checkLabel(c)} ${c.code} — ${c.detail}`);
       if (c.fix !== undefined) emitText(`       fix: ${c.fix}`);
     }
+    const machineNotes = machine.filter(c => isReportable(c) && !isFailure(c)).length;
     if (results.length === 0 && machineFailed === 0) {
-      emitText("doctor: all clean");
+      // "all clean" is a claim; a WARN or SKIP line printed above contradicts it.
+      emitText(
+        machineNotes === 0
+          ? "doctor: all clean"
+          : `doctor: no failures (${machineNotes} warning, info or skipped finding(s) above)`,
+      );
     } else {
       for (const r of results) {
         const tag = r.fixed ? " [fixed]" : showWouldFix ? " [would fix]" : "";
-        emitText(`  FAIL ${r.workingTree}  code=${r.code}${tag}`);
+        emitText(`  ${repoIsFailing(r) ? "FAIL" : "WARN"} ${r.workingTree}  code=${r.code}${tag}`);
         if (r.bypassedRepoHooks.length > 0) {
           emitText(`       repo-local hooks that never run: ${r.bypassedRepoHooks.join(", ")}`);
         }
         for (const c of r.checks) {
-          if (c.ok) continue;
-          emitText(`       FAIL ${c.code} — ${c.detail}`);
+          if (!isReportable(c)) continue;
+          emitText(`       ${checkLabel(c)} ${c.code} — ${c.detail}`);
           if (c.fix !== undefined) emitText(`            fix: ${c.fix}`);
         }
       }

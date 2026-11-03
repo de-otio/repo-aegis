@@ -145,18 +145,18 @@ export async function buildProgram(): Promise<Command> {
   engagements
     .command("add [id]")
     .description(
-      "add a new engagement (or, with --personal-org, append to top-level personalOrgs)",
+      "add a new engagement (or, with --personal-org, append to top-level personalOrgs). --personal-org and --github-org register owners and need a terminal (a TTY on stderr); an agent must not run them.",
     )
     .option("--name <name>", "human-readable name (defaults to id)")
     .option("--started <date>", "started date in YYYY-MM-DD (defaults to today)")
     .option("--marker <pattern...>", "marker pattern; pass multiple times for multiple markers")
     .option(
       "--github-org <org...>",
-      "GitHub org(s) that map to this engagement; enables auto-classify on first agent open",
+      "GitHub org(s) that map to this engagement; enables auto-classify on first agent open. Needs a terminal.",
     )
     .option(
       "--personal-org <org...>",
-      "GitHub org(s) you own; appended to top-level personalOrgs (no engagement created). Mutually exclusive with --github-org.",
+      "GitHub org(s) you own; appended to top-level personalOrgs (no engagement created). Mutually exclusive with --github-org. Needs a terminal.",
     )
     .action((id: string | undefined, opts, cmd) =>
       engagementsAdd(id, withGlobals(opts, cmd)),
@@ -179,6 +179,38 @@ export async function buildProgram(): Promise<Command> {
     .option("--hard", "required: physically delete the entry. Use `engagements end --purge` for soft removal.")
     .action((id: string, opts, cmd) => engagementsRemove(id, withGlobals(opts, cmd)));
 
+  // Forks: `allowedUpstreams` lifts rule h (refusal of egress to an unregistered
+  // owner) for PRs, issues and comments to one exact owner/repo. `add` widens
+  // what an agent may publish to, so it is human-only, like `approve`.
+  const upstreams = program
+    .command("upstreams")
+    .description(
+      "manage allowedUpstreams: exact <owner>/<repo> upstreams of your forks that PRs, issues and comments may target. `add` needs a terminal.",
+    );
+  upstreams
+    .command("add <owner/repo>")
+    .description(
+      "allow PRs, issues and comments to <owner>/<repo>. Needs a terminal (a TTY on stderr): an agent must not register upstreams, and no env var or approval lifts this. Never allows git push, merge, release or gh api writes.",
+    )
+    .action(async (target: string, opts, cmd) => {
+      const { upstreamsAdd } = await import("./commands/upstreams.js");
+      upstreamsAdd(target, withGlobals(opts, cmd));
+    });
+  upstreams
+    .command("remove <owner/repo>")
+    .description("remove an allowed upstream (no terminal needed: removing only tightens)")
+    .action(async (target: string, opts, cmd) => {
+      const { upstreamsRemove } = await import("./commands/upstreams.js");
+      upstreamsRemove(target, withGlobals(opts, cmd));
+    });
+  upstreams
+    .command("list")
+    .description("list allowed upstreams (no terminal needed)")
+    .action(async (opts, cmd) => {
+      const { upstreamsList } = await import("./commands/upstreams.js");
+      upstreamsList(withGlobals(opts, cmd));
+    });
+
   program
     .command("init")
     .description("bootstrap repo-aegis: create config dir, scaffold registry, render markers, install hooks")
@@ -186,11 +218,14 @@ export async function buildProgram(): Promise<Command> {
     .option("--with-claude", "install Claude Code PostToolUse hook + CLAUDE.md snippet (default on)", true)
     .option("--no-with-hooks", "skip git hook installation")
     .option("--no-with-claude", "skip Claude Code hook installation")
-    .option("--force", "overwrite existing engagements.yaml")
+    .option(
+      "--force",
+      "overwrite existing engagements.yaml. Needs a terminal (a TTY on stderr) when the existing registry declares anything (owners, upstreams, engagements, markers, always_block)",
+    )
     .option("--claude-home <dir>", "override default ~/.claude location (used by --with-claude)")
     .option(
       "--migrate-classify",
-      "migrate ~/.config/repo-aegis/classify.yml into the engagement registry's githubOrgs/personalOrgs (Phase 1 onboarding); does not bootstrap or install",
+      "migrate ~/.config/repo-aegis/classify.yml into the engagement registry's githubOrgs/personalOrgs (Phase 1 onboarding); does not bootstrap or install. Adds owners, so it needs a terminal (a TTY on stderr), lists them, and asks for a typed y (stdin must be a TTY) when classify.yml has any",
     )
     .action((opts, cmd) => init(withGlobals(opts, cmd)));
 
@@ -569,7 +604,9 @@ export async function buildProgram(): Promise<Command> {
   // without the operator running the command — and without the env escape.
   program
     .command("approve [target]")
-    .description("mint (from a terminal), list, or revoke a time-limited human approval for publishing to <org>/<repo>, <org>/*, or *")
+    .description(
+      "mint (from a person's terminal), list, or revoke a time-limited human approval for publishing to <org>/<repo>, <org>/*, or *. '*' covers only your personalOrgs and npm publish, not customer orgs or allowed upstreams (use <org>/* or <org>/<repo>). No approval helps with an unregistered owner: register it first (engagements add, upstreams add).",
+    )
     .option("--ref <ref>", "approve only this branch or tag")
     .option("--ttl <duration>", "how long the approval lives: 15m (default), 2h, 90s, 1d — never more than 24h")
     .option("--note <text>", "why (audit trail only)")
@@ -594,7 +631,7 @@ export async function buildProgram(): Promise<Command> {
     .option("--yes", "apply --fix changes (default: dry-run report only)")
     .option(
       "--no-egress-checks",
-      "skip the egress-guard checks (push.default, gh shim on PATH, guard hook registered, class + visibility resolved per repo)",
+      "skip the egress-guard checks (push.default, gh shim on PATH, guard hook registered, class + visibility resolved per repo, registered owners vs every logged-in gh account, pre-push hook, shell startup overrides)",
     )
     .option("--claude-home <dir>", "override default ~/.claude location (for the guard-hook check)")
     .action((opts, cmd) => doctor(withGlobals(opts, cmd)));

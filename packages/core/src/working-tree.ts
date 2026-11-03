@@ -15,7 +15,7 @@
 import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { parseRemoteUrl } from "./remote-url.js";
+import { parseRemoteUrlResolved } from "./remote-url.js";
 
 const MAX_ANCESTOR_HOPS = 64;
 
@@ -119,7 +119,7 @@ export function resolveGitDir(workingTree: string): string | null {
 export function getRemoteOrg(workingTree: string): string | null {
   const url = getRemoteUrl(workingTree);
   if (url === null) return null;
-  const parsed = parseRemoteUrl(url);
+  const parsed = parseRemoteUrlResolved(url);
   return parsed?.org ?? null;
 }
 

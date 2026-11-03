@@ -25,17 +25,23 @@ import {
   recordWorkingTree,
   describeDestinationForReceipt,
   describeVerb,
+  egressParseOptions,
   formatReceipt,
-  isHumanPresent,
+  isPrintableDestination,
   loadRegistry,
   parseEgressIntents,
   parseRemoteUrl,
+  RegistryNotFoundError,
   resolveDestinationOffline,
+  ruleHStatus,
+  SHAPE_RULE_CODES,
   type Destination,
   type EgressIntent,
   type Registry,
+  type RegistryState,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, type OutputOptions } from "../format.js";
+import { currentHumanPresent } from "../human-presence.js";
 
 export interface EgressCheckOptions extends OutputOptions {
   cwd?: string;
@@ -66,16 +72,26 @@ export function buildGhCommand(args: string[]): string {
 const EMPTY_REGISTRY: Registry = { engagements: [], alwaysBlock: [] };
 
 /**
- * The registry, or an empty one. Fails OPEN by design: a missing or broken
+ * The registry, or an empty one, with how it was obtained. A missing
  * registry must not stop `gh` from working, and the shape rules (relative
  * or mode-dependent payload paths, `cd`-preceded egress, unguarded chains)
- * need no registry at all — they still apply.
+ * need no registry at all — they still apply. But "missing" and "unreadable"
+ * are different for rule h (issue #151, decision D4):
+ *
+ *   - no registry file → `missing`: rule h is skipped (fails open);
+ *   - encrypted, or a file that does not parse or validate → `unreadable`:
+ *     rule h refuses any egress that has a destination, because no owner can
+ *     be confirmed. Only {@link RegistryNotFoundError} is "missing"; any
+ *     other error, including an unknown one, is `unreadable` (fail closed).
  */
-function loadRegistryOrEmpty(): Registry {
+function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistryState } {
   try {
-    return loadRegistry();
-  } catch {
-    return EMPTY_REGISTRY;
+    return { registry: loadRegistry(), registryState: "loaded" };
+  } catch (err) {
+    return {
+      registry: EMPTY_REGISTRY,
+      registryState: err instanceof RegistryNotFoundError ? "missing" : "unreadable",
+    };
   }
 }
 
@@ -89,7 +105,13 @@ interface DestinationJson {
   unresolved?: string;
 }
 
-function destinationJson(d: Destination): DestinationJson {
+/**
+ * The verdict's view of a destination, or `undefined` when its name is not a
+ * plausible GitHub owner/repo (shell syntax, a line break, U+202E): the name
+ * came from the agent's command line and this JSON reaches a terminal.
+ */
+function destinationJson(d: Destination): DestinationJson | undefined {
+  if (!isPrintableDestination(d)) return undefined;
   if (d.unresolved !== undefined) {
     return { org: d.org, repo: d.repo, visibility: "unknown", class: "unknown", unresolved: d.unresolved };
   }
@@ -114,12 +136,15 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   const cwd = opts.cwd ?? process.cwd();
   let intents: EgressIntent[];
   try {
-    intents = parseEgressIntents(buildGhCommand(args));
+    // The shim's own environment is the real `gh`'s: its GH_REPO and aliases.
+    intents = parseEgressIntents(buildGhCommand(args), egressParseOptions(process.env, cwd));
   } catch (err) {
     return internalError(`could not parse the gh command line: ${(err as Error).message}`);
   }
 
-  const registry = loadRegistryOrEmpty();
+  const { registry, registryState } = loadRegistryOrEmpty();
+  const ruleH = ruleHStatus(registryState, registry);
+  const humanPresent = currentHumanPresent();
   // Write-through into the machine-wide destination cache (see
   // `hook guard-egress`): a command judged from inside a repository leaves
   // that repository's declaration where a later command from elsewhere can
@@ -131,7 +156,8 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
       intents,
       cwd,
       registry,
-      humanPresent: isHumanPresent(),
+      registryState,
+      humanPresent,
       // A shell has no prompt to offer, so `ask` degrades to `deny` in core.
       capabilities: { ask: false },
     });
@@ -140,13 +166,18 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   }
 
   if (decision.action === "deny" || decision.action === "ask") {
+    const shown = decision.destination && destinationJson(decision.destination);
     process.stderr.write(
       JSON.stringify({
         code: decision.code,
         error: decision.reason,
         details: {
           verb: describeVerb(decision.intent.verb),
-          ...(decision.destination && { destination: destinationJson(decision.destination) }),
+          // D4: say whether rule h judged (`applied`) or was skipped, and why.
+          // As in the hook: not when a person is present, and not for a shape
+          // rule (a–d), which never reached rule h.
+          ...(!humanPresent && !SHAPE_RULE_CODES.has(decision.code) && { ruleH }),
+          ...(shown && { destination: shown }),
         },
       }) + "\n",
     );
@@ -195,9 +226,12 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
     first === undefined
       ? undefined
       : `${describeVerb(first.verb)}${first.refspec !== undefined ? ` ${first.refspec}` : ""}`;
+  const destJson = destination ? destinationJson(destination) : undefined;
   emitJson({
     action: "allow",
-    ...(destination && { destination: destinationJson(destination) }),
+    // Only for a command with egress intents: a plain read stays `{action}`.
+    ...(intents.length > 0 && !humanPresent && { ruleH }),
+    ...(destJson && { destination: destJson }),
     ...(decision.action === "allow" &&
       decision.approval !== undefined && {
         approval: { id: decision.approval.id, expiresAt: decision.approval.expiresAt },

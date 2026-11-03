@@ -35,18 +35,34 @@
 //      output and no registry read.
 import {
   appendAuditRecord,
+  checkNetworkRules,
   decideEgress,
   recordWorkingTree,
   describeVerb,
-  isHumanPresent,
+  egressParseOptions,
+  findHumanOnlyCommand,
+  humanCommandRefusal,
+  AGENT_RAN_HUMAN_COMMAND,
+  AGENT_DETACHED_SESSION,
+  findDetachedStart,
+  detachedStartRefusal,
+  isPrintableDestination,
   loadRegistry,
   parseEgressIntents,
+  ruleHSkipNote,
+  ruleHStatus,
+  SHAPE_RULE_CODES,
   RegistryEncryptedError,
   RegistryNotFoundError,
   type Destination,
+  type DetachedHit,
   type EgressDecision,
+  type HumanOnlyKind,
   type Registry,
+  type RegistryState,
+  type RuleHStatus,
 } from "@de-otio/repo-aegis-core";
+import { currentHumanPresent } from "../human-presence.js";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
 
 export interface HookGuardEgressOptions {
@@ -153,19 +169,41 @@ function parseHookInput(json: string): HookInput {
   return out;
 }
 
-/** Read stdin to a string, capped at 1 MiB (same cap as `hook check-write`). */
-async function readStdin(): Promise<string> {
+/** The most hook input read; a longer payload is not judged, it is refused (issue #151, final review V1). */
+export const HOOK_INPUT_MAX_BYTES = 1024 * 1024;
+
+/** Read stdin to a string, capped at {@link HOOK_INPUT_MAX_BYTES}; `truncated` says the cap cut it. */
+async function readStdin(): Promise<{ text: string; truncated: boolean }> {
   const chunks: Buffer[] = [];
   let total = 0;
-  const MAX = 1024 * 1024;
   for await (const chunk of process.stdin) {
     const b = typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer);
     total += b.length;
-    if (total > MAX) break;
+    if (total > HOOK_INPUT_MAX_BYTES) {
+      chunks.push(b.subarray(0, Math.max(0, b.length - (total - HOOK_INPUT_MAX_BYTES))));
+      return { text: Buffer.concat(chunks).toString("utf8"), truncated: true };
+    }
     chunks.push(b);
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return { text: Buffer.concat(chunks).toString("utf8"), truncated: false };
 }
+
+/**
+ * A payload past the cap cannot be parsed, and treating "unparseable" as "no command" let a command padded
+ * past 1 MiB through every hook-only rule (R6, the human-only and detached-session refusals, the shape rules).
+ * So it is refused, unless what was read already names a tool that is not a shell (a harness that sends every
+ * tool to this hook). `tool_name` comes first in every harness's payload, well inside the cap.
+ */
+export function oversizedInputVerdict(prefix: string): "proceed" | "refuse" {
+  const m = /"tool_name"\s*:\s*"([^"\\]{1,64})"/.exec(prefix.slice(0, 4096));
+  if (m !== null && !SHELL_TOOL_NAMES.has(m[1]!.toLowerCase())) return "proceed";
+  return "refuse";
+}
+
+const HOOK_INPUT_TOO_LARGE_REASON =
+  "repo-aegis: refused. This command is larger than 1 MiB, so the egress guard cannot read it whole and does not " +
+  "judge it. No approval covers this. Fix: put large content in a file and pass the file (`--body-file`, `-F`, " +
+  "`--input`, `-d @file`), keeping the command itself short. See doc/agent-guide.md#hook_input_too_large.";
 
 const EMPTY_REGISTRY: Registry = {
   engagements: [],
@@ -176,27 +214,34 @@ const EMPTY_REGISTRY: Registry = {
 
 /**
  * The registry is optional here. The shape rules need no registry at all,
- * and a guard that refused to run because a registry was missing or
- * encrypted would be inert exactly where it is most needed (a fresh machine,
- * a locked registry). So every failure falls back to an empty registry and
- * the condition travels with the decision instead.
+ * and a guard that refused to run because a registry was missing would be
+ * inert exactly where it is most needed (a fresh machine). So a failure falls
+ * back to an empty registry and the condition travels with the decision as
+ * `registryState`, which rule h reads (issue #151, decision D4):
+ *
+ *   - no registry file  → `missing`: rule h is skipped;
+ *   - encrypted, or a file that does not parse or validate → `unreadable`:
+ *     rule h REFUSES any egress that has a destination, because no owner can
+ *     be confirmed. Skipping here would let an agent that can write the file
+ *     switch rule h off with one bad YAML line.
+ *
+ * Only {@link RegistryNotFoundError} is "missing". Anything else, including an
+ * error this code does not know, is `unreadable`: fail closed.
  */
-function loadRegistryOrEmpty(): { registry: Registry; note?: string } {
+function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistryState; note?: string } {
   try {
-    return { registry: loadRegistry() };
+    return { registry: loadRegistry(), registryState: "loaded" };
   } catch (err) {
     if (err instanceof RegistryNotFoundError) {
-      return { registry: EMPTY_REGISTRY };
-    }
-    if (err instanceof RegistryEncryptedError) {
-      return {
-        registry: EMPTY_REGISTRY,
-        note: "registry is encrypted, so only the shape rules ran (context rules need a readable registry)",
-      };
+      return { registry: EMPTY_REGISTRY, registryState: "missing" };
     }
     return {
       registry: EMPTY_REGISTRY,
-      note: "registry could not be read, so only the shape rules ran (context rules need a readable registry)",
+      registryState: "unreadable",
+      note:
+        err instanceof RegistryEncryptedError
+          ? "registry is encrypted: context rules ran without it, and any publish with a destination is refused until it is decrypted"
+          : "registry could not be read: context rules ran without it, and any publish with a destination is refused until it is repaired",
     };
   }
 }
@@ -211,7 +256,9 @@ function loadRegistryOrEmpty(): { registry: Registry; note?: string } {
 function destinationDetails(
   d: Destination | undefined,
 ): { org: string; repo: string; visibility: string; class: string; unresolved?: string } | undefined {
-  if (!d) return undefined;
+  // Defence in depth: the policy already drops an invalid name from the
+  // decision, but this is what reaches the terminal, so check once more.
+  if (!d || !isPrintableDestination(d)) return undefined;
   return {
     org: d.org,
     repo: d.repo,
@@ -270,6 +317,22 @@ function writeDecisionJson(decision: "ask" | "deny", reason: string): void {
   );
 }
 
+/** Refuse a command line that runs a human-only repo-aegis command. Same channels as every other deny. */
+function denyHumanOnlyCommand(kind: HumanOnlyKind): never {
+  const reason = humanCommandRefusal({ kind });
+  process.stderr.write(JSON.stringify({ code: AGENT_RAN_HUMAN_COMMAND, error: reason, details: { command: kind } }, null, 2) + "\n");
+  writeDecisionJson("deny", reason);
+  process.exit(EXIT_BLOCK);
+}
+
+/** Refuse a command line that starts a detached session. Same channels as every other deny. */
+function denyDetachedStart(hit: DetachedHit): never {
+  const reason = detachedStartRefusal(hit);
+  process.stderr.write(JSON.stringify({ code: AGENT_DETACHED_SESSION, error: reason, details: { start: hit.kind } }, null, 2) + "\n");
+  writeDecisionJson("deny", reason);
+  process.exit(EXIT_BLOCK);
+}
+
 /**
  * `repo-aegis hook guard-egress` — PreToolUse(Bash) egress guard.
  *
@@ -286,7 +349,15 @@ function writeDecisionJson(decision: "ask" | "deny", reason: string): void {
 export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<void> {
   let stdinText: string;
   try {
-    stdinText = await readStdin();
+    const input = await readStdin();
+    if (input.truncated && oversizedInputVerdict(input.text) === "refuse") {
+      process.stderr.write(
+        JSON.stringify({ code: "HOOK_INPUT_TOO_LARGE", error: HOOK_INPUT_TOO_LARGE_REASON, details: { verb: "(oversized command)" } }, null, 2) + "\n",
+      );
+      writeDecisionJson("deny", HOOK_INPUT_TOO_LARGE_REASON);
+      process.exit(EXIT_BLOCK);
+    }
+    stdinText = input.text;
   } catch (err) {
     process.stderr.write(
       `repo-aegis: hook guard-egress could not read stdin: ${(err as Error).message}\n`,
@@ -296,18 +367,44 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
 
   let decision: EgressDecision;
   let registryNote: string | undefined;
+  let ruleH: RuleHStatus = "applied";
+  let humanPresent = false;
   try {
     const { command, cwd, toolName } = parseHookInput(stdinText);
     if (toolName !== undefined && !SHELL_TOOL_NAMES.has(toolName.toLowerCase())) process.exit(0);
     if (command === undefined) process.exit(0);
 
-    const intents = parseEgressIntents(command);
+    // R6 (plan §8.2): a raw HTTP client writing to the GitHub API, or `gh auth token` next to a network
+    // call. Shape rules on the command text: no registry, no approval, and no `ask`.
+    const network = checkNetworkRules(command);
+    if (network !== null) {
+      process.stderr.write(
+        JSON.stringify({ code: network.code, error: network.reason, details: { verb: "(raw network call)" } }, null, 2) + "\n",
+      );
+      writeDecisionJson("deny", network.reason);
+      process.exit(EXIT_BLOCK);
+    }
+    // Commands only a person may run (`approve`, owner adds, `upstreams add`,
+    // `init --migrate-classify|--force`): refused in ANY agent Bash text, with
+    // or without a terminal, before the egress parse and its early exit. A pty
+    // wrapper can fake the terminal that those commands' own gate tests, so the
+    // text is the second lock (issue #151, PR 2b).
+    const humanOnly = findHumanOnlyCommand(command);
+    if (humanOnly !== null) denyHumanOnlyCommand(humanOnly.kind);
+    // A detached session start (`tmux new -d`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`)
+    // re-parents a pty to init, where no gate sees an agent above it: refused in any command, egress or not.
+    const detached = findDetachedStart(command);
+    if (detached !== null) denyDetachedStart(detached);
+
+    const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit
     // before touching the registry or the filesystem.
     if (intents.length === 0) process.exit(0);
 
     const loaded = loadRegistryOrEmpty();
     registryNote = loaded.note;
+    ruleH = ruleHStatus(loaded.registryState, loaded.registry);
+    humanPresent = currentHumanPresent();
 
     // Write-through: whatever this directory declares about its own origin
     // goes into the machine-wide destination cache, so the next command that
@@ -319,7 +416,8 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
       intents,
       cwd: cwd ?? process.cwd(),
       registry: loaded.registry,
-      humanPresent: isHumanPresent(),
+      registryState: loaded.registryState,
+      humanPresent,
       // Only Claude Code is assumed to have an "ask". Anything else —
       // including an unrecognised `--agent` value — is treated as a
       // framework without one, so `ask` degrades to `deny`.
@@ -346,7 +444,19 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     process.exit(0);
   }
 
-  const reason = registryNote === undefined ? decision.reason : `${decision.reason} (${registryNote})`;
+  // Rule h's own refusal already says the registry could not be read and how
+  // to fix it (§3.9); appending the note would only repeat it.
+  if (decision.code === "UNREGISTERED_OWNER_EGRESS") registryNote = undefined;
+  // D4: a skip says which state applied. Only where rule h would have been
+  // judging a destination for a non-interactive command, so a shape-rule deny
+  // (no destination) or a person at the keyboard gets no extra line. No
+  // registry contents, ever.
+  const skipNote =
+    !humanPresent && decision.code !== "UNREGISTERED_OWNER_EGRESS" && !SHAPE_RULE_CODES.has(decision.code)
+      ? ruleHSkipNote(ruleH)
+      : null;
+  const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);
+  const reason = notes.length === 0 ? decision.reason : `${decision.reason} (${notes.join("; ")})`;
 
   if (decision.action === "ask") {
     writeDecisionJson("ask", reason);
@@ -357,6 +467,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   const dest = destinationDetails(decision.destination);
   if (dest !== undefined) details["destination"] = dest;
   if (registryNote !== undefined) details["registry"] = registryNote;
+  if (skipNote !== null) details["ruleH"] = ruleH;
 
   // stderr carries the reason because that is what these frameworks feed
   // back to the model on a non-zero exit (Bug A in

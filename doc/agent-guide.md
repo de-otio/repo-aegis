@@ -67,6 +67,11 @@ repo while still blocking cross-tenancy leakage.
    Adding/removing engagements, ending engagements, or deleting
    registry entries are operations you can perform on the user's
    instruction, but never silently on your own initiative.
+   **Registering an owner is not one of them.** You never add a
+   `personalOrgs` entry, an engagement `githubOrgs` entry or an
+   `allowedUpstreams` entry: those commands refuse without a person at a
+   terminal, and you do not look for a way around that. See
+   [Owners are the user's to register](#owners-are-the-users-to-register).
 
 ## Reacting to a PostToolUse hit
 
@@ -162,6 +167,11 @@ This adds the engagement to the registry, validates the patterns
 files, and reports JSON. Never invent the markers — ask the user;
 they know their customer's identifiers better than you do.
 
+Leave `--github-org` and `--personal-org` off: they register an owner,
+which only a person at a terminal may do (`OWNER_ADD_NEEDS_TTY`). Tell
+the user which org belongs to this engagement and ask them to run
+`repo-aegis engagements add <id> --github-org <org>` themselves.
+
 ### "I'm initialising a repo for customer A"
 
 ```sh
@@ -212,12 +222,20 @@ on every session-start. Possible outcomes:
 - **`needs-confirmation`** — the org is unknown to the registry. The
   hook output names the org (redacted with `[SEC H-5]` for orgs ≥ 4
   chars: `xx***y`); ask the user whether to add it to an engagement
-  (`engagements add --github-org`) or to `personalOrgs`. Do NOT
-  guess.
+  (`engagements add --github-org`) or to `personalOrgs`, and have the
+  user run that command from their own terminal. Do NOT guess, and do
+  NOT run it yourself.
 - **`skipped`** — no remote, not a git repo, etc. Surface to the
   user only if they're confused about why class is unset.
 
 ### "Add a GitHub org to an engagement so future repos auto-classify"
+
+**A person runs this, from their own terminal.** Registering an owner tells
+repo-aegis that publishing there is safe, so `--github-org`,
+`--personal-org`, `upstreams add` and `init --migrate-classify` refuse
+without a terminal (`OWNER_ADD_NEEDS_TTY`), and refuse again in the agent
+hook if the command line contains them (`AGENT_RAN_HUMAN_COMMAND`). Give the
+user the exact line and wait:
 
 ```sh
 repo-aegis engagements add customer-a --github-org acme-corp
@@ -423,7 +441,9 @@ record per successful invocation, written *after* the primary action
 persists. Each record carries `ts`, `action`, `actor` (from
 `process.env.USER`), and structural metadata — engagement ids,
 counts, paths. **Never literal marker patterns or matched
-substrings.**
+substrings.** An owner or upstream add is recorded as `registry-owner-add`
+with a kind and a count only, never the owner's name: owners can be
+customer names, and the log can be read back into an agent transcript.
 
 **Default state:** OFF. Existing users see no behaviour change after
 upgrade. Opt in per machine:
@@ -714,7 +734,7 @@ It reaches you through three doors, and you may meet any of them:
   reads the live body back and reports `PUBLISHED_BODY_MISMATCH` if it is
   not the file you passed.
 
-Four rules need no context and always apply. Learn their shapes; they
+These rules need no context and always apply. Learn their shapes; they
 are the ones you will hit:
 
 | You wrote | Refused as | Write instead |
@@ -723,8 +743,15 @@ are the ones you will hit:
 | `cd /x && … && git push origin main` | `EGRESS_AFTER_CD` | `git -C /x push origin main`, or `gh --repo <org>/<repo> …`, in its **own** tool call |
 | `make ; git push origin main` (or `\|\|`, or `&`) | `EGRESS_UNGUARDED_CHAIN` | `make && git push origin main`, or a separate call |
 | `gh pr create --body-file "$TMPDIR/pr-body.md"` (or a relative path, or `/var/folders/…`) | `PAYLOAD_MODE_DEPENDENT_PATH` | an absolute, session-unique path in the session scratchpad |
+| `gh pr create …` with no `--repo` (and no `GH_REPO` or URL) | `GH_PR_CREATE_IMPLICIT_TARGET` | `gh pr create --repo <owner>/<repo> …`. Without it gh picks the base repository from this checkout's config, which can change between the check and the run. No approval lifts this. |
+| `REPO_AEGIS_REGISTRY=… gh …`, `GH_CONFIG_DIR=… git push …`, `env -i …`, `git -c remote.origin.url=… push …` | `EGRESS_ENV_OVERRIDE` | the plain command, with no `REPO_AEGIS_*`, `HOME`, `PATH`, `GIT_*`, `GH_*`, `SRT_*`, `SHELL`, `LD_*` or `DYLD_*` assignment, no `env -i` / `-u`, no `--git-dir` / `--work-tree`, no `git -c remote.* \| url.* \| core.sshCommand \| core.hooksPath` |
+| `git remote set-url … && git push …`, `gh repo set-default … && gh issue create …`, `export X=1 && gh …` | `EGRESS_AFTER_STATE_CHANGE` | run the state change as its own call, then the publish alone as the next call, so it is judged against the new state |
+| `script -q /dev/null gh issue create …`, or the same under `unbuffer`, `expect`, `tmux`, `screen`, `ssh -t`, an interpreter's `pty` module | `EGRESS_PTY_WRAPPER` | the same command run directly. A wrapper hands the command a terminal, and a terminal reads as a person. If it needs a person, ask your human. |
 
-The context rules fail open when the estate cannot answer, and never
+One context rule does not fail open, because it is the point of the
+guard: **`UNREGISTERED_OWNER_EGRESS`**. See the next section.
+
+The other context rules fail open when the estate cannot answer, and never
 block on their own uncertainty: `CROSS_ORG_EGRESS` (the payload's tree or
 the pushed repo sits in a trust boundary disjoint from the destination's),
 `PAYLOAD_MARKER_HIT` (the body file matches the destination's deny set —
@@ -734,6 +761,50 @@ including `selfIdentity` when the destination is customer-coupled), and
 `gh` verb becomes `SHIM_UNREACHABLE_NEEDS_HUMAN`, an outright refusal, when
 the `gh` shim is not first on `PATH` and nothing below the hook could hold
 the command.
+
+### Owners are the user's to register
+
+Rule h refuses a publish, from a shell with no person at it, when the
+destination's owner is not registered: not in `personalOrgs`, not in any
+engagement's `githubOrgs`, and not an exact `owner/repo` in
+`allowedUpstreams` for a PR, issue or comment. The same code,
+`UNREGISTERED_OWNER_EGRESS`, comes from the hook, the `gh` shim and the git
+pre-push hook. Rules to follow:
+
+- **No approval covers it.** `repo-aegis approve` cannot lift this refusal,
+  whatever its scope, and neither can `*`. Do not ask the user for one.
+- **You never register an owner or an upstream.** `engagements add
+  --personal-org|--github-org`, `upstreams add`, `init --migrate-classify`,
+  `init --force` over a populated registry, and any change that would leave
+  zero owners are for a person, from a terminal. You do not run them, wrap
+  them (`bash -c`, `script`, `tmux`, a heredoc), edit `engagements.yaml`
+  yourself, or set `REPO_AEGIS_EGRESS_HUMAN`. Say what was refused, name the
+  destination, and give the user the command from the refusal.
+- **A write whose owner cannot be named counts as unregistered.** That is a
+  GraphQL mutation (`gh api graphql` with a node id), a `gh api` write to an
+  endpoint with no owner in the path (`repositories/<id>/…`, `gists`,
+  `projects/…`), a target held in a variable (`--repo "$VAR"`,
+  `GH_REPO=$X`, `gh pr comment "$URL"`), and an alias or extension the guard
+  cannot expand. Name the repository literally: `gh issue comment --repo
+  <owner>/<repo> …` or `gh api -X POST repos/<owner>/<repo>/issues …`.
+  Otherwise the user runs it.
+- **Forks.** A fork's upstream is refused until a person runs `repo-aegis
+  upstreams add <owner>/<repo>`; that admits PRs, issues and comments there,
+  and nothing else (not `git push`, merge, release, repo or workflow verbs,
+  or `gh api` writes). The publish itself then still needs the usual approval.
+- **A refusal that says the registry could not be read** means it is
+  encrypted or damaged. Tell the user; do not decrypt it yourself.
+- Rule h is inert with no registry file, or a registry that declares no
+  owners, and each refusal or stderr note says so. `doctor` reports
+  `OWNERS_UNDECLARED` and `REGISTRY_UNREADABLE` as failures. Surface them.
+
+**What `*` covers.** A `*` approval no longer matches every owner. It covers
+repositories under the user's `personalOrgs`, and commands with no
+repository (`npm publish`). It does not cover a customer org, an allowed
+upstream or an unregistered owner, and it never covers a GraphQL mutation or
+a gist. For a customer's repository the user mints `repo-aegis approve
+<org>/*` or `approve <org>/<repo>`. If you are refused with a live `*` in
+place, the refusal names it and says why it does not apply; pass that on.
 
 How to recover — the same three moves every time:
 
@@ -771,7 +842,9 @@ Every CLI failure with exit 2 emits a JSON error payload (under
 { "code": "USAGE", "error": "specify exactly one of …", "details": "…" }
 ```
 
-Codes you should recognise and act on:
+Codes you should recognise and act on (refusals from the egress guard and the
+owner gates end with `[<CODE>, see doc/agent-guide.md#<code>]`, which points at
+the row below):
 
 | Code | Meaning | Recovery |
 |---|---|---|
@@ -818,6 +891,21 @@ Codes you should recognise and act on:
 | `EGRESS_AFTER_CD` | egress guard: a publishing command follows a `cd`/`pushd` in the same command line | use `git -C <abs-path>` or `gh --repo <org>/<repo>`, and give the publishing command its own tool call |
 | `EGRESS_UNGUARDED_CHAIN` | egress guard: a publishing command is joined to earlier segments with `;`, `\|\|` or `&` | chain with `&&`, or run it as a separate call |
 | `PAYLOAD_MODE_DEPENDENT_PATH` | egress guard: a `--body-file` / `-F` / `--notes-file` / `--input` path is relative, expands `$TMPDIR`, or sits under a mode-dependent temp root | write the payload to an absolute, session-unique path in the session scratchpad and pass that |
+| <a id="unregistered_owner_egress"></a>`UNREGISTERED_OWNER_EGRESS` | egress guard (rule h), at the hook, the `gh` shim and pre-push: no person present, and the destination's owner is not in `personalOrgs`, not in any engagement's `githubOrgs`, and not an allowed upstream for a PR / issue / comment; or the owner cannot be named offline (GraphQL mutation, opaque `gh api` endpoint, a target in a variable, an alias the guard cannot expand, a push URL that does not resolve); or the registry is encrypted or damaged | **Stop and report it to the user; do not retry, reroute or fix it yourself.** No approval covers it, and `*` does not. If the owner is the user's or a customer's, a **person** runs from a terminal `repo-aegis engagements add --personal-org <owner>` (or `--github-org <owner>` under the engagement). For a fork's upstream, a person runs `repo-aegis upstreams add <owner>/<repo>` (PRs, issues and comments only). If the destination was unresolved, re-issue naming the repository literally (`--repo <owner>/<repo>`, or the `repos/<owner>/<repo>/…` endpoint), or have the user run it. |
+| <a id="gh_pr_create_implicit_target"></a>`GH_PR_CREATE_IMPLICIT_TARGET` | egress guard: `gh pr create` from a shell with no person, with no `--repo`, `GH_REPO` or URL | re-issue as `gh pr create --repo <owner>/<repo> …`. No approval covers it; nothing is wrong with the destination, only with how it is named. |
+| <a id="egress_env_override"></a>`EGRESS_ENV_OVERRIDE` | egress guard: the publishing command sets an environment variable or option that can point the shim, the pre-push hook, `gh` or `git` at different state (`REPO_AEGIS_*`, `HOME`, `PATH`, `GIT_CONFIG*`, `GIT_SSH*`, `GH_CONFIG_DIR`, `SRT_*`, `SHELL`, `env -i`, `git -c remote.*`, …) | re-issue without the assignment or option. No approval covers it. Never set these to make a refused command pass. |
+| <a id="egress_after_state_change"></a>`EGRESS_AFTER_STATE_CHANGE` | egress guard: a publishing command follows, in the same command line, a change to state it reads (`git remote`, `git config`, `gh repo set-default`, `gh alias set`, `gh auth`, `export`, a write into `.git/`, `~/.ssh/config`, `~/.gitconfig`) | run the change as its own tool call, then re-issue the publish alone as the next call. No approval covers it. |
+| <a id="egress_pty_wrapper"></a>`EGRESS_PTY_WRAPPER` | egress guard: the publish runs under `script`, `unbuffer`, `expect`, `socat`, `ssh -t`, `tmux`, `screen` or an interpreter's pty module, which would give it a terminal that reads as a person | run the command directly. If it needs a person's go-ahead, ask your human for an approval or an owner registration. No approval covers the wrapper. |
+| <a id="hook_input_too_large"></a>`HOOK_INPUT_TOO_LARGE` | egress guard: the hook input is larger than 1 MiB, so the command cannot be read whole and is not judged | put the large content in a file and pass the file (`--body-file`, `-F`, `--input`, `-d @file`); keep the command itself short. No approval covers it. |
+| <a id="github_api_via_http_client"></a>`GITHUB_API_VIA_HTTP_CLIENT` | egress guard: `curl` or `wget` writing to `api.github.com` or `uploads.github.com` (`-X POST\|PUT\|PATCH\|DELETE`, or a data flag) | use `gh api -X <METHOD> repos/<owner>/<repo>/…` or a `gh` verb with `--repo <owner>/<repo>`, which are checked like any publish. No approval covers it. |
+| <a id="gh_auth_token_network"></a>`GH_AUTH_TOKEN_NETWORK` | egress guard: `gh auth token` (or `gh auth status --show-token`) in a command line that also makes a network call | use `gh api …`, which uses its own credential and is checked. Never put the token in a command. No approval covers it. |
+| <a id="agent_ran_human_command"></a>`AGENT_RAN_HUMAN_COMMAND` | agent hook: the command text runs `repo-aegis approve`, `engagements add --personal-org\|--github-org`, `upstreams add` or `init --migrate-classify\|--force`, in any shape (`bash -c`, a heredoc, `tmux`, an alias), with or without a terminal | stop. These commands are how a person vouches for a publish or an owner. Tell the user what you need and give them the exact line to run in their own terminal. Do not re-word it to get past the hook. A quoted mention next to a repo-aegis word is refused too; re-word the sentence. |
+| <a id="agent_detached_session"></a>`AGENT_DETACHED_SESSION` | agent hook: the command starts a detached session (`tmux new -d`, `tmux new-window` / `send-keys`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`) | run it in the foreground, or as a plain `nohup <command> &` for a dev server. If a long-lived terminal session is really needed, the user starts it. |
+| <a id="owner_add_needs_tty"></a>`OWNER_ADD_NEEDS_TTY` | `engagements add --personal-org\|--github-org`, `upstreams add` or `init --migrate-classify` was run without a person's terminal (no TTY on stderr, or an agent host or pty wrapper above the process, or an unreadable process chain). No env var or approval lifts it. | **Ask your human to run the command themselves**, from their own terminal window; the refusal prints it. Do not retry, wrap it in `script` / `tmux`, or edit `engagements.yaml`. |
+| <a id="owner_set_empty_needs_tty"></a>`OWNER_SET_EMPTY_NEEDS_TTY` | a change that would leave zero registered owners (`engagements end` / `remove` of the engagement holding the last owner, or `init --force` over a registry that declares anything) was run without a terminal; with no owners rule h switches itself off, so this is the same as registering every owner | ask your human to run it from a terminal. Removing one owner among several needs no terminal. |
+| `REGISTRY_WOULD_BE_INVALID` | a registry mutator refused because the result would not load (typically an org registered twice: an org belongs to `personalOrgs` or to exactly one engagement) | nothing was written. Surface it; run `repo-aegis doctor` once the registry loads. Do not edit the file to force it. |
+| `MIGRATION_NOT_CONFIRMED` | `init --migrate-classify` listed the owners it would register and did not get a typed `y` on a stdin terminal | nothing was written. A person re-runs it at a terminal and answers `y` after reading the list. |
+| `APPROVE_NEEDS_TTY` | `repo-aegis approve` was run without a person's terminal | ask the user to run the `approve` line themselves; never set `REPO_AEGIS_EGRESS_HUMAN` or wrap it. |
 | `CROSS_ORG_EGRESS` / `CROSS_ORG_PUSH` | egress guard: the pushed repo (or the payload's tree) belongs to a trust boundary disjoint from the destination's | this is the boundary both incidents crossed. Stop; name the destination to the user. Do NOT widen `personalOrgs` / `githubOrgs` to make it pass. |
 | `PAYLOAD_MARKER_HIT` | egress guard: the body file matches the destination's deny set (`selfIdentity` included for a customer-coupled destination) | run `repo-aegis check --path <file>` from the destination repo to see which stems (never `--verbose` from a hook); redact; re-run. The reason carries a hit count only. |
 | `PUBLIC_EGRESS_NEEDS_HUMAN` / `PUBLIC_PUSH_NEEDS_HUMAN` | egress guard: public destination, or `merge` / `release` / `publish` / `repo edit` / `workflow run`, and no human present | on Claude Code this arrives as a permission prompt — the user's decision. Elsewhere: tell the user what would be published where and stop. Never set `REPO_AEGIS_EGRESS_HUMAN`; never re-shape the command to dodge the rule. |
@@ -828,6 +916,10 @@ Codes you should recognise and act on:
 | `PUSH_DEFAULT_IMPLICIT` (`doctor`) | global `push.default` is unset or not `nothing` | suggest `git config --global push.default nothing` — one line, every shell, every agent |
 | `CLASS_VISIBILITY_UNRESOLVED` (`doctor`) | a repo with a GitHub remote has no explicit class or no cached visibility, so the destination rules are blind there | suggest `repo-aegis classify --apply && repo-aegis status` in that repo; do not run it yourself (see `VISIBILITY_UNRESOLVED`) |
 | `PERSONAL_ORG_UNREGISTERED` (`doctor`) | the repo's remote org is in no engagement and not in `personalOrgs` | surface the `fix` line; which org is "ours" is the user's compliance decision |
+| `MARKERS_WRITE_PROTECTED` (`render`) | the rendered markers directory is write-protected (the `install claude-md` Edit deny rules reach the sandbox) | tell the user to run `repo-aegis render` from their own terminal. Do not retry or look for another way to write the markers; editing them would silently drop customer markers. |
+| `REGISTRY_UNREADABLE` / `OWNERS_UNDECLARED` (`doctor`, failures) | the registry is encrypted or does not parse, so rule h refuses every non-interactive egress with a destination; or it loads with no owners, so rule h is inert | surface the `fix` line. Never run an owner add or `registry decrypt` yourself: both need a person at a terminal. |
+| `GH_LOGIN_UNREGISTERED` / `GH_MEMBER_ORG_UNREGISTERED` / `REGISTERED_ORG_NOT_MEMBER` (`doctor`) | a logged-in `gh` account, or an organisation it belongs to, is not a registered owner (or, for the info check, a registered owner matches no account) | surface the `fix` line (it names the owners; the summary line does not). Which owners are "ours" is the user's decision, and only a person at a terminal can add one. `SKIP` means `gh` was absent or logged out, not that all is well. |
+| `REGISTRY_AGENT_WRITABLE` / `GH_BINARY_UNTRUSTED` / `GH_CONFIG_REDIRECT` / `PREPUSH_HOOK_MISSING` / `SHELL_STARTUP_OVERRIDES` / `SSH_GITHUB_REDIRECT` (`doctor`, warnings and info) | no `permissions.deny` Edit rule for the registry, approvals, hooks, shim and rendered-markers paths; the `gh` first on `PATH` is in an agent-writable or non-standard place; the guard hook is registered but the global `core.hooksPath` is not the repo-aegis hooks directory; a shell startup file exports `GH_REPO`, `GH_HOST`, `GIT_SSH_COMMAND`, `SRT_*` or `REPO_AEGIS_*`; `Host github.com` in the ssh config points elsewhere or is proxied | suggest the `fix` line (`install claude-md` / `install hooks` / remove the export). Never print a startup file's value. |
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` / `GUARD_HOOK_UNREGISTERED` (`doctor`) | the `gh` shim is absent, shadowed on `PATH`, or left over from an earlier release; the guard hook is not in `settings.json` | suggest `repo-aegis install shim` / fixing `PATH` order / `repo-aegis install claude-md`. A shadowed shim is also why a `gh` verb can be refused with `SHIM_UNREACHABLE_NEEDS_HUMAN`. |
 
 `audit` also emits per-finding diagnostic codes inside its
@@ -975,7 +1067,7 @@ shape we don't model.
 | `check --history` | scan full git log | (same; `historyHits` populated) |
 | `render` | regenerate marker files | `RenderResult` |
 | `engagements list` | list engagements | `engagements`, `alwaysBlock` |
-| `engagements add [id]` | add new engagement (id optional with `--github-org` / `--personal-org`) | `action`, `id`, `name`, `markers`, `rendered`, `githubOrgs`, `personalOrgs` |
+| `engagements add [id]` | add new engagement (id optional with `--github-org` / `--personal-org`; those two flags register an owner and are **for a person at a terminal**) | `action`, `id`, `name`, `markers`, `rendered`, `githubOrgs`, `personalOrgs` |
 | `engagements end <id>` | mark ended | `action`, `id`, `ended`, `purged`, `rendered` |
 | `engagements show <id>` | show one engagement | `action`, `id`, `name`, `started`, `ended`, `active`, `markerCount`, `notes` |
 | `engagements remove <id> --hard` | hard-delete | `action`, `id`, `removed`, `rendered` |
@@ -1005,6 +1097,9 @@ shape we don't model.
 | `install ci --uninstall` | remove the workflow file | `action`, `target`, `removed`, `absent?` |
 | `install shim [gh]` | write the `gh` egress shim to `<home>/bin` | `action`, `path`, `changed`, `tool`, `binDir`, `pathInstruction`, `reason?` |
 | `install shim --uninstall` | remove the shim (never a file repo-aegis did not write) | `action`, `path`, `changed`, `reason?` |
+| `upstreams add <owner>/<repo>` | allow PRs, issues and comments to a fork's upstream (**person at a terminal only**) | `action`, `upstream`, `added` |
+| `upstreams remove <owner>/<repo>` / `upstreams list` | tighten / read; no terminal needed | `action`, `upstream`, `removed` / `action`, `upstreams` |
+| `approve <org>/<repo>\|<org>/*\|*` | mint a time-limited approval for rule g (**person at a terminal only**); `--list` / `--revoke` need no terminal | `action`, `approval`, `warnings?` |
 | `egress-check -- <gh args…>` | decide a `gh` publish (exit 0 allow / 2 deny) | `action`, `destination?`, `readback?`; deny reason on stderr |
 | `egress-readback --body-file <f> --pr <ref>` | diff the live PR body against the file | `ok`, `bytes` / `PUBLISHED_BODY_MISMATCH` with byte counts / `READBACK_UNAVAILABLE` |
 | `hook guard-egress [--agent <a>]` | (PreToolUse(Bash) entry) allow / ask / deny a publishing command | `hookSpecificOutput.permissionDecision` (+ reason); deny payload on stderr |

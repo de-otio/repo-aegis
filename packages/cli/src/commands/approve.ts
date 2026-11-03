@@ -18,11 +18,17 @@ import {
   parseApprovalTarget,
   parseTtl,
   revokeApprovals,
+  loadRegistry,
+  registeredOwners,
+  safeDestination,
+  RegistryNotFoundError,
   DEFAULT_APPROVAL_TTL_MS,
   MAX_APPROVAL_TTL_MS,
   type EgressApproval,
+  type Registry,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { requireTerminal } from "../require-terminal.js";
 
 export interface ApproveOptions extends OutputOptions {
   ref?: string;
@@ -34,6 +40,8 @@ export interface ApproveOptions extends OutputOptions {
   stderrIsTTY?: boolean;
   /** Test seam: the approvals store path. */
   path?: string;
+  /** Test seam: the registry path the mint warnings read. Defaults to the machine's registry. */
+  registryPath?: string;
   /** Test seam: the clock. */
   now?: () => Date;
 }
@@ -42,6 +50,72 @@ function describe(a: EgressApproval, now: Date): string {
   const left = Math.max(0, Math.round((Date.parse(a.expiresAt) - now.getTime()) / 60_000));
   const scope = `${a.org}/${a.repo}${a.ref !== undefined ? ` (ref ${a.ref})` : ""}`;
   return `${a.id}  ${scope}  by ${a.by}  expires ${a.expiresAt} (${left} min left)`;
+}
+
+/**
+ * What a minted approval will and will not do, as plain sentences for the
+ * operator (§3.2, §3.9). Content-free about the registry: it never lists
+ * owners. It names only what the person typed, and only when that passes
+ * `safeDestination()` (the typed name is echoed into a terminal and pasted).
+ */
+function mintWarnings(target: { org: string; repo: string }, registryPath: string | undefined): string[] {
+  let registry: Registry | null = null;
+  let unreadable = false;
+  try {
+    registry = registryPath === undefined ? loadRegistry() : loadRegistry(registryPath);
+  } catch (err) {
+    unreadable = !(err instanceof RegistryNotFoundError);
+  }
+  const owners = registry === null ? new Set<string>() : registeredOwners(registry);
+
+  if (target.org === "*") {
+    const notes = [
+      "'*' now covers repositories under your personalOrgs, and commands with no repository " +
+        "(npm publish), only. It does not cover customer orgs, allowed upstreams or unregistered owners: " +
+        "approve <org>/* or <org>/<repo> for those.",
+    ];
+    if (unreadable) {
+      notes.push("The registry could not be read, so repo-aegis cannot say which owners '*' covers until it is repaired.");
+    } else if ((registry?.personalOrgs ?? []).length === 0) {
+      notes.push(
+        "Your registry declares no personalOrgs, so '*' currently covers npm publish only. " +
+          "A person registers an owner from a terminal: repo-aegis engagements add --personal-org <login>.",
+      );
+    }
+    return notes;
+  }
+
+  const safe = safeDestination(target.org, target.repo);
+  if (safe === null) return [];
+  if (unreadable) {
+    return [
+      "The registry could not be read (it is encrypted or damaged), so rule h (UNREGISTERED_OWNER_EGRESS) " +
+        "refuses every non-interactive publish until a person repairs or decrypts it. This approval will not help before then.",
+    ];
+  }
+  const exactUpstream =
+    safe.repo !== "*" &&
+    (registry?.allowedUpstreams ?? []).some(u => u.toLowerCase() === `${safe.org}/${safe.repo}`);
+  // A missing registry or one with no owners leaves rule h inert: nothing to warn about.
+  if (owners.size === 0 || owners.has(safe.org) || exactUpstream) return [];
+  // `<owner>/*` for an owner that is not registered but has an allowed upstream:
+  // rule h admits that upstream for PR and issue verbs, so the approval is not
+  // useless, only narrow. Does not name the upstream.
+  if (safe.repo === "*" && (registry?.allowedUpstreams ?? []).some(u => u.toLowerCase().startsWith(`${safe.org}/`))) {
+    return [
+      `"${safe.org}" is not a registered owner. This approval covers only that owner's allowed upstream ` +
+        `repositories, and only for PR and issue verbs; everything else under it stays refused by rule h ` +
+        `(UNREGISTERED_OWNER_EGRESS) until a person registers the owner.`,
+    ];
+  }
+  return [
+    `"${safe.org}" is not a registered owner, so rule h (UNREGISTERED_OWNER_EGRESS) will still refuse ` +
+      `non-interactive egress there until a person registers it, whatever approval exists. ` +
+      `From a terminal: repo-aegis engagements add --personal-org ${safe.org} (or --github-org ${safe.org} ` +
+      `under the engagement)` +
+      (safe.repo === "*" ? "" : `; for an upstream you contribute to: repo-aegis upstreams add ${safe.org}/${safe.repo}`) +
+      `.`,
+  ];
 }
 
 export function approve(target: string | undefined, opts: ApproveOptions): void {
@@ -74,18 +148,12 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
   }
 
   // ---- mint -----------------------------------------------------------------
-  const isTTY = opts.stderrIsTTY ?? !!process.stderr.isTTY;
-  if (!isTTY) {
-    emitError(
-      {
-        code: "APPROVE_NEEDS_TTY",
-        error:
-          "an egress approval can only be minted from a terminal: this shell has no TTY on stderr. " +
-          "(REPO_AEGIS_EGRESS_HUMAN is not honoured here — an agent must never mint its own approval.)",
-      },
-      opts,
-    );
-  }
+  requireTerminal(
+    "APPROVE_NEEDS_TTY",
+    "an egress approval can only be minted from a terminal: this shell has no TTY on stderr. " +
+      "(REPO_AEGIS_EGRESS_HUMAN is not honoured here — an agent must never mint its own approval.)",
+    opts,
+  );
   if (target === undefined || target.trim() === "") {
     emitError({ code: "USAGE", error: "approve <org>/<repo> | <org>/* | *   (or --list / --revoke <id|all>)" }, opts);
   }
@@ -126,10 +194,12 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
     /* audit must not break the operation */
   }
 
+  const warnings = mintWarnings(parsed, opts.registryPath);
   if (opts.json) {
-    emitJson({ action: "approve", approval });
+    emitJson({ action: "approve", approval, ...(warnings.length > 0 && { warnings }) });
   } else {
     emitText(`repo-aegis approve: ${describe(approval, now)}`);
+    for (const w of warnings) emitText(`  warning: ${w}`);
     emitText(
       "  every egress layer now treats a matching publish from a non-interactive shell as human-approved " +
         "(rule g only; shape, cross-org and payload rules still apply). Revoke: repo-aegis approve --revoke " +

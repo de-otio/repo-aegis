@@ -11,6 +11,7 @@ import {
   appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { isPermissionDenied } from "../fs-utils.js";
 
 interface RenderOptions extends OutputOptions {
   dryRun?: boolean;
@@ -68,6 +69,19 @@ export function render(opts: RenderOptions): void {
         }
       }
       process.exit(EXIT_USAGE);
+    }
+    if (isPermissionDenied(err)) {
+      // `install claude-md` denies agent writes to the rendered markers (an
+      // agent that edits them can silently drop a customer's markers), and the
+      // deny reaches the sandbox. So this is a refusal, not a fault to retry.
+      emitError(
+        {
+          code: "MARKERS_WRITE_PROTECTED",
+          error: "the rendered markers directory is write-protected here (the Edit deny rules from `install claude-md` reach the sandbox)",
+          details: "a person runs `repo-aegis render` from their own terminal. Do not retry or look for another way to write the markers.",
+        },
+        opts,
+      );
     }
     emitError({ error: (err as Error).message }, opts);
   }

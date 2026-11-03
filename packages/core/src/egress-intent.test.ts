@@ -38,8 +38,6 @@ describe("parseEgressIntents — non-egress commands yield nothing", () => {
     "npm test",
     "npm install",
     "npm run publish-docs",
-    "echo 'git push origin main'",
-    'printf "%s" "gh pr create --body-file x"',
     "# git push origin main",
     "cat <<'EOF'\ngit push origin main\nEOF",
     "cat <<EOF > notes.md\ngh pr create --body-file /tmp/x\nEOF",
@@ -48,6 +46,35 @@ describe("parseEgressIntents — non-egress commands yield nothing", () => {
   ];
   for (const c of cases) {
     it(`${JSON.stringify(c)} → []`, () => {
+      assert.deepEqual(parseEgressIntents(c), []);
+    });
+  }
+});
+
+describe("parseEgressIntents — the one accepted false positive: a literal mention in a quoted argument", () => {
+  // The backstop reads the command's text again and cannot tell `echo "gh issue create"` (data) from
+  // `echo "gh issue create" | sh` (a program), so a literal quoted mention is reported. Documented in
+  // parseEgressIntents. What is NOT reported: a comment, a heredoc that feeds nothing that runs it, a
+  // search, a commit message, and the value of any flag of a command the parser understood.
+  for (const c of ["echo 'git push origin main'", 'printf "%s" "gh pr create --body-file x"', 'echo "gh issue create"']) {
+    it(`${JSON.stringify(c)} is reported as unparsed-shape`, () => {
+      const intents = parseEgressIntents(c);
+      assert.equal(intents.length, 1);
+      assert.equal(intents[0]!.unresolved, "unparsed-shape");
+    });
+  }
+
+  for (const c of [
+    "grep -rn 'git push' docs/",
+    "rg 'gh pr create' .",
+    'git commit -m "document git push and gh issue create"',
+    'git commit -am "gh issue create fix"',
+    "git log --grep='git push'",
+    "# git push origin main",
+    "cat <<EOF > notes.md\ngh issue create -R stranger/r\nEOF",
+    "cat <<'EOF'\ngit push https://github.com/stranger/r main\nEOF",
+  ]) {
+    it(`${JSON.stringify(c)} is data, not a mention`, () => {
       assert.deepEqual(parseEgressIntents(c), []);
     });
   }

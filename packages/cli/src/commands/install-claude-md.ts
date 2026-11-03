@@ -3,12 +3,24 @@
 import {
   existsSync,
   mkdirSync,
+  realpathSync,
+  unlinkSync,
   writeFileSync,
   appendFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { leakContextFlagPath, appendAuditRecord } from "@de-otio/repo-aegis-core";
+import { homedir, userInfo } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import {
+  leakContextFlagPath,
+  appendAuditRecord,
+  approvalsPath,
+  denySetCachePath,
+  destinationCachePath,
+  markersDir,
+  registryPath,
+  repoAegisHome,
+  statePath,
+} from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { readIfExists } from "../fs-utils.js";
 
@@ -146,6 +158,7 @@ interface InstallClaudeMdOptions extends OutputOptions {
 
 interface SettingsJson {
   hooks?: Record<string, HookMatcherEntry[]>;
+  permissions?: { deny?: unknown; [k: string]: unknown };
   [k: string]: unknown;
 }
 
@@ -270,6 +283,303 @@ function mergeFirstTouchHook(
   return { added: true, alreadyPresent: false };
 }
 
+// ---------------------------------------------------------------------------
+// Registry write protection (doc/plan-unregistered-owner-egress.md §8.2, R1)
+//
+// The registry file is on disk, and the agent's own file tools can change it
+// without any TTY: appending one line to `engagements.yaml` registers an owner
+// and undoes rule h. `install claude-md` therefore adds Claude Code
+// `permissions.deny` entries, and `install claude-md --uninstall` removes
+// exactly the ones it added.
+//
+// Only `Edit(...)` rules are written. Claude Code matches path rules for
+// `Edit` and `Read` only: a `Write(path)` rule is accepted but never matched,
+// and an Edit rule already covers every built-in editing tool. Claude Code also
+// merges Edit deny rules into the sandbox's write-deny list, so they stop a
+// sandboxed Bash write (`sed -i`, `>`) too; verify that on your machine with a
+// sandboxed `touch` of a protected file (the install output says which).
+//
+// What is denied is deliberately narrow, because the sandbox enforces it on
+// the agent's own Bash too: the files whose tampering bypasses the guard, and
+// nothing the tools write at run time. Denied: the registry file and its `.age`
+// ciphertext, the approvals store, `hooks/**` (the git hook scripts), `bin/**`
+// (the `gh` shim) and `markers/**` (the rendered deny set the write scan
+// reads: editing it silently drops markers). NOT denied, on purpose: `state/`
+// (audit log, lock, caches) and the rest of the home. Denying the whole
+// directory broke audit appends, the state lock, cache writes, and an agent
+// running `install hooks` or `install shim`. Denying `markers/**` means an
+// agent-run `render` is refused inside the sandbox; a person runs it.
+// ---------------------------------------------------------------------------
+
+/** What `install claude-md` denies for the current registry location. */
+export interface RegistryDenyPlan {
+  /** The `permissions.deny` entries, in order. */
+  rules: string[];
+  /** A path under each rule, for checking that a settings.json rule covers it. */
+  sampleTargets: string[];
+  /** The path to `touch` from a sandboxed shell to verify the rule reaches the sandbox. */
+  verifyPath: string;
+  /** Things the operator should know: a relocated registry or home. */
+  warnings: string[];
+}
+
+function canonicalDir(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+/**
+ * Why a directory is too broad or too shared to protect as a directory, or
+ * null. The registry was moved there, and denying writes to the directory
+ * would lock the user's own home or a repository's work tree.
+ */
+function riskyDirReason(dir: string): string | null {
+  const c = canonicalDir(dir);
+  if (c === "/") return "is the filesystem root";
+  const homes = new Set<string>([canonicalDir(homedir())]);
+  try {
+    homes.add(canonicalDir(userInfo().homedir));
+  } catch {
+    /* no passwd entry */
+  }
+  if (homes.has(c)) return "is your home directory";
+  for (let d = c; d !== dirname(d); d = dirname(d)) {
+    if (existsSync(join(d, ".git"))) return "is inside a git work tree";
+  }
+  return null;
+}
+
+/** The deny rules for the registry, approvals, hooks, shim, markers and trusted state files at their current locations. */
+export function registryDenyPlan(): RegistryDenyPlan {
+  const home = repoAegisHome();
+  const registry = registryPath(home);
+  // Files an enforcement path trusts. state/deny-set.cache.json is one of them:
+  // it is keyed by a fingerprint an agent can compute, and a forged entry with
+  // empty patterns switches the scanner off. Its write is best-effort, so a
+  // denied write only costs a recompute. The ledger is trusted by uninstall.
+  const files = [
+    registry,
+    `${registry}.age`,
+    approvalsPath(home),
+    // Rules e-g read a cached entry's class and visibility to decide whether a
+    // destination is public-facing: a forged "private" entry for a public repo
+    // would skip rule g's person check. Every writer treats a failed write as a
+    // cache miss (recordWorkingTree), so denying it costs nothing.
+    destinationCachePath(home),
+    denySetCachePath(home),
+    join(statePath(home), DENY_LEDGER_FILE),
+  ];
+  const warnings: string[] = [];
+
+  // hooks/, bin/ and markers/ are narrow subdirectories of the home, so they are
+  // denied wherever the home is (even `$HOME` or a work tree): the risky-directory
+  // test is for BROADER denies only. A markers directory moved OUT of the home is
+  // a path of the operator's choosing and may itself be broad, so that one is tested.
+  const dirs = [join(home, "hooks"), join(home, "bin")];
+  const markers = markersDir(home);
+  if (markers === home || markers.startsWith(home + "/")) {
+    dirs.push(markers);
+  } else {
+    const markersRisk = riskyDirReason(markers);
+    if (markersRisk !== null) warnings.push(`the markers directory (${markers}) ${markersRisk}: not denied`);
+    else dirs.push(markers);
+  }
+  const regDir = dirname(registry);
+  const regRisk = riskyDirReason(regDir);
+  if (regRisk !== null && regDir !== home) {
+    warnings.push(`the registry's directory (${regDir}) ${regRisk}: denying only the registry file itself, not its directory`);
+  }
+
+  return {
+    rules: [...files.map(f => `Edit(/${f})`), ...dirs.map(d => `Edit(/${d}/**)`)],
+    sampleTargets: [...files, ...dirs.map(d => join(d, "x"))],
+    verifyPath: registry,
+    warnings,
+  };
+}
+
+/** The rules `registryDenyPlan` would add, as a list. */
+export function registryDenyRules(): string[] {
+  return registryDenyPlan().rules;
+}
+
+/**
+ * The pair an earlier build wrote (never released): an Edit AND a Write rule
+ * over the whole registry directory. They are removed on upgrade and on
+ * uninstall only when BOTH are present, because one alone is indistinguishable
+ * from a rule the user wrote themselves, and a user rule is never removed. The
+ * whole-directory rule broke audit appends and caches, and a `Write(path)` rule
+ * is never matched.
+ */
+function legacyDenyPair(list: readonly unknown[]): string[] {
+  const dir = dirname(registryPath());
+  const pair = [`Edit(/${dir}/**)`, `Write(/${dir}/**)`];
+  return pair.every(r => list.includes(r)) ? pair : [];
+}
+
+/** Basenames/globs of the paths this install protects, for recognising its own rules. */
+const OUR_RULE_SHAPE =
+  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|destinations\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers)\/\*\*)\)$/;
+
+/**
+ * Whether `rule` is one this install could have written: exactly a rule of the
+ * current plan, or the shape of one (`Edit(//…)` over one of the protected
+ * basenames) under the current repo-aegis home. The ledger lives in a directory
+ * an agent can write, so uninstall removes a ledger entry only if it also has
+ * our shape: a forged ledger cannot make uninstall delete the user's own rules.
+ */
+function isOurRuleShape(rule: string, plan: RegistryDenyPlan): boolean {
+  if (plan.rules.includes(rule)) return true;
+  const m = OUR_RULE_SHAPE.exec(rule);
+  if (m === null) return false;
+  const abs = "/" + m[1]!.replace(/^\/+/, "");
+  const home = repoAegisHome();
+  return abs === home || abs.startsWith(home + "/");
+}
+
+// The ledger: which deny rules THIS install added to which settings.json, so
+// uninstall removes exactly those and never a rule the user already had. Lives
+// under state/ (writable by design).
+const DENY_LEDGER_FILE = "claude-md-deny-rules.json";
+
+interface DenyLedger {
+  version: 1;
+  settings: Record<string, string[]>;
+}
+
+function ledgerPath(): string {
+  return join(statePath(), DENY_LEDGER_FILE);
+}
+
+function readDenyLedger(): DenyLedger {
+  const empty: DenyLedger = { version: 1, settings: {} };
+  try {
+    const raw = readIfExists(ledgerPath());
+    if (raw === null) return empty;
+    const parsed = JSON.parse(raw) as Partial<DenyLedger>;
+    if (typeof parsed.settings !== "object" || parsed.settings === null) return empty;
+    const settings: Record<string, string[]> = {};
+    for (const [k, v] of Object.entries(parsed.settings)) {
+      if (Array.isArray(v)) settings[k] = v.filter((r): r is string => typeof r === "string");
+    }
+    return { version: 1, settings };
+  } catch {
+    return empty;
+  }
+}
+
+/** Record (or, with an empty list, forget) the rules added to `settingsPath`. Throws on a write failure. */
+function writeDenyLedger(settingsPath: string, rules: readonly string[]): void {
+  const ledger = readDenyLedger();
+  if (rules.length > 0) ledger.settings[settingsPath] = [...rules];
+  else delete ledger.settings[settingsPath];
+  if (Object.keys(ledger.settings).length === 0) {
+    try {
+      unlinkSync(ledgerPath());
+    } catch {
+      /* already absent */
+    }
+    return;
+  }
+  mkdirSync(statePath(), { recursive: true });
+  writeFileSync(ledgerPath(), JSON.stringify(ledger, null, 2) + "\n");
+}
+
+interface DenyInstall {
+  plan: RegistryDenyPlan;
+  added: string[];
+  alreadyPresent: string[];
+  /** Whole-directory rules from an earlier build, removed during this install. */
+  legacyRemoved: string[];
+  /** What the ledger should hold for this settings.json afterwards. */
+  recorded: string[];
+  ledgerChanged: boolean;
+}
+
+function denyList(settings: SettingsJson): unknown[] {
+  return Array.isArray(settings.permissions?.deny) ? (settings.permissions!.deny as unknown[]) : [];
+}
+
+function setDenyList(settings: SettingsJson, list: unknown[]): void {
+  if (list.length > 0) {
+    if (!settings.permissions || typeof settings.permissions !== "object") settings.permissions = {};
+    settings.permissions.deny = list;
+    return;
+  }
+  if (settings.permissions) {
+    delete settings.permissions.deny;
+    if (Object.keys(settings.permissions).length === 0) delete settings.permissions;
+  }
+}
+
+/**
+ * Add the plan's rules to the in-memory `settings` and compute the ledger. A
+ * rule that is already in settings.json was the user's (or an earlier run's,
+ * which the ledger remembers): it is reported as present and never newly
+ * recorded, so uninstall cannot remove what the user had.
+ */
+function installDenyRules(settings: SettingsJson, settingsPath: string): DenyInstall {
+  const plan = registryDenyPlan();
+  const prev = readDenyLedger().settings[settingsPath];
+  let list = denyList(settings);
+
+  // First run of this build over an older one: its broad pair goes (both rules
+  // present, or neither is touched: one alone could be the user's own).
+  const legacyRemoved: string[] = [];
+  if (prev === undefined) {
+    const legacy = legacyDenyPair(list);
+    legacyRemoved.push(...legacy);
+    if (legacy.length > 0) list = list.filter(r => !(typeof r === "string" && legacy.includes(r)));
+  }
+
+  const added: string[] = [];
+  const alreadyPresent: string[] = [];
+  for (const rule of plan.rules) {
+    if (list.includes(rule)) alreadyPresent.push(rule);
+    else {
+      added.push(rule);
+      list = [...list, rule];
+    }
+  }
+  if (added.length > 0 || legacyRemoved.length > 0) setDenyList(settings, list);
+
+  const recorded = [...(prev ?? []).filter(r => list.includes(r)), ...added];
+  const unique = [...new Set(recorded)];
+  const ledgerChanged = JSON.stringify(unique) !== JSON.stringify(prev ?? []);
+  return { plan, added, alreadyPresent, legacyRemoved, recorded: unique, ledgerChanged };
+}
+
+/**
+ * Remove from `settings` the rules the ledger says this install added (or, when
+ * the ledger has no entry for this settings.json, the older build's forms).
+ * Returns the removed count and whether a ledger entry existed.
+ */
+function stripDenyRules(settings: SettingsJson, settingsPath: string): { removed: number; hadRecord: boolean } {
+  const record = readDenyLedger().settings[settingsPath];
+  const list = denyList(settings);
+  // A ledger entry that is not shaped like one of ours is ignored: the ledger is
+  // agent-writable, and it must not be a way to delete the user's own rules.
+  const plan = registryDenyPlan();
+  const rules = record !== undefined ? record.filter(r => isOurRuleShape(r, plan)) : legacyDenyPair(list);
+  const kept = list.filter(r => !(typeof r === "string" && rules.includes(r)));
+  const removed = list.length - kept.length;
+  if (removed > 0) setDenyList(settings, kept);
+  return { removed, hadRecord: record !== undefined };
+}
+
+/** The lines `install claude-md` prints about verifying and scoping the rules. */
+function denyAdviceLines(plan: RegistryDenyPlan): string[] {
+  return [
+    ...plan.warnings.map(w => `warning: ${w}`),
+    "Claude Code merges Edit deny rules into the sandbox's write-deny list (see its sandboxing docs), so they also stop sandboxed Bash writes.",
+    `verify in a sandboxed Bash session: touch ${plan.verifyPath}   (it should fail with a permission error)`,
+    "state/ (audit log, lock, caches) is deliberately not denied.",
+  ];
+}
+
 export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   const claudeHome = opts.claudeHome ?? defaultClaudeHome();
   const claudeMdPath = join(claudeHome, "CLAUDE.md");
@@ -331,9 +641,25 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   const firstTouchMerge: MergeResult | null = opts.firstTouch
     ? mergeFirstTouchHook(settings!, FIRST_TOUCH_HOOK_COMMAND)
     : null;
+  const denyInstall = installDenyRules(settings!, settingsPath);
 
-  // Write if any hook was added.
+  // The ledger first: if it cannot be written, uninstall could not tell our
+  // rules from the user's, so no rule is added at all.
+  if (denyInstall.ledgerChanged) {
+    try {
+      writeDenyLedger(settingsPath, denyInstall.recorded);
+    } catch (err) {
+      emitError(
+        { code: "FS_ERROR", error: `failed to record the deny rules under ${statePath()}: ${(err as Error).message}` },
+        opts,
+      );
+    }
+  }
+
+  // Write if any hook or deny rule was added (or an older build's rule removed).
   if (
+    denyInstall.added.length > 0 ||
+    denyInstall.legacyRemoved.length > 0 ||
     merge.added ||
     checkWriteMerge.added ||
     bashMerge.added ||
@@ -378,6 +704,9 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
           firstTouchAdded: firstTouchMerge.added,
           firstTouchAlreadyPresent: firstTouchMerge.alreadyPresent,
         }),
+        registryDenyRulesAdded: denyInstall.added.length,
+        registryDenyRulesAlreadyPresent: denyInstall.alreadyPresent.length,
+        registryDenyRulesLegacyRemoved: denyInstall.legacyRemoved.length,
       },
     });
   } catch {
@@ -420,6 +749,14 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
           alreadyPresent: firstTouchMerge.alreadyPresent,
         },
       }),
+      registryDeny: {
+        rules: denyInstall.plan.rules,
+        added: denyInstall.added,
+        alreadyPresent: denyInstall.alreadyPresent,
+        legacyRemoved: denyInstall.legacyRemoved,
+        warnings: denyInstall.plan.warnings,
+        verifyWith: `touch ${denyInstall.plan.verifyPath}`,
+      },
       strictModeOn,
     });
     return;
@@ -450,6 +787,16 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     }
     emitText(`  command: ${FIRST_TOUCH_HOOK_COMMAND}`);
   }
+  emitText(
+    denyInstall.added.length > 0
+      ? `registered ${denyInstall.added.length} permissions.deny rule(s) protecting the registry, approvals, hooks and shim in ${settingsPath}`
+      : `permissions.deny rules for the registry already registered in ${settingsPath}`,
+  );
+  if (denyInstall.legacyRemoved.length > 0) {
+    emitText(`removed ${denyInstall.legacyRemoved.length} broader deny rule(s) written by an earlier build`);
+  }
+  for (const rule of denyInstall.plan.rules) emitText(`  rule: ${rule}`);
+  for (const line of denyAdviceLines(denyInstall.plan)) emitText(`  ${line}`);
   if (!strictModeOn) {
     emitText("");
     emitText("note: leak-context strict mode is OFF.");
@@ -499,6 +846,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   const bashMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, BASH_HOOK_COMMAND);
   const guardEgressMerge = mergePreToolUseHook(settings, BASH_HOOK_MATCHER, GUARD_EGRESS_HOOK_COMMAND);
   const egressReceiptMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, EGRESS_RECEIPT_HOOK_COMMAND);
+  const denyInstall = installDenyRules(settings, settingsPath);
   const wouldBeSettings = JSON.stringify(settings, null, 2) + "\n";
 
   // 3. strict-mode flag (read-only check)
@@ -545,6 +893,14 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
         wouldAdd: egressReceiptMerge.added,
         alreadyPresent: egressReceiptMerge.alreadyPresent,
       },
+      registryDeny: {
+        rules: denyInstall.plan.rules,
+        wouldAdd: denyInstall.added,
+        alreadyPresent: denyInstall.alreadyPresent,
+        wouldRemoveLegacy: denyInstall.legacyRemoved,
+        warnings: denyInstall.plan.warnings,
+        verifyWith: `touch ${denyInstall.plan.verifyPath}`,
+      },
       strictModeOn,
     });
     return;
@@ -568,13 +924,19 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   emitText(`#   ${BASH_HOOK_COMMAND}  (PostToolUse: Bash)`);
   emitText(`#   ${EGRESS_RECEIPT_HOOK_COMMAND}  (PostToolUse: Bash)`);
   emitText("");
+  emitText("# permissions.deny rules protecting the registry, approvals, hooks and shim:");
+  for (const rule of denyInstall.plan.rules) emitText(`#   ${rule}`);
+  for (const line of denyAdviceLines(denyInstall.plan)) emitText(`# ${line}`);
+  emitText("");
   emitText(`# Would-be settings.json at: ${settingsPath}`);
   if (
     merge.alreadyPresent &&
     checkWriteMerge.alreadyPresent &&
     bashMerge.alreadyPresent &&
     guardEgressMerge.alreadyPresent &&
-    egressReceiptMerge.alreadyPresent
+    egressReceiptMerge.alreadyPresent &&
+    denyInstall.added.length === 0 &&
+    denyInstall.legacyRemoved.length === 0
   ) {
     emitText("# (Pre/PostToolUse hooks already registered; settings.json unchanged)");
   }
@@ -722,6 +1084,8 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
     guardEgressRemoved: 0,
     egressReceiptRemoved: 0,
   };
+  let denyRulesRemoved = 0;
+  let denyRecordFound = false;
   const settingsRaw = readIfExists(settingsPath);
   const settingsAbsent = settingsRaw === null;
   if (settingsRaw !== null) {
@@ -735,7 +1099,10 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
       );
     }
     settingsResult = stripHookEntries(settings!);
-    if (settingsResult.removed > 0) {
+    const stripped = stripDenyRules(settings!, settingsPath);
+    denyRulesRemoved = stripped.removed;
+    denyRecordFound = stripped.hadRecord;
+    if (settingsResult.removed > 0 || denyRulesRemoved > 0) {
       try {
         writeFileSync(settingsPath, JSON.stringify(settings!, null, 2) + "\n");
       } catch (err) {
@@ -744,6 +1111,14 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
           opts,
         );
       }
+    }
+  }
+  // The rules are gone (or were never there), so the record of adding them goes too.
+  if (denyRecordFound || readDenyLedger().settings[settingsPath] !== undefined) {
+    try {
+      writeDenyLedger(settingsPath, []);
+    } catch {
+      /* a stale ledger entry only makes the next uninstall a no-op for rules that are already gone */
     }
   }
 
@@ -762,6 +1137,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         guardEgressHookEntriesRemoved: settingsResult.guardEgressRemoved,
         egressReceiptHookEntriesRemoved: settingsResult.egressReceiptRemoved,
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
+        registryDenyRulesRemoved: denyRulesRemoved,
         settingsAbsent,
       },
     });
@@ -786,6 +1162,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         guardEgressHookEntriesRemoved: settingsResult.guardEgressRemoved,
         egressReceiptHookEntriesRemoved: settingsResult.egressReceiptRemoved,
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
+        registryDenyRulesRemoved: denyRulesRemoved,
       },
     });
     return;
@@ -807,6 +1184,14 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
           settingsResult.scanRemoved + settingsResult.bashScanRemoved + settingsResult.egressReceiptRemoved
         },` +
         ` SessionStart: ${settingsResult.firstTouchRemoved})`,
+    );
+  }
+  if (!settingsAbsent) {
+    emitText(
+      denyRulesRemoved > 0
+        ? `removed ${denyRulesRemoved} registry permissions.deny rule(s) from ${settingsPath}` +
+            " (a sandbox.filesystem.denyWrite entry you added yourself is left in place)"
+        : `no registry permissions.deny rules in ${settingsPath}`,
     );
   }
 }
@@ -882,4 +1267,93 @@ export function checkGuardHook(claudeHome?: string): import("./doctor-checks.js"
       detail: `\`${GUARD_EGRESS_COMMAND_PREFIX}\` is registered as a PreToolUse(Bash) hook in ${settingsPath}`,
     },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Registry write protection: the doctor side (R1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether one `permissions.deny` entry denies `Edit` for `target`. A bare
+ * `Edit` denies the tool outright. A pattern counts when it is an absolute path
+ * (`//…`) or a home path (`~/…`) and either names the target exactly, or ends
+ * in `/**` (or `/*`) over a directory containing it; a project-relative pattern
+ * cannot be judged from here and does not count. Only `Edit` is consulted:
+ * Claude Code matches path rules for `Edit` and `Read` only. Pure and total:
+ * anything unrecognised is "no".
+ */
+export function denyRuleCoversPath(rule: unknown, target: string, home: string = homedir()): boolean {
+  if (typeof rule !== "string") return false;
+  const trimmed = rule.trim();
+  if (trimmed === "Edit") return true;
+  const m = /^Edit\((.*)\)$/.exec(trimmed);
+  if (m === null) return false;
+  const pattern = m[1]!.trim();
+  let abs: string;
+  if (pattern.startsWith("//")) abs = pattern.slice(1);
+  else if (pattern.startsWith("~/")) abs = join(home, pattern.slice(2));
+  else return false;
+  if (abs.endsWith("/**")) {
+    const base = abs.slice(0, -3).replace(/\/+$/, "");
+    return base === "" || target === base || target.startsWith(`${base}/`);
+  }
+  if (abs.endsWith("/*")) {
+    const base = abs.slice(0, -2).replace(/\/+$/, "");
+    return base === "" || dirname(target) === base;
+  }
+  return abs === target;
+}
+
+/**
+ * `doctor` check: `REGISTRY_AGENT_WRITABLE` (warn) when the Claude Code
+ * `settings.json` under `claudeHome` has no `permissions.deny` `Edit` rule for
+ * one of the paths `install claude-md` protects: the registry file and its
+ * `.age`, the approvals store, `hooks/` and `bin/` (R1). Without them the agent
+ * can edit `engagements.yaml` directly, with no terminal, and register any
+ * owner.
+ *
+ * A warning and not a failure: this reads settings.json, it cannot prove what
+ * the running sandbox enforces. Best-effort like {@link checkGuardHook}: a
+ * missing or unparseable settings.json is reported, never thrown.
+ */
+export function checkRegistryAgentWritable(
+  claudeHome?: string,
+  plan: RegistryDenyPlan = registryDenyPlan(),
+): import("./doctor-checks.js").DoctorCheck {
+  const home = claudeHome ?? defaultClaudeHome();
+  const settingsPath = join(home, "settings.json");
+  const fix =
+    "repo-aegis install claude-md   (adds permissions.deny Edit rules for the registry file, its .age, the approvals store, hooks/ and bin/); " +
+    `Claude Code applies Edit rules to the sandbox too: verify with a sandboxed \`touch ${plan.verifyPath}\``;
+  const warn = (detail: string): import("./doctor-checks.js").DoctorCheck => ({
+    code: "REGISTRY_AGENT_WRITABLE",
+    ok: false,
+    severity: "warn",
+    detail,
+    fix,
+  });
+
+  let settings: SettingsJson;
+  try {
+    settings = readSettings(settingsPath);
+  } catch {
+    return warn(
+      `settings.json at ${settingsPath} could not be parsed, so a deny rule for the registry files cannot be confirmed`,
+    );
+  }
+
+  const deny = denyList(settings);
+  const uncovered = plan.sampleTargets.filter(t => !deny.some(rule => denyRuleCoversPath(rule, t)));
+  if (uncovered.length > 0) {
+    return warn(
+      `Claude Code settings have no permissions.deny Edit rule covering ${uncovered.length} of the ${plan.sampleTargets.length} ` +
+        "protected path(s) (registry, approvals, hooks, shim), so an agent can edit them directly, with no terminal, " +
+        "and register any owner",
+    );
+  }
+  return {
+    code: "REGISTRY_AGENT_WRITABLE",
+    ok: true,
+    detail: `settings.json at ${settingsPath} denies Edit on the registry, approvals, hooks and shim paths`,
+  };
 }

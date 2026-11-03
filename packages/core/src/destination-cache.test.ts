@@ -3,7 +3,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { closeSync, fstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, fstatSync, mkdtempSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -86,6 +86,29 @@ describe("destination cache", () => {
       workingTree: pub,
       checkedAt: "2026-09-12T16:00:00.000Z",
     });
+  });
+
+  it("a write that fails (a denied target, or a read-only directory) returns null, never throws, and leaves no temp file", () => {
+    // The sandbox-style refusal: `install claude-md` denies agent writes to this file.
+    // (1) The target cannot be replaced: a non-empty directory sits there, so the rename fails
+    //     AFTER the temp file was written.
+    const deniedHome = join(root, "denied-home");
+    const deniedCache = destinationCachePath(deniedHome);
+    mkdirSync(join(deniedCache, "keep"), { recursive: true });
+    assert.equal(recordWorkingTree(pub, deniedCache), null);
+    assert.deepEqual(readdirSync(deniedHome).filter(f => f.endsWith(".tmp")), [], "a failed rename must not litter");
+
+    // (2) The directory itself is read-only (EACCES on creating the temp file).
+    if (typeof process.getuid === "function" && process.getuid() !== 0) {
+      const roHome = join(root, "ro-home");
+      mkdirSync(roHome, { recursive: true });
+      chmodSync(roHome, 0o500);
+      try {
+        assert.equal(recordWorkingTree(pub, destinationCachePath(roHome)), null);
+      } finally {
+        chmodSync(roHome, 0o700);
+      }
+    }
   });
 
   it("recording a second checkout keeps the first", () => {

@@ -5,6 +5,32 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { setAncestryReaderForTests, type AncestorInfo } from "@de-otio/repo-aegis-core";
+
+/**
+ * What `ps` shows for a person's own terminal session: zsh <- -zsh <- login <- Terminal. It reaches a
+ * positive root (login), which `approve` and the owner adds now require. Names only; no agent above it.
+ */
+export const PERSON_ANCESTRY: readonly AncestorInfo[] = [
+  { pid: 14, ppid: 13, comm: "zsh", argv: ["/bin/zsh"], exe: "/bin/zsh" },
+  { pid: 13, ppid: 12, comm: "-zsh", argv: ["-zsh"], exe: "-zsh" },
+  { pid: 12, ppid: 11, comm: "login", argv: ["login", "-pf", "me"], exe: "/usr/bin/login", uid: 0 },
+  {
+    pid: 11,
+    ppid: 1,
+    comm: "Terminal",
+    argv: ["/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"],
+    exe: "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+    uid: 501,
+  },
+];
+
+/** What `ps` shows under a Claude Code session: the same shell shape with `claude` between the shell and the login. */
+export const UNDER_CLAUDE_ANCESTRY: readonly AncestorInfo[] = [
+  { pid: 15, ppid: 14, comm: "zsh", argv: ["/bin/zsh"], exe: "/bin/zsh" },
+  { pid: 14, ppid: 13, comm: "claude", argv: ["claude"], exe: "/Users/me/.local/" },
+  ...PERSON_ANCESTRY,
+];
 
 export class ExitError extends Error {
   constructor(public code: number) {
@@ -203,6 +229,49 @@ export function withoutGh<T>(dir: string, fn: () => T): T {
 }
 
 /**
+ * Pin `stream.isTTY` for the duration of `fn`. Whether the test runner's own
+ * stderr/stdin is a terminal depends on how a developer invoked it; pinning it
+ * makes both sides of a human-presence gate assertable WITHOUT the
+ * `stderrIsTTY` seam, so the default (`process.stderr.isTTY`) path is tested.
+ *
+ * A pinned stderr TTY is also pinned "no agent above this process": the real
+ * process-ancestry walk would otherwise make these tests depend on whether the
+ * developer ran them under an agent host (issue #151, PR 2b).
+ */
+export function withStreamTty<T>(stream: "stderr" | "stdin", isTty: boolean, fn: () => T): T {
+  const target = process[stream];
+  const desc = Object.getOwnPropertyDescriptor(target, "isTTY");
+  Object.defineProperty(target, "isTTY", { value: isTty, configurable: true, writable: true });
+  if (stream === "stderr") setAncestryReaderForTests(() => PERSON_ANCESTRY);
+  try {
+    return fn();
+  } finally {
+    if (stream === "stderr") setAncestryReaderForTests(undefined);
+    if (desc) Object.defineProperty(target, "isTTY", desc);
+    else delete (target as { isTTY?: boolean }).isTTY;
+  }
+}
+
+/** Async variant of {@link withStreamTty}. */
+export async function withStreamTtyAsync<T>(
+  stream: "stderr" | "stdin",
+  isTty: boolean,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const target = process[stream];
+  const desc = Object.getOwnPropertyDescriptor(target, "isTTY");
+  Object.defineProperty(target, "isTTY", { value: isTty, configurable: true, writable: true });
+  if (stream === "stderr") setAncestryReaderForTests(() => PERSON_ANCESTRY);
+  try {
+    return await fn();
+  } finally {
+    if (stream === "stderr") setAncestryReaderForTests(undefined);
+    if (desc) Object.defineProperty(target, "isTTY", desc);
+    else delete (target as { isTTY?: boolean }).isTTY;
+  }
+}
+
+/**
  * Parse the last non-empty line of a stream as JSON.
  *
  * `emitError` writes its JSON payload to stderr, but stderr may already
@@ -218,4 +287,39 @@ export function lastJsonLine<T>(stream: string): T {
 
 function assertDefined(v: unknown, msg: string): asserts v is NonNullable<unknown> {
   if (v === undefined || v === null) throw new Error(msg);
+}
+
+const GIT_SCRUBBED =
+  /^(GIT_SSH.*|GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)|GIT_DIR|GIT_WORK_TREE|REPO_AEGIS_EGRESS_HUMAN|SRT_SSH_PROXY_COMMAND)$/;
+
+/**
+ * Make the process's git environment hermetic: no outer `GIT_SSH_COMMAND`,
+ * `GIT_CONFIG_*` (a sandbox or CI wrapper often sets them; the ssh override
+ * check reads exactly these), global and system git config off. Returns the undo.
+ */
+export function scrubGitEnv(): () => void {
+  const saved: Record<string, string | undefined> = {};
+  const touch = (name: string, value: string | undefined): void => {
+    if (!(name in saved)) saved[name] = process.env[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  };
+  for (const name of Object.keys(process.env)) if (GIT_SCRUBBED.test(name)) touch(name, undefined);
+  touch("GIT_CONFIG_GLOBAL", "/dev/null");
+  touch("GIT_CONFIG_NOSYSTEM", "1");
+  return () => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+}
+
+/** An environment for a child `git`: the current one, scrubbed of ssh/config overrides, plus `extra`. */
+export function hermeticGitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!GIT_SCRUBBED.test(k)) env[k] = v;
+  env["GIT_CONFIG_GLOBAL"] = "/dev/null";
+  env["GIT_CONFIG_NOSYSTEM"] = "1";
+  return { ...env, ...extra };
 }

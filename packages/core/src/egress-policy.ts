@@ -8,13 +8,25 @@
 // Two properties are load-bearing and must survive every future edit:
 //
 //   1. **Shape rules are unconditional; context rules fail open.** Rules
-//      a–d need no registry, no class and no visibility, so they always
-//      apply. Rules e–h read context that may be missing (an unparseable
+//      a–d (and the pty-wrapper rule, `EGRESS_PTY_WRAPPER`, which runs before
+//      them) need no registry, no class and no visibility, so they always
+//      apply. Rules e–g read context that may be missing (an unparseable
 //      remote, an unclassified repo, a payload that does not exist); a
 //      guardrail must never block on its own inability to determine
 //      context — that was the spurious `CROSS_ORG_WRITE` flake
 //      (doc/bugs/repo-aegis-check-write-flake.md). Asking is not blocking,
 //      so an uncertain destination may still `ask`.
+//
+//      Rule h (issue #151) is the documented exception, and it is a refusal
+//      no approval satisfies. It refuses non-interactive egress to an owner
+//      that is not registered (in neither `personalOrgs` nor any engagement's
+//      `githubOrgs`). The context is not missing: what is known is that a
+//      write goes to an owner nobody has vouched for. That includes a write
+//      whose owner cannot be named offline (`Destination.unresolved`), and an
+//      unreadable or encrypted registry, where no owner can be confirmed. It
+//      stays out of the way only where there is nothing to judge against: no
+//      registry file at all, or a registry that declares no owners. Only a
+//      person at a terminal passes it.
 //   2. **Decision-only.** This module returns a decision and a reason; it
 //      never returns a rewritten command. Rewriting `git push` into `git
 //      push origin <branch>` would rebuild the implicit-destination defect
@@ -24,7 +36,7 @@
 // ref or PR — the receipt-before-the-fact a human sees when asked. They
 // never carry payload content, matched substrings, or registry entries.
 
-import { basename, isAbsolute, resolve as resolvePath } from "node:path";
+import { basename, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
 import { closeSync, openSync, readSync } from "node:fs";
 import { readCachedVisibility, treatAsPublicDestination, type RepoVisibility } from "./egress.js";
@@ -35,15 +47,43 @@ import {
   type VisibilityLookup,
 } from "./visibility-lookup.js";
 import {
+  classifyApiEndpoint,
   graphqlOperationKind,
-  parseApiEndpoint,
+  intentRepoTargets,
   type EgressIntent,
   type EgressVerb,
   type GraphqlOperationKind,
+  type IntentUnresolved,
 } from "./egress-intent.js";
 import { resolveCachedDestination } from "./destination-cache.js";
-import { findApproval, type EgressApproval } from "./egress-approval.js";
-import { parseRemoteUrl } from "./remote-url.js";
+import {
+  approvalScopeOf,
+  findApproval,
+  findUncoveringStarApproval,
+  type ApprovalScope,
+  type EgressApproval,
+  type StarApprovalGap,
+} from "./egress-approval.js";
+import {
+  firstUnadmittedCandidate,
+  ownerAdmitted,
+  registeredOwners,
+  UPSTREAM_ADMITTED_VERBS,
+} from "./registered-owners.js";
+import {
+  refusal,
+  safeDestination,
+  isSafeOwner,
+  isPrintableDestination,
+  INVALID_DESTINATION_LABEL,
+  type RefusalFix,
+} from "./refusal.js";
+import { registryPath } from "./paths.js";
+import { checkTerminal, type AncestryReader } from "./process-ancestry.js";
+import { homedir } from "node:os";
+import { parseRemoteUrl, parseRemoteUrlResolved, resolveRemoteUrl } from "./remote-url.js";
+import { resolvePushUrls, detectSshOverride } from "./push-urls.js";
+import { ghBaseRepo } from "./gh-base-repo.js";
 import { readRepoConfig, type RepoClass, type RepoConfig } from "./repo.js";
 import type { Registry } from "./registry.js";
 import { computeTrustBoundary, type TrustBoundary } from "./trust-boundary.js";
@@ -52,14 +92,35 @@ import { computeDenySet } from "./deny-set.js";
 import { scanFile } from "./scan.js";
 
 export type EgressCode =
+  | "EGRESS_PTY_WRAPPER"
   | "PUSH_IMPLICIT_TARGET"
   | "EGRESS_AFTER_CD"
   | "EGRESS_UNGUARDED_CHAIN"
   | "PAYLOAD_MODE_DEPENDENT_PATH"
+  | "EGRESS_ENV_OVERRIDE"
+  | "EGRESS_AFTER_STATE_CHANGE"
+  | "GH_PR_CREATE_IMPLICIT_TARGET"
   | "CROSS_ORG_EGRESS"
   | "PAYLOAD_MARKER_HIT"
+  | "UNREGISTERED_OWNER_EGRESS"
   | "PUBLIC_EGRESS_NEEDS_HUMAN"
   | "SHIM_UNREACHABLE_NEEDS_HUMAN";
+
+/**
+ * The shape rules (a–d, b′, b″ and D10's): unconditional, they never reach rule h. Layers use
+ * this to leave rule h's standing (`ruleH`, the skip note) out of a refusal
+ * that rule h had no part in.
+ */
+export const SHAPE_RULE_CODES: ReadonlySet<EgressCode> = new Set<EgressCode>([
+  "EGRESS_PTY_WRAPPER",
+  "PUSH_IMPLICIT_TARGET",
+  "EGRESS_AFTER_CD",
+  "EGRESS_UNGUARDED_CHAIN",
+  "PAYLOAD_MODE_DEPENDENT_PATH",
+  "EGRESS_ENV_OVERRIDE",
+  "EGRESS_AFTER_STATE_CHANGE",
+  "GH_PR_CREATE_IMPLICIT_TARGET",
+]);
 
 export interface Destination {
   org: string;
@@ -127,8 +188,33 @@ export interface Destination {
    * `assumedPublic`: rule g asks a person, or refuses from a shell with none.
    * Rule e is skipped (there is no boundary to compare against); rule f
    * still scans the payload against a public-facing deny set.
+   *
+   * `opaque-url`: a push whose URL cannot be resolved to a GitHub repository
+   * offline (a URL-shaped value that is not cleanly `github.com/<owner>/<repo>`,
+   * or an ssh alias the pure ssh-config parser cannot resolve). Same treatment.
    */
-  unresolved?: "graphql-mutation";
+  unresolved?: "graphql-mutation" | "opaque-url" | "self" | IntentUnresolved;
+  /**
+   * Every repository (or org, `repo: "*"`) a command can reach when that is more than one: a command naming
+   * several repositories (`gh issue transfer 5 acme/y -R acme/x`). Rule h admits the destination only when
+   * EVERY candidate is admitted (M5). `org`/`repo` are then `*`/`*` with `unresolved: "ambiguous-target"`, so
+   * rule g still wants a person and no approval covers it.
+   */
+  candidates?: ReadonlyArray<{ org: string; repo: string }>;
+  /**
+   * For `opaque-url`: a fixed, content-free phrase saying what could not be
+   * resolved (an ssh Match block, an IP-literal host, an ssh override…), so the
+   * refusal can say why. Never carries part of the URL.
+   */
+  unresolvedWhy?: string;
+  /**
+   * Further, fully classified targets of the same command: a remote with
+   * several push URLs writes to all of them. Every rule judges every target
+   * (rule h requires all to be admitted; rules e–g are run per target and the
+   * most restrictive decision wins), and a receipt names them all. A target
+   * here never carries `alsoTargets` of its own.
+   */
+  alsoTargets?: Destination[];
 }
 
 export type EgressDecision =
@@ -148,16 +234,75 @@ export type EgressDecision =
 /** Human-only escape for the "is a person present" test. Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE`. */
 export const EGRESS_HUMAN_ENV = "REPO_AEGIS_EGRESS_HUMAN";
 
+/** What {@link humanPresence} found, so a caller can report the ancestry case. */
+export interface HumanPresence {
+  present: boolean;
+  /**
+   * How the process ancestry bore on a TTY: `skipped` (no TTY, the env
+   * override decided, or the caller injected the TTY answer), `clear`, `agent`
+   * (an agent host or pty wrapper sits above this process: the TTY is not a
+   * person's) or `undeterminable` (the chain could not be read: today's TTY
+   * result stands, and the caller should say so).
+   */
+  ancestry: "skipped" | "clear" | "agent" | "undeterminable";
+  /** For `agent`: a fixed label such as `claude` or `script` (a process name, never an argument). */
+  ancestor?: string;
+}
+
 /**
  * Whether a human is at the keyboard for this invocation: a TTY on stderr
  * (stdin is often a pipe even for humans — git's ref list, a heredoc — so it
- * is never the signal), or the documented human-only override.
+ * is never the signal) that no agent host or pty wrapper sits above, or the
+ * documented human-only override.
+ *
+ * The TTY alone is a speed bump (issue #151, PR 2b, S10): `script -q /dev/null
+ * gh …` gives an agent's child a pty. So with a TTY the process ancestry is
+ * also read ({@link checkTerminal}): the Claude Code environment signal
+ * (`CLAUDECODE=1`) and the process chain. Policy here, for rules g and h: an
+ * agent or pty-wrapper ancestor, or that environment, means NOT a person. A
+ * chain that cannot be read, or that reaches init without a positive root
+ * (login, sshd, a terminal emulator, an attached tmux/screen), keeps today's TTY
+ * result (`undeterminable`, reported by the caller), because refusing a person's
+ * own publish is the worse failure. (`approve` and owner adds refuse instead.)
+ *
+ * `stderrIsTTY` and `ancestry` are TEST-ONLY seams: outside the Node test runner
+ * they are ignored (see `testSeamsEnabled`), so no production path can skip the
+ * check. Tests that pin `process.stderr.isTTY` use `setAncestryReaderForTests`.
  */
+export function humanPresence(
+  env?: NodeJS.ProcessEnv,
+  stderrIsTTY?: boolean,
+  ancestry?: AncestryReader,
+): HumanPresence {
+  if ((env ?? process.env)[EGRESS_HUMAN_ENV] === "1") return { present: true, ancestry: "skipped" };
+  const check = checkTerminal({
+    // Left unset when the caller gave none, so a synthetic (test) chain is judged against an empty
+    // environment rather than the developer's own (which, under Claude Code, says CLAUDECODE=1).
+    ...(env !== undefined && { env }),
+    ...(stderrIsTTY !== undefined && { stderrIsTTY }),
+    ...(ancestry !== undefined && { ancestry }),
+  });
+  switch (check.kind) {
+    case "no-tty":
+      return { present: false, ancestry: "skipped" };
+    case "skipped":
+      return { present: true, ancestry: "skipped" };
+    case "agent":
+      return { present: false, ancestry: "agent", ancestor: check.ancestor };
+    case "unrooted":
+    case "undeterminable":
+      return { present: true, ancestry: "undeterminable" };
+    case "clear":
+      return { present: true, ancestry: "clear" };
+  }
+}
+
 export function isHumanPresent(
-  env: NodeJS.ProcessEnv = process.env,
-  stderrIsTTY: boolean = !!process.stderr.isTTY,
+  env?: NodeJS.ProcessEnv,
+  stderrIsTTY?: boolean,
+  ancestry?: AncestryReader,
 ): boolean {
-  return stderrIsTTY || env[EGRESS_HUMAN_ENV] === "1";
+  return humanPresence(env, stderrIsTTY, ancestry).present;
 }
 
 /** Verbs that need a person regardless of destination: they are hard or impossible to undo. */
@@ -190,16 +335,40 @@ export type PayloadScanner = (file: string, destination: Destination, cwd: strin
 /**
  * Looks up a live human-minted approval for a destination (null when the
  * command has none, e.g. `npm publish`) and the ref the command names.
- * Injectable for tests; defaults to the approvals store under
- * `REPO_AEGIS_HOME`.
+ * `scope` says what a `*` approval may cover for this call (D7): the
+ * registry's personal orgs and upstreams, and whether the verb is
+ * destination-less. Injectable for tests; defaults to the approvals store
+ * under `REPO_AEGIS_HOME`.
  */
-export type ApprovalFinder = (destination: Destination | null, ref: string | undefined) => EgressApproval | null;
+export type ApprovalFinder = (
+  destination: Destination | null,
+  ref: string | undefined,
+  scope: ApprovalScope,
+) => EgressApproval | null;
+
+/**
+ * How the registry was obtained, so that "empty because missing", "empty
+ * because unreadable" and "loaded and empty" cannot be confused (rule h,
+ * issue #151, decision D4).
+ *
+ * - `loaded`: read successfully. Rule h judges against its owner lists, and
+ *   is skipped when it declares none.
+ * - `missing`: no registry file exists. Rule h is skipped.
+ * - `unreadable`: a file (or ciphertext) exists but could not be read:
+ *   encrypted, unparseable, or a newer schema. Rule h refuses every
+ *   non-interactive egress that has a destination, because no owner can be
+ *   confirmed. Falling open here would let one corrupted line switch the
+ *   rule off.
+ */
+export type RegistryState = "loaded" | "missing" | "unreadable";
 
 export interface DecideEgressOptions {
   intents: EgressIntent[];
   /** Where the command WILL run: the hook payload's cwd, or the shim's `$PWD`. */
   cwd: string;
   registry: Registry;
+  /** How `registry` was obtained. Required: every caller must say (see {@link RegistryState}). */
+  registryState: RegistryState;
   /** From {@link isHumanPresent}. */
   humanPresent: boolean;
   capabilities: {
@@ -226,6 +395,15 @@ export interface DecideEgressOptions {
   /** Injectable for tests; defaults to the approvals store. */
   findApproval?: ApprovalFinder;
   /**
+   * Injectable for tests: the lookup behind rule g's "a `*` approval is live
+   * but does not cover this" sentence. When omitted it follows
+   * {@link findApproval}: the real store is read only when the real finder is
+   * in use (omitted, or {@link findApprovalDefault}); an injected finder
+   * means no gap lookup, so an injected finder controls what rule g sees and
+   * a test never reads the developer's own approvals store.
+   */
+  findUncoveredStar?: UncoveredStarFinder;
+  /**
    * Live lookup for a destination whose visibility is unknown. Injectable
    * for tests; defaults to `gh repo view` unless
    * `REPO_AEGIS_VISIBILITY_LOOKUP=0`.
@@ -233,9 +411,29 @@ export interface DecideEgressOptions {
   lookupVisibility?: VisibilityLookup;
 }
 
-/** Default {@link ApprovalFinder}: a destination-less command is covered only by a `*` approval. */
-export const findApprovalDefault: ApprovalFinder = (destination, ref) =>
-  findApproval(destination ?? { org: "*", repo: "*" }, ref);
+/**
+ * Looks up a live `*` approval that exists but does NOT cover `destination`
+ * (D7), so rule g's refusal can say so. Same injection seam as
+ * {@link ApprovalFinder}: see {@link DecideEgressOptions.findUncoveredStar}.
+ */
+export type UncoveredStarFinder = (
+  destination: Destination,
+  ref: string | undefined,
+  scope: ApprovalScope,
+) => { approval: EgressApproval; gap: StarApprovalGap } | null;
+
+/** Default {@link UncoveredStarFinder}: the approvals store under `REPO_AEGIS_HOME`. */
+export const findUncoveredStarDefault: UncoveredStarFinder = (destination, ref, scope) =>
+  findUncoveringStarApproval(destination, ref, scope);
+
+/**
+ * Default {@link ApprovalFinder}. A `*` approval covers only `personalOrgs`
+ * owners and destination-less verbs (`scope.destinationless`); a null
+ * destination that is not flagged destination-less is covered by nothing
+ * but an explicit person.
+ */
+export const findApprovalDefault: ApprovalFinder = (destination, ref, scope) =>
+  findApproval(destination ?? { org: "*", repo: "*" }, ref, scope);
 
 // ---------------------------------------------------------------------------
 // Destination resolution (offline)
@@ -268,7 +466,9 @@ function parseRepoFlag(flag: string): { org: string; repo: string } | null {
 
 function ownOrigin(base: string): { org: string; repo: string } | null {
   const url = gitConfigGet(base, "remote.origin.url");
-  const parsed = url === null ? null : parseRemoteUrl(url);
+  // The same resolution every layer uses, ssh aliases included: an origin
+  // `git@gh-work:acme/x.git` is `acme/x`.
+  const parsed = url === null ? null : parseRemoteUrlResolved(url);
   return parsed ? { org: parsed.org, repo: parsed.repo } : null;
 }
 
@@ -455,49 +655,135 @@ export function graphqlIntentKind(intent: EgressIntent, base: string): GraphqlOp
  * nothing parses — the context rules then do not fire.
  */
 export const resolveDestinationOffline: DestinationResolver = (intent, cwd, registry) => {
+  // The parser could not name the target (`$REPO`, a shell alias, an unknown
+  // command, an earlier `export GH_REPO=…`, an unparsed line): fail closed,
+  // never the cwd. Checked first, so no git config is read for it either.
+  if (intent.unresolved !== undefined) return unresolvedDestination(intent.unresolved);
+
   const base = intent.cwdOverride ?? cwd;
   const own = ownOrigin(base);
 
   if (intent.verb === "git-push") {
     if (intent.remote === undefined) return own ? withLocalClass(own, base, own, registry) : null;
-    const direct = parseRemoteUrl(intent.remote);
-    if (direct) return withLocalClass({ org: direct.org, repo: direct.repo }, base, own, registry);
-    const url = gitConfigGet(base, `remote.${intent.remote}.url`);
-    const parsed = url === null ? null : parseRemoteUrl(url);
-    if (!parsed) return null;
-    return withLocalClass({ org: parsed.org, repo: parsed.repo }, base, own, registry);
-  }
-
-  if (intent.verb === "npm-publish") return null; // registry, not a repo
-
-  if (intent.repoFlag !== undefined) {
-    const target = parseRepoFlag(intent.repoFlag);
-    return target ? withLocalClass(target, base, own, registry) : null;
-  }
-  if (intent.apiEndpoint !== undefined) {
-    // The destination is in the path. `{owner}/{repo}` placeholders, `graphql`
-    // and the account-level endpoints carry none, and fall through to the
-    // cwd's origin — for the placeholders that is exactly what gh does.
-    const target = parseApiEndpoint(intent.apiEndpoint);
-    if (target !== null) return withLocalClass({ org: target.org, repo: target.repo ?? "*" }, base, own, registry);
-    // A GraphQL mutation's target is a node id, not a path, and not the cwd:
-    // an `enqueuePullRequest` run from a private checkout reaches whichever
-    // repository owns that PR (issue #113). A read keeps the cwd fallback.
-    if (intent.graphql !== undefined && graphqlIntentKind(intent, base) !== "query") {
+    // Where the push will actually write: `git remote get-url --push --all`
+    // applies pushurl, insteadOf and pushInsteadOf and returns every push URL
+    // (plan §3.3.5). A URL given directly is rewritten the same way.
+    const urls = resolvePushUrls(base, intent.remote);
+    if (urls === null) return null;
+    // Any ssh override (GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT,
+    // core.sshCommand) makes a non-GitHub-looking ssh host unresolved
+    // (resolveRemoteUrl). This process reads its OWN environment and the
+    // config seen from the command's directory. The agent hook may run outside
+    // the sandbox that sets the agent's GIT_SSH_COMMAND, so it cannot know
+    // there is no override: `unknownDotlessUnresolved` also makes a dotless
+    // host the ssh config does not map (`zz`) unresolved. A dotted non-GitHub
+    // host (gitlab.com) stays non-GitHub here; pre-push, which sees the real
+    // environment, catches that override case.
+    const sshOverride = detectSshOverride(base);
+    const targets = urls.map(u =>
+      resolveRemoteUrl(u, undefined, { sshOverride, unknownDotlessUnresolved: true }),
+    );
+    // A push URL nothing offline can name is a write to an unknown owner (D5).
+    // Not marked public-facing: only rule h acts on it, so that a registry that
+    // is missing or declares no owners (rule h skipped) behaves as it did when
+    // such a URL simply had no destination.
+    const doubt = targets.find(t => t.kind === "unresolved");
+    if (doubt !== undefined && doubt.kind === "unresolved") {
       return {
         org: "*",
         repo: "*",
         class: "private-strict",
         visibility: "unknown",
-        publicFacing: true,
+        publicFacing: false,
         classKnown: false,
-        assumedPublic: true,
-        unresolved: "graphql-mutation",
+        unresolved: "opaque-url",
+        unresolvedWhy: doubt.why,
       };
     }
+    const seen = new Set<string>();
+    const found: { org: string; repo: string }[] = [];
+    for (const t of targets) {
+      if (t.kind !== "github") continue;
+      const key = `${t.org}/${t.repo}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ org: t.org, repo: t.repo });
+    }
+    const [first, ...rest] = found;
+    if (first === undefined) return null;
+    const dest = withLocalClass(first, base, own, registry);
+    return rest.length > 0
+      ? { ...dest, alsoTargets: rest.map(t => withLocalClass(t, base, own, registry)) }
+      : dest;
   }
-  return own ? withLocalClass(own, base, own, registry) : null;
+
+  if (intent.verb === "npm-publish") return null; // registry, not a repo
+
+  // A gist belongs to the authenticated account, not to the cwd's origin, and no `*` approval
+  // covers it (§3.3 item 9).
+  if (intent.verb === "gh-gist-create") return unresolvedDestination("self");
+
+  // Several distinct targets (`--repo` plus a URL positional, …): no single
+  // destination, so a person; rule h admits it only when EVERY one is registered (M5).
+  const targets = intentRepoTargets(intent);
+  const distinct = new Map(targets.map(t => [`${t.org}/${t.repo ?? "*"}`, { org: t.org, repo: t.repo ?? "*" }]));
+  if (distinct.size > 1) return unresolvedDestination("ambiguous-target", [...distinct.values()]);
+  if (targets[0] !== undefined) {
+    return withLocalClass({ org: targets[0].org, repo: targets[0].repo ?? "*" }, base, own, registry);
+  }
+  if (intent.apiEndpoint !== undefined) {
+    // The destination is in the path. `{owner}/{repo}` placeholders carry none and fall through to the
+    // base repository — which is exactly where gh fills them in from.
+    const api = classifyApiEndpoint(intent.apiEndpoint);
+    if (api.kind === "named") return withLocalClass({ org: api.org, repo: api.repo ?? "*" }, base, own, registry);
+    // The authenticated account's own resources: not a repository, never covered by `*` (§3.3 item 4).
+    if (api.kind === "self") return unresolvedDestination("self");
+    // No owner in the path (`repositories/<id>/…`, `gists`, `projects/…`): never the cwd's origin.
+    if (api.kind === "opaque-endpoint") return unresolvedDestination("opaque-endpoint");
+    if (api.kind === "opaque") return unresolvedDestination("opaque-repo");
+    // A GraphQL mutation's target is a node id, not a path, and not the cwd:
+    // an `enqueuePullRequest` run from a private checkout reaches whichever
+    // repository owns that PR (issue #113). A read keeps the cwd fallback.
+    if (intent.graphql !== undefined && graphqlIntentKind(intent, base) !== "query") {
+      return unresolvedDestination("graphql-mutation");
+    }
+  }
+  return implicitGhDestination(base, own, registry, intent.ghPlainBase === true);
 };
+
+/** A destination nothing offline can name: `*`/`*`, treated as public (the fail-closed stance of `assumedPublic`). */
+function unresolvedDestination(
+  reason: NonNullable<Destination["unresolved"]>,
+  candidates?: ReadonlyArray<{ org: string; repo: string }>,
+): Destination {
+  return {
+    org: "*",
+    repo: "*",
+    class: "private-strict",
+    visibility: "unknown",
+    publicFacing: true,
+    classKnown: false,
+    assumedPublic: true,
+    unresolved: reason,
+    ...(candidates !== undefined && { candidates: [...candidates] }),
+  };
+}
+
+/**
+ * The destination of a `gh` write with no explicit target: gh's OWN pick of the base repository
+ * ({@link ghBaseRepo}), not a candidate set. Unresolved when that pick cannot be read offline.
+ */
+function implicitGhDestination(
+  base: string,
+  own: { org: string; repo: string } | null,
+  registry: Registry | undefined,
+  plain: boolean,
+): Destination | null {
+  const found = ghBaseRepo(base, plain);
+  if (found.kind === "none") return null;
+  if (found.kind === "unresolved") return unresolvedDestination(found.reason);
+  return withLocalClass({ org: found.org, repo: found.repo }, base, own, registry);
+}
 
 /**
  * Default payload scanner: the destination's deny set (its own class when
@@ -553,6 +839,8 @@ const VERB_LABEL: Record<EgressVerb, string> = {
   "gh-repo-edit": "gh repo edit",
   "gh-gist-create": "gh gist create",
   "gh-workflow-run": "gh workflow run",
+  "gh-alias-shell": "gh (shell alias)",
+  "gh-unknown": "gh (unrecognised command)",
   "gh-api-mutating": "gh api (mutating)",
   "npm-publish": "npm publish",
 };
@@ -561,12 +849,31 @@ export function describeVerb(verb: EgressVerb): string {
   return VERB_LABEL[verb];
 }
 
-/** `<org>/<repo> (<visibility>, class <class>)` — the only way a destination is ever printed. */
+/**
+ * `<org>/<repo> (<visibility>, class <class>)` — the only way a destination is ever printed.
+ * A command with several targets (a remote with several push URLs) names every
+ * one of them, each through the same name validation.
+ */
 export function describeDestination(d: Destination | null | undefined): string {
   if (!d) return "unresolved destination";
+  const more = d.alsoTargets ?? [];
+  const first = describeOneDestination(d);
+  return more.length === 0 ? first : [first, ...more.map(describeOneDestination)].join(" AND ");
+}
+
+function describeOneDestination(d: Destination): string {
   if (d.unresolved === "graphql-mutation") {
     return "UNKNOWN repository (GraphQL mutation: the target is a node id, not resolvable offline; treated as public)";
   }
+  if (d.unresolved === "self") return "your own GitHub account (not a repository)";
+  if (d.unresolved === "opaque-url") {
+    return "UNKNOWN repository (the push URL does not resolve to a GitHub repository offline)";
+  }
+  if (d.unresolved !== undefined) {
+    return `UNKNOWN repository (${d.unresolved}: the target cannot be named offline; treated as public)`;
+  }
+  // The name comes from the agent's command line (see refusal.ts): never print one that is not a GitHub name.
+  if (safeDestination(d.org, d.repo) === null) return INVALID_DESTINATION_LABEL;
   const vis = d.assumedPublic ? "visibility uncached, treated as public" : d.classKnown ? d.visibility : "visibility unknown";
   const cls = d.classKnown ? d.class : "class unknown";
   return `${d.org}/${d.repo} (${vis}, ${cls})`;
@@ -579,7 +886,17 @@ export function describeDestination(d: Destination | null | undefined): string {
  */
 export function describeDestinationForReceipt(d: Destination | null | undefined): string {
   if (!d) return "(destination not resolved)";
+  const more = d.alsoTargets ?? [];
+  const first = describeOneDestinationForReceipt(d);
+  return more.length === 0 ? first : [first, ...more.map(describeOneDestinationForReceipt)].join(" AND ");
+}
+
+function describeOneDestinationForReceipt(d: Destination): string {
   if (d.unresolved === "graphql-mutation") return "UNKNOWN (GRAPHQL MUTATION TARGET NOT RESOLVED, TREATED AS PUBLIC)";
+  if (d.unresolved === "self") return "YOUR OWN GITHUB ACCOUNT (NOT A REPOSITORY)";
+  if (d.unresolved === "opaque-url") return "UNKNOWN (PUSH URL NOT RESOLVED)";
+  if (d.unresolved !== undefined) return `UNKNOWN (TARGET NOT RESOLVED: ${d.unresolved.toUpperCase()}, TREATED AS PUBLIC)`;
+  if (safeDestination(d.org, d.repo) === null) return INVALID_DESTINATION_LABEL.toUpperCase();
   const vis = d.assumedPublic
     ? "VISIBILITY UNCACHED, TREATED AS PUBLIC"
     : d.classKnown
@@ -629,6 +946,397 @@ function positivelyDisjoint(a: ReadonlySet<string>, b: ReadonlySet<string>): boo
   return true;
 }
 
+/**
+ * `d` if it may be printed or attached to a decision (see
+ * {@link isPrintableDestination}), else `undefined`: the name is dropped, as
+ * the refusal text drops it. Layers print the attached destination as JSON, so
+ * an invalid name (shell syntax, a line break, U+202E) never reaches a
+ * terminal through that channel either.
+ */
+function printable(d: Destination): Destination | undefined {
+  return isPrintableDestination(d) ? d : undefined;
+}
+
+/** Orgs for a message: valid names, sorted; any invalid ones are counted, not shown. */
+function printOrgs(orgs: Iterable<string>): string {
+  const valid: string[] = [];
+  let invalid = 0;
+  for (const o of orgs) {
+    if (isSafeOwner(o)) valid.push(o.toLowerCase());
+    else invalid++;
+  }
+  const names = [...new Set(valid)].sort();
+  if (invalid > 0) names.push(invalid === 1 ? "1 invalid name" : `${invalid} invalid names`);
+  return names.join(", ");
+}
+
+/** A path for a message; one with control or format characters (U+202E and friends) is described instead. */
+function printablePath(p: string | undefined): string {
+  return p !== undefined && !/[\p{C}]/u.test(p) ? p : "a checkout on this machine";
+}
+
+/**
+ * Where the registry file is, for the repair hint. The path is printed only
+ * when it is the default location under the home directory; for an override
+ * the hint names the variable instead, so a path the environment chose (and
+ * that could carry anything) is never echoed.
+ */
+function registryPathLabel(): string {
+  try {
+    const viaRegistry = process.env["REPO_AEGIS_REGISTRY"];
+    if (viaRegistry !== undefined) return "the registry file (set by REPO_AEGIS_REGISTRY)";
+    if (process.env["REPO_AEGIS_HOME"] !== undefined) return "the registry file (under REPO_AEGIS_HOME)";
+    const h = homedir();
+    if (h.length > 1 && registryPath() === join(h, ".config", "repo-aegis", "engagements.yaml")) {
+      return "~/.config/repo-aegis/engagements.yaml";
+    }
+    return "the registry file";
+  } catch {
+    return "the registry file";
+  }
+}
+
+/**
+ * Why each kind of unresolved destination cannot be named offline, and the shape the agent
+ * re-issues the command in (§3.9). Static text: nothing from the command line is interpolated.
+ */
+const UNRESOLVED_REFUSAL: Readonly<Record<NonNullable<Destination["unresolved"]>, { why: string; reissue: string }>> = {
+  "graphql-mutation": {
+    why:
+      "A GraphQL mutation names its target by node id, so repo-aegis cannot tell offline which owner it writes to",
+    reissue: "a gh command that names the repository, such as gh issue comment --repo <owner>/<repo> …",
+  },
+  // Normally handled by the dedicated opaque-url branch in unregisteredOwnerReason;
+  // kept here so the table covers every reason.
+  "opaque-url": {
+    why: "The push URL does not resolve offline to a github.com/<owner>/<repo> repository",
+    reissue: "git push <a remote whose URL is https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git> <branch>",
+  },
+  "env-override": {
+    why:
+      "An earlier part of this command line changes GH_REPO (or may, through eval, source, set -a or unset), so the " +
+      "repository gh will use is not the one repo-aegis can see before the command runs",
+    reissue: "the command alone, with a literal --repo <owner>/<repo>, and run the environment change as its own call",
+  },
+  "gh-alias": {
+    why:
+      "The command starts with a word that is not a built-in gh command and not an alias repo-aegis can read " +
+      "(an alias, a shell alias, an extension, or a shell expansion), so it cannot tell what the command publishes or where",
+    reissue: "the built-in command with a literal repository, such as gh issue comment --repo <owner>/<repo> …",
+  },
+  "opaque-repo": {
+    why:
+      "A repository in this command is not a literal <owner>/<repo> (it is a shell variable or expansion, a bare name, " +
+      "or malformed), so repo-aegis cannot tell which owner it writes to",
+    reissue: "the command with a literal --repo <owner>/<repo> (for gh api, the repos/<owner>/<repo>/… endpoint)",
+  },
+  "unknown-shape": {
+    why:
+      "This gh command writes somewhere repo-aegis has no way to read (an unrecognised subcommand or a command group it " +
+      "does not model)",
+    reissue: "a built-in command that repo-aegis models, with a literal --repo <owner>/<repo>",
+  },
+  "ambiguous-target": {
+    why: "This command names more than one repository (for example --repo plus a URL), so repo-aegis cannot tell which one it writes to",
+    reissue: "the command naming a single repository, with a literal --repo <owner>/<repo>",
+  },
+  "unparsed-shape": {
+    why:
+      "repo-aegis could not take this command line apart (it is nested too deeply, built through a wrapper, brace " +
+      "expansion or stdin, or points git at a directory it cannot name), so it cannot tell what it publishes or where",
+    reissue: "a single plain command with literal arguments, such as gh issue comment --repo <owner>/<repo> …",
+  },
+  "opaque-endpoint": {
+    why:
+      "The gh api endpoint does not name an owner (it uses a numeric id, or an account-level path such as gists or " +
+      "projects), so repo-aegis cannot check where the write lands",
+    reissue: "the repos/<owner>/<repo>/… form of the endpoint (for example gh api -X POST repos/<owner>/<repo>/issues …)",
+  },
+  "gh-resolved": {
+    why:
+      "This checkout's remote.<name>.gh-resolved setting is neither base nor an <owner>/<repo>, so repo-aegis cannot tell " +
+      "which repository gh will choose",
+    reissue: "the command with a literal --repo <owner>/<repo>",
+  },
+  "opaque-remote": {
+    why:
+      "A git remote of this checkout is not cleanly a github.com/<owner>/<repo> URL, or two remotes of equal rank name " +
+      "different repositories, so repo-aegis cannot tell which repository gh will choose",
+    reissue: "the command with a literal --repo <owner>/<repo>",
+  },
+  // Admitted by rule h before any text is built; present because the table covers every reason.
+  self: {
+    why: "This command acts on your own GitHub account rather than on a repository",
+    reissue: "the same command from a terminal",
+  },
+};
+
+/**
+ * Rule h's refusal text (§3.9). Names the verb and the destination's own
+ * owner/repo, which the command already carries, and nothing else: never the
+ * registered owners, engagement ids or upstreams (the redaction oracle).
+ */
+/**
+ * The sentence rule g ADDS to its existing refusal when a live `*` approval
+ * exists but does not cover the destination (D7, §3.9: "existing message,
+ * plus"): it says so, says why, and gives the narrower, quoted approve
+ * commands. Leading space included, so it concatenates; empty when the
+ * destination's name is not a plausible GitHub owner/repo (nothing
+ * interpolated from an invalid name, no command to paste). Names only the
+ * destination's own owner/repo, which the command already carries; never
+ * another owner, an engagement id or the registry's contents.
+ */
+export function uncoveredStarSentence(
+  destination: Pick<Destination, "org" | "repo">,
+  star: EgressApproval,
+  gap: StarApprovalGap,
+  registry: Registry,
+): string {
+  const safe = safeDestination(destination.org, destination.repo);
+  if (safe === null) return "";
+  const owner = safe.org;
+  const target = `${safe.org}/${safe.repo}`;
+  const isCustomer = registry.engagements.some(e => (e.githubOrgs ?? []).some(o => o.toLowerCase() === owner));
+  const kind =
+    gap === "upstream"
+      ? `${target} is an allowed upstream, not one of your own repositories`
+      : isCustomer
+        ? `${owner} is a customer org`
+        : `${owner} is not one of your personal orgs`;
+  return (
+    ` A '*' approval (${star.id}, until ${star.expiresAt}) is live, but since 0.11.0 '*' covers only ` +
+    `personal-org repositories and destination-less commands such as npm publish; ${kind}. ` +
+    `No '*' approval covers it. A person runs, from a terminal: \`repo-aegis approve '${owner}/*'\` ` +
+    `(the whole org) or \`repo-aegis approve ${target}\` (this repository only).`
+  );
+}
+
+export function unregisteredOwnerReason(
+  intent: Pick<EgressIntent, "verb">,
+  destination: Pick<Destination, "org" | "repo" | "unresolved" | "unresolvedWhy" | "candidates">,
+  state: RegistryState,
+  registry: Pick<Registry, "allowedUpstreams"> & Partial<Pick<Registry, "personalOrgs" | "engagements">>,
+): string {
+  const verb = describeVerb(intent.verb);
+  const code = "UNREGISTERED_OWNER_EGRESS";
+  const unresolved = destination.unresolved !== undefined;
+  // Names come from the agent's own command line and end up in text a person
+  // is told to paste. Only validated, lower-cased names are interpolated, and
+  // `refusal()` discards the whole message for an invalid one (it is handed
+  // `subject`), so nothing built from `owner`/`target` below can reach output
+  // when the name is bad.
+  const safe = unresolved ? null : safeDestination(destination.org, destination.repo);
+  const owner = safe?.org ?? "";
+  const target = safe === null ? "" : `${safe.org}/${safe.repo}`;
+  const subject = unresolved ? {} : { destination: { verb, org: destination.org, repo: destination.repo } };
+  const what = unresolved
+    ? destination.unresolved === "graphql-mutation"
+      ? "gh api graphql (mutation)"
+      : `${verb} (unresolved destination)`
+    : `${verb} → ${target}`;
+
+  if (state === "unreadable") {
+    return refusal({
+      code,
+      ...subject,
+      what,
+      why:
+        `The registry could not be read (it is encrypted or damaged), so repo-aegis cannot confirm that ` +
+        (unresolved ? `this destination's owner` : `the owner "${owner}"`) +
+        ` is registered and refuses egress it cannot vouch for`,
+      approval: "No approval covers this",
+      fixes: [
+        { by: "person", when: "If the registry is encrypted", command: "repo-aegis registry decrypt --identity <key>" },
+        {
+          by: "person",
+          when: "If it is damaged",
+          step: `repairs ${registryPathLabel()}, then re-runs the command (\`repo-aegis status\` shows why it fails to load)`,
+        },
+      ],
+    });
+  }
+
+  // Several candidate repositories (M5): name only the first one that is not admitted, which is in the
+  // command or the checkout's remotes, never a registry entry.
+  const unadmitted = firstUnadmittedCandidate(
+    destination,
+    intent,
+    registeredOwners({ engagements: registry.engagements ?? [], personalOrgs: registry.personalOrgs ?? [] } as Registry),
+    registry,
+  );
+  if (unadmitted !== null) {
+    const safeCandidate = safeDestination(unadmitted.org, unadmitted.repo);
+    const candidateOwner = safeCandidate?.org ?? "";
+    return refusal({
+      code,
+      destination: { verb, org: unadmitted.org, repo: unadmitted.repo },
+      what: `${verb} → (more than one possible repository)`,
+      why:
+        `This command can reach more than one repository, and gh may use either; the owner "${candidateOwner}" is not ` +
+        `registered (in neither personalOrgs nor any engagement), so repo-aegis cannot tell whether it is yours`,
+      approval: "No approval covers this",
+      fixes: [
+        { by: "agent", when: "To act on one repository", command: `${verb} --repo <owner>/<repo> …` },
+        {
+          by: "person",
+          when: `If "${candidateOwner}" is yours or a customer's`,
+          command: `repo-aegis engagements add --personal-org ${candidateOwner}`,
+          note: `or --github-org ${candidateOwner} under the engagement, for a customer`,
+        },
+      ],
+    });
+  }
+
+  if (destination.unresolved === "opaque-url") {
+    return refusal({
+      code,
+      what,
+      why:
+        `The push URL does not resolve offline to a github.com/<owner>/<repo> repository` +
+        // A fixed phrase naming the doubt (an ssh Match block, an IP-literal
+        // host, an ssh override…); never a piece of the URL.
+        (destination.unresolvedWhy !== undefined ? ` (${destination.unresolvedWhy})` : "") +
+        `, so repo-aegis cannot tell which owner the push writes to, and an unknown owner is treated as unregistered`,
+      approval: "No approval covers this",
+      fixes: [
+        {
+          by: "agent",
+          when: "To push to a GitHub repository",
+          command:
+            "git push <a remote whose URL is https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git> <branch>",
+        },
+        { by: "person" },
+      ],
+    });
+  }
+
+  if (unresolved) {
+    const text = UNRESOLVED_REFUSAL[destination.unresolved ?? "unparsed-shape"];
+    return refusal({
+      code,
+      what,
+      why: `${text.why}, and an unknown owner is treated as unregistered`,
+      approval:
+        destination.unresolved === "graphql-mutation"
+          ? "No approval covers this (since 0.11.0 a '*' approval no longer does)"
+          : "No approval covers this",
+      fixes: [{ by: "agent", when: "To act on a repository", command: text.reissue }, { by: "person" }],
+    });
+  }
+
+  const upstreamKey = target.toLowerCase();
+  const isUpstream = (registry.allowedUpstreams ?? []).some(u => u.toLowerCase() === upstreamKey);
+  if (isUpstream && !UPSTREAM_ADMITTED_VERBS.has(intent.verb)) {
+    return refusal({
+      code,
+      ...subject,
+      what,
+      why: `${target} is an allowed upstream, but allowed upstreams accept only PRs, issues and comments, not ${verb}`,
+      approval: "No approval covers this",
+      fixes: [
+        {
+          by: "agent",
+          when: "To propose a change",
+          command: `gh pr create --repo ${target} …`,
+          note: "push the branch to your own fork first",
+        },
+      ],
+    });
+  }
+
+  return refusal({
+    code,
+    ...subject,
+    what,
+    why:
+      `The owner "${owner}" is not registered (in neither personalOrgs nor any engagement), so repo-aegis ` +
+      `cannot tell whether this repository is yours`,
+    approval: "No approval covers this",
+    fixes: [
+      {
+        by: "person",
+        when: `If "${owner}" is yours or a customer's`,
+        command: `repo-aegis engagements add --personal-org ${owner}`,
+        note: `or --github-org ${owner} under the engagement, for a customer`,
+      },
+      ...(destination.repo === "*"
+        ? []
+        : [
+            {
+              by: "person",
+              when: "If it is an upstream you contribute to",
+              command: `repo-aegis upstreams add ${target}`,
+              note: "PRs and issues only",
+            } satisfies RefusalFix,
+          ]),
+    ],
+  });
+}
+
+/** Up to three labels, then a count: the labels are fixed strings or identifier-shaped variable names, never values. */
+function listLabels(labels: readonly string[]): string {
+  const shown = labels.slice(0, 3).join(", ");
+  return labels.length > 3 ? `${shown} and ${labels.length - 3} more` : shown;
+}
+
+function envOverrideReason(intent: EgressIntent, labels: readonly string[]): string {
+  const verb = describeVerb(intent.verb);
+  return refusal({
+    code: "EGRESS_ENV_OVERRIDE",
+    what: verb,
+    why:
+      `The command changes the environment or options it runs under (${listLabels(labels)}), which can make the gh shim, ` +
+      `the pre-push hook, gh or git read a different registry, config, remote or program than the one this guard judged, ` +
+      `so repo-aegis cannot tell where it would publish`,
+    approval: "No approval covers this",
+    fixes: [
+      {
+        by: "agent",
+        command: `${verb} …`,
+        note: "with no REPO_AEGIS_*, SRT_*, GIT_CONFIG*, GIT_SSH*, LD_*, DYLD_*, BASH_FUNC_*, HOME, PATH, SHELL or similar assignment or export, no env -i or env -u, and no --git-dir, --work-tree or git -c remote.*/url.*/core.sshCommand/core.hooksPath",
+      },
+    ],
+  });
+}
+
+/** A `gh` intent whose repository is spelled out: `--repo`, a URL or `o/r` positional, or a literal `repos/<o>/<r>/…` endpoint. */
+function namesLiteralGhTarget(intent: EgressIntent): boolean {
+  if (!intent.verb.startsWith("gh-") || intent.unresolved !== undefined) return false;
+  if (intent.repoFlag !== undefined || intent.positionalRepo !== undefined) return true;
+  return intent.apiEndpoint !== undefined && classifyApiEndpoint(intent.apiEndpoint).kind === "named";
+}
+
+function afterStateChangeReason(intent: EgressIntent, change: string): string {
+  const verb = describeVerb(intent.verb);
+  return refusal({
+    code: "EGRESS_AFTER_STATE_CHANGE",
+    what: verb,
+    why:
+      `An earlier part of this command line changes state that ${verb} reads (${change}), but repo-aegis judges the ` +
+      `command against the state as it is before anything runs, so it would judge a state that no longer holds`,
+    approval: "No approval covers this",
+    fixes: [
+      {
+        by: "agent",
+        command: `${verb} …`,
+        note: "run the change as its own call first, then re-issue the publish alone as the next call, so it is judged against the new state",
+      },
+    ],
+  });
+}
+
+function ghPrCreateImplicitTargetReason(): string {
+  return refusal({
+    code: "GH_PR_CREATE_IMPLICIT_TARGET",
+    what: "gh pr create",
+    why:
+      "Without --repo, gh chooses the base repository from this checkout's remotes and gh-resolved config, which can " +
+      "change between this check and the run",
+    approval: "No approval covers this; nothing is wrong with the destination, only with how it is named",
+    fixes: [{ by: "agent", command: "gh pr create --repo <owner>/<repo> …" }],
+  });
+}
+
 function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecision {
   const verb = describeVerb(intent.verb);
   const deny = (code: EgressCode, reason: string, destination?: Destination): EgressDecision => ({
@@ -638,6 +1346,38 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     ...(destination && { destination }),
     intent,
   });
+
+  // ---- pty wrapper (issue #151, PR 2b) -------------------------------------
+  // Unconditional and first: it needs no registry, no destination and no
+  // approval. A publish run under `script`/`unbuffer`/`expect`/`tmux`/`ssh -t`
+  // or an interpreter's pty module is handed a terminal, and every later layer
+  // (shim, pre-push, rules g and h) reads a terminal as a person. Refusing here
+  // keeps the agent from manufacturing that signal. The fix is to re-issue the
+  // command plainly; a person who needs the publish runs it themselves.
+  if (intent.ptyWrapper !== undefined) {
+    return deny(
+      "EGRESS_PTY_WRAPPER",
+      refusal({
+        code: "EGRESS_PTY_WRAPPER",
+        what: verb,
+        why:
+          `Running a publish under ${intent.ptyWrapper} gives it a terminal, and repo-aegis treats a terminal as ` +
+          `a person, so a wrapper like this could stand in for the human who must approve it`,
+        approval: "No approval covers this",
+        fixes: [
+          {
+            by: "agent",
+            command: "the same command run directly, without script, unbuffer, expect, tmux, screen, socat, ssh -t or a pty module",
+          },
+          {
+            by: "person",
+            when: "If it needs a person's go-ahead (an approval or an unregistered owner)",
+            step: "runs it, or mints the approval, from their own terminal",
+          },
+        ],
+      }),
+    );
+  }
 
   // ---- a: bare `git push` --------------------------------------------------
   if (intent.verb === "git-push" && (intent.remote === undefined || intent.refspec === undefined)) {
@@ -680,6 +1420,36 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     }
   }
 
+  // ---- b′: environment / option overrides on the egress segment (issue #151, §3.4) ----
+  // A shape rule like a–d: it needs no registry, and no approval lifts it, because the fix is to re-issue the
+  // command, not to get permission. The hook judges with its own environment; the shim and the pre-push hook
+  // read whatever the command's environment says, so an override would steer them elsewhere.
+  if (intent.envOverrides !== undefined && intent.envOverrides.length > 0) {
+    return deny("EGRESS_ENV_OVERRIDE", envOverrideReason(intent, intent.envOverrides));
+  }
+
+  // ---- b″: egress after a persistent state change in the same command (§3.4, F6) ----
+  // A checkout- or remote-kind change cannot change a literal target (L2): exempt a gh intent that names one.
+  const stateChange =
+    intent.afterStateChange ?? (namesLiteralGhTarget(intent) ? undefined : intent.afterLocalStateChange);
+  if (stateChange !== undefined) {
+    return deny("EGRESS_AFTER_STATE_CHANGE", afterStateChangeReason(intent, stateChange));
+  }
+
+  // ---- D10: a non-interactive `gh pr create` must name its target ------------------
+  // Without --repo (or GH_REPO, or a URL), gh picks the base repository itself from `remote.*.gh-resolved`
+  // and the remote order: config the agent can edit, read at a different moment than this check. The `gh`
+  // counterpart of rule a. Unconditional (no registry needed); a person at a terminal may answer gh's prompts.
+  if (
+    intent.verb === "gh-pr-create" &&
+    !opts.humanPresent &&
+    intent.repoFlag === undefined &&
+    intent.envRepo === undefined &&
+    intent.positionalRepo === undefined
+  ) {
+    return deny("GH_PR_CREATE_IMPLICIT_TARGET", ghPrCreateImplicitTargetReason());
+  }
+
   // ---- context ---------------------------------------------------------------
   const resolve = opts.resolveDestination ?? resolveDestinationOffline;
   let destination: Destination | null = null;
@@ -688,6 +1458,53 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   } catch {
     destination = null;
   }
+
+  // ---- h: unregistered owner (issue #151) -----------------------------------
+  // Right after resolution and BEFORE the visibility lookup and rule e: it is
+  // offline and cheap, and it must not send `gh repo view` to an owner the
+  // guard is about to refuse. No approval satisfies it (the finder is never
+  // consulted); only a person does. Only the registry's owner lists count —
+  // not the destination cache, a local class, or an approval (D2).
+  if (destination !== null && !opts.humanPresent) {
+    let refused = false;
+    if (opts.registryState === "unreadable") {
+      // No owner can be confirmed, so none is admitted (D4, revised).
+      refused = true;
+    } else if (opts.registryState === "loaded") {
+      const owners = registeredOwners(opts.registry);
+      // A registry that declares no owners has nothing to judge against. A
+      // remote with several push URLs writes to all of them: every one must be
+      // admitted, and the refusal names the first that is not.
+      if (owners.size > 0) {
+        const rejected = [destination, ...(destination.alsoTargets ?? [])].find(
+          c => !ownerAdmitted(c, intent, owners, opts.registry),
+        );
+        if (rejected !== undefined) {
+          refused = true;
+          if (rejected !== destination) destination = { ...destination, org: rejected.org, repo: rejected.repo };
+        }
+      }
+    }
+    // "missing": no registry file at all, rule h is skipped.
+    if (refused) {
+      // A destination whose name is not a plausible GitHub owner/repo is not
+      // attached to the decision: layers print it as JSON, and the refusal
+      // text deliberately carries no such name either.
+      return deny(
+        "UNREGISTERED_OWNER_EGRESS",
+        unregisteredOwnerReason(intent, destination, opts.registryState, opts.registry),
+        printable(destination),
+      );
+    }
+  }
+
+  // ---- e–g, once per target ----------------------------------------------------
+  // A remote with several push URLs writes to all of them, so every target is
+  // judged by rules e–g, and the most restrictive decision wins (deny over ask
+  // over an approved allow, earliest target first within a severity). Rule h
+  // above has already required every target's owner to be registered.
+  const judgeTarget = (target: Destination | null): EgressDecision => {
+  let destination: Destination | null = target;
   if (destination !== null) {
     destination = refreshDestinationVisibility(destination, effectiveVisibilityLookup(opts.lookupVisibility));
   }
@@ -735,9 +1552,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           "CROSS_ORG_EGRESS",
           `${verb} → ${describeDestination(destination)}: the ${
             intent.verb === "git-push" ? "repository being pushed" : "payload's working tree"
-          } belongs to a trust boundary (${[...src.orgs].sort().join(", ")}) that does not overlap ` +
-            `the destination's (${[...destOrgs].sort().join(", ")}). This is the boundary both incidents crossed.`,
-          destination,
+          } belongs to a trust boundary (${printOrgs(src.orgs)}) that does not overlap ` +
+            `the destination's (${printOrgs(destOrgs)}). This is the boundary both incidents crossed.`,
+          printable(destination),
         );
       }
     }
@@ -758,7 +1575,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           `${verb} → ${describeDestination(destination)}: payload file \`${basename(file)}\` matches the ` +
             `destination's deny set (${hits} hit${hits === 1 ? "" : "s"}). Run \`repo-aegis check --path\` ` +
             `on it from the destination repo to see which patterns; nothing is shown here.`,
-          destination,
+          printable(destination),
         );
       }
     }
@@ -771,15 +1588,22 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     // A person may have declared themselves in advance: a live approval
     // minted at a terminal for this destination (and ref, when scoped).
     // Rule g is the ONLY rule it satisfies — everything above still ran.
+    // `*` covers personalOrgs owners and destination-less verbs only (D7). The
+    // destination-less flag is explicit and tied to the verb: a null
+    // destination on any other verb, or an unresolved `*`/`*` one (GraphQL),
+    // is not destination-less.
+    const approvalScope = approvalScopeOf(opts.registry, destination === null && intent.verb === "npm-publish");
     let approval: EgressApproval | null = null;
     try {
-      approval = (opts.findApproval ?? findApprovalDefault)(destination, intent.refspec);
+      approval = (opts.findApproval ?? findApprovalDefault)(destination, intent.refspec, approvalScope);
     } catch {
       approval = null;
     }
     if (approval !== null) {
-      return { action: "allow", approval, intent, ...(destination && { destination }) };
+      const shown = destination && printable(destination);
+      return { action: "allow", approval, intent, ...(shown && { destination: shown }) };
     }
+    const shownDestination = destination ? printable(destination) : undefined;
     const what =
       destination?.unresolved !== undefined
         ? `UNRESOLVED destination`
@@ -787,9 +1611,29 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
           ? `PUBLIC destination`
           : `an operation that is hard to undo`;
     const target = intent.verb === "git-push" && intent.refspec ? `${intent.refspec} → ` : "";
-    const approveCommand = `repo-aegis approve ${
-      destination && destination.unresolved === undefined ? `${destination.org}/${destination.repo}` : "'*'"
-    }`;
+    // The destination's name comes from the agent's command line and this hint
+    // is text a person pastes: interpolate only a validated name. A name that
+    // fails validation gets no approve command at all (see refusal.ts).
+    // `approve '*'` is only offered where a `*` approval actually covers the
+    // call (destination-less `npm publish`). An unresolved destination, or a
+    // null one on another verb, is covered by no approval, so none is offered.
+    const approveTarget =
+      destination && destination.unresolved === undefined
+        ? safeDestination(destination.org, destination.repo)
+        : destination === null && approvalScope.destinationless === true
+          ? "wildcard"
+          : null;
+    const approveCommand =
+      approveTarget === null
+        ? null
+        : `repo-aegis approve ${
+            approveTarget === "wildcard"
+              ? "'*'"
+              : approveTarget.repo === "*"
+                ? // `*` is a shell glob: quote it, as the global form is.
+                  `'${approveTarget.org}/*'`
+                : `${approveTarget.org}/${approveTarget.repo}`
+          }`;
     // Public only because nothing says private (issue #114): say so, and say
     // how the visibility gets recorded, so the refusal is not a dead end. Not
     // for an unresolved GraphQL target — there is no repository to record.
@@ -806,11 +1650,31 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         : intent.repoFlag !== undefined
           ? ` (from --repo)`
           : destination?.fromCache
-            ? ` (from the checkout at ${destination.workingTree})`
+            ? ` (from the checkout at ${printablePath(destination.workingTree)})`
             : intent.apiEndpoint !== undefined && destination !== null
               ? ` (from the API path)`
               : "") +
       `, from a non-interactive shell. A person must approve this`;
+    // A live `*` approval that exists but does not cover this destination (D7):
+    // say exactly that, with the narrower command, so the operator does not
+    // conclude the guard is broken (§3.9). Only for a named destination.
+    // The sentence is ADDED to the existing message (§3.9: "existing message,
+    // plus"), before the visibility hint, so every existing clause stays.
+    // The lookup is behind the same injection seam as the finder.
+    const gapFinder: UncoveredStarFinder | null =
+      opts.findUncoveredStar ??
+      (opts.findApproval === undefined || opts.findApproval === findApprovalDefault ? findUncoveredStarDefault : null);
+    let starGap = "";
+    if (gapFinder !== null && destination !== null && destination.unresolved === undefined) {
+      try {
+        const uncovered = gapFinder(destination, intent.refspec, approvalScope);
+        if (uncovered !== null) {
+          starGap = uncoveredStarSentence(destination, uncovered.approval, uncovered.gap, opts.registry);
+        }
+      } catch {
+        starGap = "";
+      }
+    }
     if (opts.capabilities.ask) {
       // An `ask` is a refusal only if something can still hold the command
       // when the ask is not answered by a person — and on at least one agent
@@ -827,27 +1691,61 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         return deny(
           "SHIM_UNREACHABLE_NEEDS_HUMAN",
           `${head}, and in this shell nothing below this hook can hold the command: the \`gh\` shim is not ` +
-            `the first \`gh\` on PATH, so an unanswered prompt would let it run. Mint an approval from a ` +
-            `terminal (\`${approveCommand}\`) and re-run, or start the agent from a shell where the shim ` +
+            `the first \`gh\` on PATH, so an unanswered prompt would let it run. ` +
+            (approveCommand === null
+              ? `Re-run it from a terminal`
+              : `Mint an approval from a terminal (\`${approveCommand}\`) and re-run`) +
+            `, or start the agent from a shell where the shim ` +
             `comes first (\`repo-aegis doctor\` says which).` +
+            starGap +
             hint,
-          destination ?? undefined,
+          shownDestination,
         );
       }
-      const reason = `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.${hint}`;
-      return { action: "ask", code: "PUBLIC_EGRESS_NEEDS_HUMAN", reason, ...(destination && { destination }), intent };
+      const reason =
+        destination?.unresolved === "self"
+          ? `${head}: run it from a terminal. No approval covers a command on your own account (a '*' approval never does).${hint}`
+          : approveCommand === null
+          ? `${head}: re-issue the command naming a valid owner/repo, or run it from a terminal.${starGap}${hint}`
+          : `${head}, or mint an approval first: \`${approveCommand}\` from a terminal.${starGap}${hint}`;
+      return {
+        action: "ask",
+        code: "PUBLIC_EGRESS_NEEDS_HUMAN",
+        reason,
+        ...(shownDestination && { destination: shownDestination }),
+        intent,
+      };
     }
     return deny(
       "PUBLIC_EGRESS_NEEDS_HUMAN",
-      `${head}: re-run it from a terminal, mint an approval first (\`${approveCommand}\`), ` +
+      `${head}: re-run it from a terminal, ` +
+        (approveCommand === null ? "" : `mint an approval first (\`${approveCommand}\`), `) +
         `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).` +
+        starGap +
         hint,
-      destination ?? undefined,
+      shownDestination,
     );
   }
 
-  // ---- h: scratch, and everything else ---------------------------------------
+  // ---- otherwise: allow ------------------------------------------------------
   return { action: "allow" };
+  };
+
+  let askDecision: EgressDecision | null = null;
+  let approvedDecision: EgressDecision | null = null;
+  const single = (d: Destination): Destination => {
+    const { alsoTargets: _dropped, ...rest } = d;
+    return rest;
+  };
+  const targets: (Destination | null)[] =
+    destination === null ? [null] : [single(destination), ...(destination.alsoTargets ?? []).map(single)];
+  for (const t of targets) {
+    const d = judgeTarget(t);
+    if (d.action === "deny") return d;
+    if (d.action === "ask" && askDecision === null) askDecision = d;
+    if (d.action === "allow" && d.approval !== undefined && approvedDecision === null) approvedDecision = d;
+  }
+  return askDecision ?? approvedDecision ?? { action: "allow" };
 }
 
 /**

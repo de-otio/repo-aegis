@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it, before, after } from "node:test";
+import { scrubGitEnv } from "./_test-git-env.js";
+
+// Hermetic git env: the destination resolver reads GIT_SSH_COMMAND / core.sshCommand.
+let restoreGitEnv: () => void;
+before(() => {
+  restoreGitEnv = scrubGitEnv();
+});
+after(() => {
+  restoreGitEnv();
+});
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -10,6 +20,7 @@ import { parseEgressIntents, type EgressIntent } from "./egress-intent.js";
 import {
   decideEgress,
   describeDestination,
+  findApprovalDefault,
   formatReceipt,
   isHumanPresent,
   isModeDependentPath,
@@ -23,7 +34,7 @@ import {
 import type { Registry } from "./registry.js";
 import type { TrustBoundary } from "./trust-boundary.js";
 import { recordWorkingTree } from "./destination-cache.js";
-import type { EgressApproval } from "./egress-approval.js";
+import { mintApproval, type EgressApproval } from "./egress-approval.js";
 
 const REGISTRY: Registry = {
   engagements: [
@@ -58,6 +69,7 @@ function decide(command: string, over: Partial<DecideEgressOptions> = {}) {
     intents,
     cwd: "/work/svc",
     registry: REGISTRY,
+    registryState: "loaded",
     humanPresent: false,
     capabilities: { ask: true },
     resolveDestination: () => dest(),
@@ -329,7 +341,7 @@ describe("decideEgress — context rules", () => {
       findApproval: () => approval,
     });
     assert.equal(cross.action === "deny" && cross.code, "CROSS_ORG_EGRESS");
-    const hit = decide("gh pr create -t x --body-file /abs/b.md", {
+    const hit = decide("gh issue create -t x --body-file /abs/b.md", {
       resolveDestination: () => PUBLIC,
       scanPayload: () => 1,
       findApproval: () => approval,
@@ -372,12 +384,12 @@ describe("decideEgress — context rules", () => {
     const opts = { resolveDestination: () => PUBLIC, findApproval: () => null };
     // The shim is first on PATH: something below the hook can still refuse,
     // so the ask is a real refusal and the decision is unchanged.
-    const asked = decide("gh pr create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: true } });
+    const asked = decide("gh issue create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: true } });
     assert.equal(asked.action, "ask");
     assert.equal(asked.action === "ask" && asked.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
     // The shim is not first: nothing below this decision can hold the
     // command, so asking would be theatre.
-    const denied = decide("gh pr create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: false } });
+    const denied = decide("gh issue create -t x -b y", { ...opts, capabilities: { ask: true, ghShimOnPath: false } });
     assert.equal(denied.action, "deny");
     assert.equal(denied.action === "deny" && denied.code, "SHIM_UNREACHABLE_NEEDS_HUMAN");
     assert.ok(denied.action === "deny" && denied.reason.includes("not the first `gh` on PATH"));
@@ -389,7 +401,7 @@ describe("decideEgress — context rules", () => {
   });
 
   it("g: an unanswerable PATH lookup changes nothing — the capability is left unset", () => {
-    const d = decide("gh pr create -t x -b y", {
+    const d = decide("gh issue create -t x -b y", {
       resolveDestination: () => PUBLIC,
       findApproval: () => null,
       capabilities: { ask: true },
@@ -437,7 +449,7 @@ describe("decideEgress — context rules", () => {
     });
     assert.equal(shaped.action === "deny" && shaped.code, "EGRESS_AFTER_CD");
     // And a private, reversible `gh` verb is still allowed: rule g never fired.
-    assert.equal(decide("gh pr create -t x -b y", { capabilities }).action, "allow");
+    assert.equal(decide("gh issue create -t x -b y", { capabilities }).action, "allow");
   });
 
   it("g: irreversible verb fires even with no resolved destination", () => {
@@ -448,7 +460,7 @@ describe("decideEgress — context rules", () => {
 
   it("private destination, ordinary verb, no human → allow (fail open on context)", () => {
     assert.equal(decide("git push origin main").action, "allow");
-    assert.equal(decide("gh pr create -t x -b y").action, "allow");
+    assert.equal(decide("gh issue create -t x -b y").action, "allow");
   });
 
   it("unresolvable destination, ordinary verb → allow", () => {
@@ -479,7 +491,7 @@ describe("decideEgress — severity across intents", () => {
       resolveDestination: resolver,
     });
     assert.equal(d.action, "deny"); // rule d on the second intent beats the ask on the first
-    const a = decide("git push origin main && gh pr create -t x -b y", { resolveDestination: resolver });
+    const a = decide("git push origin main && gh issue create -t x -b y", { resolveDestination: resolver });
     assert.equal(a.action, "ask");
     assert.equal(decideEgress({ ...baseOpts(), intents: [] }).action, "allow");
   });
@@ -490,6 +502,7 @@ function baseOpts(): DecideEgressOptions {
     intents: [],
     cwd: "/work/svc",
     registry: REGISTRY,
+    registryState: "loaded",
     humanPresent: false,
     capabilities: { ask: true },
   };
@@ -682,6 +695,7 @@ describe("resolveDestinationOffline — real git config", () => {
         intents: parseEgressIntents(`gh pr create -t x --body-file ${body} --repo customer-a-org/thing`),
         cwd: other,
         registry: REGISTRY,
+        registryState: "loaded",
         humanPresent: true,
         capabilities: { ask: true },
       });
@@ -698,6 +712,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents("git push https://github.com/customer-a-org/thing.git main"),
       cwd: repo,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: true,
       capabilities: { ask: true },
     });
@@ -715,8 +730,11 @@ describe("resolveDestinationOffline — real git config", () => {
     );
   });
 
-  it("gh without --repo → cwd's origin", () => {
-    const d = resolveDestinationOffline(intent("gh pr create -t x -b y"), repo);
+  // PR 2c (§3.3 item 3): the base repository is gh's own pick: the first remote in gh's order (upstream,
+  // github, origin, the rest). `repo` has origin and an unranked `customer` remote, so origin is the pick;
+  // the other cases (upstream, gh-resolved, ties, URL forms) are in egress-resolve-2c.test.ts.
+  it("gh without --repo → gh's pick: origin outranks an unranked remote", () => {
+    const d = resolveDestinationOffline(intent("gh issue create -t x -b y"), repo);
     assert.equal(d?.org, "acme");
     assert.equal(d?.classKnown, true);
   });
@@ -734,6 +752,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents("git push origin main"),
       cwd: repo,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
     });
@@ -745,6 +764,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents("git push customer main"),
       cwd: repo,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: true,
       capabilities: { ask: true },
     });
@@ -798,12 +818,18 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.ok(!describeDestination(d).includes("notes"), describeDestination(d));
   });
 
+  // These two tests pin rule g's handling of an unresolved destination. Since
+  // issue #151 rule h refuses an unresolved write first whenever a registry
+  // with owners is loaded (D5), so they run with `registryState: "missing"`
+  // (rule h skipped) to keep reaching rule g. Rule h's own behaviour for the
+  // same mutation is pinned in "decideEgress — rule h" below.
   it("the issue's test: that mutation, no approval, non-interactive shell → refused", () => {
     let askedFor: { org: string; repo: string } | null = null;
     const opts = {
       intents: parseEgressIntents(ENQUEUE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "missing" as const,
       humanPresent: false,
       findApproval: (dst: Destination | null) => {
         askedFor = dst && { org: dst.org, repo: dst.repo };
@@ -816,19 +842,22 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.equal(shell.action === "deny" && shell.destination?.unresolved, "graphql-mutation");
     assert.ok(shell.action === "deny" && shell.reason.includes("UNKNOWN repository"), shell.action === "deny" ? shell.reason : "");
     assert.ok(shell.action === "deny" && !shell.reason.includes("acme/notes"));
-    // Only a wildcard approval could cover a destination nobody can name.
-    assert.ok(shell.action === "deny" && shell.reason.includes("`repo-aegis approve '*'`"));
+    // Since #151 (D7) no approval, `*` included, covers a destination nobody can
+    // name, so none is offered: it would be a dead end.
+    assert.ok(shell.action === "deny" && !shell.reason.includes("repo-aegis approve"), shell.action === "deny" ? shell.reason : "");
+    assert.ok(shell.action === "deny" && shell.reason.includes("re-run it from a terminal"));
     assert.deepEqual(askedFor, { org: "*", repo: "*" });
 
     const agent = decideEgress({ ...opts, capabilities: { ask: true } });
     assert.equal(agent.action, "ask");
   });
 
-  it("… an approval for the cwd's repository does not cover it; a wildcard one does", () => {
+  it("… an approval for the cwd's repository does not cover it, and neither does a `*` one (D7)", () => {
     const base = {
       intents: parseEgressIntents(ENQUEUE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "missing" as const,
       humanPresent: false,
       capabilities: { ask: false },
     };
@@ -845,8 +874,21 @@ describe("resolveDestinationOffline — real git config", () => {
       findApproval: dst => (dst?.org === "acme" && dst.repo === "notes" ? approval("acme", "notes") : null),
     });
     assert.equal(cwdOnly.action, "deny");
-    const wildcard = decideEgress({ ...base, findApproval: () => approval("*", "*") });
-    assert.equal(wildcard.action, "allow");
+    // Through the REAL matcher over a real store: a live `*` approval is not a
+    // global wildcard, and the `*`/`*` sentinel of an unresolved target is not
+    // a destination-less call, so it does not cover the mutation either.
+    const home = mkdtempSync(join(tmpdir(), "egress-policy-gql-"));
+    const prior = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = home;
+    try {
+      mintApproval({ target: { org: "*", repo: "*" } });
+      const wildcard = decideEgress({ ...base, findApproval: findApprovalDefault });
+      assert.equal(wildcard.action, "deny");
+    } finally {
+      if (prior === undefined) delete process.env["REPO_AEGIS_HOME"];
+      else process.env["REPO_AEGIS_HOME"] = prior;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("… and a person at the terminal is allowed through, with no cross-org verdict on the `*`", () => {
@@ -854,6 +896,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents(ENQUEUE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: true,
       capabilities: { ask: false },
       trustBoundaryOf: () => boundary(["acme"]),
@@ -870,6 +913,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents(VIEWER),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: false },
     });
@@ -930,6 +974,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents("gh pr create -t x -b y --repo acme/other"),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
     });
@@ -943,6 +988,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents(MERGE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
     });
@@ -977,6 +1023,7 @@ describe("resolveDestinationOffline — real git config", () => {
       intents: parseEgressIntents(MERGE),
       cwd: priv,
       registry: REGISTRY,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
     });
@@ -1031,11 +1078,24 @@ describe("decideEgress — an UNKNOWN visibility is treated as public (issue #11
     return dir;
   }
 
+  // `example` must be a registered owner here: since issue #151 an
+  // unregistered owner is refused by rule h before the visibility handling
+  // this block tests is ever reached. It is registered as a customer org (not
+  // a personal one), which keeps these destinations "non-personal".
+  const REGISTRY_WITH_EXAMPLE: Registry = {
+    ...REGISTRY,
+    engagements: [
+      ...REGISTRY.engagements,
+      { id: "customer-b", name: "Customer B", started: "2026-01-01", markers: [], githubOrgs: ["example"] },
+    ],
+  };
+
   function decideIn(cwd: string, over: Partial<DecideEgressOptions> = {}) {
     return decideEgress({
       intents: parseEgressIntents("git push origin main"),
       cwd,
-      registry: REGISTRY,
+      registry: REGISTRY_WITH_EXAMPLE,
+      registryState: "loaded",
       humanPresent: false,
       capabilities: { ask: true },
       scanPayload: () => 0,

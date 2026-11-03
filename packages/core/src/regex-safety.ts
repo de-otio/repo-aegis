@@ -82,7 +82,10 @@ const MAX_PATTERN_LENGTH = 2048;
 const MAX_COMBINED_BYTES = 128 * 1024;
 const REDOS_STRESS_LENGTH = 1000;
 const REDOS_TIMEOUT_MS = 100;
-const STRICT_BATCH_TIMEOUT_MS = 5000;
+/** CPU a single pattern may use on the stress input: 10x the nominal budget, for noisy machines. */
+const STRICT_PER_PATTERN_BUDGET_MS = REDOS_TIMEOUT_MS * 10;
+/** Node start-up and JSON parse in the child, before the first pattern. Generous: a loaded machine is slow here. */
+const STRICT_STARTUP_ALLOWANCE_MS = 5000;
 
 /**
  * Validate a single regex pattern for use as a marker.
@@ -224,21 +227,96 @@ function validatePatternsStrict(
     return { valid, invalid };
   }
 
+  // Attempt 1 runs everything. If the child hangs, the pattern that was
+  // IN FLIGHT (it announced itself with a start marker and never reported) is
+  // rejected, and the rest, which it never reached or which were queued behind
+  // it, get ONE more try in a fresh child. A second hang rejects its in-flight
+  // pattern too, and whatever is still unresolved is rejected as unfinished:
+  // the property to keep is that a catastrophic regex is never accepted, so
+  // anything unproven stays out.
+  const results = new Map<number, PatternValidationResult>();
+  let pending = toCheckRedos.map((_, i) => i);
+  for (let attempt = 0; attempt < 2 && pending.length > 0; attempt++) {
+    // The retry gets twice the start-up allowance: if the first child's start-up was
+    // starved, a second identical allowance would likely starve again.
+    const run = runStrictChild(pending.map(i => toCheckRedos[i]!), STRICT_STARTUP_ALLOWANCE_MS * (attempt + 1));
+    const next: number[] = [];
+    pending.forEach((globalIdx, localIdx) => {
+      const r = run.results.get(localIdx);
+      if (r) results.set(globalIdx, r);
+      else if (run.timedOut && run.inFlight === localIdx) {
+        // The in-flight pattern is the likeliest culprit, but on a starved
+        // machine it can be a harmless one that was merely descheduled. Give it
+        // one test ALONE in a fresh child before rejecting it. A catastrophic
+        // pattern hangs again and is rejected; the cost is one more bounded wait.
+        const solo = runStrictChild([toCheckRedos[globalIdx]!], STRICT_STARTUP_ALLOWANCE_MS / 2);
+        results.set(
+          globalIdx,
+          solo.results.get(0) ?? {
+            ok: false,
+            reason: "strict validation timed out on this pattern (likely catastrophic backtracking)",
+          },
+        );
+      } else next.push(globalIdx);
+    });
+    if (!run.timedOut && next.length > 0) {
+      // The child exited without a result for these (crash or truncated output):
+      // nothing to retry on, and nothing proven.
+      for (const g of next) results.set(g, { ok: false, reason: "strict validation produced no result" });
+      next.length = 0;
+    }
+    pending = next;
+  }
+  for (const g of pending) {
+    results.set(g, { ok: false, reason: "strict validation did not complete (the validator timed out twice)" });
+  }
+
+  for (let i = 0; i < toCheckRedos.length; i++) {
+    const p = toCheckRedos[i]!;
+    const r = results.get(i)!;
+    if (r.ok) valid.push(p);
+    else invalid.push({ pattern: p, reason: r.reason ?? "unknown" });
+  }
+  return { valid, invalid };
+}
+
+interface StrictChildRun {
+  /** Verdicts by index into the batch handed to the child. */
+  results: Map<number, PatternValidationResult>;
+  timedOut: boolean;
+  /** Index announced by a start marker that never got a verdict; null when none. */
+  inFlight: number | null;
+}
+
+/**
+ * One child process over `patterns`. Each pattern is timed in the child with
+ * CPU time (`process.cpuUsage`, user + system), not wall-clock: on a loaded
+ * machine a harmless pattern's wall time balloons while its CPU time does not,
+ * and a wall-clock budget rejected valid markers there. A catastrophic pattern
+ * still burns CPU without bound, so it is still caught, either by exceeding the
+ * CPU budget when it returns or by the parent's kill timeout when it does not.
+ *
+ * The child writes a start marker before each pattern (synchronously, so it is
+ * in the pipe even if the next instruction never returns) and a verdict after.
+ */
+function runStrictChild(patterns: string[], startupAllowanceMs: number): StrictChildRun {
   const script = `
 const fs = require('fs');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-const { patterns, stressLength, perPatternBudgetMs } = input;
+const { patterns, stressLength, cpuBudgetMs } = input;
 const stress = 'a'.repeat(stressLength);
 for (let i = 0; i < patterns.length; i++) {
-  const p = patterns[i];
-  const start = Date.now();
+  fs.writeSync(1, JSON.stringify({ s: i }) + '\\n');
   let outcome;
   try {
-    new RegExp(p, 'i').test(stress);
-    const elapsed = Date.now() - start;
-    if (elapsed > perPatternBudgetMs * 10) {
+    const re = new RegExp(patterns[i], 'i');
+    const before = process.cpuUsage();
+    re.test(stress);
+    const used = process.cpuUsage(before);
+    const cpuMs = (used.user + used.system) / 1000;
+    if (cpuMs > cpuBudgetMs) {
       outcome = { i, ok: false, reason:
-        'pattern took >' + perPatternBudgetMs + 'ms on stress input ' +
+        'pattern used >' + (cpuBudgetMs / 10) + 'ms of CPU on stress input ' +
         '(possible catastrophic backtracking; consider re-anchoring)' };
     } else {
       outcome = { i, ok: true };
@@ -246,50 +324,40 @@ for (let i = 0; i < patterns.length; i++) {
   } catch (err) {
     outcome = { i, ok: false, reason: 'invalid regex: ' + err.message };
   }
-  process.stdout.write(JSON.stringify(outcome) + '\\n');
+  fs.writeSync(1, JSON.stringify(outcome) + '\\n');
 }
 `;
   const result = spawnSync(process.execPath, ["-e", script], {
     input: JSON.stringify({
-      patterns: toCheckRedos,
+      patterns,
       stressLength: REDOS_STRESS_LENGTH,
-      perPatternBudgetMs: REDOS_TIMEOUT_MS,
+      cpuBudgetMs: STRICT_PER_PATTERN_BUDGET_MS,
     }),
     encoding: "utf8",
-    timeout: STRICT_BATCH_TIMEOUT_MS,
+    // A startup allowance plus a per-pattern allowance, so the ceiling scales
+    // with the batch instead of one fixed number that a long list on a busy
+    // machine can exceed with no pattern misbehaving.
+    timeout: startupAllowanceMs + patterns.length * STRICT_PER_PATTERN_BUDGET_MS,
     maxBuffer: 16 * 1024 * 1024,
   });
 
-  // Parse partial stdout (one JSON object per line).
-  const seenResults = new Map<number, PatternValidationResult>();
+  const results = new Map<number, PatternValidationResult>();
+  let started: number | null = null;
   for (const line of (result.stdout ?? "").split("\n")) {
     if (!line.trim()) continue;
     try {
-      const obj = JSON.parse(line) as { i: number; ok: boolean; reason?: string };
-      seenResults.set(obj.i, { ok: obj.ok, reason: obj.reason });
+      const obj = JSON.parse(line) as { s?: number; i?: number; ok?: boolean; reason?: string };
+      if (typeof obj.s === "number") started = obj.s;
+      else if (typeof obj.i === "number") {
+        results.set(obj.i, { ok: obj.ok === true, reason: obj.reason });
+        if (started === obj.i) started = null;
+      }
     } catch {
       /* skip malformed line */
     }
   }
-
   const timedOut = result.signal === "SIGTERM" || result.signal === "SIGKILL";
-
-  for (let i = 0; i < toCheckRedos.length; i++) {
-    const p = toCheckRedos[i]!;
-    const r = seenResults.get(i);
-    if (r) {
-      if (r.ok) valid.push(p);
-      else invalid.push({ pattern: p, reason: r.reason ?? "unknown" });
-    } else {
-      // No result for this pattern: either the worker died on this
-      // pattern (likeliest culprit on timeout) or output was truncated.
-      const reason = timedOut
-        ? "strict validation timed out on this pattern (likely catastrophic backtracking)"
-        : "strict validation produced no result";
-      invalid.push({ pattern: p, reason });
-    }
-  }
-  return { valid, invalid };
+  return { results, timedOut, inFlight: started !== null && !results.has(started) ? started : null };
 }
 
 /**
@@ -338,12 +406,15 @@ function isInTimeBudget(pattern: string, stressLength: number, budgetMs: number)
   // safety against an adversary who controls pattern input.
   const re = new RegExp(pattern, "i");
   const stress = "a".repeat(stressLength);
-  const start = Date.now();
+  // CPU time (user + system), not wall-clock: a descheduled process on a busy
+  // machine accrues wall time without doing work, which rejected valid markers.
+  const before = process.cpuUsage();
   try {
     re.test(stress);
   } catch {
     return false;
   }
-  const elapsed = Date.now() - start;
-  return elapsed <= budgetMs * 10; // generous: 10x to account for noisy CI
+  const used = process.cpuUsage(before);
+  const cpuMs = (used.user + used.system) / 1000;
+  return cpuMs <= budgetMs * 10; // generous: 10x to account for noisy CI
 }

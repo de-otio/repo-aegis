@@ -23,7 +23,22 @@ import {
   loadEgressPolicy,
   // Destination awareness (doc/design/egress-guard.md §2). The pre-push hook
   // is handed the remote URL as `$2`; `--remote-url` is how it reaches here.
-  parseRemoteUrl,
+  // Rule h parity (issue #151): the same owner set, registry-state semantics,
+  // presence test and refusal builder as the agent hook and the `gh` shim.
+  // `git` hands this hook the URL AFTER insteadOf/pushInsteadOf rewriting, so
+  // only ssh aliases need resolving here (`resolveRemoteUrl`, pure, never `ssh -G`).
+  resolveRemoteUrl,
+  detectSshOverride,
+  parseRemoteUrlResolved,
+  safeDestination,
+  registeredOwners,
+  ownerAdmitted,
+  ruleHStatus,
+  ruleHSkipNote,
+  unregisteredOwnerReason,
+  refusal,
+  type RefusalFix,
+  type RegistryState,
   computeTrustBoundary,
   readCachedVisibility,
   treatAsPublicDestination,
@@ -34,9 +49,12 @@ import {
   recordWorkingTree,
   resolveCachedDestination,
   getRemoteUrl,
-  findApproval,
-  isHumanPresent,
   EGRESS_HUMAN_ENV,
+  findApproval,
+  approvalScopeOf,
+  findUncoveringStarApproval,
+  uncoveredStarSentence,
+  type ApprovalScope,
   loadRegistry,
   appendAuditRecord,
   RegistryNotFoundError,
@@ -69,6 +87,7 @@ import {
   EXIT_HIT,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, shouldRevealMatches } from "../format.js";
+import { currentHumanPresent } from "../human-presence.js";
 import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
 
 interface CheckOptions extends DenySetFloorOptions {
@@ -352,36 +371,97 @@ function refLabel(opts: CheckOptions): string {
   return opts.pushRef ?? opts.range ?? "(no ref)";
 }
 
+const EMPTY_REGISTRY: Registry = { engagements: [], alwaysBlock: [] };
+
 /**
- * Load the registry for the trust-boundary comparison, best-effort.
+ * Load the registry, and say HOW (rule h, issue #151, decision D4). The same
+ * three-way state the agent hook and the shim use: only
+ * {@link RegistryNotFoundError} is `missing`; an encrypted, unparseable or
+ * otherwise unreadable registry is `unreadable` (rule h refuses), and the
+ * ambiguity falls on the side of refusing.
  *
- * `null` means "skip the cross-org check": a guardrail must not block on its
- * own inability to determine context (the spurious `CROSS_ORG_WRITE` flake,
+ * For the trust-boundary comparison, `registry: null` means "skip the
+ * cross-org check": a guardrail must not block on its own inability to
+ * determine context (the spurious `CROSS_ORG_WRITE` flake,
  * doc/bugs/repo-aegis-check-write-flake.md). A *missing* registry is the one
  * error that is not ambiguous — there is simply no registry on this machine —
  * so it degrades to an empty one, which still lets the remote-origin fallback
  * inside `computeTrustBoundary` supply the repo's own org.
  */
-function registryForBoundary(): Registry | null {
+function loadRegistryState(): { registry: Registry | null; state: RegistryState } {
   try {
-    return loadRegistry();
+    return { registry: loadRegistry(), state: "loaded" };
   } catch (err) {
-    if (err instanceof RegistryNotFoundError) return { engagements: [], alwaysBlock: [] };
-    return null;
+    if (err instanceof RegistryNotFoundError) return { registry: EMPTY_REGISTRY, state: "missing" };
+    return { registry: null, state: "unreadable" };
   }
 }
 
-/** Best-effort audit trail for a refusal. Never content, never the URL. */
-function auditRefusal(code: string, repo: RepoConfig, dest: CheckDestination, ref: string): void {
+/** Best-effort audit trail for a refusal. Never content, never the URL. `destination` is `<org>/<repo>` or a label. */
+function auditRefusal(code: string, repo: RepoConfig, destination: string, ref: string): void {
   try {
     appendAuditRecord({
       action: "check-egress-refused",
       cwd: repo.cwd,
       repo: repo.cwd,
-      details: { code, destination: `${dest.org}/${dest.repo}`, ref },
+      details: { code, destination, ref },
     });
   } catch {
     /* the audit log must never break the refusal itself */
+  }
+}
+
+/**
+ * A pre-push refusal on the shared five-part builder. The destination goes
+ * through `safeDestination` inside `refusal()`: a name that is not a plausible
+ * GitHub owner/repo is dropped from the text, along with every command built
+ * from it. The ref is git's and may hold shell syntax (`$(…)`, `;`): it is
+ * named in the text only when it is plain ref characters, and never inside a
+ * command. It always rides in `details`. Nothing here names the registry's
+ * contents.
+ */
+function pushRefusal(
+  code: string,
+  dest: { org: string; repo: string },
+  ref: string,
+  why: string,
+  approval: string,
+  fixes: readonly RefusalFix[],
+): string {
+  const safe = safeDestination(dest.org, dest.repo) ?? dest; // refusal() discards a name that failed
+  const shownRef = /^[A-Za-z0-9._/+~^@-]{1,200}$/.test(ref) ? `${ref} ` : "";
+  return refusal({
+    code,
+    destination: { verb: "git push", org: dest.org, repo: dest.repo },
+    what: `git push ${shownRef}→ ${safe.org}/${safe.repo}`,
+    why,
+    approval,
+    fixes,
+  });
+}
+
+/**
+ * The "does an approval help?" sentence of the PUBLIC_PUSH_NEEDS_HUMAN refusal.
+ *
+ * When a live `*` approval exists but does not cover the destination (D7), the
+ * refusal says so, in the hook's own words (`uncoveredStarSentence`, shared
+ * from core so the layers cannot drift), instead of leaving the operator to
+ * conclude the guard is broken. It names only the destination owner and the
+ * approval's id and expiry, never registry contents.
+ */
+function publicPushApprovalSentence(
+  dest: { org: string; repo: string },
+  ref: string | undefined,
+  scope: ApprovalScope,
+  registry: Registry,
+): string {
+  const base = `A live approval for ${dest.org}/${dest.repo} would cover this, and none exists.`;
+  try {
+    const star = findUncoveringStarApproval(dest, ref, scope);
+    if (star === null) return base;
+    return base + uncoveredStarSentence(dest, star.approval, star.gap, registry);
+  } catch {
+    return base;
   }
 }
 
@@ -393,24 +473,88 @@ function auditRefusal(code: string, repo: RepoConfig, dest: CheckDestination, re
  * decided first and is unaffected by whether a human happens to be at the
  * keyboard. `PUBLIC_PUSH_NEEDS_HUMAN` is the softer gate underneath it.
  *
- * Fail-open by construction: a URL that does not parse (a non-GitHub host, a
- * local path, a bare directory) yields `null` and no checks at all. That is
- * the documented Phase-1 scope of `parseRemoteUrl`, and refusing what it
- * cannot read would make every non-GitHub remote unpushable.
+ * Rule h (`UNREGISTERED_OWNER_EGRESS`, issue #151) runs first of all, before
+ * any cache write or live visibility lookup: it is offline, and a push the
+ * guard is about to refuse must not send `gh repo view` to that owner. With no
+ * person present, an owner outside `registeredOwners()` is refused whatever
+ * approvals exist (D1). Registry states are the hook's and the shim's (D4):
+ * `missing` and "no owners declared" skip; `unreadable` refuses.
+ *
+ * Out of scope, so `null` and no checks: a non-GitHub host and a local path,
+ * as before. But a URL-shaped value that is NOT cleanly
+ * `github.com/<owner>/<repo>` (or an ssh alias the pure ssh-config parser
+ * cannot resolve) is not "no destination": it is an unresolved one, and rule h
+ * refuses it for a caller with no person present (D5).
  */
 function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestination | null {
   if (opts.remoteUrl === undefined || opts.remoteUrl.trim() === "") return null;
-  const parsed = parseRemoteUrl(opts.remoteUrl);
-  if (parsed === null) return null;
+  // The pre-push hook sees the real environment and git config of the push: an
+  // ssh override (GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT, core.sshCommand)
+  // makes a non-GitHub-looking ssh host unresolved (see `resolveRemoteUrl`).
+  // Unlike the agent hook, this layer needs no "dotless unknown host" rule:
+  // it sees the real environment.
+  const target = resolveRemoteUrl(opts.remoteUrl, undefined, { sshOverride: detectSshOverride(repo.cwd) });
+  if (target.kind === "non-github") return null;
 
   const ref = refLabel(opts);
+  const loaded = loadRegistryState();
+  const humanPresent = currentHumanPresent();
+  const ruleH = ruleHStatus(loaded.state, loaded.registry ?? EMPTY_REGISTRY);
+
+  // --- UNREGISTERED_OWNER_EGRESS (rule h) ----------------------------------
+  if (!humanPresent) {
+    const named = target.kind === "github" ? { org: target.org, repo: target.repo } : null;
+    const candidate =
+      named ??
+      ({
+        org: "*",
+        repo: "*",
+        unresolved: "opaque-url",
+        ...(target.kind === "unresolved" && { unresolvedWhy: target.why }),
+      } as const);
+    let refused = false;
+    if (loaded.state === "unreadable") {
+      refused = true; // no owner can be confirmed, so none is admitted (D4, revised)
+    } else if (loaded.state === "loaded" && loaded.registry !== null) {
+      const owners = registeredOwners(loaded.registry);
+      refused = owners.size > 0 && !ownerAdmitted(candidate, { verb: "git-push" }, owners, loaded.registry);
+    }
+    if (refused) {
+      const label = named !== null ? `${named.org}/${named.repo}` : "(unresolved)";
+      auditRefusal("UNREGISTERED_OWNER_EGRESS", repo, label, ref);
+      emitError(
+        {
+          code: "UNREGISTERED_OWNER_EGRESS",
+          error: unregisteredOwnerReason({ verb: "git-push" }, candidate, loaded.state, loaded.registry ?? EMPTY_REGISTRY),
+          // Only the destination, which the remote URL already carries: never
+          // the registry's owners, engagements or upstreams (the redaction oracle).
+          details: { destination: label, ref, ruleH },
+        },
+        opts,
+      );
+    }
+    // D4: say when rule h did NOT judge, so nobody believes an owner check happened.
+    const skipNote = ruleHSkipNote(ruleH);
+    if (skipNote !== null) process.stderr.write(`repo-aegis: ${skipNote}\n`);
+  }
+
+  if (target.kind === "unresolved") {
+    // Nothing offline names the repository, so none of the destination checks
+    // below can run. Rule h has already judged this (or a person is present,
+    // or it was skipped); say so rather than pass in silence.
+    process.stderr.write(
+      `repo-aegis: the push URL does not resolve to a GitHub repository offline; destination checks skipped\n`,
+    );
+    return null;
+  }
+  const parsed = { host: "github.com", org: target.org, repo: target.repo };
   // The pushing repository's declaration describes the destination only when
   // the destination IS its origin. A push to any other URL (`git push
   // git@github.com:o/other.git main`) must be judged by `o/other`'s own
   // declaration, which this machine may hold in another checkout.
   recordWorkingTree(repo.cwd);
   const ownUrl = getRemoteUrl(repo.cwd);
-  const own = ownUrl === null ? null : parseRemoteUrl(ownUrl);
+  const own = ownUrl === null ? null : parseRemoteUrlResolved(ownUrl);
   const isOwn = own !== null && own.org === parsed.org && own.repo === parsed.repo;
   // The pushing repository's cached visibility describes the destination only
   // when the destination IS its origin. For any other URL it is "unknown"
@@ -423,7 +567,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   let cls = repo.class;
   let declaredBy: CheckDestination["declaredBy"] = isOwn ? "origin" : "none";
   let workingTree: string | undefined = isOwn ? repo.cwd : undefined;
-  const registry = registryForBoundary();
+  const registry = loaded.registry;
   if (!isOwn) {
     const cached = resolveCachedDestination(parsed.org, parsed.repo);
     if (cached !== null) {
@@ -470,18 +614,38 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
     // `trustBoundariesOverlap`, which treats two empty sets as non-overlapping
     // rather than as a match.
     if (boundaryOrgs !== null && boundaryOrgs.length > 0 && !boundaryOrgs.includes(parsed.org)) {
-      auditRefusal("CROSS_ORG_PUSH", repo, dest, ref);
+      auditRefusal("CROSS_ORG_PUSH", repo, `${dest.org}/${dest.repo}`, ref);
+      // The boundary's owners are NOT listed, in the text or in `details`: they
+      // can be customer orgs, and a refusal can land in an agent transcript.
+      // Only the destination owner, which the remote URL already carries.
       emitError(
         {
           code: "CROSS_ORG_PUSH",
-          error:
-            `refusing to push ${ref} to ${parsed.org}/${parsed.repo}: this repo's trust boundary ` +
-            `is ${boundaryOrgs.join(", ")} and does not include ${parsed.org}. ` +
-            `Push to a remote inside the boundary, or classify this repo so the boundary is right.`,
+          error: pushRefusal(
+            "CROSS_ORG_PUSH",
+            parsed,
+            ref,
+            `This repository's trust boundary does not include the owner "${parsed.org}", so a push there would ` +
+              `carry its content across the boundary`,
+            "No approval covers this",
+            [
+              {
+                by: "agent",
+                command: "git push <a remote inside this repository's trust boundary> <branch>",
+              },
+              // Only "push inside the boundary" or "re-classify this repository".
+              // Never `engagements add --github-org <destination owner>`: that
+              // would teach the refused party to widen the boundary to fit.
+              {
+                by: "person",
+                when: "If this repository was classified wrongly",
+                step: "re-classifies it from a terminal (repo-aegis classify) so its boundary matches where it should publish",
+              },
+            ],
+          ),
           details: {
             destination: `${parsed.org}/${parsed.repo}`,
             ref,
-            boundaryOrgs,
           },
         },
         opts,
@@ -490,10 +654,14 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   }
 
   // --- PUBLIC_PUSH_NEEDS_HUMAN --------------------------------------------
-  // `isHumanPresent` tests stderr's TTY. stdin is git's ref list on this path
+  // `currentHumanPresent` tests stderr's TTY (and the process ancestry). stdin is git's ref list on this path
   // and is never the signal. A live approval minted at a terminal for this
   // destination (and ref, when scoped) stands in for the person.
-  const approval = dest.publicFacing && !isHumanPresent() ? findApproval(parsed, opts.pushRef) : null;
+  // A `*` approval covers only personalOrgs owners (D7); a push always has a
+  // destination, and a registry that could not be loaded has no personal orgs,
+  // so `*` then covers nothing (fail closed).
+  const scope = approvalScopeOf(registry ?? {});
+  const approval = dest.publicFacing && !humanPresent ? findApproval(parsed, opts.pushRef, scope) : null;
   if (approval !== null) {
     try {
       appendAuditRecord({
@@ -507,17 +675,31 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
     }
     process.stderr.write(`repo-aegis: human approval ${approval.id} stands in for a person on this push\n`);
   }
-  if (dest.publicFacing && !isHumanPresent() && approval === null) {
-    auditRefusal("PUBLIC_PUSH_NEEDS_HUMAN", repo, dest, ref);
+  if (dest.publicFacing && !humanPresent && approval === null) {
+    auditRefusal("PUBLIC_PUSH_NEEDS_HUMAN", repo, `${dest.org}/${dest.repo}`, ref);
     emitError(
       {
         code: "PUBLIC_PUSH_NEEDS_HUMAN",
-        error:
-          `refusing to push ${ref} to ${parsed.org}/${parsed.repo} ` +
-          `(${visLabel}, ${cls}) with no human present: ` +
-          `run it from a terminal, mint an approval first (\`repo-aegis approve ${parsed.org}/${parsed.repo}\`), ` +
-          `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).` +
-          (assumedPublic ? UNKNOWN_VISIBILITY_HINT : ""),
+        error: pushRefusal(
+          "PUBLIC_PUSH_NEEDS_HUMAN",
+          parsed,
+          ref,
+          `The destination ${parsed.org}/${parsed.repo} (${visLabel}, ${cls}) is public-facing, and no person is ` +
+            `present` +
+            (assumedPublic ? `.${UNKNOWN_VISIBILITY_HINT}` : ""),
+          publicPushApprovalSentence(parsed, opts.pushRef, scope, registry ?? EMPTY_REGISTRY),
+          [
+            {
+              by: "person",
+              when: "To approve this push in advance",
+              command: `repo-aegis approve ${parsed.org}/${parsed.repo}`,
+            },
+            {
+              by: "person",
+              note: `or set ${EGRESS_HUMAN_ENV}=1 for that one invocation; an agent never sets it`,
+            },
+          ],
+        ),
         details: {
           destination: `${parsed.org}/${parsed.repo}`,
           ref,

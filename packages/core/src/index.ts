@@ -39,6 +39,7 @@ export type { AuditRecord } from "./audit-log.js";
 // ---- registry ------------------------------------------------------------
 export {
   loadRegistry,
+  parseRegistryText,
   isActive,
   resolveEngagement,
   ALWAYS_BLOCK_RESERVED_ID,
@@ -47,8 +48,19 @@ export {
 export type { Engagement, Registry, ResolveResult } from "./registry.js";
 
 // ---- remote URL parser ---------------------------------------------------
-export { parseRemoteUrl } from "./remote-url.js";
-export type { ParsedRemote } from "./remote-url.js";
+export {
+  parseRemoteUrl,
+  parseRemoteUrlResolved,
+  resolveRemoteUrl,
+  classifyRemoteUrl,
+  looksLikeRemoteUrl,
+} from "./remote-url.js";
+// The pure ssh-config reader behind alias resolution (never `ssh -G`), and the
+// URL(s) a `git push <remote>` writes to (pushurl, insteadOf, pushInsteadOf).
+export { lookupSshHost, defaultSshDir, SSH_INCLUDE_MAX_DEPTH } from "./ssh-config.js";
+export type { SshHostLookup, SshConfigOptions } from "./ssh-config.js";
+export { resolvePushUrls, detectSshOverride, isSshPreservingCommand } from "./push-urls.js";
+export type { ParsedRemote, RemoteUrlClass, RemoteTarget, RemoteTransport, SshOverrideKind } from "./remote-url.js";
 
 // ---- working-tree resolution (path-aware hook) --------------------------
 export {
@@ -255,14 +267,39 @@ export type {
 // One decision function behind the pre-push hook, the `gh` shim and the
 // agent pre-command hooks. Shape rules are unconditional; context rules
 // fail open; the decision is never a rewritten command.
-export { parseEgressIntents, parseApiEndpoint, isGraphqlEndpoint, graphqlOperationKind } from "./egress-intent.js";
-export type { EgressIntent, EgressVerb, GraphqlOperationKind, SegmentJoin } from "./egress-intent.js";
+export {
+  parseEgressIntents,
+  parseApiEndpoint,
+  analyseApiEndpoint,
+  classifyApiEndpoint,
+  isEgressOverrideVariable,
+  simpleCommands,
+  parseRepoRef,
+  intentRepoTargets,
+  isGraphqlEndpoint,
+  graphqlOperationKind,
+} from "./egress-intent.js";
+export { checkNetworkRules } from "./egress-network-rules.js";
+export type { NetworkRuleCode, NetworkRuleHit } from "./egress-network-rules.js";
+export type {
+  ApiEndpointClass,
+  ApiEndpointTarget,
+  EgressIntent,
+  EgressVerb,
+  GraphqlOperationKind,
+  IntentUnresolved,
+  ParseEgressOptions,
+  RepoTarget,
+  SegmentJoin,
+} from "./egress-intent.js";
+export { egressParseOptions, loadGhAliases, loadGitAliases, parseGitAliasEntries, ghConfigDir } from "./gh-env.js";
 export {
   decideEgress,
   resolveDestinationOffline,
   refreshDestinationVisibility,
   scanPayloadAgainstDestination,
   isHumanPresent,
+  humanPresence,
   isModeDependentPath,
   describeVerb,
   describeDestination,
@@ -292,8 +329,81 @@ export type {
   PayloadScanner,
   DecideEgressOptions,
   ApprovalFinder,
+  RegistryState,
 } from "./egress-policy.js";
-export { findApprovalDefault } from "./egress-policy.js";
+// Rule h (issue #151): the one definition of "a registered owner", shared by
+// every layer so the hook, the shim, pre-push and `doctor` cannot disagree.
+export {
+  registeredOwners,
+  ownerAdmitted,
+  firstUnadmittedCandidate,
+  ruleHStatus,
+  ruleHSkipNote,
+  UPSTREAM_ADMITTED_VERBS,
+} from "./registered-owners.js";
+export type { OwnerCandidate, RuleHStatus } from "./registered-owners.js";
+// The shared five-part refusal builder (what, why, approval, fix + who, where
+// to read more), so the three enforcement layers cannot drift in wording.
+export {
+  refusal,
+  agentGuideAnchor,
+  safeDestination,
+  isSafeOwner,
+  isPrintableDestination,
+  INVALID_DESTINATION_LABEL,
+} from "./refusal.js";
+export type { RefusalInput, RefusalFix } from "./refusal.js";
+export {
+  findApprovalDefault,
+  findUncoveredStarDefault,
+  uncoveredStarSentence,
+  SHAPE_RULE_CODES,
+  unregisteredOwnerReason,
+} from "./egress-policy.js";
+export type { UncoveredStarFinder, HumanPresence } from "./egress-policy.js";
+// Is a person behind this terminal? The process-ancestry walk (issue #151, PR 2b).
+export {
+  readProcessAncestry,
+  judgeAncestry,
+  classifyAncestor,
+  positiveRoot,
+  isTrustedAppPath,
+  realExeOf,
+  parseLsofTxt,
+  trustedLsofPath,
+  agentEnvSignal,
+  checkTerminal,
+  parsePsSnapshotLine,
+  parseProcEntry,
+  snapshotViaPs,
+  trustedPsPath,
+  makeDefaultLookup,
+  setAncestryReaderForTests,
+  testSeamsEnabled,
+  MAX_ANCESTRY_DEPTH,
+} from "./process-ancestry.js";
+export type {
+  AncestorInfo,
+  AncestryChain,
+  AncestryReader,
+  AncestryVerdict,
+  ExeResolver,
+  MultiplexerProbe,
+  RootContext,
+  ProcessLookup,
+  TerminalCheck,
+  TerminalCheckOptions,
+} from "./process-ancestry.js";
+// Commands only a person may run, refused in agent Bash text (issue #151, PR 2b).
+export {
+  AGENT_RAN_HUMAN_COMMAND,
+  AGENT_DETACHED_SESSION,
+  findHumanOnlyCommand,
+  humanCommandRefusal,
+  findDetachedStart,
+  detachedStartRefusal,
+} from "./human-commands.js";
+export type { HumanOnlyHit, HumanOnlyKind, DetachedHit, DetachedKind } from "./human-commands.js";
 // Human-minted, time-limited, destination-scoped approvals that satisfy
 // rule g from a shell with no TTY (`repo-aegis approve`).
 export {
@@ -305,12 +415,22 @@ export {
   mintApproval,
   revokeApprovals,
   findApproval,
+  findUncoveringStarApproval,
+  approvalScopeOf,
+  starApprovalCovers,
   normaliseRef,
   APPROVALS_FILE,
   DEFAULT_APPROVAL_TTL_MS,
   MAX_APPROVAL_TTL_MS,
 } from "./egress-approval.js";
-export type { EgressApproval, ApprovalStore, MintOptions } from "./egress-approval.js";
+export type {
+  EgressApproval,
+  ApprovalStore,
+  MintOptions,
+  ApprovalScope,
+  ApprovalScopeRegistry,
+  StarApprovalGap,
+} from "./egress-approval.js";
 
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";
@@ -395,4 +515,4 @@ export type { RepoJson, EngagementJson } from "./types.js";
 // human-readable message" helper. Sibling packages (cli, scan) own their
 // own schemas (classify rules, queries) but import this so error wording
 // is consistent across the surface.
-export { formatZodError, ORG_NAME_REGEX } from "./schemas.js";
+export { formatZodError, ORG_NAME_REGEX, OWNER_REPO_REGEX, upstreamProblem } from "./schemas.js";
