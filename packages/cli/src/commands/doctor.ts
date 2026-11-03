@@ -49,6 +49,7 @@ import { checkShim } from "./install-shim.js";
 import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
 import { ghOwnerChecks, registryStateChecks, type DoctorRegistryState, type GhCheckOptions } from "./doctor-owner-checks.js";
 import { checkPrePushHook, checkShellStartupOverrides, checkSshGithubRedirect } from "./doctor-env-checks.js";
+import { enforcementPinChecks } from "./doctor-pin-checks.js";
 
 interface DoctorOptions extends OutputOptions {
   scanRoot?: string[];
@@ -234,7 +235,7 @@ function loadRegistryForDoctor(): RegistryLoad {
 }
 
 function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
-  const checks = [checkPushDefault(), ...checkShim(), ...checkGuardHook(opts.claudeHome)];
+  const checks = [checkPushDefault(), ...checkShim(), ...enforcementPinChecks(), ...checkGuardHook(opts.claudeHome)];
   checks.push(...registryStateChecks(reg.state, reg.registry, reg.encrypted));
   // With no registry there is nothing to protect and nothing to compare gh against.
   if (reg.state !== "missing") checks.push(checkRegistryAgentWritable(opts.claudeHome));

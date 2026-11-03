@@ -26,6 +26,10 @@ export type DoctorCheckCode =
   | "GH_CONFIG_REDIRECT"
   | "REGISTRY_AGENT_WRITABLE"
   | "REGISTRY_UNREADABLE"
+  // The enforcement pin (doc/plan-pin-enforcement-binary.md).
+  | "ENFORCEMENT_UNPINNED"
+  | "ENFORCEMENT_PIN_MISSING"
+  | "MULTIPLE_INSTALLS"
   // Residual risks R8, R9, R11 (§8.2).
   | "PREPUSH_HOOK_MISSING"
   | "SHELL_STARTUP_OVERRIDES"
