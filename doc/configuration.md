@@ -248,6 +248,18 @@ How it shows up elsewhere:
   one, is `HOOKS_SCRIPT_STALE`; the same comparison gives the shim `SHIM_STALE`.
 - `doctor` reports `ENFORCEMENT_UNPINNED`, `ENFORCEMENT_PIN_MISSING` and
   `MULTIPLE_INSTALLS` (see `doc/agent-guide.md`).
+- `install claude-md` writes every Claude Code hook command (`check-write`,
+  `guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`,
+  `first-touch`) as a pinned one-line `sh` command: shell-quoted absolute paths to
+  the node and CLI, `exec`'d so the tool call on stdin reaches the CLI, and an
+  exit **2** with the fix on stderr if either file is missing. A missing command
+  would exit 127, which Claude Code treats as a non-blocking hook error: the hook
+  would be skipped and the tool call would proceed. The point is the `PATH` the
+  agent's shell sees: its first entry is typically `~/.config/repo-aegis/bin`
+  (the shim directory), and a `repo-aegis` file placed there would replace the
+  `guard-egress` hook that judges every agent command. Re-running `install
+  claude-md` replaces an older by-name `repo-aegis hook …` entry (and one pinned
+  elsewhere) in place; `--uninstall` removes either form.
 - `install claude-md` adds `permissions.deny` Edit rules for the pinned CLI's
   package directory and the pinned Node executable, so an agent cannot overwrite
   the code the pin points at. A package directory inside a git work tree (a

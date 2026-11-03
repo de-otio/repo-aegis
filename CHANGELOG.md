@@ -41,6 +41,18 @@ re-run the installers; `repo-aegis doctor` reports them
   and `MULTIPLE_INSTALLS` (warning: more than one `repo-aegis` on `PATH`, listed
   with each version, or the first one is not the pinned one; nothing on `PATH` is
   executed).
+- **Claude Code hook commands are pinned too.** `install claude-md` now writes each
+  hook (`check-write`, `guard-egress`, `scan-after-write`, `scan-bash-output`,
+  `egress-receipt`, `first-touch`) as a one-line `sh` command that runs the pinned
+  node and CLI by absolute path and exits 2 (a blocking hook error) if either is
+  gone, instead of `repo-aegis hook …` resolved on the agent's PATH. A missing command
+  exits 127, which Claude Code treats as non-blocking, so the old form could be
+  replaced by a file named `repo-aegis` in a directory ahead of the real one.
+  Re-running `install claude-md` replaces older by-name entries in place (and entries
+  pinned to an earlier path); `--uninstall` removes both forms; `doctor`
+  (`ENFORCEMENT_UNPINNED`) reports by-name entries until then, and
+  `GUARD_HOOK_UNREGISTERED` accepts either form. A pin path with a newline or NUL
+  refuses the install (`PIN_PATH_UNSUPPORTED`).
 - **`install claude-md`** adds `permissions.deny` Edit rules for the pinned CLI's
   package directory and the pinned Node executable, in the same ledger as the
   registry rules, so an agent cannot overwrite the code the pin points at. A
