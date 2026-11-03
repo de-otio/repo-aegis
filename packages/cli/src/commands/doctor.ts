@@ -235,7 +235,7 @@ function loadRegistryForDoctor(): RegistryLoad {
 }
 
 function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
-  const checks = [checkPushDefault(), ...checkShim(), ...enforcementPinChecks(), ...checkGuardHook(opts.claudeHome)];
+  const checks = [checkPushDefault(), ...checkShim(), ...enforcementPinChecks(process.env, undefined, opts.claudeHome), ...checkGuardHook(opts.claudeHome)];
   checks.push(...registryStateChecks(reg.state, reg.registry, reg.encrypted));
   // With no registry there is nothing to protect and nothing to compare gh against.
   if (reg.state !== "missing") checks.push(checkRegistryAgentWritable(opts.claudeHome));

@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { renderHookScript, type EnforcementPin } from "@de-otio/repo-aegis-core";
+import { pinnedHookCommand, renderHookScript, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { enforcementPinChecks } from "./doctor-pin-checks.js";
 import { renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
 import type { DoctorCheck } from "./doctor-checks.js";
@@ -56,10 +56,18 @@ function writeHooks(h: Home, text: (name: "pre-commit" | "pre-push") => string):
   }
 }
 
-function find(checks: DoctorCheck[], code: DoctorCheck["code"]): DoctorCheck {
-  const c = checks.find(x => x.code === code);
-  assert.ok(c, `no ${code} check in ${JSON.stringify(checks.map(x => x.code))}`);
+function find(found: DoctorCheck[], code: DoctorCheck["code"]): DoctorCheck {
+  const c = found.find(x => x.code === code);
+  assert.ok(c, `no ${code} check in ${JSON.stringify(found.map(x => x.code))}`);
   return c;
+}
+
+/**
+ * `enforcementPinChecks` with a claude home that holds no settings.json unless a case
+ * passes its own: the check must never read the real `~/.claude`.
+ */
+function checks(env: NodeJS.ProcessEnv, pin: EnforcementPin, claudeHome = join(root, "no-claude-home")): DoctorCheck[] {
+  return enforcementPinChecks(env, pin, claudeHome);
 }
 
 describe("ENFORCEMENT_UNPINNED (T10)", () => {
@@ -68,7 +76,7 @@ describe("ENFORCEMENT_UNPINNED (T10)", () => {
     const h = makeHome("unpinned-hook");
     writeHooks(h, () => UNPINNED_HOOK);
 
-    const c = find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_UNPINNED");
+    const c = find(checks(h.env, pin), "ENFORCEMENT_UNPINNED");
     assert.equal(c.ok, false);
     assert.equal(c.severity ?? "fail", "fail", "an unpinned hook is a failure, not a warning");
     assert.match(c.detail, /pre-commit/);
@@ -81,7 +89,7 @@ describe("ENFORCEMENT_UNPINNED (T10)", () => {
     const h = makeHome("unpinned-shim");
     writeFileSync(join(h.home, "bin", "gh"), UNPINNED_SHIM, { mode: 0o755 });
 
-    const c = find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_UNPINNED");
+    const c = find(checks(h.env, pin), "ENFORCEMENT_UNPINNED");
     assert.equal(c.ok, false);
     assert.match(c.detail, /shim/);
     assert.equal(c.fix, "repo-aegis install shim");
@@ -93,7 +101,7 @@ describe("ENFORCEMENT_UNPINNED (T10)", () => {
     writeHooks(h, () => UNPINNED_HOOK);
     writeFileSync(join(h.home, "bin", "gh"), UNPINNED_SHIM, { mode: 0o755 });
 
-    const c = find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_UNPINNED");
+    const c = find(checks(h.env, pin), "ENFORCEMENT_UNPINNED");
     assert.ok(c.fix?.includes("repo-aegis install hooks") && c.fix.includes("repo-aegis install shim"), String(c.fix));
   });
 
@@ -102,24 +110,24 @@ describe("ENFORCEMENT_UNPINNED (T10)", () => {
     const h = makeHome("pinned-ok");
     writeHooks(h, name => renderHookScript(name, pin));
     writeFileSync(join(h.home, "bin", "gh"), renderShimScript(pin), { mode: 0o755 });
-    assert.equal(find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_UNPINNED").ok, true);
+    assert.equal(find(checks(h.env, pin), "ENFORCEMENT_UNPINNED").ok, true);
 
     const empty = makeHome("nothing-installed");
-    assert.equal(find(enforcementPinChecks(empty.env, pin), "ENFORCEMENT_UNPINNED").ok, true);
+    assert.equal(find(checks(empty.env, pin), "ENFORCEMENT_UNPINNED").ok, true);
   });
 
   it("does not call a hook pinned to ANOTHER path unpinned (that is HOOKS_SCRIPT_STALE's finding)", () => {
     const pin = realPin("other-pin");
     const h = makeHome("other-pin");
     writeHooks(h, name => renderHookScript(name, { node: "/opt/elsewhere/node", cli: "/opt/elsewhere/index.js" }));
-    assert.equal(find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_UNPINNED").ok, true);
+    assert.equal(find(checks(h.env, pin), "ENFORCEMENT_UNPINNED").ok, true);
   });
 
   it("ignores a script it did not write", () => {
     const pin = realPin("foreign");
     const h = makeHome("foreign");
     writeFileSync(join(h.home, "bin", "gh"), "#!/bin/sh\n# somebody else's wrapper, calls repo-aegis by name\nrepo-aegis x\n", { mode: 0o755 });
-    assert.equal(find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_UNPINNED").ok, true);
+    assert.equal(find(checks(h.env, pin), "ENFORCEMENT_UNPINNED").ok, true);
   });
 });
 
@@ -130,7 +138,7 @@ describe("ENFORCEMENT_PIN_MISSING", () => {
     const gone = { node: pin.node, cli: join(root, "missing-cli", "gone", "index.js") };
     writeHooks(h, name => renderHookScript(name, gone));
 
-    const c = find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_PIN_MISSING");
+    const c = find(checks(h.env, pin), "ENFORCEMENT_PIN_MISSING");
     assert.equal(c.ok, false);
     assert.equal(c.severity ?? "fail", "fail");
     assert.ok(c.detail.includes(gone.cli), c.detail);
@@ -143,7 +151,7 @@ describe("ENFORCEMENT_PIN_MISSING", () => {
     const gone = { node: join(root, "missing-node", "no-such-node"), cli: pin.cli };
     writeFileSync(join(h.home, "bin", "gh"), renderShimScript(gone), { mode: 0o755 });
 
-    const c = find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_PIN_MISSING");
+    const c = find(checks(h.env, pin), "ENFORCEMENT_PIN_MISSING");
     assert.equal(c.ok, false);
     assert.ok(c.detail.includes(gone.node), c.detail);
     assert.equal(c.fix, "repo-aegis install shim");
@@ -153,14 +161,14 @@ describe("ENFORCEMENT_PIN_MISSING", () => {
     const pin = realPin("pin-present");
     const h = makeHome("pin-present");
     writeHooks(h, name => renderHookScript(name, pin));
-    assert.equal(find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_PIN_MISSING").ok, true);
+    assert.equal(find(checks(h.env, pin), "ENFORCEMENT_PIN_MISSING").ok, true);
   });
 
   it("an unpinned script is not also reported as a missing pin", () => {
     const pin = realPin("unpinned-no-missing");
     const h = makeHome("unpinned-no-missing");
     writeHooks(h, () => UNPINNED_HOOK);
-    assert.equal(find(enforcementPinChecks(h.env, pin), "ENFORCEMENT_PIN_MISSING").ok, true);
+    assert.equal(find(checks(h.env, pin), "ENFORCEMENT_PIN_MISSING").ok, true);
   });
 });
 
@@ -185,7 +193,7 @@ describe("MULTIPLE_INSTALLS (T9)", () => {
     const b = installOnPath("multi-b", "0.11.0");
     const h = makeHome("multi", [a.binDir, b.binDir].join(delimiter));
 
-    const c = find(enforcementPinChecks(h.env, { node: process.execPath, cli: b.entry }), "MULTIPLE_INSTALLS");
+    const c = find(checks(h.env, { node: process.execPath, cli: b.entry }), "MULTIPLE_INSTALLS");
     assert.equal(c.ok, false);
     assert.equal(c.severity, "warn");
     assert.ok(c.detail.includes(a.bin) && c.detail.includes("0.9.0"), c.detail);
@@ -200,7 +208,7 @@ describe("MULTIPLE_INSTALLS (T9)", () => {
     mkdirSync(alias, { recursive: true });
     symlinkSync(a.entry, join(alias, "repo-aegis"));
     const h = makeHome("multi-same-home", [a.binDir, alias].join(delimiter));
-    const c = find(enforcementPinChecks(h.env, { node: process.execPath, cli: a.entry }), "MULTIPLE_INSTALLS");
+    const c = find(checks(h.env, { node: process.execPath, cli: a.entry }), "MULTIPLE_INSTALLS");
     assert.equal(c.ok, true, c.detail);
   });
 
@@ -208,7 +216,7 @@ describe("MULTIPLE_INSTALLS (T9)", () => {
     const a = installOnPath("single-other", "0.9.0");
     const pinned = installOnPath("single-pinned", "0.11.0");
     const h = makeHome("single-other-home", a.binDir);
-    const c = find(enforcementPinChecks(h.env, { node: process.execPath, cli: pinned.entry }), "MULTIPLE_INSTALLS");
+    const c = find(checks(h.env, { node: process.execPath, cli: pinned.entry }), "MULTIPLE_INSTALLS");
     assert.equal(c.ok, false);
     assert.equal(c.severity, "warn");
     assert.match(c.detail, /not the pinned/);
@@ -218,10 +226,10 @@ describe("MULTIPLE_INSTALLS (T9)", () => {
   it("is ok when the only repo-aegis on PATH is the pinned one, and when there is none", () => {
     const a = installOnPath("single-pinned-ok", "0.11.0");
     const ok = makeHome("single-ok-home", a.binDir);
-    assert.equal(find(enforcementPinChecks(ok.env, { node: process.execPath, cli: a.entry }), "MULTIPLE_INSTALLS").ok, true);
+    assert.equal(find(checks(ok.env, { node: process.execPath, cli: a.entry }), "MULTIPLE_INSTALLS").ok, true);
 
     const none = makeHome("none-home", join(root, "no-such-dir"));
-    assert.equal(find(enforcementPinChecks(none.env, { node: process.execPath, cli: a.entry }), "MULTIPLE_INSTALLS").ok, true);
+    assert.equal(find(checks(none.env, { node: process.execPath, cli: a.entry }), "MULTIPLE_INSTALLS").ok, true);
   });
 
   it("never executes a repo-aegis it finds on PATH (the version comes from package.json)", () => {
@@ -231,9 +239,63 @@ describe("MULTIPLE_INSTALLS (T9)", () => {
     writeFileSync(join(dir, "repo-aegis"), `#!/bin/sh\ntouch "${marker}"\n`, { mode: 0o755 });
     const b = installOnPath("multi-exec-b", "0.11.0");
     const h = makeHome("multi-exec-home", [dir, b.binDir].join(delimiter));
-    const c = find(enforcementPinChecks(h.env, { node: process.execPath, cli: b.entry }), "MULTIPLE_INSTALLS");
+    const c = find(checks(h.env, { node: process.execPath, cli: b.entry }), "MULTIPLE_INSTALLS");
     assert.equal(c.ok, false);
     assert.match(c.detail, /version unknown/);
     assert.throws(() => chmodSync(marker, 0o644), /ENOENT/, "doctor executed a repo-aegis from PATH");
+  });
+});
+
+describe("ENFORCEMENT_UNPINNED: Claude Code hook commands (D7)", () => {
+  function claudeHomeWith(name: string, command: string | null): string {
+    const dir = join(root, name, "claude");
+    mkdirSync(dir, { recursive: true });
+    if (command !== null) {
+      writeFileSync(
+        join(dir, "settings.json"),
+        JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] } }),
+      );
+    }
+    return dir;
+  }
+
+  it("fails when a Claude Code hook still calls repo-aegis by name, with the claude-md fix", () => {
+    const pin = realPin("cc-unpinned");
+    const h = makeHome("cc-unpinned");
+    const claude = claudeHomeWith("cc-unpinned", "repo-aegis hook guard-egress --agent claude");
+    const c = find(checks(h.env, pin, claude), "ENFORCEMENT_UNPINNED");
+    assert.equal(c.ok, false);
+    assert.match(c.detail, /Claude Code/);
+    assert.match(c.detail, /guard-egress/);
+    assert.equal(c.fix, "repo-aegis install claude-md");
+  });
+
+  it("names every installer that is stale when hooks, shim and Claude Code hooks are all by name", () => {
+    const pin = realPin("cc-all");
+    const h = makeHome("cc-all");
+    writeHooks(h, () => UNPINNED_HOOK);
+    writeFileSync(join(h.home, "bin", "gh"), UNPINNED_SHIM, { mode: 0o755 });
+    const claude = claudeHomeWith("cc-all", "repo-aegis hook guard-egress --agent claude");
+    const c = find(checks(h.env, pin, claude), "ENFORCEMENT_UNPINNED");
+    assert.equal(c.fix, "repo-aegis install hooks && repo-aegis install shim && repo-aegis install claude-md");
+  });
+
+  it("is ok for a pinned Claude Code hook command, for no settings.json, and for a user's own hook", () => {
+    const pin = realPin("cc-ok");
+    const h = makeHome("cc-ok");
+    const pinned = claudeHomeWith("cc-ok", pinnedHookCommand(pin, "hook guard-egress --agent claude"));
+    assert.equal(find(checks(h.env, pin, pinned), "ENFORCEMENT_UNPINNED").ok, true);
+    const none = claudeHomeWith("cc-none", null);
+    assert.equal(find(checks(h.env, pin, none), "ENFORCEMENT_UNPINNED").ok, true);
+    const own = claudeHomeWith("cc-own", "/usr/local/bin/my-own-hook.sh");
+    assert.equal(find(checks(h.env, pin, own), "ENFORCEMENT_UNPINNED").ok, true);
+  });
+
+  it("an unparseable settings.json is not reported here (GUARD_HOOK_UNREGISTERED says so)", () => {
+    const pin = realPin("cc-bad");
+    const h = makeHome("cc-bad");
+    const dir = claudeHomeWith("cc-bad", null);
+    writeFileSync(join(dir, "settings.json"), "{ not json");
+    assert.equal(find(checks(h.env, pin, dir), "ENFORCEMENT_UNPINNED").ok, true);
   });
 });

@@ -8,7 +8,7 @@ import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { doctor } from "./doctor.js";
 import { fakeGh, withEnv } from "../_test-utils.js";
-import { destinationCachePath, readDestinationCache, renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
+import { destinationCachePath, pinnedHookCommand, readDestinationCache, renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { renderShimScript } from "./shim-script.js";
 
@@ -84,7 +84,7 @@ function makeFixture(
       JSON.stringify({
         hooks: {
           PreToolUse: [
-            { matcher: "Bash", hooks: [{ type: "command", command: "repo-aegis hook guard-egress --agent claude" }] },
+            { matcher: "Bash", hooks: [{ type: "command", command: pinnedHookCommand(currentEnforcementPin(), "hook guard-egress --agent claude") }] },
           ],
         },
       }),

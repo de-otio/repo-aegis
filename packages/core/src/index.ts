@@ -218,6 +218,8 @@ export {
   parsePinFromScript,
   pinAssignments,
   pinGuard,
+  pinnedHookCommand,
+  isPinnedHookCommand,
   pinProblem,
   shellQuote,
   shellUnquote,

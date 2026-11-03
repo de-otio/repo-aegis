@@ -14,7 +14,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
-import type { Registry } from "@de-otio/repo-aegis-core";
+import { pinnedHookCommand, type Registry } from "@de-otio/repo-aegis-core";
 import { doctor } from "./doctor.js";
 import {
   findRealGh,
@@ -557,7 +557,7 @@ describe("doctor — owner checks end to end", () => {
       join(w.claudeHome, "settings.json"),
       JSON.stringify({
         hooks: {
-          PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "repo-aegis hook guard-egress --agent claude" }] }],
+          PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: pinnedHookCommand(currentEnforcementPin(), "hook guard-egress --agent claude") }] }],
         },
       }),
     );
@@ -868,7 +868,7 @@ describe("doctor as a subprocess", () => {
       join(w.claudeHome, "settings.json"),
       JSON.stringify({
         hooks: {
-          PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "repo-aegis hook guard-egress --agent claude" }] }],
+          PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: pinnedHookCommand(currentEnforcementPin(), "hook guard-egress --agent claude") }] }],
         },
       }),
     );

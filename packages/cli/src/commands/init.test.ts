@@ -23,6 +23,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutputAsync, withEnvAsync } from "../_test-utils.js";
+import { pinnedHookCommand } from "@de-otio/repo-aegis-core";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 import { init } from "./init.js";
 
 let tmp: string;
@@ -277,7 +279,7 @@ describe("init command — --with-hooks wires installHooks", () => {
 });
 
 describe("init command — --with-claude wires installClaudeMd", () => {
-  it("registers the bin-name hook command in settings.json (no shell script)", async () => {
+  it("registers the pinned hook command in settings.json (no shell script)", async () => {
     const home = join(tmp, "with-claude-aegis-home");
     mkdirSync(join(home, "state"), { recursive: true });
     const claudeHome = join(tmp, "with-claude-claude-home");
@@ -287,8 +289,8 @@ describe("init command — --with-claude wires installClaudeMd", () => {
       captureOutputAsync(() => init({ withHooks: false, claudeHome })),
     );
 
-    // No shell-script artefact: the hook calls the repo-aegis bin
-    // directly via PATH, so settings.json is the only thing written.
+    // No shell-script artefact: the hook command runs the pinned node and CLI
+    // directly, so settings.json is the only thing written.
     assert.ok(!existsSync(join(claudeHome, "hooks")));
 
     const settings = JSON.parse(readFileSync(join(claudeHome, "settings.json"), "utf8")) as {
@@ -296,7 +298,7 @@ describe("init command — --with-claude wires installClaudeMd", () => {
     };
     const entry = settings.hooks.PostToolUse.find(e => e.matcher === "Write|Edit|MultiEdit");
     assert.ok(entry);
-    assert.equal(entry!.hooks[0]!.command, "repo-aegis hook scan-after-write");
+    assert.equal(entry!.hooks[0]!.command, pinnedHookCommand(currentEnforcementPin(), "hook scan-after-write"));
   });
 });
 

@@ -20,6 +20,9 @@ import {
   registryPath,
   repoAegisHome,
   statePath,
+  isPinnedHookCommand,
+  pinnedHookCommand,
+  pinProblem,
   type EnforcementPin,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
@@ -76,23 +79,23 @@ ${CLAUDE_MD_END}
  * in users' settings.json. `install claude-md` is idempotent on the
  * current value but will not strip a stale older one.
  */
-const HOOK_COMMAND = "repo-aegis hook scan-after-write";
+const HOOK_ARGS = "hook scan-after-write";
 
 /**
  * PreToolUse hook command for cross-org write refusal. Same matcher
- * as `HOOK_COMMAND` (Write|Edit|MultiEdit) but a different event
+ * as `HOOK_ARGS` (Write|Edit|MultiEdit) but a different event
  * (PreToolUse), so a non-zero exit blocks the tool *before* it runs.
  * Added in v0.3.0 to make the cross-org-write refusal genuine
  * prevention rather than post-write detection.
  */
-const CHECK_WRITE_HOOK_COMMAND = "repo-aegis hook check-write";
+const CHECK_WRITE_HOOK_ARGS = "hook check-write";
 
 /**
  * SessionStart hook command — Phase 1 onboarding. Calls
  * `firstTouchClassify` and emits the result as JSON. Same naming
- * stability rule as `HOOK_COMMAND` above.
+ * stability rule as `HOOK_ARGS` above.
  */
-const FIRST_TOUCH_HOOK_COMMAND = "repo-aegis hook first-touch";
+const FIRST_TOUCH_HOOK_ARGS = "hook first-touch";
 
 const FIRST_TOUCH_HOOK_MATCHER = "*";
 
@@ -101,7 +104,7 @@ const FIRST_TOUCH_HOOK_MATCHER = "*";
  * `Bash` matcher entry, distinct from the file-write matcher. Same
  * naming-stability rule as the other hook commands.
  */
-const BASH_HOOK_COMMAND = "repo-aegis hook scan-bash-output";
+const BASH_HOOK_ARGS = "hook scan-bash-output";
 
 const BASH_HOOK_MATCHER = "Bash";
 
@@ -116,14 +119,35 @@ const BASH_HOOK_MATCHER = "Bash";
  * Same naming-stability rule as the other hook commands: changing this
  * string does not auto-update anyone's settings.json.
  */
-const GUARD_EGRESS_HOOK_COMMAND = "repo-aegis hook guard-egress --agent claude";
+const GUARD_EGRESS_HOOK_ARGS = "hook guard-egress --agent claude";
 
 /**
  * PostToolUse(Bash) receipt — doc/design/egress-guard.md §5. Shares the
  * `Bash` matcher entry with `scan-bash-output`; both hooks run on the same
  * tool result and neither replaces the other.
  */
-const EGRESS_RECEIPT_HOOK_COMMAND = "repo-aegis hook egress-receipt";
+const EGRESS_RECEIPT_HOOK_ARGS = "hook egress-receipt";
+
+/**
+ * The `command` written into settings.json for each hook, for `pin`
+ * (doc/plan-pin-enforcement-binary.md D7). Not `repo-aegis hook …`: that name is
+ * resolved on the agent's PATH, whose first entry on a real machine can be a
+ * directory the agent can write, so a file named `repo-aegis` there would replace
+ * the hook that judges every agent command. A pinned command runs the node and CLI
+ * `install claude-md` ran under, by absolute path, and exits 2 (a blocking hook
+ * error) if either is gone, where a missing command exits 127 (non-blocking: the
+ * hook is silently skipped).
+ */
+function hookCommands(pin: EnforcementPin) {
+  return {
+    scanAfterWrite: pinnedHookCommand(pin, HOOK_ARGS),
+    checkWrite: pinnedHookCommand(pin, CHECK_WRITE_HOOK_ARGS),
+    firstTouch: pinnedHookCommand(pin, FIRST_TOUCH_HOOK_ARGS),
+    scanBash: pinnedHookCommand(pin, BASH_HOOK_ARGS),
+    guardEgress: pinnedHookCommand(pin, GUARD_EGRESS_HOOK_ARGS),
+    egressReceipt: pinnedHookCommand(pin, EGRESS_RECEIPT_HOOK_ARGS),
+  };
+}
 
 interface InstallClaudeMdOptions extends OutputOptions {
   claudeHome?: string;
@@ -202,7 +226,32 @@ interface MergeResult {
 }
 
 function mergeHook(settings: SettingsJson, hookCommand: string): MergeResult {
-  return mergePostToolUseHook(settings, HOOK_MATCHER, hookCommand);
+  return mergePostToolUseHook(settings, HOOK_MATCHER, hookCommand, "scan-after-write");
+}
+
+/**
+ * Put `hookCommand` in `hooks`, in place of any other repo-aegis command for the
+ * same hook (`kind`): an older by-name `repo-aegis hook …` entry, or one pinned to
+ * an earlier node or CLI path. The first such entry is replaced where it stands and
+ * the rest dropped, so a re-install neither duplicates nor leaves a by-name command
+ * behind. Commands that are not recognisably repo-aegis's are never touched.
+ */
+function placeHookCommand(hooks: HookCommand[], hookCommand: string, kind: HookKind): MergeResult {
+  const isOld = (h: HookCommand): boolean =>
+    h.type === "command" && typeof h.command === "string" && h.command !== hookCommand && isRepoAegisHookCommand(h.command, kind);
+  const exact = hooks.some(h => h.type === "command" && h.command === hookCommand);
+  const firstOld = hooks.findIndex(isOld);
+  if (firstOld === -1) {
+    if (exact) return { added: false, alreadyPresent: true };
+    hooks.push({ type: "command", command: hookCommand });
+    return { added: true, alreadyPresent: false };
+  }
+  // Mutates `hooks` (a parsed settings.json array we own): replace, then drop the other old ones.
+  if (!exact) hooks[firstOld] = { type: "command", command: hookCommand };
+  for (let i = hooks.length - 1; i >= 0; i--) {
+    if (isOld(hooks[i]!)) hooks.splice(i, 1);
+  }
+  return { added: true, alreadyPresent: false };
 }
 
 /**
@@ -216,6 +265,7 @@ function mergeHookOnEvent(
   event: "PreToolUse" | "PostToolUse",
   matcher: string,
   hookCommand: string,
+  kind: HookKind,
 ): MergeResult {
   if (!settings.hooks) settings.hooks = {};
   if (!settings.hooks[event]) settings.hooks[event] = [];
@@ -229,30 +279,25 @@ function mergeHookOnEvent(
   }
   if (!entry.hooks) entry.hooks = [];
 
-  const exists = entry.hooks.some(
-    h => h.type === "command" && h.command === hookCommand,
-  );
-  if (exists) {
-    return { added: false, alreadyPresent: true };
-  }
-  entry.hooks.push({ type: "command", command: hookCommand });
-  return { added: true, alreadyPresent: false };
+  return placeHookCommand(entry.hooks, hookCommand, kind);
 }
 
 function mergePostToolUseHook(
   settings: SettingsJson,
   matcher: string,
   hookCommand: string,
+  kind: HookKind,
 ): MergeResult {
-  return mergeHookOnEvent(settings, "PostToolUse", matcher, hookCommand);
+  return mergeHookOnEvent(settings, "PostToolUse", matcher, hookCommand, kind);
 }
 
 function mergePreToolUseHook(
   settings: SettingsJson,
   matcher: string,
   hookCommand: string,
+  kind: HookKind,
 ): MergeResult {
-  return mergeHookOnEvent(settings, "PreToolUse", matcher, hookCommand);
+  return mergeHookOnEvent(settings, "PreToolUse", matcher, hookCommand, kind);
 }
 
 /**
@@ -277,14 +322,7 @@ function mergeFirstTouchHook(
   }
   if (!entry.hooks) entry.hooks = [];
 
-  const exists = entry.hooks.some(
-    h => h.type === "command" && h.command === hookCommand,
-  );
-  if (exists) {
-    return { added: false, alreadyPresent: true };
-  }
-  entry.hooks.push({ type: "command", command: hookCommand });
-  return { added: true, alreadyPresent: false };
+  return placeHookCommand(entry.hooks, hookCommand, "first-touch");
 }
 
 // ---------------------------------------------------------------------------
@@ -646,8 +684,24 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     return;
   }
 
+  // The hook commands run THIS install's node and CLI by absolute path. Refuse before
+  // anything is written when the pin cannot be quoted into a shell command.
+  const pin = opts.pin ?? currentEnforcementPin();
+  const pinIssue = pinProblem(pin);
+  if (pinIssue !== null) {
+    emitError(
+      {
+        code: "PIN_PATH_UNSUPPORTED",
+        error: `cannot pin the enforcement binary: ${pinIssue}`,
+        details: "install repo-aegis, and the Node it runs on, at a path without newline characters, then re-run `repo-aegis install claude-md`",
+      },
+      opts,
+    );
+  }
+  const cmd = hookCommands(pin);
+
   if (opts.dryRun) {
-    dryRunInstallClaudeMd({ claudeHome, claudeMdPath, settingsPath, opts });
+    dryRunInstallClaudeMd({ claudeHome, claudeMdPath, settingsPath, opts, pin, cmd });
     return;
   }
 
@@ -676,10 +730,10 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     claudeMdAppended = true;
   }
 
-  // 2. Merge into settings.json. The `command` references the bin name
-  // (`repo-aegis hook scan-after-write`) so the hook is PATH-resolved at
-  // invocation time — moving claudeHome no longer breaks the hook, and
-  // there is no separate shell script to keep in sync.
+  // 2. Merge into settings.json. Each `command` runs the pinned node and CLI by
+  // absolute path (see `hookCommands`) — moving claudeHome does not break the
+  // hook, there is no separate shell script to keep in sync, and nothing on the
+  // agent's PATH can stand in for the CLI.
   let settings: SettingsJson;
   try {
     settings = readSettings(settingsPath);
@@ -689,15 +743,15 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
       opts,
     );
   }
-  const merge = mergeHook(settings!, HOOK_COMMAND);
-  const checkWriteMerge = mergePreToolUseHook(settings!, HOOK_MATCHER, CHECK_WRITE_HOOK_COMMAND);
-  const bashMerge = mergePostToolUseHook(settings!, BASH_HOOK_MATCHER, BASH_HOOK_COMMAND);
-  const guardEgressMerge = mergePreToolUseHook(settings!, BASH_HOOK_MATCHER, GUARD_EGRESS_HOOK_COMMAND);
-  const egressReceiptMerge = mergePostToolUseHook(settings!, BASH_HOOK_MATCHER, EGRESS_RECEIPT_HOOK_COMMAND);
+  const merge = mergeHook(settings!, cmd.scanAfterWrite);
+  const checkWriteMerge = mergePreToolUseHook(settings!, HOOK_MATCHER, cmd.checkWrite, "check-write");
+  const bashMerge = mergePostToolUseHook(settings!, BASH_HOOK_MATCHER, cmd.scanBash, "scan-bash-output");
+  const guardEgressMerge = mergePreToolUseHook(settings!, BASH_HOOK_MATCHER, cmd.guardEgress, "guard-egress");
+  const egressReceiptMerge = mergePostToolUseHook(settings!, BASH_HOOK_MATCHER, cmd.egressReceipt, "egress-receipt");
   const firstTouchMerge: MergeResult | null = opts.firstTouch
-    ? mergeFirstTouchHook(settings!, FIRST_TOUCH_HOOK_COMMAND)
+    ? mergeFirstTouchHook(settings!, cmd.firstTouch)
     : null;
-  const denyInstall = installDenyRules(settings!, settingsPath, opts.pin);
+  const denyInstall = installDenyRules(settings!, settingsPath, pin);
 
   // The ledger first: if it cannot be written, uninstall could not tell our
   // rules from the user's, so no rule is added at all.
@@ -776,31 +830,31 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
       action: "install-claude-md",
       claudeHome,
       claudeMd: { path: claudeMdPath, appended: claudeMdAppended, alreadyPresent: claudeMdAlreadyPresent },
-      hookCommand: HOOK_COMMAND,
+      hookCommand: cmd.scanAfterWrite,
       settings: { path: settingsPath, added: merge.added, alreadyPresent: merge.alreadyPresent },
       checkWriteHook: {
-        hookCommand: CHECK_WRITE_HOOK_COMMAND,
+        hookCommand: cmd.checkWrite,
         added: checkWriteMerge.added,
         alreadyPresent: checkWriteMerge.alreadyPresent,
       },
       bashHook: {
-        hookCommand: BASH_HOOK_COMMAND,
+        hookCommand: cmd.scanBash,
         added: bashMerge.added,
         alreadyPresent: bashMerge.alreadyPresent,
       },
       guardEgressHook: {
-        hookCommand: GUARD_EGRESS_HOOK_COMMAND,
+        hookCommand: cmd.guardEgress,
         added: guardEgressMerge.added,
         alreadyPresent: guardEgressMerge.alreadyPresent,
       },
       egressReceiptHook: {
-        hookCommand: EGRESS_RECEIPT_HOOK_COMMAND,
+        hookCommand: cmd.egressReceipt,
         added: egressReceiptMerge.added,
         alreadyPresent: egressReceiptMerge.alreadyPresent,
       },
       ...(firstTouchMerge && {
         firstTouch: {
-          hookCommand: FIRST_TOUCH_HOOK_COMMAND,
+          hookCommand: cmd.firstTouch,
           added: firstTouchMerge.added,
           alreadyPresent: firstTouchMerge.alreadyPresent,
         },
@@ -822,26 +876,26 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   else emitText(`snippet already present in ${claudeMdPath}`);
   if (checkWriteMerge.added) emitText(`registered PreToolUse(Write|Edit|MultiEdit) hook in ${settingsPath}`);
   else emitText(`PreToolUse(Write|Edit|MultiEdit) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${CHECK_WRITE_HOOK_COMMAND}`);
+  emitText(`  command: ${cmd.checkWrite}`);
   if (merge.added) emitText(`registered PostToolUse(Write|Edit|MultiEdit) hook in ${settingsPath}`);
   else emitText(`PostToolUse(Write|Edit|MultiEdit) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${HOOK_COMMAND}`);
+  emitText(`  command: ${cmd.scanAfterWrite}`);
   if (guardEgressMerge.added) emitText(`registered PreToolUse(Bash) hook in ${settingsPath}`);
   else emitText(`PreToolUse(Bash) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${GUARD_EGRESS_HOOK_COMMAND}`);
+  emitText(`  command: ${cmd.guardEgress}`);
   if (bashMerge.added) emitText(`registered PostToolUse(Bash) hook in ${settingsPath}`);
   else emitText(`PostToolUse(Bash) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${BASH_HOOK_COMMAND}`);
+  emitText(`  command: ${cmd.scanBash}`);
   if (egressReceiptMerge.added) emitText(`registered PostToolUse(Bash) hook in ${settingsPath}`);
   else emitText(`PostToolUse(Bash) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${EGRESS_RECEIPT_HOOK_COMMAND}`);
+  emitText(`  command: ${cmd.egressReceipt}`);
   if (firstTouchMerge) {
     if (firstTouchMerge.added) {
       emitText(`registered SessionStart hook in ${settingsPath}`);
     } else {
       emitText(`SessionStart hook already registered in ${settingsPath}`);
     }
-    emitText(`  command: ${FIRST_TOUCH_HOOK_COMMAND}`);
+    emitText(`  command: ${cmd.firstTouch}`);
   }
   emitText(
     denyInstall.added.length > 0
@@ -865,10 +919,12 @@ interface DryRunContext {
   claudeMdPath: string;
   settingsPath: string;
   opts: InstallClaudeMdOptions;
+  pin: EnforcementPin;
+  cmd: ReturnType<typeof hookCommands>;
 }
 
 function dryRunInstallClaudeMd(ctx: DryRunContext): void {
-  const { claudeHome, claudeMdPath, settingsPath, opts } = ctx;
+  const { claudeHome, claudeMdPath, settingsPath, opts, pin, cmd } = ctx;
 
   // 1. CLAUDE.md — compute would-be additions without writing.
   const existingClaudeMd = readIfExists(claudeMdPath) ?? "";
@@ -897,12 +953,12 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   // mergeHook mutates settings in place; that's fine here because
   // `settings` is a fresh object parsed inside this function and is
   // not persisted.
-  const merge = mergeHook(settings, HOOK_COMMAND);
-  const checkWriteMerge = mergePreToolUseHook(settings, HOOK_MATCHER, CHECK_WRITE_HOOK_COMMAND);
-  const bashMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, BASH_HOOK_COMMAND);
-  const guardEgressMerge = mergePreToolUseHook(settings, BASH_HOOK_MATCHER, GUARD_EGRESS_HOOK_COMMAND);
-  const egressReceiptMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, EGRESS_RECEIPT_HOOK_COMMAND);
-  const denyInstall = installDenyRules(settings, settingsPath, opts.pin);
+  const merge = mergeHook(settings, cmd.scanAfterWrite);
+  const checkWriteMerge = mergePreToolUseHook(settings, HOOK_MATCHER, cmd.checkWrite, "check-write");
+  const bashMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, cmd.scanBash, "scan-bash-output");
+  const guardEgressMerge = mergePreToolUseHook(settings, BASH_HOOK_MATCHER, cmd.guardEgress, "guard-egress");
+  const egressReceiptMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, cmd.egressReceipt, "egress-receipt");
+  const denyInstall = installDenyRules(settings, settingsPath, pin);
   const wouldBeSettings = JSON.stringify(settings, null, 2) + "\n";
 
   // 3. strict-mode flag (read-only check)
@@ -922,7 +978,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
         alreadyPresent: claudeMdAlreadyPresent,
         addition: claudeMdAddition,
       },
-      hookCommand: HOOK_COMMAND,
+      hookCommand: cmd.scanAfterWrite,
       settings: {
         path: settingsPath,
         wouldAdd: merge.added,
@@ -930,22 +986,22 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
         contents: wouldBeSettings,
       },
       checkWriteHook: {
-        hookCommand: CHECK_WRITE_HOOK_COMMAND,
+        hookCommand: cmd.checkWrite,
         wouldAdd: checkWriteMerge.added,
         alreadyPresent: checkWriteMerge.alreadyPresent,
       },
       bashHook: {
-        hookCommand: BASH_HOOK_COMMAND,
+        hookCommand: cmd.scanBash,
         wouldAdd: bashMerge.added,
         alreadyPresent: bashMerge.alreadyPresent,
       },
       guardEgressHook: {
-        hookCommand: GUARD_EGRESS_HOOK_COMMAND,
+        hookCommand: cmd.guardEgress,
         wouldAdd: guardEgressMerge.added,
         alreadyPresent: guardEgressMerge.alreadyPresent,
       },
       egressReceiptHook: {
-        hookCommand: EGRESS_RECEIPT_HOOK_COMMAND,
+        hookCommand: cmd.egressReceipt,
         wouldAdd: egressReceiptMerge.added,
         alreadyPresent: egressReceiptMerge.alreadyPresent,
       },
@@ -974,11 +1030,11 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   }
   emitText("");
   emitText(`# Hook commands (to be registered in settings.json):`);
-  emitText(`#   ${CHECK_WRITE_HOOK_COMMAND}    (PreToolUse: Write|Edit|MultiEdit)`);
-  emitText(`#   ${GUARD_EGRESS_HOOK_COMMAND}    (PreToolUse: Bash)`);
-  emitText(`#   ${HOOK_COMMAND}  (PostToolUse: Write|Edit|MultiEdit)`);
-  emitText(`#   ${BASH_HOOK_COMMAND}  (PostToolUse: Bash)`);
-  emitText(`#   ${EGRESS_RECEIPT_HOOK_COMMAND}  (PostToolUse: Bash)`);
+  emitText(`#   ${cmd.checkWrite}    (PreToolUse: Write|Edit|MultiEdit)`);
+  emitText(`#   ${cmd.guardEgress}    (PreToolUse: Bash)`);
+  emitText(`#   ${cmd.scanAfterWrite}  (PostToolUse: Write|Edit|MultiEdit)`);
+  emitText(`#   ${cmd.scanBash}  (PostToolUse: Bash)`);
+  emitText(`#   ${cmd.egressReceipt}  (PostToolUse: Bash)`);
   emitText("");
   emitText("# permissions.deny rules protecting the registry, approvals, hooks and shim:");
   for (const rule of denyInstall.plan.rules) emitText(`#   ${rule}`);
@@ -1256,8 +1312,43 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
 // Egress guard (doc/design/egress-guard.md §4, §7)
 // ---------------------------------------------------------------------------
 
-/** The prefix a registered guard command must start with, whatever `--agent` follows it. */
+/** The prefix a registered by-name guard command must start with, whatever `--agent` follows it. */
 const GUARD_EGRESS_COMMAND_PREFIX = "repo-aegis hook guard-egress";
+
+/** True for a registered guard command: the pinned form `install claude-md` writes, or the older by-name form. */
+function isGuardEgressCommand(command: string): boolean {
+  const c = command.trim();
+  return c.startsWith(GUARD_EGRESS_COMMAND_PREFIX) || isPinnedHookCommand(c, "guard-egress");
+}
+
+/**
+ * The repo-aegis hooks (`guard-egress`, `scan-after-write`, …) that Claude Code's
+ * `settings.json` under `claudeHome` still runs as `repo-aegis hook <name> …` by
+ * name, which a `repo-aegis` first on the agent's PATH can replace
+ * (doc/plan-pin-enforcement-binary.md D7). Empty when there is no settings.json,
+ * it does not parse (`GUARD_HOOK_UNREGISTERED` reports that), or every command
+ * is pinned or someone else's.
+ */
+export function unpinnedClaudeHooks(claudeHome?: string): string[] {
+  const settingsPath = join(claudeHome ?? defaultClaudeHome(), "settings.json");
+  let settings: SettingsJson;
+  try {
+    if (!existsSync(settingsPath)) return [];
+    settings = readSettings(settingsPath);
+  } catch {
+    return [];
+  }
+  const names = new Set<string>();
+  for (const entries of Object.values(settings.hooks ?? {})) {
+    for (const entry of entries ?? []) {
+      for (const h of entry.hooks ?? []) {
+        const m = typeof h.command === "string" ? /^repo-aegis hook ([a-z-]+)/.exec(h.command.trim()) : null;
+        if (m !== null) names.add(m[1]!);
+      }
+    }
+  }
+  return [...names].sort();
+}
 
 /**
  * `doctor` check: `GUARD_HOOK_UNREGISTERED` when the Claude Code
@@ -1305,7 +1396,7 @@ export function checkGuardHook(claudeHome?: string): import("./doctor-checks.js"
     entry =>
       entry.matcher === BASH_HOOK_MATCHER &&
       (entry.hooks ?? []).some(
-        h => typeof h.command === "string" && h.command.trim().startsWith(GUARD_EGRESS_COMMAND_PREFIX),
+        h => typeof h.command === "string" && isGuardEgressCommand(h.command),
       ),
   );
 

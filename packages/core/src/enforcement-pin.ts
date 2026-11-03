@@ -102,3 +102,34 @@ export function parsePinFromScript(text: string): EnforcementPin | null {
   const c = shellUnquote(cli[1]!);
   return n === null || c === null ? null : { node: n, cli: c };
 }
+
+/**
+ * A Claude Code hook `command` that runs `hookArgs` (for example
+ * `hook guard-egress --agent claude`) on the pinned CLI, written for a POSIX
+ * `sh -c`: shell-quoted absolute paths, no bash-only syntax.
+ *
+ * It fails CLOSED with exit 2 when the pinned node or CLI is gone. A missing
+ * command would otherwise exit 127, which Claude Code treats as a non-blocking
+ * hook error: the hook would simply not run and the tool call would proceed.
+ * Exit 2 blocks. `exec` hands stdin (the tool call) straight to the CLI.
+ */
+export function pinnedHookCommand(pin: EnforcementPin, hookArgs: string): string {
+  assertPinnable(pin);
+  const n = shellQuote(pin.node);
+  const c = shellQuote(pin.cli);
+  return (
+    `if [ -f ${n} ] && [ -x ${n} ] && [ -f ${c} ] && [ -r ${c} ]; then exec ${n} ${c} ${hookArgs}; fi; ` +
+    `printf 'repo-aegis: the pinned enforcement binary is missing or not usable (%s, %s); ` +
+    `re-pin it by running: repo-aegis install claude-md\\n' ${n} ${c} >&2; exit 2`
+  );
+}
+
+/** True when `command` is a {@link pinnedHookCommand} that runs `hookName` (for example `guard-egress`). */
+export function isPinnedHookCommand(command: string, hookName: string): boolean {
+  return (
+    command.startsWith("if [ -f ") &&
+    command.includes("; then exec ") &&
+    command.includes(` hook ${hookName}`) &&
+    command.endsWith("; exit 2")
+  );
+}

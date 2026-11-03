@@ -12,7 +12,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
+import { pinnedHookCommand, renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { doctor } from "./doctor.js";
 import {
@@ -230,7 +230,7 @@ function registerGuard(w: RepoWorld): void {
     join(w.claudeHome, "settings.json"),
     JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "repo-aegis hook guard-egress --agent claude" }] }],
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: pinnedHookCommand(currentEnforcementPin(), "hook guard-egress --agent claude") }] }],
       },
     }),
   );

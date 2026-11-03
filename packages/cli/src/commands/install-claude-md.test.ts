@@ -13,12 +13,21 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv } from "../_test-utils.js";
+import { pinnedHookCommand } from "@de-otio/repo-aegis-core";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 import { checkGuardHook, installClaudeMd } from "./install-claude-md.js";
 
-const HOOK_COMMAND = "repo-aegis hook scan-after-write";
-const CHECK_WRITE_HOOK_COMMAND = "repo-aegis hook check-write";
-const GUARD_EGRESS_HOOK_COMMAND = "repo-aegis hook guard-egress --agent claude";
-const EGRESS_RECEIPT_HOOK_COMMAND = "repo-aegis hook egress-receipt";
+// The hook commands install writes are pinned to this build's node and CLI
+// (doc/plan-pin-enforcement-binary.md D7), not `repo-aegis hook …` by name.
+const PIN = currentEnforcementPin();
+const HOOK_COMMAND = pinnedHookCommand(PIN, "hook scan-after-write");
+const CHECK_WRITE_HOOK_COMMAND = pinnedHookCommand(PIN, "hook check-write");
+const GUARD_EGRESS_HOOK_COMMAND = pinnedHookCommand(PIN, "hook guard-egress --agent claude");
+const EGRESS_RECEIPT_HOOK_COMMAND = pinnedHookCommand(PIN, "hook egress-receipt");
+const BASH_HOOK_COMMAND = pinnedHookCommand(PIN, "hook scan-bash-output");
+const FIRST_TOUCH_HOOK_COMMAND = pinnedHookCommand(PIN, "hook first-touch");
+/** How a command appears inside the pretty-printed settings.json text (backslashes escaped). */
+const inJson = (command: string): string => JSON.stringify(command).slice(1, -1);
 
 let tmp: string;
 
@@ -65,7 +74,7 @@ describe("install-claude-md — fresh install", () => {
     assert.ok(!existsSync(join(claudeHome, "hooks")));
   });
 
-  it("registers PostToolUse hooks in settings.json by bin name", () => {
+  it("registers PostToolUse hooks in settings.json as pinned commands", () => {
     const settingsPath = join(claudeHome, "settings.json");
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       hooks: { PostToolUse: { matcher: string; hooks: { type: string; command: string }[] }[] };
@@ -77,7 +86,7 @@ describe("install-claude-md — fresh install", () => {
     assert.ok(fileEntry, "missing file-write matcher entry");
     assert.equal(fileEntry!.hooks.length, 1);
     assert.equal(fileEntry!.hooks[0]!.type, "command");
-    assert.equal(fileEntry!.hooks[0]!.command, "repo-aegis hook scan-after-write");
+    assert.equal(fileEntry!.hooks[0]!.command, HOOK_COMMAND);
 
     // The Bash matcher entry carries BOTH PostToolUse Bash hooks: the
     // secret-shape scan of the output and the egress receipt. They are
@@ -87,12 +96,12 @@ describe("install-claude-md — fresh install", () => {
     assert.equal(bashEntry!.hooks.length, 2);
     assert.deepEqual(
       bashEntry!.hooks.map(h => h.command),
-      ["repo-aegis hook scan-bash-output", EGRESS_RECEIPT_HOOK_COMMAND],
+      [BASH_HOOK_COMMAND, EGRESS_RECEIPT_HOOK_COMMAND],
     );
     for (const h of bashEntry!.hooks) assert.equal(h.type, "command");
   });
 
-  it("registers PreToolUse check-write hook in settings.json by bin name", () => {
+  it("registers PreToolUse check-write hook in settings.json as a pinned command", () => {
     // v0.3.0: cross-org-write refusal moved to PreToolUse so a non-zero
     // exit blocks the tool *before* it runs. Same matcher as the
     // PostToolUse scan-after-write hook (Write|Edit|MultiEdit).
@@ -111,7 +120,7 @@ describe("install-claude-md — fresh install", () => {
     assert.equal(entry!.hooks[0]!.command, CHECK_WRITE_HOOK_COMMAND);
   });
 
-  it("registers the PreToolUse(Bash) egress guard in settings.json by bin name", () => {
+  it("registers the PreToolUse(Bash) egress guard in settings.json as a pinned command", () => {
     // doc/design/egress-guard.md §4: the guard must sit on PreToolUse, not
     // PostToolUse — it is the only enforcement point that sees the whole
     // compound command before a shell has resolved it, and exit 2 there is
@@ -373,7 +382,7 @@ describe("install-claude-md — --dry-run", () => {
     assert.equal(j.settings.wouldAdd, true);
     assert.equal(j.settings.alreadyPresent, false);
     assert.ok(j.settings.contents.includes("Write|Edit|MultiEdit"));
-    assert.ok(j.settings.contents.includes(HOOK_COMMAND));
+    assert.ok(j.settings.contents.includes(inJson(HOOK_COMMAND)));
 
     // No filesystem side effects.
     assert.ok(!existsSync(join(claudeHome, "CLAUDE.md")));
@@ -466,7 +475,7 @@ describe("install-claude-md — --first-touch", () => {
     assert.equal(sessionEntries[0]!.matcher, "*");
     assert.equal(
       sessionEntries[0]!.hooks?.[0]?.command,
-      "repo-aegis hook first-touch",
+      FIRST_TOUCH_HOOK_COMMAND,
     );
   });
 
@@ -502,13 +511,13 @@ describe("install-claude-md — --first-touch", () => {
     assert.ok(fileEntry);
     assert.equal(
       fileEntry!.hooks?.[0]?.command,
-      "repo-aegis hook scan-after-write",
+      HOOK_COMMAND,
     );
     const bashEntry = postEntries.find(e => e.matcher === "Bash");
     assert.ok(bashEntry);
     assert.equal(
       bashEntry!.hooks?.[0]?.command,
-      "repo-aegis hook scan-bash-output",
+      BASH_HOOK_COMMAND,
     );
   });
 
@@ -524,7 +533,7 @@ describe("install-claude-md — --first-touch", () => {
       firstTouch?: { hookCommand: string; added: boolean };
     };
     assert.ok(j.firstTouch);
-    assert.equal(j.firstTouch!.hookCommand, "repo-aegis hook first-touch");
+    assert.equal(j.firstTouch!.hookCommand, FIRST_TOUCH_HOOK_COMMAND);
     assert.equal(j.firstTouch!.added, true);
   });
 });
@@ -954,5 +963,33 @@ describe("checkGuardHook", () => {
       }),
     );
     assert.equal(checkGuardHook(claudeHome)[0]!.ok, true);
+  });
+});
+
+describe("checkGuardHook — the pinned form (D7)", () => {
+  function claudeHomeWithGuard(name: string, command: string): string {
+    const dir = makeClaudeHome(name);
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] } }),
+    );
+    return dir;
+  }
+
+  it("accepts the pinned guard-egress command that `install claude-md` writes", () => {
+    const home = claudeHomeWithGuard("guard-pinned", GUARD_EGRESS_HOOK_COMMAND);
+    assert.equal(checkGuardHook(home).every(c => c.ok), true);
+  });
+
+  it("still accepts the older by-name command", () => {
+    const home = claudeHomeWithGuard("guard-by-name", "repo-aegis hook guard-egress --agent claude");
+    assert.equal(checkGuardHook(home).every(c => c.ok), true);
+  });
+
+  it("does not accept a pinned command for a different hook, or a command that merely mentions guard-egress", () => {
+    const other = claudeHomeWithGuard("guard-other-hook", pinnedHookCommand(PIN, "hook scan-bash-output"));
+    assert.equal(checkGuardHook(other).every(c => c.ok), false);
+    const mention = claudeHomeWithGuard("guard-mention", "echo hook guard-egress");
+    assert.equal(checkGuardHook(mention).every(c => c.ok), false);
   });
 });
