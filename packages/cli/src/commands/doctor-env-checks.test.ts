@@ -132,19 +132,21 @@ describe("checkSshGithubRedirect", () => {
   }
 
   it("is info when `Host github.com` sets HostName to another host", () => {
-    const c = checkSshGithubRedirect(sshDirWith("Host github.com\n  HostName git.example.net\n  User git\n"));
+    // Dotless host names: the redaction asserts look for the name, and a dotted
+    // one inside `includes` reads to CodeQL as URL sanitization.
+    const c = checkSshGithubRedirect(sshDirWith("Host github.com\n  HostName gitmirrorzz\n  User git\n"));
     assert.equal(c.ok, false);
     assert.equal(c.severity, "info");
-    assert.ok(!c.detail.includes("example.net"), c.detail);
+    assert.ok(!c.detail.includes("gitmirrorzz"), c.detail);
   });
 
   it("is info when `Host github.com` sets a ProxyCommand or ProxyJump", () => {
-    for (const line of ["ProxyCommand nc -X 5 -x proxy.example.net:1080 %h %p", "ProxyJump bastion.example.net"]) {
+    for (const line of ["ProxyCommand nc -X 5 -x proxyhostzz:1080 %h %p", "ProxyJump proxyhostzz"]) {
       const c = checkSshGithubRedirect(sshDirWith(`Host github.com\n  ${line}\n`));
       assert.equal(c.ok, false, line);
       assert.equal(c.severity, "info");
       assert.match(c.detail, /ProxyCommand or ProxyJump/);
-      assert.ok(!c.detail.includes("example.net"), c.detail);
+      assert.ok(!c.detail.includes("proxyhostzz"), c.detail);
     }
   });
 
