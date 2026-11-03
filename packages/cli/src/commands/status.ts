@@ -19,6 +19,7 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { resolveVisibility } from "../visibility.js";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 
 // Same 10-char label field the other `  key:    value` lines below use
 // (2-space indent + label + colon padded to column 10), so continuation
@@ -185,7 +186,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   // relying on hook output. `resolveHookState` already returns a
   // well-formed (isGitRepo: false) placeholder outside a git repo, so
   // it's safe to call unconditionally and include verbatim in JSON.
-  const hooks = resolveHookState(repo.cwd);
+  const hooks = resolveHookState(repo.cwd, currentEnforcementPin());
 
   // H6: best-effort audit-log record of the observed hook state so a
   // regression gets a timestamp when audit-log is enabled. Off by

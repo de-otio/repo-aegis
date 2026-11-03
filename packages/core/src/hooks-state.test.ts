@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { resolveHookState } from "./hooks-state.js";
-import { HOOK_SCRIPTS } from "./hook-scripts.js";
+import { renderHookScript, type EnforcementPin, type HookName } from "./hook-scripts.js";
 
 // SAFETY: every case below runs against a throwaway repo under a
 // per-case temp dir, with GIT_CONFIG_GLOBAL/SYSTEM redirected to files
@@ -17,6 +17,10 @@ import { HOOK_SCRIPTS } from "./hook-scripts.js";
 // config — `git config --global` calls below only ever touch the
 // per-case GIT_CONFIG_GLOBAL file. Never call `git config --global`
 // without going through `Fixture.run`.
+
+/** The pin every case renders for; `resolveHookState` is told the same one. */
+const PIN: EnforcementPin = { node: "/opt/node/bin/node", cli: "/opt/ra/dist/index.js" };
+const HOOK_NAMES: readonly HookName[] = ["pre-commit", "pre-push"];
 
 let root: string;
 
@@ -85,13 +89,13 @@ function gitConfig(fx: Fixture, args: string[]): void {
   fx.run(() => execFileSync("git", ["config", ...args], { cwd: fx.repoDir }));
 }
 
-/** Writes both hook scripts (byte-identical to HOOK_SCRIPTS) to `dir`,
+/** Writes both hook scripts rendered for `pin` (default: PIN) to `dir`,
  * mode 0o755, mirroring exactly what `install-hooks.ts` writes. */
-function writeCorrectHooks(dir: string): void {
+function writeCorrectHooks(dir: string, pin: EnforcementPin = PIN): void {
   mkdirSync(dir, { recursive: true });
-  for (const name of Object.keys(HOOK_SCRIPTS) as (keyof typeof HOOK_SCRIPTS)[]) {
+  for (const name of HOOK_NAMES) {
     const p = join(dir, name);
-    writeFileSync(p, HOOK_SCRIPTS[name], { mode: 0o755 });
+    writeFileSync(p, renderHookScript(name, pin), { mode: 0o755 });
     chmodSync(p, 0o755);
   }
 }
@@ -106,7 +110,7 @@ function expectedHooksDir(fx: Fixture): string {
 describe("resolveHookState", () => {
   it("core.hooksPath unset -> HOOKS_PATH_UNSET, effectivePath null", () => {
     const fx = makeFixture("unset");
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.equal(state.isGitRepo, true);
     assert.equal(state.origin, "unset");
     assert.equal(state.effectivePath, null);
@@ -122,7 +126,7 @@ describe("resolveHookState", () => {
     writeCorrectHooks(hooksDir);
     gitConfig(fx, ["--global", "core.hooksPath", hooksDir]);
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.equal(state.origin, "global");
     assert.equal(state.effectivePath, hooksDir);
     assert.equal(state.expectedPath, hooksDir);
@@ -150,7 +154,7 @@ describe("resolveHookState", () => {
     mkdirSync(emptyDir, { recursive: true });
     gitConfig(fx, ["core.hooksPath", emptyDir]);
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.equal(state.origin, "local");
     assert.equal(state.effectivePath, emptyDir);
     assert.equal(state.ok, false);
@@ -172,7 +176,7 @@ describe("resolveHookState", () => {
     chmodSync(preCommitPath, 0o644); // deliberately not executable
     gitConfig(fx, ["core.hooksPath", foreignDir]);
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.equal(state.origin, "local");
     assert.equal(state.effectivePath, foreignDir);
     assert.equal(state.ok, false);
@@ -197,7 +201,7 @@ describe("resolveHookState", () => {
     chmodSync(prePushPath, 0o755);
     gitConfig(fx, ["core.hooksPath", hooksDir]);
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.equal(state.effectivePath, hooksDir);
     assert.equal(state.ok, false);
     assert.equal(state.code, "HOOKS_SCRIPT_STALE");
@@ -206,6 +210,51 @@ describe("resolveHookState", () => {
     assert.equal(state.scripts["pre-push"].present, true);
     assert.equal(state.scripts["pre-push"].executable, true);
     assert.equal(state.scripts["pre-push"].current, false);
+  });
+
+  it("T8: a hook rendered for a different pin is installed but stale (HOOKS_SCRIPT_STALE)", () => {
+    const fx = makeFixture("stale-other-pin");
+    const hooksDir = expectedHooksDir(fx);
+    writeCorrectHooks(hooksDir, { ...PIN, node: "/opt/old-node/bin/node" });
+    gitConfig(fx, ["core.hooksPath", hooksDir]);
+
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
+    assert.equal(state.code, "HOOKS_SCRIPT_STALE");
+    assert.equal(state.ok, false);
+    for (const name of HOOK_NAMES) {
+      assert.equal(state.scripts[name].present, true);
+      assert.equal(state.scripts[name].executable, true);
+      assert.equal(state.scripts[name].current, false, `${name} rendered for another pin must not be current`);
+    }
+  });
+
+  it("T8: an old unpinned hook (calls repo-aegis by name, fails open) is installed but stale", () => {
+    const fx = makeFixture("stale-unpinned");
+    const hooksDir = expectedHooksDir(fx);
+    mkdirSync(hooksDir, { recursive: true });
+    const unpinned =
+      "#!/usr/bin/env bash\nset -euo pipefail\n" +
+      "if ! command -v repo-aegis >/dev/null 2>&1; then\n  exit 0\nfi\n" +
+      "repo-aegis check --staged || exit 1\nexit 0\n";
+    for (const name of HOOK_NAMES) {
+      writeFileSync(join(hooksDir, name), unpinned, { mode: 0o755 });
+      chmodSync(join(hooksDir, name), 0o755);
+    }
+    gitConfig(fx, ["core.hooksPath", hooksDir]);
+
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
+    assert.equal(state.code, "HOOKS_SCRIPT_STALE");
+    for (const name of HOOK_NAMES) assert.equal(state.scripts[name].current, false);
+  });
+
+  it("T8: the same hooks are current for the pin they were rendered for", () => {
+    const fx = makeFixture("current-for-pin");
+    const hooksDir = expectedHooksDir(fx);
+    writeCorrectHooks(hooksDir, { ...PIN, cli: "/opt/elsewhere/dist/index.js" });
+    gitConfig(fx, ["core.hooksPath", hooksDir]);
+
+    const state = fx.run(() => resolveHookState(fx.repoDir, { ...PIN, cli: "/opt/elsewhere/dist/index.js" }));
+    assert.equal(state.code, "HOOKS_OK");
   });
 
   it("repo's own executable .git/hooks/pre-commit while a global hooksPath is set -> shadowedRepoHooks non-empty", () => {
@@ -226,7 +275,7 @@ describe("resolveHookState", () => {
     writeFileSync(shadowed, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     chmodSync(shadowed, 0o755);
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.equal(state.code, "HOOKS_OK");
     assert.equal(state.ok, true);
     assert.deepEqual(state.shadowedRepoHooks, ["pre-commit"]);
@@ -249,7 +298,7 @@ describe("resolveHookState", () => {
       chmodSync(p, 0o755);
     }
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.deepEqual(state.shadowedRepoHooks, ["commit-msg", "post-merge", "pre-commit", "pre-push"]);
     assert.deepEqual(state.bypassedRepoHooks, ["commit-msg", "post-merge"]);
   });
@@ -265,7 +314,7 @@ describe("resolveHookState", () => {
     writeCorrectHooks(hooksDir);
     gitConfig(fx, ["--global", "core.hooksPath", hooksDir]);
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.deepEqual(state.shadowedRepoHooks, []);
   });
 
@@ -275,7 +324,7 @@ describe("resolveHookState", () => {
     writeCorrectHooks(hooksDir);
     gitConfig(fx, ["core.hooksPath", hooksDir]);
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.equal(state.isGitRepo, true);
     assert.equal(state.origin, "local");
     assert.equal(state.effectivePath, hooksDir);
@@ -300,7 +349,7 @@ describe("resolveHookState", () => {
     rmSync(join(hooksDir, "pre-commit"));
     gitConfig(fx, ["core.hooksPath", hooksDir]);
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.equal(state.ok, false);
     assert.equal(state.code, "HOOKS_SCRIPT_MISSING");
     assert.equal(state.fix, "repo-aegis install hooks");
@@ -315,7 +364,7 @@ describe("resolveHookState", () => {
     chmodSync(join(hooksDir, "pre-push"), 0o644);
     gitConfig(fx, ["core.hooksPath", hooksDir]);
 
-    const state = fx.run(() => resolveHookState(fx.repoDir));
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
     assert.equal(state.ok, false);
     assert.equal(state.code, "HOOKS_SCRIPT_NOT_EXECUTABLE");
     assert.equal(state.fix, "repo-aegis install hooks");
@@ -329,7 +378,7 @@ describe("resolveHookState", () => {
     const nonGitDir = join(fx.base, "non-git");
     mkdirSync(nonGitDir, { recursive: true });
 
-    const state = fx.run(() => resolveHookState(nonGitDir));
+    const state = fx.run(() => resolveHookState(nonGitDir, PIN));
     assert.equal(state.isGitRepo, false);
   });
 });

@@ -43,6 +43,7 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { findWorkingTrees, defaultScanRoots } from "../repo-walk.js";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 import { checkLabel, isFailure, isReportable, PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
 import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
@@ -334,7 +335,7 @@ export function doctor(opts: DoctorOptions): void {
   for (const root of roots) {
     for (const wt of findWorkingTrees(root)) {
       scanned++;
-      let state = resolveHookState(wt);
+      let state = resolveHookState(wt, currentEnforcementPin());
       if (!state.isGitRepo) continue; // walker found a `.git` entry that git itself doesn't recognise (corrupt/bare edge case) — nothing to evaluate.
 
       const checks = egressChecksOn ? repoEgressChecks(wt, registry) : [];
@@ -378,7 +379,7 @@ export function doctor(opts: DoctorOptions): void {
             // it can also change which scripts count as shadowed. The
             // reported code/effectivePath must reflect the post-fix
             // state, not the stale pre-fix snapshot.
-            state = resolveHookState(wt);
+            state = resolveHookState(wt, currentEnforcementPin());
           }
         }
       }

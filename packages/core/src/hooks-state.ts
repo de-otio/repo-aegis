@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { repoAegisHome } from "./paths.js";
 import { hookScriptDigest, type HookName } from "./hook-scripts.js";
+import type { EnforcementPin } from "./enforcement-pin.js";
 
 const HOOK_NAMES: readonly HookName[] = ["pre-commit", "pre-push"];
 
@@ -126,7 +127,7 @@ function isExecutable(mode: number): boolean {
   return (mode & 0o111) !== 0;
 }
 
-function inspectScript(dir: string, name: HookName): HookScriptState {
+function inspectScript(dir: string, name: HookName, pin: EnforcementPin): HookScriptState {
   const path = join(dir, name);
   let fd: number;
   try {
@@ -142,7 +143,7 @@ function inspectScript(dir: string, name: HookName): HookScriptState {
     const executable = isExecutable(st.mode);
     const contents = readFileSync(fd, "utf8");
     const digest = createHash("sha256").update(contents).digest("hex");
-    const current = digest === hookScriptDigest(name);
+    const current = digest === hookScriptDigest(name, pin);
     return { present: true, executable, current };
   } catch {
     return { present: false, executable: false, current: false };
@@ -216,11 +217,15 @@ function mapScope(raw: string): HookStateOrigin {
  * Resolves whether repo-aegis's git hooks are installed, on the path
  * git will actually consult, executable, and up to date.
  *
+ * `pin` is the enforcement pin this install would render into its scripts
+ * (`hookScriptDigest`): a script rendered for another pin, or an older
+ * unpinned one, is installed but not `current`.
+ *
  * Never throws for ordinary misconfiguration; a bad state IS the
  * result. Returns a clearly-marked `isGitRepo: false` result outside a
  * git repository.
  */
-export function resolveHookState(cwd: string): HookState {
+export function resolveHookState(cwd: string, pin: EnforcementPin): HookState {
   const inside = git(cwd, ["rev-parse", "--is-inside-work-tree"]);
   if (!inside.ok || inside.stdout !== "true") return notAGitRepoState();
 
@@ -241,7 +246,7 @@ export function resolveHookState(cwd: string): HookState {
     // realHooksDir. Nothing is shadowed — that directory IS the
     // effective one. `scripts` reports on whatever happens to live
     // there today (almost always: repo-aegis was never installed).
-    const scripts = buildScripts(realHooksDir);
+    const scripts = buildScripts(realHooksDir, pin);
     return {
       isGitRepo: true,
       effectivePath: null,
@@ -265,7 +270,7 @@ export function resolveHookState(cwd: string): HookState {
   const effectivePath = resolve(cwd, gitPathRes.ok ? gitPathRes.stdout : effective.value);
   const origin = mapScope(effective.scope);
 
-  const scripts = buildScripts(effectivePath);
+  const scripts = buildScripts(effectivePath, pin);
   const shadowedRepoHooks = effectivePath === realHooksDir ? [] : listShadowedHooks(realHooksDir);
   // The generated scripts chain to the repo's own hook of the same name, so a
   // displaced pre-commit / pre-push still runs. Only the hook types we do not
@@ -367,9 +372,9 @@ export function resolveHookState(cwd: string): HookState {
   };
 }
 
-function buildScripts(dir: string): Record<HookName, HookScriptState> {
+function buildScripts(dir: string, pin: EnforcementPin): Record<HookName, HookScriptState> {
   return {
-    "pre-commit": inspectScript(dir, "pre-commit"),
-    "pre-push": inspectScript(dir, "pre-push"),
+    "pre-commit": inspectScript(dir, "pre-commit", pin),
+    "pre-push": inspectScript(dir, "pre-push", pin),
   };
 }

@@ -8,7 +8,8 @@ import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { doctor } from "./doctor.js";
 import { fakeGh, withEnv } from "../_test-utils.js";
-import { HOOK_SCRIPTS, destinationCachePath, readDestinationCache } from "@de-otio/repo-aegis-core";
+import { destinationCachePath, readDestinationCache, renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 import { GH_SHIM_SCRIPT } from "./shim-script.js";
 
 // A test seam, deliberately not exported from the core package's public index.
@@ -158,13 +159,13 @@ function readLocalConfig(dir: string, fx: Fixture, key: string): string | null {
   }
 }
 
-/** Writes both hook scripts (byte-identical to HOOK_SCRIPTS) to `dir`,
+/** Writes both hook scripts rendered for this install's pin to `dir`,
  * mode 0o755, mirroring exactly what `install-hooks.ts` writes. */
 function writeCorrectHooks(dir: string): void {
   mkdirSync(dir, { recursive: true });
-  for (const name of Object.keys(HOOK_SCRIPTS) as (keyof typeof HOOK_SCRIPTS)[]) {
+  for (const name of ["pre-commit", "pre-push"] as const satisfies readonly HookName[]) {
     const p = join(dir, name);
-    writeFileSync(p, HOOK_SCRIPTS[name], { mode: 0o755 });
+    writeFileSync(p, renderHookScript(name, currentEnforcementPin()), { mode: 0o755 });
     chmodSync(p, 0o755);
   }
 }

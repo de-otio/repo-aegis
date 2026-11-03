@@ -12,7 +12,8 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { HOOK_SCRIPTS } from "@de-otio/repo-aegis-core";
+import { renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 import { doctor } from "./doctor.js";
 import {
   checkPrePushHook,
@@ -217,8 +218,8 @@ function withWorld<T>(w: RepoWorld, fn: () => T): T {
 function installHooks(w: RepoWorld): void {
   const dir = join(w.aegisHome, "hooks");
   mkdirSync(dir, { recursive: true });
-  for (const name of Object.keys(HOOK_SCRIPTS) as (keyof typeof HOOK_SCRIPTS)[]) {
-    writeFileSync(join(dir, name), HOOK_SCRIPTS[name], { mode: 0o755 });
+  for (const name of ["pre-commit", "pre-push"] as const satisfies readonly HookName[]) {
+    writeFileSync(join(dir, name), renderHookScript(name, currentEnforcementPin()), { mode: 0o755 });
     chmodSync(join(dir, name), 0o755);
   }
   withWorld(w, () => execFileSync("git", ["config", "--local", "core.hooksPath", dir], { cwd: w.repo }));

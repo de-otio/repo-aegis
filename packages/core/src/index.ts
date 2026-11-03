@@ -212,12 +212,18 @@ export { isKnownNonSecret } from "./known-non-secrets.js";
 // A client-side gate that is installed but disconnected is indistinguishable
 // from one that is clean: both print nothing. `resolveHookState` is the
 // liveness check that tells them apart.
+export { hookScriptDigest, renderHookScript } from "./hook-scripts.js";
 export {
-  PRE_COMMIT_SCRIPT,
-  PRE_PUSH_SCRIPT,
-  HOOK_SCRIPTS,
-  hookScriptDigest,
-} from "./hook-scripts.js";
+  assertPinnable,
+  parsePinFromScript,
+  pinAssignments,
+  pinGuard,
+  pinProblem,
+  shellQuote,
+  shellUnquote,
+  type EnforcementPin,
+  type PinGuardOptions,
+} from "./enforcement-pin.js";
 export type { HookName } from "./hook-scripts.js";
 export { resolveHookState } from "./hooks-state.js";
 export type {
