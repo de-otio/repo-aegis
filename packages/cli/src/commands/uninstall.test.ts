@@ -91,7 +91,7 @@ describe("repo-aegis uninstall — dry run", () => {
     const claudeHome = makeClaudeHome("dryrun");
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
       // Pre-install some artefacts so we can prove they survive a dry-run.
-      captureOutput(() => installClaudeMd({ claudeHome, silent: true }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, silent: true }));
       const before = existsSync(join(claudeHome, "settings.json"));
       assert.ok(before);
 
@@ -127,7 +127,7 @@ describe("repo-aegis uninstall — dry run", () => {
 
     withHooksIsolation(base, () => {
       withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-        captureOutput(() => installClaudeMd({ claudeHome, silent: true }));
+        captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, silent: true }));
         captureOutput(() =>
           installGitignore({ gitignorePath: gitignore, silent: true }),
         );

@@ -297,6 +297,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "--first-touch",
       "--print-only",
       "--uninstall",
+      "--user-settings",
     ],
     subcommands: [],
   },

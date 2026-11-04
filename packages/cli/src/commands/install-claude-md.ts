@@ -28,6 +28,7 @@ import {
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { readIfExists } from "../fs-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
+import { applyManagedInstall, chooseTarget, planManagedInstall, type ManagedSeams } from "./install-claude-md-managed.js";
 import {
   BASH_HOOK_ARGS,
   BASH_HOOK_MATCHER,
@@ -138,6 +139,15 @@ interface InstallClaudeMdOptions extends OutputOptions {
   uninstall?: boolean;
   /** Test seam: the pin whose CLI package directory and Node executable are denied. Not reachable from the CLI. */
   pin?: EnforcementPin;
+  /**
+   * D8.6: write the hooks and deny rules to the user's `settings.json`, as D7 did,
+   * instead of the root-owned managed drop-in. For containers and devcontainers
+   * (no `sudo`) and unsupported platforms; doctor then warns
+   * `ENFORCEMENT_IN_USER_SETTINGS`, because that file must stay per machine.
+   */
+  userSettings?: boolean;
+  /** Test seam: platform, uid, file system root, the privileged runner and the terminal. Honoured only under the Node test runner. */
+  managed?: ManagedSeams;
 }
 
 interface SettingsJson {
@@ -628,6 +638,17 @@ function denyAdviceLines(plan: RegistryDenyPlan): string[] {
   ];
 }
 
+/** Append the managed block to CLAUDE.md unless it is there (idempotent via the marker comment). */
+function ensureClaudeMdSnippet(claudeMdPath: string): { appended: boolean; alreadyPresent: boolean } {
+  const existingClaudeMd = readIfExists(claudeMdPath) ?? "";
+  if (existingClaudeMd.includes(CLAUDE_MD_BEGIN)) return { appended: false, alreadyPresent: true };
+  const needsLeadingNewline = existingClaudeMd.length > 0 && !existingClaudeMd.endsWith("\n");
+  const prefix = existingClaudeMd.length === 0 ? "" : needsLeadingNewline ? "\n\n" : "\n";
+  // Append mode creates a missing file; `prefix` is "" in that case.
+  appendFileSync(claudeMdPath, prefix + CLAUDE_MD_BLOCK);
+  return { appended: true, alreadyPresent: false };
+}
+
 export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   const claudeHome = opts.claudeHome ?? defaultClaudeHome();
   const claudeMdPath = join(claudeHome, "CLAUDE.md");
@@ -654,8 +675,16 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   }
   const cmd = hookCommands(pin);
 
+  // D8: the hooks and deny rules go in the root-owned managed drop-in, unless the
+  // person asked for the user file (D8.6) or there is no managed location here.
+  const target = chooseTarget(opts);
+  if (target.kind === "managed") {
+    installManagedMode({ claudeHome, claudeMdPath, opts, pin, target });
+    return;
+  }
+
   if (opts.dryRun) {
-    dryRunInstallClaudeMd({ claudeHome, claudeMdPath, settingsPath, opts, pin, cmd });
+    dryRunInstallClaudeMd({ claudeHome, claudeMdPath, settingsPath, opts, pin, cmd, note: target.note });
     return;
   }
 
@@ -669,20 +698,7 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   }
 
   // 1. CLAUDE.md snippet (idempotent via marker comment)
-  let claudeMdAppended = false;
-  let claudeMdAlreadyPresent = false;
-  const existingClaudeMd = readIfExists(claudeMdPath) ?? "";
-
-  if (existingClaudeMd.includes(CLAUDE_MD_BEGIN)) {
-    claudeMdAlreadyPresent = true;
-  } else {
-    const needsLeadingNewline =
-      existingClaudeMd.length > 0 && !existingClaudeMd.endsWith("\n");
-    const prefix = existingClaudeMd.length === 0 ? "" : (needsLeadingNewline ? "\n\n" : "\n");
-    // Append mode creates a missing file; `prefix` is "" in that case.
-    appendFileSync(claudeMdPath, prefix + CLAUDE_MD_BLOCK);
-    claudeMdAppended = true;
-  }
+  const { appended: claudeMdAppended, alreadyPresent: claudeMdAlreadyPresent } = ensureClaudeMdSnippet(claudeMdPath);
 
   // 2. Merge into settings.json. Each `command` runs the pinned node and CLI by
   // absolute path (see `hookCommands`) — moving claudeHome does not break the
@@ -782,6 +798,8 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   if (opts.json) {
     emitJson({
       action: "install-claude-md",
+      mode: "user-settings",
+      ...(target.note !== null && { note: target.note }),
       claudeHome,
       claudeMd: { path: claudeMdPath, appended: claudeMdAppended, alreadyPresent: claudeMdAlreadyPresent },
       hookCommand: cmd.scanAfterWrite,
@@ -826,6 +844,7 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     return;
   }
 
+  if (target.note !== null) emitText(`note: ${target.note}`);
   if (claudeMdAppended) emitText(`appended snippet to ${claudeMdPath}`);
   else emitText(`snippet already present in ${claudeMdPath}`);
   if (checkWriteMerge.added) emitText(`registered PreToolUse(Write|Edit|MultiEdit) hook in ${settingsPath}`);
@@ -868,6 +887,135 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   }
 }
 
+interface ManagedModeContext {
+  claudeHome: string;
+  claudeMdPath: string;
+  opts: InstallClaudeMdOptions;
+  pin: EnforcementPin;
+  target: Extract<ReturnType<typeof chooseTarget>, { kind: "managed" }>;
+}
+
+/**
+ * `install claude-md` into the managed-settings drop-in (D8). The drop-in goes
+ * first and the CLAUDE.md snippet after it: the drop-in is the step that can be
+ * refused or declined, and a refused install should leave nothing behind.
+ */
+function installManagedMode(ctx: ManagedModeContext): void {
+  const { claudeHome, claudeMdPath, opts, pin, target } = ctx;
+  const { env, paths } = target;
+  const denyPlan = registryDenyPlan(pin);
+  const plan = planManagedInstall(env, paths, { pin, firstTouch: opts.firstTouch === true, denyRules: denyPlan.rules }, opts);
+  const strictModeOn = existsSync(leakContextFlagPath());
+  const managedInfo = {
+    path: paths.file,
+    uid: env.uid,
+    platform: env.platform,
+    digest: plan.digest,
+    bytes: plan.bytes,
+  };
+
+  if (opts.dryRun) {
+    const existing = readIfExists(claudeMdPath) ?? "";
+    const alreadyPresent = existing.includes(CLAUDE_MD_BEGIN);
+    if (opts.silent) return;
+    if (opts.json) {
+      emitJson({
+        action: "install-claude-md",
+        dryRun: true,
+        mode: "managed",
+        claudeHome,
+        claudeMd: { path: claudeMdPath, wouldAppend: !alreadyPresent, alreadyPresent },
+        managed: { ...managedInfo, unchanged: plan.unchanged, contents: plan.text },
+        registryDeny: {
+          rules: denyPlan.rules,
+          warnings: denyPlan.warnings,
+          verifyWith: `touch ${denyPlan.verifyPath}`,
+        },
+        strictModeOn,
+      });
+      return;
+    }
+    emitText("# repo-aegis install claude-md (dry run — nothing written)");
+    emitText("");
+    emitText(`# Managed drop-in (written as root, for uid ${env.uid}): ${paths.file}`);
+    emitText(`#   ${plan.bytes} bytes, sha256 ${plan.digest}${plan.unchanged ? "  (already installed, unchanged)" : ""}`);
+    emitText(`# CLAUDE.md snippet: ${alreadyPresent ? "already present" : `would be appended to ${claudeMdPath}`}`);
+    emitText("# permissions.deny rules protecting the registry, approvals, hooks, shim and pinned code:");
+    for (const rule of denyPlan.rules) emitText(`#   ${rule}`);
+    for (const line of denyAdviceLines(denyPlan)) emitText(`# ${line}`);
+    emitText("");
+    emitText(plan.text.trimEnd());
+    if (!strictModeOn) {
+      emitText("");
+      emitText("# note: leak-context strict mode is OFF.");
+      emitText("#   enable for sensitive sessions: repo-aegis context on");
+    }
+    return;
+  }
+
+  // The drop-in first: the step a person can refuse.
+  const applied = applyManagedInstall(env, paths, plan, opts.managed?.terminal ?? {}, opts);
+
+  try {
+    mkdirSync(claudeHome, { recursive: true });
+  } catch (err) {
+    emitError({ code: "FS_ERROR", error: `failed to create ${claudeHome}: ${(err as Error).message}` }, opts);
+  }
+  const snippet = ensureClaudeMdSnippet(claudeMdPath);
+
+  try {
+    appendAuditRecord({
+      action: "install-claude-md",
+      details: {
+        claudeHome,
+        mode: "managed",
+        claudeMdAppended: snippet.appended,
+        claudeMdAlreadyPresent: snippet.alreadyPresent,
+        managedWritten: applied.wrote,
+        managedDigest: plan.digest,
+        registryDenyRules: denyPlan.rules.length,
+      },
+    });
+  } catch {
+    /* audit log must not break user-facing ops */
+  }
+
+  if (opts.silent) return;
+
+  if (opts.json) {
+    emitJson({
+      action: "install-claude-md",
+      mode: "managed",
+      claudeHome,
+      claudeMd: { path: claudeMdPath, appended: snippet.appended, alreadyPresent: snippet.alreadyPresent },
+      managed: { ...managedInfo, installed: true, unchanged: !applied.wrote, createdDirs: applied.created },
+      registryDeny: {
+        rules: denyPlan.rules,
+        warnings: denyPlan.warnings,
+        verifyWith: `touch ${denyPlan.verifyPath}`,
+      },
+      strictModeOn,
+    });
+    return;
+  }
+
+  emitText(
+    applied.wrote
+      ? `installed the managed drop-in ${paths.file}`
+      : `the managed drop-in ${paths.file} is already installed and unchanged`,
+  );
+  emitText(`  owner 0:0, mode 0644, ${plan.bytes} bytes, sha256 ${plan.digest}`);
+  emitText(`  registers ${plan.spec.firstTouch ? 7 : 6} hooks and ${denyPlan.rules.length} permissions.deny rule(s) for uid ${env.uid}`);
+  emitText(snippet.appended ? `appended snippet to ${claudeMdPath}` : `snippet already present in ${claudeMdPath}`);
+  for (const rule of denyPlan.rules) emitText(`  rule: ${rule}`);
+  for (const line of denyAdviceLines(denyPlan)) emitText(`  ${line}`);
+  if (!strictModeOn) {
+    emitText("");
+    emitText("note: leak-context strict mode is OFF.");
+    emitText("  enable for sensitive sessions: repo-aegis context on");
+  }
+}
+
 interface DryRunContext {
   claudeHome: string;
   claudeMdPath: string;
@@ -875,10 +1023,12 @@ interface DryRunContext {
   opts: InstallClaudeMdOptions;
   pin: EnforcementPin;
   cmd: ReturnType<typeof hookCommands>;
+  /** Why the user file is the target (a D8.6 fallback), or null when the person chose it. */
+  note: string | null;
 }
 
 function dryRunInstallClaudeMd(ctx: DryRunContext): void {
-  const { claudeHome, claudeMdPath, settingsPath, opts, pin, cmd } = ctx;
+  const { claudeHome, claudeMdPath, settingsPath, opts, pin, cmd, note } = ctx;
 
   // 1. CLAUDE.md — compute would-be additions without writing.
   const existingClaudeMd = readIfExists(claudeMdPath) ?? "";
@@ -925,6 +1075,8 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
     emitJson({
       action: "install-claude-md",
       dryRun: true,
+      mode: "user-settings",
+      ...(note !== null && { note }),
       claudeHome,
       claudeMd: {
         path: claudeMdPath,
@@ -973,6 +1125,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   }
 
   emitText("# repo-aegis install claude-md (dry run — nothing written)");
+  if (note !== null) emitText(`# note: ${note}`);
   emitText("");
   emitText(`# Would-be CLAUDE.md additions to: ${claudeMdPath}`);
   if (claudeMdAlreadyPresent) {

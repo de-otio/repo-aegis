@@ -59,7 +59,7 @@ describe("install-claude-md — fresh install", () => {
     claudeHome = makeClaudeHome("fresh");
     aegisHome = aegisHomeFor("fresh");
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
   });
 
@@ -143,8 +143,8 @@ describe("install-claude-md — idempotency", () => {
     const aegisHome = aegisHomeFor("idem");
 
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
 
     const claudeMd = readFileSync(join(claudeHome, "CLAUDE.md"), "utf8");
@@ -208,7 +208,7 @@ describe("install-claude-md — merges into existing settings", () => {
     );
 
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
 
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -248,7 +248,7 @@ describe("install-claude-md — merges into existing settings", () => {
     );
 
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
 
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -267,7 +267,7 @@ describe("install-claude-md — strict-mode warning", () => {
     const claudeHome = makeClaudeHome("warn");
     const aegisHome = aegisHomeFor("warn");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     assert.ok(result.stdout.includes("strict mode is OFF"));
     assert.ok(result.stdout.includes("repo-aegis context on"));
@@ -278,7 +278,7 @@ describe("install-claude-md — strict-mode warning", () => {
     const aegisHome = aegisHomeFor("no-warn");
     writeFileSync(join(aegisHome, "state", "leak-context-mode"), "");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     assert.ok(!result.stdout.includes("strict mode is OFF"));
   });
@@ -290,7 +290,7 @@ describe("install-claude-md — --dry-run", () => {
     const aegisHome = aegisHomeFor("dryrun-fresh");
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true })),
     );
     assert.equal(result.exitCode, undefined);
 
@@ -304,7 +304,7 @@ describe("install-claude-md — --dry-run", () => {
     const aegisHome = aegisHomeFor("dryrun-stdout");
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true })),
     );
     assert.ok(result.stdout.includes("dry run"));
     assert.ok(result.stdout.includes("repo-aegis: managed block"));
@@ -341,7 +341,7 @@ describe("install-claude-md — --dry-run", () => {
     const before = readFileSync(settingsPath, "utf8");
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true })),
     );
 
     // Disk file untouched.
@@ -360,7 +360,7 @@ describe("install-claude-md — --dry-run", () => {
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
       captureOutput(() =>
-        installClaudeMd({ claudeHome, dryRun: true, json: true }),
+        installClaudeMd({ userSettings: true, claudeHome, dryRun: true, json: true }),
       ),
     );
     const j = JSON.parse(result.stdout) as {
@@ -396,7 +396,7 @@ describe("install-claude-md — --dry-run", () => {
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
       captureOutput(() =>
-        installClaudeMd({ claudeHome, dryRun: true, silent: true }),
+        installClaudeMd({ userSettings: true, claudeHome, dryRun: true, silent: true }),
       ),
     );
     assert.equal(result.stdout, "");
@@ -410,7 +410,7 @@ describe("install-claude-md — JSON output", () => {
     const claudeHome = makeClaudeHome("json");
     const aegisHome = aegisHomeFor("json");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, json: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, json: true })),
     );
     const j = JSON.parse(result.stdout) as {
       action: string;
@@ -453,7 +453,7 @@ describe("install-claude-md — --first-touch", () => {
     const claudeHome = makeClaudeHome("first-touch-default");
     const aegisHome = aegisHomeFor("first-touch-default");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
@@ -465,7 +465,7 @@ describe("install-claude-md — --first-touch", () => {
     const claudeHome = makeClaudeHome("first-touch-on");
     const aegisHome = aegisHomeFor("first-touch-on");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true })),
     );
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
@@ -483,10 +483,10 @@ describe("install-claude-md — --first-touch", () => {
     const claudeHome = makeClaudeHome("first-touch-idempotent");
     const aegisHome = aegisHomeFor("first-touch-idempotent");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true })),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true })),
     );
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
@@ -500,7 +500,7 @@ describe("install-claude-md — --first-touch", () => {
     const claudeHome = makeClaudeHome("first-touch-preserves");
     const aegisHome = aegisHomeFor("first-touch-preserves");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true })),
     );
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
@@ -526,7 +526,7 @@ describe("install-claude-md — --first-touch", () => {
     const aegisHome = aegisHomeFor("first-touch-json");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
       captureOutput(() =>
-        installClaudeMd({ claudeHome, firstTouch: true, json: true }),
+        installClaudeMd({ userSettings: true, claudeHome, firstTouch: true, json: true }),
       ),
     );
     const j = JSON.parse(result.stdout) as {
@@ -543,7 +543,7 @@ describe("install-claude-md — uninstall", () => {
     const claudeHome = makeClaudeHome("uninstall-basic");
     const aegisHome = aegisHomeFor("uninstall-basic");
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
 
@@ -569,7 +569,7 @@ describe("install-claude-md — uninstall", () => {
     const userAfter = "\n## My other section\n\nMore notes.\n";
     writeFileSync(claudeMd, userBefore);
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
     // Append more user content AFTER the managed block landed.
     writeFileSync(claudeMd, readFileSync(claudeMd, "utf8") + userAfter);
@@ -596,7 +596,7 @@ describe("install-claude-md — uninstall", () => {
       }),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -628,7 +628,7 @@ describe("install-claude-md — uninstall", () => {
       }),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -660,7 +660,7 @@ describe("install-claude-md — uninstall", () => {
       }),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -678,7 +678,7 @@ describe("install-claude-md — uninstall", () => {
     const claudeHome = makeClaudeHome("uninstall-idempotent");
     const aegisHome = aegisHomeFor("uninstall-idempotent");
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
       const second = captureOutput(() =>
         installClaudeMd({ claudeHome, uninstall: true, json: true }),
@@ -718,7 +718,7 @@ describe("install-claude-md — uninstall", () => {
     const claudeHome = makeClaudeHome("uninstall-egress");
     const aegisHome = aegisHomeFor("uninstall-egress");
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       const out = captureOutput(() =>
         installClaudeMd({ claudeHome, uninstall: true, json: true }),
       );
@@ -745,7 +745,7 @@ describe("install-claude-md — uninstall", () => {
     const claudeHome = makeClaudeHome("uninstall-egress-text");
     const aegisHome = aegisHomeFor("uninstall-egress-text");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       return captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
     assert.match(result.stdout, /removed 5 hook entries/);
@@ -793,7 +793,7 @@ describe("install-claude-md — egress guard registration", () => {
     const claudeHome = makeClaudeHome("egress-md");
     const aegisHome = aegisHomeFor("egress-md");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     const body = readFileSync(join(claudeHome, "CLAUDE.md"), "utf8");
     assert.match(body, /PreToolUse egress guard/);
@@ -811,7 +811,7 @@ describe("install-claude-md — egress guard registration", () => {
     const claudeHome = makeClaudeHome("egress-dryrun");
     const aegisHome = aegisHomeFor("egress-dryrun");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true })),
     );
     assert.ok(result.stdout.includes(GUARD_EGRESS_HOOK_COMMAND));
     assert.ok(result.stdout.includes(EGRESS_RECEIPT_HOOK_COMMAND));
@@ -824,7 +824,7 @@ describe("install-claude-md — egress guard registration", () => {
     const claudeHome = makeClaudeHome("egress-dryrun-json");
     const aegisHome = aegisHomeFor("egress-dryrun-json");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true, json: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true, json: true })),
     );
     const j = JSON.parse(result.stdout) as {
       guardEgressHook: { hookCommand: string; wouldAdd: boolean };
@@ -840,7 +840,7 @@ describe("install-claude-md — egress guard registration", () => {
     const claudeHome = makeClaudeHome("egress-json");
     const aegisHome = aegisHomeFor("egress-json");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, json: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, json: true })),
     );
     const j = JSON.parse(result.stdout) as {
       guardEgressHook: { hookCommand: string; added: boolean };
@@ -865,7 +865,7 @@ describe("install-claude-md — egress guard registration", () => {
       }),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       hooks: { PreToolUse: { matcher: string; hooks: { command: string }[] }[] };
@@ -942,7 +942,7 @@ describe("checkGuardHook", () => {
     const claudeHome = makeClaudeHome("guard-check-ok");
     const aegisHome = aegisHomeFor("guard-check-ok");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     const checks = checkGuardHook(claudeHome);
     assert.equal(checks.length, 1);

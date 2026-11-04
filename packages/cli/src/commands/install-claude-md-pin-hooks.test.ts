@@ -6,6 +6,11 @@
 // and CLI by absolute path and fails closed with exit 2 when either is gone,
 // instead of resolving `repo-aegis` on the agent's PATH.
 //
+// T19 (D8.6): every case here goes through `--user-settings`, the fallback that
+// writes the user's settings.json exactly as D7 did; the default target is now the
+// managed drop-in (install-claude-md-managed.test.ts), so these cases would
+// otherwise stop being about this file.
+//
 // Subprocess cases use a temp REPO_AEGIS_HOME and a temp claude home; nothing
 // reads or writes the real ones. Placeholder names only.
 import { describe, it, before, after } from "node:test";
@@ -48,7 +53,7 @@ function makeEnv(name: string): Env {
 
 function install(e: Env, opts: Record<string, unknown>): { stdout: string; stderr: string; exitCode?: number } {
   return withEnv("REPO_AEGIS_HOME", e.aegisHome, () =>
-    captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, ...opts })),
+    captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, userSettings: true, ...opts })),
   );
 }
 
@@ -114,7 +119,7 @@ function seed(e: Env, commands: typeof BY_NAME, extra: Settings = {}): void {
   writeFileSync(e.settingsPath, JSON.stringify({ ...extra, hooks }));
 }
 
-describe("T13: install claude-md writes pinned hook commands", () => {
+describe("T13/T19: install claude-md --user-settings writes pinned hook commands", () => {
   it("every hook command is the pinned form, none is a by-name `repo-aegis hook` entry", () => {
     const e = makeEnv("pinned");
     install(e, { firstTouch: true, pin: REAL_PIN });

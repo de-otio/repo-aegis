@@ -333,8 +333,12 @@ export async function buildProgram(): Promise<Command> {
 
   install
     .command("claude-md")
-    .description("install Claude Code PostToolUse hook + CLAUDE.md snippet")
+    .description("install the Claude Code hooks and deny rules as a root-owned managed-settings drop-in (asks for your sudo password), plus a CLAUDE.md snippet")
     .option("--claude-home <dir>", "override default ~/.claude location")
+    .option(
+      "--user-settings",
+      "write the hooks and deny rules to ~/.claude/settings.json instead of the managed drop-in: for containers and other places without sudo (that file must then stay per machine)",
+    )
     .option("--dry-run", "preview the would-be settings.json + CLAUDE.md additions without writing")
     .option("--print-only", "alias for --dry-run")
     .option(
@@ -349,6 +353,7 @@ export async function buildProgram(): Promise<Command> {
       const merged = withGlobals(opts, cmd) as {
         dryRun?: boolean;
         printOnly?: boolean;
+        userSettings?: boolean;
       };
       if (merged.printOnly) merged.dryRun = true;
       installClaudeMd(merged);

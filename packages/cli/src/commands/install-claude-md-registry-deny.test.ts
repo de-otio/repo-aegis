@@ -72,7 +72,7 @@ function readSettings(e: Env): Settings {
 }
 
 function install(e: Env, opts: Record<string, unknown> = {}): { stdout: string } {
-  return inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, ...opts })));
+  return inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, userSettings: true, ...opts })));
 }
 
 const LEDGER = "state/claude-md-deny-rules.json";
