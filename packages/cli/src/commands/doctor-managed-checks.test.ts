@@ -545,6 +545,57 @@ describe("SUDO_NOPASSWD (D8.7, P7)", () => {
   });
 });
 
+describe("SUDO_NOPASSWD probes only a /usr/bin/true that passes the P1 predicate (L3)", () => {
+  const probe = (c: { args: readonly string[] }): boolean => c.args[0] === "-n";
+
+  it("a /usr/bin/true that root does not own is never run as root: the probe is skipped with a reason", () => {
+    const e = makeEnv();
+    install(e);
+    e.sys.owners.set("/usr/bin/true", { uid: 1000, gid: 1000 });
+    const c = byCode(checks(e), "SUDO_NOPASSWD");
+    assert.equal(c.ok, true);
+    assert.equal(c.skipped, true);
+    assert.match(c.detail, /\/usr\/bin\/true/);
+    assert.match(c.detail, /not owned by root/);
+    assert.equal(e.sys.calls.filter(probe).length, 0, "sudo -n -k /usr/bin/true must not have run");
+  });
+
+  it("a group- or world-writable /usr/bin/true is not run either", () => {
+    for (const mode of [0o775, 0o757]) {
+      const e = makeEnv();
+      install(e);
+      chmodSync(e.sys.at("/usr/bin/true"), mode);
+      const c = byCode(checks(e), "SUDO_NOPASSWD");
+      assert.equal(c.skipped, true, mode.toString(8));
+      assert.match(c.detail, /writable by group or others/);
+      assert.equal(e.sys.calls.filter(probe).length, 0, mode.toString(8));
+    }
+  });
+
+  it("a /usr/bin/true that is a symlink to a user-owned file is judged by where it points", () => {
+    const e = makeEnv();
+    install(e);
+    makeDir(e.sys, "/home/u");
+    writeFileSync(e.sys.at("/home/u/true"), "#!/bin/sh\n", { mode: 0o755 });
+    rmSync(e.sys.at("/usr/bin/true"));
+    symlinkSync(e.sys.at("/home/u/true"), e.sys.at("/usr/bin/true"));
+    e.sys.owners.set("/home/u/true", { uid: 1000, gid: 1000 });
+    const c = byCode(checks(e), "SUDO_NOPASSWD");
+    assert.equal(c.skipped, true, c.detail);
+    assert.equal(e.sys.calls.filter(probe).length, 0);
+  });
+
+  it("a root-owned /usr/bin/true is still probed", () => {
+    const e = makeEnv();
+    install(e);
+    e.sys.intercept = c => (probe(c) ? { status: 1, stdout: "", stderr: "a password is required" } : undefined);
+    const c = byCode(checks(e), "SUDO_NOPASSWD");
+    assert.equal(c.ok, true);
+    assert.notEqual(c.skipped, true);
+    assert.equal(e.sys.calls.filter(probe).length, 1);
+  });
+});
+
 describe("ENFORCEMENT_IN_USER_SETTINGS (D8.6)", () => {
   it("warns when repo-aegis's hooks are in the user's settings.json, saying the file must stay per machine", () => {
     const e = makeEnv();

@@ -21,7 +21,7 @@ import { managedPaths, renderDropIn } from "./managed-dropin.js";
 import { managedShadowChecks, parseObject } from "./managed-shadow-checks.js";
 import { readManagedLedger } from "./managed-ledger.js";
 import { heartbeatCheck, HEARTBEAT_MARGIN_MS, sessionStartTimes, type HeartbeatContext } from "./managed-heartbeat-check.js";
-import { privilegedTools, sudoEnvironment, verifyDirectoryChain, verifyPrivilegedTools, type ManagedEnv } from "./managed-privileged.js";
+import { privilegedTools, rootFileProblem, sudoEnvironment, verifyDirectoryChain, verifyPrivilegedTools, type ManagedEnv } from "./managed-privileged.js";
 
 // ---------------------------------------------------------------------------
 // The drop-in itself
@@ -203,7 +203,14 @@ function sudoNopasswdCheck(env: ManagedEnv, installed: boolean): DoctorCheck {
   if (!installed) return ok("no drop-in installed, so nothing to protect with a sudo password", true);
   const sudoProblem = verifyPrivilegedTools(env).find(p => p.tool === "sudo");
   if (sudoProblem !== undefined) return ok(`sudo was not probed: ${sudoProblem.path}: ${sudoProblem.reason}`, true);
-  if (env.fs.stat("/usr/bin/true") === null) return ok("sudo was not probed: /usr/bin/true is missing", true);
+  // The probe runs this file as root: it gets the same P1 test as every other tool.
+  const trueProblem = rootFileProblem(env, "/usr/bin/true");
+  if (trueProblem !== null) {
+    return ok(
+      trueProblem.missing ? "sudo was not probed: /usr/bin/true is missing" : `sudo was not probed: /usr/bin/true: ${trueProblem.reason}`,
+      true,
+    );
+  }
   const r = env.spawn(privilegedTools(env.platform).sudo, ["-n", "-k", "/usr/bin/true"], { env: sudoEnvironment(env.processEnv), shell: false });
   if (r.status !== 0) return ok("sudo asks for a password");
   return {

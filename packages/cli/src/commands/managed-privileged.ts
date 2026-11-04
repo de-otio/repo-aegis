@@ -229,21 +229,30 @@ export function verifyPrivilegedTools(env: ManagedEnv): ToolProblem[] {
   const tools = privilegedTools(env.platform);
   for (const tool of Object.keys(tools) as Array<keyof PrivilegedTools>) {
     const path = tools[tool];
-    const real = env.fs.realpath(path);
-    const st = real === null ? null : env.fs.stat(real);
-    if (real === null || st === null) {
-      problems.push({ tool, path, reason: "does not exist", missing: true });
-    } else if (!st.isFile) {
-      problems.push({ tool, path, reason: `${real} is not a regular file`, missing: false });
-    } else if (st.uid !== 0) {
-      problems.push({ tool, path, reason: `${real} is not owned by root (owner uid ${st.uid})`, missing: false });
-    } else if ((st.mode & OTHER_OR_GROUP_WRITE) !== 0) {
-      problems.push({ tool, path, reason: `${real} is writable by group or others (mode ${(st.mode & 0o7777).toString(8)})`, missing: false });
-    } else if (tool === "sudo" && (st.mode & SETUID) === 0) {
-      problems.push({ tool, path, reason: `${real} does not have its setuid bit, so it is not the real sudo`, missing: false });
-    }
+    const problem = rootFileProblem(env, path, tool === "sudo");
+    if (problem !== null) problems.push({ tool, path, ...problem });
   }
   return problems;
+}
+
+/**
+ * The P1 predicate for one file: it resolves (through realpath) to a regular file
+ * owned by uid 0 that group and others cannot write, and, when `setuid`, still has
+ * its setuid bit. `reason` says which; `missing` is true when it does not exist.
+ * Used for every tool root runs, and for the `/usr/bin/true` that doctor hands to
+ * `sudo -n -k`.
+ */
+export function rootFileProblem(env: ManagedEnv, path: string, setuid = false): { reason: string; missing: boolean } | null {
+  const real = env.fs.realpath(path);
+  const st = real === null ? null : env.fs.stat(real);
+  if (real === null || st === null) return { reason: "does not exist", missing: true };
+  if (!st.isFile) return { reason: `${real} is not a regular file`, missing: false };
+  if (st.uid !== 0) return { reason: `${real} is not owned by root (owner uid ${st.uid})`, missing: false };
+  if ((st.mode & OTHER_OR_GROUP_WRITE) !== 0) {
+    return { reason: `${real} is writable by group or others (mode ${(st.mode & 0o7777).toString(8)})`, missing: false };
+  }
+  if (setuid && (st.mode & SETUID) === 0) return { reason: `${real} does not have its setuid bit, so it is not the real sudo`, missing: false };
+  return null;
 }
 
 /** Why the tools cannot be used to write or remove the drop-in, or null. A missing `id` does not matter here: it is only the hooks' dependency. */
