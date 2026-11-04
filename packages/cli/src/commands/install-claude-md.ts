@@ -29,6 +29,8 @@ import { emitJson, emitText, emitError, type OutputOptions } from "../format.js"
 import { readIfExists } from "../fs-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { applyManagedInstall, chooseTarget, planManagedInstall, type ManagedSeams } from "./install-claude-md-managed.js";
+import { managedShadowChecks } from "./doctor-managed-checks.js";
+import type { DoctorCheck } from "./doctor-checks.js";
 import {
   BASH_HOOK_ARGS,
   BASH_HOOK_MATCHER,
@@ -887,6 +889,62 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   }
 }
 
+/**
+ * JSON text for `value` laid out like `original`: its indent (tab or the first
+ * indented line's spaces), compact if it was one line, and its trailing newline or
+ * the lack of one. Used where a file is rewritten after removing OUR entries only,
+ * so everything else in it keeps its bytes when it was written by a JSON formatter.
+ */
+function stringifyLike(original: string, value: unknown): string {
+  const body = original.trimEnd();
+  const trailing = original.slice(body.length);
+  if (!body.includes("\n")) return JSON.stringify(value) + trailing;
+  const m = /^([ \t]+)\S/m.exec(body);
+  const indent: string | number = m === null ? 2 : m[1]!.startsWith("\t") ? "\t" : m[1]!.length;
+  return JSON.stringify(value, null, indent) + (trailing === "" ? "" : "\n");
+}
+
+interface Migration {
+  hooksRemoved: number;
+  rulesRemoved: number;
+}
+
+/**
+ * D8.5: remove from the user's `settings.json` the hooks and deny rules that an
+ * earlier install (D7) put there. The hooks are recognised by shape, the deny
+ * rules by the ledger and the shape of our own rules, so what the person wrote
+ * stays. A missing or unparseable file is left alone.
+ */
+function migrateUserSettings(settingsPath: string, pin: EnforcementPin): Migration {
+  const none: Migration = { hooksRemoved: 0, rulesRemoved: 0 };
+  let raw: string | null;
+  let settings: SettingsJson;
+  try {
+    raw = readIfExists(settingsPath);
+    if (raw === null) return none;
+    settings = parseSettings(raw, settingsPath);
+  } catch {
+    return none;
+  }
+  const hooks = stripHookEntries(settings);
+  const rules = stripDenyRules(settings, settingsPath, pin);
+  if (hooks.removed > 0 || rules.removed > 0) {
+    try {
+      writeFileSync(settingsPath, stringifyLike(raw, settings));
+    } catch (err) {
+      emitError({ code: "FS_ERROR", error: `failed to write ${settingsPath}: ${(err as Error).message}` }, {});
+    }
+  }
+  if (rules.hadRecord) {
+    try {
+      writeDenyLedger(settingsPath, []);
+    } catch {
+      /* a stale ledger entry only makes the next uninstall a no-op for rules that are already gone */
+    }
+  }
+  return { hooksRemoved: hooks.removed, rulesRemoved: rules.removed };
+}
+
 interface ManagedModeContext {
   claudeHome: string;
   claudeMdPath: string;
@@ -956,6 +1014,12 @@ function installManagedMode(ctx: ManagedModeContext): void {
   // The drop-in first: the step a person can refuse.
   const applied = applyManagedInstall(env, paths, plan, opts.managed?.terminal ?? {}, opts);
 
+  // D8.5: the drop-in is in place and read back. Only now, and only if no other
+  // managed source shadows it, do repo-aegis's own earlier entries leave the user file.
+  const settingsPath = join(claudeHome, "settings.json");
+  const shadowed = managedShadowChecks(env, paths).filter(c => !c.ok);
+  const migration: Migration = shadowed.length === 0 ? migrateUserSettings(settingsPath, pin) : { hooksRemoved: 0, rulesRemoved: 0 };
+
   try {
     mkdirSync(claudeHome, { recursive: true });
   } catch (err) {
@@ -974,6 +1038,9 @@ function installManagedMode(ctx: ManagedModeContext): void {
         managedWritten: applied.wrote,
         managedDigest: plan.digest,
         registryDenyRules: denyPlan.rules.length,
+        userFileHooksRemoved: migration.hooksRemoved,
+        userFileDenyRulesRemoved: migration.rulesRemoved,
+        userFileKeptBecauseShadowed: shadowed.map(c => c.code),
       },
     });
   } catch {
@@ -989,6 +1056,12 @@ function installManagedMode(ctx: ManagedModeContext): void {
       claudeHome,
       claudeMd: { path: claudeMdPath, appended: snippet.appended, alreadyPresent: snippet.alreadyPresent },
       managed: { ...managedInfo, installed: true, unchanged: !applied.wrote, createdDirs: applied.created },
+      migration: {
+        settingsPath,
+        hooksRemoved: migration.hooksRemoved,
+        denyRulesRemoved: migration.rulesRemoved,
+        keptBecause: shadowed.map((c: DoctorCheck) => ({ code: c.code, detail: c.detail })),
+      },
       registryDeny: {
         rules: denyPlan.rules,
         warnings: denyPlan.warnings,
@@ -1007,6 +1080,19 @@ function installManagedMode(ctx: ManagedModeContext): void {
   emitText(`  owner 0:0, mode 0644, ${plan.bytes} bytes, sha256 ${plan.digest}`);
   emitText(`  registers ${plan.spec.firstTouch ? 7 : 6} hooks and ${denyPlan.rules.length} permissions.deny rule(s) for uid ${env.uid}`);
   emitText(snippet.appended ? `appended snippet to ${claudeMdPath}` : `snippet already present in ${claudeMdPath}`);
+  if (migration.hooksRemoved > 0 || migration.rulesRemoved > 0) {
+    emitText(
+      `removed ${migration.hooksRemoved} hook entr${migration.hooksRemoved === 1 ? "y" : "ies"} and ${migration.rulesRemoved} permissions.deny rule(s) ` +
+        `from ${settingsPath}: the drop-in carries them now, and that file no longer has to stay per machine`,
+    );
+  }
+  for (const c of shadowed) {
+    emitText(`warning: ${c.code}: ${c.detail}`);
+    emitText(`  repo-aegis's entries in ${settingsPath} were kept, because the drop-in may not apply (${c.fix ?? "see doctor"})`);
+  }
+  if (applied.wrote || migration.hooksRemoved > 0 || migration.rulesRemoved > 0) {
+    emitText("confirm that `/status` in Claude Code shows `(drop-ins)` or `(file + drop-ins)`: the first session after this also records a heartbeat that `repo-aegis doctor` checks (MANAGED_HOOKS_NOT_FIRING)");
+  }
   for (const rule of denyPlan.rules) emitText(`  rule: ${rule}`);
   for (const line of denyAdviceLines(denyPlan)) emitText(`  ${line}`);
   if (!strictModeOn) {
