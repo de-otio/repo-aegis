@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-04
+
 ### Added — `dot gh` is recognised; agent writes through it need `--as bot`
 
 - **`dot gh` is recognised.** Since 0.11.0 the egress guard refused `node
@@ -1768,7 +1770,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/de-otio/repo-aegis/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/de-otio/repo-aegis/compare/v0.10.3...v0.11.0
 [0.10.3]: https://github.com/de-otio/repo-aegis/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/de-otio/repo-aegis/compare/v0.10.1...v0.10.2
