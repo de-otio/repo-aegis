@@ -777,7 +777,8 @@ are the ones you will hit:
 | `REPO_AEGIS_REGISTRY=… gh …`, `GH_CONFIG_DIR=… git push …`, `env -i …`, `git -c remote.origin.url=… push …` | `EGRESS_ENV_OVERRIDE` | the plain command, with no `REPO_AEGIS_*`, `HOME`, `PATH`, `GIT_*`, `GH_*`, `SRT_*`, `SHELL`, `LD_*` or `DYLD_*` assignment, no `env -i` / `-u`, no `--git-dir` / `--work-tree`, no `git -c remote.* \| url.* \| core.sshCommand \| core.hooksPath` |
 | `git remote set-url … && git push …`, `gh repo set-default … && gh issue create …`, `export X=1 && gh …` | `EGRESS_AFTER_STATE_CHANGE` | run the state change as its own call, then the publish alone as the next call, so it is judged against the new state |
 | `script -q /dev/null gh issue create …`, or the same under `unbuffer`, `expect`, `tmux`, `screen`, `ssh -t`, an interpreter's `pty` module | `EGRESS_PTY_WRAPPER` | the same command run directly. A wrapper hands the command a terminal, and a terminal reads as a person. If it needs a person, ask your human. |
-| `node …/wrapper.mjs gh pr view …`, `python tool.py gh …` (an interpreter whose arguments contain `gh`, for example a script that picks a token and runs `gh` for you) | `UNREGISTERED_OWNER_EGRESS` (an unparsed shape: the guard cannot see the destination or tell a read from a write) | plain `gh … --repo <owner>/<repo>`. The guard does not recognise wrapper scripts, by design: an agent can edit them. Reads are refused too. |
+| `node …/wrapper.mjs gh pr view …`, `python tool.py gh …` (an interpreter whose arguments contain `gh`, for example a script that picks a token and runs `gh` for you) | `UNREGISTERED_OWNER_EGRESS` (an unparsed shape: the guard cannot see the destination or tell a read from a write) | plain `gh … --repo <owner>/<repo>`. The guard recognises `dot gh` in the one form [below](#writing-to-github-through-dot-gh-always---as-bot) and no other wrapper, by design: an agent can edit them. Reads through any other wrapper are refused too. |
+| `dot gh pr create --repo <owner>/<repo> …` (or `node …/dot.mjs gh …`) with no `--as bot` first, or `--as owner`, or `--as bot` after a `gh` word | `DOT_GH_WRITE_NEEDS_BOT` | `dot gh --as bot pr create --repo <owner>/<repo> …`, with `--as bot` as the first option. See [below](#writing-to-github-through-dot-gh-always---as-bot). |
 
 One context rule does not fail open, because it is the point of the
 guard: **`UNREGISTERED_OWNER_EGRESS`**. See the next section.
@@ -792,6 +793,33 @@ including `selfIdentity` when the destination is customer-coupled), and
 `gh` verb becomes `SHIM_UNREACHABLE_NEEDS_HUMAN`, an outright refusal, when
 the `gh` shim is not first on `PATH` and nothing below the hook could hold
 the command.
+
+### Writing to GitHub through `dot gh`: always `--as bot`
+
+Some setups provide `dot gh`, a wrapper that runs `gh` with the token of the right identity for each command and never touches the shared active `gh` account. repo-aegis recognises it in exactly this form:
+
+```
+node <path>/scripts/dot.mjs gh [--as <identity>] [--explain] <gh args…>
+dot gh [--as <identity>] [--explain] <gh args…>
+```
+
+**Every write you make through it carries `--as bot`, as its first option.** A write is anything that creates, changes or deletes something on GitHub: `pr create`, `pr edit`, `pr comment`, `pr review`, `pr close`/`reopen`, `issue …` writes, `release …`, `repo …` writes, `api -X POST|PATCH|PUT|DELETE`, and `api -f`/`-F` (which imply POST).
+
+```
+dot gh --as bot pr create --repo <owner>/<repo> --base main --head <branch> --title "…" --body-file <abs path>
+dot gh --as bot pr comment 12 --repo <owner>/<repo> --body-file <abs path>
+dot gh --as bot api -X POST repos/<owner>/<repo>/pulls/12/requested_reviewers -f "reviewers[]=<login>"
+```
+
+Why: without `--as`, `dot gh` chooses the identity from the repository's owner, and for your user's own organisation that is **your user's personal account**. A write as that account is your user publishing, with nobody at the keyboard. As the bot, the write is attributed to an agent, holds only the bot's narrow permissions, and leaves your user's approval meaningful.
+
+- **First option, or it does not count.** `dot gh pr create --as bot …` hands `--as bot` to `gh`, not to `dot gh`; repo-aegis refuses it as a write without the bot.
+- **Reads need nothing.** `dot gh --repo <owner>/<repo> pr view 12` picks the right account itself. `--as bot` on a read is fine too.
+- **Check before you act:** `dot gh --as bot --explain --repo <owner>/<repo> pr create …` prints the identity and target and runs nothing.
+- **Read the receipt.** Every run prints `dot gh: as bot (…) for <owner>/<repo>` on stderr. If it names any other identity on a write, stop.
+- **Everything else still applies.** `--as bot` does not lift any other rule: public repositories still need your user's approval, unregistered owners are still refused, markers are still scanned. A refusal there is for your user, not for you to route around.
+- **When the bot lacks a permission** (it has no access to issues, secrets, Actions or workflow files), `dot gh` says so. Stop and report it. Never retry as `--as owner`, `--as work` or plain `gh`: that is the accident this rule exists to stop.
+- Any other way of running a wrapper (node options, `NODE_OPTIONS`, a different script name, a script path in a variable) is not recognised and stays refused.
 
 ### Owners are the user's to register
 
@@ -924,6 +952,7 @@ the row below):
 | `PAYLOAD_MODE_DEPENDENT_PATH` | egress guard: a `--body-file` / `-F` / `--notes-file` / `--input` path is relative, expands `$TMPDIR`, or sits under a mode-dependent temp root | write the payload to an absolute, session-unique path in the session scratchpad and pass that |
 | <a id="unregistered_owner_egress"></a>`UNREGISTERED_OWNER_EGRESS` | egress guard (rule h), at the hook, the `gh` shim and pre-push: no person present, and the destination's owner is not in `personalOrgs`, not in any engagement's `githubOrgs`, and not an allowed upstream for a PR / issue / comment; or the owner cannot be named offline (GraphQL mutation, opaque `gh api` endpoint, a target in a variable, an alias the guard cannot expand, a push URL that does not resolve); or the registry is encrypted or damaged | **Stop and report it to the user; do not retry, reroute or fix it yourself.** No approval covers it, and `*` does not. If the owner is the user's or a customer's, a **person** runs from a terminal `repo-aegis engagements add --personal-org <owner>` (or `--github-org <owner>` under the engagement). For a fork's upstream, a person runs `repo-aegis upstreams add <owner>/<repo>` (PRs, issues and comments only). If the destination was unresolved, re-issue naming the repository literally (`--repo <owner>/<repo>`, or the `repos/<owner>/<repo>/…` endpoint), or have the user run it. |
 | <a id="gh_pr_create_implicit_target"></a>`GH_PR_CREATE_IMPLICIT_TARGET` | egress guard: `gh pr create` from a shell with no person, with no `--repo`, `GH_REPO` or URL | re-issue as `gh pr create --repo <owner>/<repo> …`. No approval covers it; nothing is wrong with the destination, only with how it is named. |
+| <a id="dot_gh_write_needs_bot"></a>`DOT_GH_WRITE_NEEDS_BOT` | egress guard, at the hook: a write through `dot gh` with no person present and no leading `--as bot` | **Fix it yourself:** re-issue as `dot gh --as bot <same gh arguments>`, with `--as bot` first. If the bot then lacks the permission, stop and report it; do not switch identity. |
 | <a id="egress_env_override"></a>`EGRESS_ENV_OVERRIDE` | egress guard: the publishing command sets an environment variable or option that can point the shim, the pre-push hook, `gh` or `git` at different state (`REPO_AEGIS_*`, `HOME`, `PATH`, `GIT_CONFIG*`, `GIT_SSH*`, `GH_CONFIG_DIR`, `SRT_*`, `SHELL`, `env -i`, `git -c remote.*`, …) | re-issue without the assignment or option. No approval covers it. Never set these to make a refused command pass. |
 | <a id="egress_after_state_change"></a>`EGRESS_AFTER_STATE_CHANGE` | egress guard: a publishing command follows, in the same command line, a change to state it reads (`git remote`, `git config`, `gh repo set-default`, `gh alias set`, `gh auth`, `export`, a write into `.git/`, `~/.ssh/config`, `~/.gitconfig`) | run the change as its own tool call, then re-issue the publish alone as the next call. No approval covers it. |
 | <a id="egress_pty_wrapper"></a>`EGRESS_PTY_WRAPPER` | egress guard: the publish runs under `script`, `unbuffer`, `expect`, `socat`, `ssh -t`, `tmux`, `screen` or an interpreter's pty module, which would give it a terminal that reads as a person | run the command directly. If it needs a person's go-ahead, ask your human for an approval or an owner registration. No approval covers the wrapper. |

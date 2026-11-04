@@ -1,6 +1,6 @@
 # Plan: let agents run `dot gh`, and make `--as bot` the way they write
 
-Status: proposal, not implemented. Supersedes `doc/plan-gh-identity-selection.md` (parked on branch `plan/gh-identity-selection`, not merged).
+Status: implemented on this branch. Supersedes `doc/plan-gh-identity-selection.md` (parked on branch `plan/gh-identity-selection`, not merged).
 
 ## 0. Threat model, in one sentence
 
@@ -23,7 +23,7 @@ The earlier plan (choosing the account inside the shim) would have moved token h
 | D3 | `bot` is a fixed name: the identity `dot gh`'s table declares for the agent's GitHub App. repo-aegis does not read the table | One literal is easy to document and to test. Reading dot-work's table would make it a second input to the guard |
 | D4 | `dot gh --explain …` is no egress (it runs no `gh` and reads no token) | It prints what it would do and stops |
 | D5 | Any other wrapper shape stays `unparsed-shape` and refused, as today: node options before the script (`-r`, `--import`, `-e`), `NODE_OPTIONS`/`NODE_PATH` set on the segment, a script not named `dot.mjs`, a target in a variable | Keeps the recognised shape small enough to document in one line |
-| D6 | No change to the shim. The `gh` that `dot gh` spawns reaches the shim with literal arguments and is judged there as plain `gh` | Defence in depth already exists. The shim cannot see `--as`, so D2 lives at the hook |
+| D6 | No change to the shim. The `gh` that `dot gh` spawns reaches the shim with literal arguments and is judged there as plain `gh`. One consequence for persons is an accepted limit (§6): `dot gh` pipes `gh`'s stderr, so the shim's terminal test never sees a person | Defence in depth already exists. The shim cannot see `--as`, so D2 lives at the hook |
 
 ## 3. Design
 
@@ -39,17 +39,18 @@ dot gh [--as <id> | --as=<id> | --explain]… <gh args…>
 - `node` is the bare word or an absolute path whose last component is `node`. No word starting with `-` may come between `node` and the script.
 - The script is a literal word (no `$`, glob or substitution) whose last path component is `dot.mjs`.
 - `dot`'s own options are read **only at the front**, as `dot gh` itself reads them (`splitOwnOptions` in dot-work `scripts/dot-gh.mjs`). `dot gh pr create --as bot …` passes `--as bot` to `gh`, so for D2 there is no `--as`. The refusal says to move it to the front.
-- The remainder goes to the existing plain-`gh` parser as an argument vector, unchanged. The intent carries `wrapper: { kind: "dot-gh", as: <id> | null }`.
+- `--as` with a missing, empty (`--as=`) or `-`-leading value is a refusal by `dot gh` itself (`splitOwnOptions` checks the same three), and it runs no `gh`: no intent, like `--explain`.
+- The remainder goes to the existing plain-`gh` parser as an argument vector, unchanged, with the same context a plain `gh` on that segment gets (`GH_REPO` in the prefix or the environment, an earlier `GH_REPO` change, the user's aliases). The intent carries `wrapper: { kind: "dot-gh", as: <id> | null }`, and `precededByCd`, `joinedBy` and the other segment facts as for any intent.
 
 ### 3.2 The decision
 
 For a `dot-gh` intent, in this order:
 
 1. `--explain` given: no intent (D4).
-2. No person present, the intent is a write (the same classification rule h uses), and `as !== "bot"`: refuse `DOT_GH_WRITE_NEEDS_BOT` (D2).
+2. No person present, the call is a write, and `as !== "bot"`: refuse `DOT_GH_WRITE_NEEDS_BOT` (D2). A write is any intent the parser returns for the remainder, resolved or unresolved (`gh-unknown` / `unknown-shape` included): that is the set rule h judges, and reads yield none.
 3. Otherwise: the plain-`gh` decision on the remainder, unchanged.
 
-Step 2 comes before step 3 because its fix belongs to the agent (add `--as bot`), while most step-3 refusals belong to a person.
+Step 2 comes before step 3 because its fix belongs to the agent (add `--as bot`), while most step-3 refusals belong to a person. It also comes before the shape rules, deliberately: `cd … && dot gh pr create …` with no `--as` gets `DOT_GH_WRITE_NEEDS_BOT` first, and `EGRESS_AFTER_CD` only once `--as bot` is there.
 
 ### 3.3 Refusal text
 
@@ -67,7 +68,7 @@ Fixtures in `packages/core/src/egress-intent*.test.ts` and `egress-policy*.test.
 
 | # | Command | Expected |
 |---|---|---|
-| T1 | `node /p/scripts/dot.mjs gh --as bot pr create --repo o/r --title t --body-file /s/b.md` | allowed |
+| T1 | `node /p/scripts/dot.mjs gh --as bot pr create --repo o/r --title t --body-file /s/b.md` | allowed. Parser: exactly one intent, verb `gh-pr-create`, `wrapper: { kind: "dot-gh", as: "bot" }`, `repoFlag` `o/r`, `payloadFiles` `["/s/b.md"]`. With a marker in the payload file: refused as for plain `gh` (`PAYLOAD_MARKER_HIT`) |
 | T2 | same without `--as` | `DOT_GH_WRITE_NEEDS_BOT` |
 | T3 | same with `--as owner`, and with `--as work` | `DOT_GH_WRITE_NEEDS_BOT` |
 | T4 | `--as=bot` | allowed |
@@ -80,8 +81,12 @@ Fixtures in `packages/core/src/egress-intent*.test.ts` and `egress-policy*.test.
 | T11 | `node --require x /p/dot.mjs gh …`, `NODE_OPTIONS=--require=x node /p/dot.mjs gh …`, `node /p/other.mjs gh …`, `node "$S" gh …` | `unparsed-shape` → refused, as today |
 | T12 | `dot gh --explain --repo o/r pr create …` | no intent |
 | T13 | person present: `dot gh --as owner pr create --repo o/r …` | allowed |
-| T14 | `cd /x && node /p/dot.mjs gh --as bot pr create --repo o/r …` | as T1, with the existing `precededByCd` handling |
+| T14 | `cd /x && node /p/dot.mjs gh --as bot pr create --repo o/r …` | `EGRESS_AFTER_CD` (rule b), as for plain `gh`: the intent carries `precededByCd`. Without `--as bot`, `DOT_GH_WRITE_NEEDS_BOT` (D2 comes first) |
 | T15 | the refusal of T2 contains `dot gh --as bot` literally and no gh argument | asserted |
+
+| T16 | `dot gh --as owner project item-add --repo o/r …` (an unresolved write) | `DOT_GH_WRITE_NEEDS_BOT`; with `--as bot`, the plain-`gh` decision for the same call (unknown shape, refused by rule h) |
+| T17 | `GH_REPO=o/r dot gh --as bot pr create --title t --body-file /s/b.md` | allowed (the remainder gets plain `gh`'s context), not `GH_PR_CREATE_IMPLICIT_TARGET` |
+| T18 | `dot gh --as`, `dot gh --as= …`, `dot gh --as --explain …`, `dot gh --as -x …` | no intent (`dot gh` refuses its own options) |
 
 T2, T3, T5, T6 and T1 fail on today's code (T1 and T6 are refused as `unparsed-shape`, T2/T3/T5 are refused for the wrong reason, with a message that says to report to the human instead of naming the fix).
 
@@ -138,6 +143,7 @@ One line, with an assertion in the existing `install-claude-md` tests:
 
 - `scripts/README.md`, section "`dot gh`": a subsection **"Agents: every write is `--as bot`"** with the same rule, the three examples, and the "first option" trap.
 - `docs/identity-and-authority.md`, "Minting, probing, and using a token": one paragraph saying that agents on the host write through `dot gh --as bot`, and that repo-aegis enforces it.
+- `scripts/dot-gh.mjs` / the identity table must declare the agent's GitHub App identity under the name `bot` (D3): repo-aegis trusts the word and does not read the table.
 - `AGENTS.md` §2 is control plane: **propose** one line to the founder ("On the host, write to GitHub with `dot gh --as bot …`"); do not edit it.
 
 ## 6. Accepted limits
@@ -148,6 +154,7 @@ Under §0, these are out of scope and are written down, not designed around:
 - `--as bot` is trusted as a word; repo-aegis does not check that the token really is the App's.
 - Plain `gh` writes from an agent still run as the active account, as today. Only `dot gh` writes are steered to the bot.
 - D2 is enforced at the hook only. A framework without the hook falls back to the shim, which judges the inner `gh` call but cannot see `--as`.
+- A person's own public write or merge through `dot gh` is judged at the shim (rule g). `dot gh` pipes `gh`'s stderr (`scripts/dot-gh.mjs`), so the shim's terminal test never sees a person: such a call needs `REPO_AEGIS_EGRESS_HUMAN=1`, or plain `gh`. Reads and private writes are unaffected.
 
 ## 7. Work breakdown
 
