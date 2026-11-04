@@ -13,12 +13,21 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv } from "../_test-utils.js";
+import { pinnedHookCommand } from "@de-otio/repo-aegis-core";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 import { checkGuardHook, installClaudeMd } from "./install-claude-md.js";
 
-const HOOK_COMMAND = "repo-aegis hook scan-after-write";
-const CHECK_WRITE_HOOK_COMMAND = "repo-aegis hook check-write";
-const GUARD_EGRESS_HOOK_COMMAND = "repo-aegis hook guard-egress --agent claude";
-const EGRESS_RECEIPT_HOOK_COMMAND = "repo-aegis hook egress-receipt";
+// The hook commands install writes are pinned to this build's node and CLI
+// (doc/plan-pin-enforcement-binary.md D7), not `repo-aegis hook …` by name.
+const PIN = currentEnforcementPin();
+const HOOK_COMMAND = pinnedHookCommand(PIN, "hook scan-after-write");
+const CHECK_WRITE_HOOK_COMMAND = pinnedHookCommand(PIN, "hook check-write");
+const GUARD_EGRESS_HOOK_COMMAND = pinnedHookCommand(PIN, "hook guard-egress --agent claude");
+const EGRESS_RECEIPT_HOOK_COMMAND = pinnedHookCommand(PIN, "hook egress-receipt");
+const BASH_HOOK_COMMAND = pinnedHookCommand(PIN, "hook scan-bash-output");
+const FIRST_TOUCH_HOOK_COMMAND = pinnedHookCommand(PIN, "hook first-touch");
+/** How a command appears inside the pretty-printed settings.json text (backslashes escaped). */
+const inJson = (command: string): string => JSON.stringify(command).slice(1, -1);
 
 let tmp: string;
 
@@ -50,7 +59,7 @@ describe("install-claude-md — fresh install", () => {
     claudeHome = makeClaudeHome("fresh");
     aegisHome = aegisHomeFor("fresh");
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
   });
 
@@ -65,7 +74,7 @@ describe("install-claude-md — fresh install", () => {
     assert.ok(!existsSync(join(claudeHome, "hooks")));
   });
 
-  it("registers PostToolUse hooks in settings.json by bin name", () => {
+  it("registers PostToolUse hooks in settings.json as pinned commands", () => {
     const settingsPath = join(claudeHome, "settings.json");
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       hooks: { PostToolUse: { matcher: string; hooks: { type: string; command: string }[] }[] };
@@ -77,7 +86,7 @@ describe("install-claude-md — fresh install", () => {
     assert.ok(fileEntry, "missing file-write matcher entry");
     assert.equal(fileEntry!.hooks.length, 1);
     assert.equal(fileEntry!.hooks[0]!.type, "command");
-    assert.equal(fileEntry!.hooks[0]!.command, "repo-aegis hook scan-after-write");
+    assert.equal(fileEntry!.hooks[0]!.command, HOOK_COMMAND);
 
     // The Bash matcher entry carries BOTH PostToolUse Bash hooks: the
     // secret-shape scan of the output and the egress receipt. They are
@@ -87,12 +96,12 @@ describe("install-claude-md — fresh install", () => {
     assert.equal(bashEntry!.hooks.length, 2);
     assert.deepEqual(
       bashEntry!.hooks.map(h => h.command),
-      ["repo-aegis hook scan-bash-output", EGRESS_RECEIPT_HOOK_COMMAND],
+      [BASH_HOOK_COMMAND, EGRESS_RECEIPT_HOOK_COMMAND],
     );
     for (const h of bashEntry!.hooks) assert.equal(h.type, "command");
   });
 
-  it("registers PreToolUse check-write hook in settings.json by bin name", () => {
+  it("registers PreToolUse check-write hook in settings.json as a pinned command", () => {
     // v0.3.0: cross-org-write refusal moved to PreToolUse so a non-zero
     // exit blocks the tool *before* it runs. Same matcher as the
     // PostToolUse scan-after-write hook (Write|Edit|MultiEdit).
@@ -111,7 +120,7 @@ describe("install-claude-md — fresh install", () => {
     assert.equal(entry!.hooks[0]!.command, CHECK_WRITE_HOOK_COMMAND);
   });
 
-  it("registers the PreToolUse(Bash) egress guard in settings.json by bin name", () => {
+  it("registers the PreToolUse(Bash) egress guard in settings.json as a pinned command", () => {
     // doc/design/egress-guard.md §4: the guard must sit on PreToolUse, not
     // PostToolUse — it is the only enforcement point that sees the whole
     // compound command before a shell has resolved it, and exit 2 there is
@@ -134,8 +143,8 @@ describe("install-claude-md — idempotency", () => {
     const aegisHome = aegisHomeFor("idem");
 
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
 
     const claudeMd = readFileSync(join(claudeHome, "CLAUDE.md"), "utf8");
@@ -199,7 +208,7 @@ describe("install-claude-md — merges into existing settings", () => {
     );
 
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
 
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -239,7 +248,7 @@ describe("install-claude-md — merges into existing settings", () => {
     );
 
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
 
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -258,7 +267,7 @@ describe("install-claude-md — strict-mode warning", () => {
     const claudeHome = makeClaudeHome("warn");
     const aegisHome = aegisHomeFor("warn");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     assert.ok(result.stdout.includes("strict mode is OFF"));
     assert.ok(result.stdout.includes("repo-aegis context on"));
@@ -269,7 +278,7 @@ describe("install-claude-md — strict-mode warning", () => {
     const aegisHome = aegisHomeFor("no-warn");
     writeFileSync(join(aegisHome, "state", "leak-context-mode"), "");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     assert.ok(!result.stdout.includes("strict mode is OFF"));
   });
@@ -281,7 +290,7 @@ describe("install-claude-md — --dry-run", () => {
     const aegisHome = aegisHomeFor("dryrun-fresh");
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true })),
     );
     assert.equal(result.exitCode, undefined);
 
@@ -295,7 +304,7 @@ describe("install-claude-md — --dry-run", () => {
     const aegisHome = aegisHomeFor("dryrun-stdout");
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true })),
     );
     assert.ok(result.stdout.includes("dry run"));
     assert.ok(result.stdout.includes("repo-aegis: managed block"));
@@ -332,7 +341,7 @@ describe("install-claude-md — --dry-run", () => {
     const before = readFileSync(settingsPath, "utf8");
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true })),
     );
 
     // Disk file untouched.
@@ -351,7 +360,7 @@ describe("install-claude-md — --dry-run", () => {
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
       captureOutput(() =>
-        installClaudeMd({ claudeHome, dryRun: true, json: true }),
+        installClaudeMd({ userSettings: true, claudeHome, dryRun: true, json: true }),
       ),
     );
     const j = JSON.parse(result.stdout) as {
@@ -373,7 +382,7 @@ describe("install-claude-md — --dry-run", () => {
     assert.equal(j.settings.wouldAdd, true);
     assert.equal(j.settings.alreadyPresent, false);
     assert.ok(j.settings.contents.includes("Write|Edit|MultiEdit"));
-    assert.ok(j.settings.contents.includes(HOOK_COMMAND));
+    assert.ok(j.settings.contents.includes(inJson(HOOK_COMMAND)));
 
     // No filesystem side effects.
     assert.ok(!existsSync(join(claudeHome, "CLAUDE.md")));
@@ -387,7 +396,7 @@ describe("install-claude-md — --dry-run", () => {
 
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
       captureOutput(() =>
-        installClaudeMd({ claudeHome, dryRun: true, silent: true }),
+        installClaudeMd({ userSettings: true, claudeHome, dryRun: true, silent: true }),
       ),
     );
     assert.equal(result.stdout, "");
@@ -401,7 +410,7 @@ describe("install-claude-md — JSON output", () => {
     const claudeHome = makeClaudeHome("json");
     const aegisHome = aegisHomeFor("json");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, json: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, json: true })),
     );
     const j = JSON.parse(result.stdout) as {
       action: string;
@@ -444,7 +453,7 @@ describe("install-claude-md — --first-touch", () => {
     const claudeHome = makeClaudeHome("first-touch-default");
     const aegisHome = aegisHomeFor("first-touch-default");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
@@ -456,7 +465,7 @@ describe("install-claude-md — --first-touch", () => {
     const claudeHome = makeClaudeHome("first-touch-on");
     const aegisHome = aegisHomeFor("first-touch-on");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true })),
     );
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
@@ -466,7 +475,7 @@ describe("install-claude-md — --first-touch", () => {
     assert.equal(sessionEntries[0]!.matcher, "*");
     assert.equal(
       sessionEntries[0]!.hooks?.[0]?.command,
-      "repo-aegis hook first-touch",
+      FIRST_TOUCH_HOOK_COMMAND,
     );
   });
 
@@ -474,10 +483,10 @@ describe("install-claude-md — --first-touch", () => {
     const claudeHome = makeClaudeHome("first-touch-idempotent");
     const aegisHome = aegisHomeFor("first-touch-idempotent");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true })),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true })),
     );
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
@@ -491,7 +500,7 @@ describe("install-claude-md — --first-touch", () => {
     const claudeHome = makeClaudeHome("first-touch-preserves");
     const aegisHome = aegisHomeFor("first-touch-preserves");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true })),
     );
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
@@ -502,13 +511,13 @@ describe("install-claude-md — --first-touch", () => {
     assert.ok(fileEntry);
     assert.equal(
       fileEntry!.hooks?.[0]?.command,
-      "repo-aegis hook scan-after-write",
+      HOOK_COMMAND,
     );
     const bashEntry = postEntries.find(e => e.matcher === "Bash");
     assert.ok(bashEntry);
     assert.equal(
       bashEntry!.hooks?.[0]?.command,
-      "repo-aegis hook scan-bash-output",
+      BASH_HOOK_COMMAND,
     );
   });
 
@@ -517,14 +526,14 @@ describe("install-claude-md — --first-touch", () => {
     const aegisHome = aegisHomeFor("first-touch-json");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
       captureOutput(() =>
-        installClaudeMd({ claudeHome, firstTouch: true, json: true }),
+        installClaudeMd({ userSettings: true, claudeHome, firstTouch: true, json: true }),
       ),
     );
     const j = JSON.parse(result.stdout) as {
       firstTouch?: { hookCommand: string; added: boolean };
     };
     assert.ok(j.firstTouch);
-    assert.equal(j.firstTouch!.hookCommand, "repo-aegis hook first-touch");
+    assert.equal(j.firstTouch!.hookCommand, FIRST_TOUCH_HOOK_COMMAND);
     assert.equal(j.firstTouch!.added, true);
   });
 });
@@ -534,7 +543,7 @@ describe("install-claude-md — uninstall", () => {
     const claudeHome = makeClaudeHome("uninstall-basic");
     const aegisHome = aegisHomeFor("uninstall-basic");
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome, firstTouch: true }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, firstTouch: true }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
 
@@ -560,7 +569,7 @@ describe("install-claude-md — uninstall", () => {
     const userAfter = "\n## My other section\n\nMore notes.\n";
     writeFileSync(claudeMd, userBefore);
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
     });
     // Append more user content AFTER the managed block landed.
     writeFileSync(claudeMd, readFileSync(claudeMd, "utf8") + userAfter);
@@ -587,7 +596,7 @@ describe("install-claude-md — uninstall", () => {
       }),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -619,7 +628,7 @@ describe("install-claude-md — uninstall", () => {
       }),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -651,7 +660,7 @@ describe("install-claude-md — uninstall", () => {
       }),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
@@ -669,7 +678,7 @@ describe("install-claude-md — uninstall", () => {
     const claudeHome = makeClaudeHome("uninstall-idempotent");
     const aegisHome = aegisHomeFor("uninstall-idempotent");
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
       const second = captureOutput(() =>
         installClaudeMd({ claudeHome, uninstall: true, json: true }),
@@ -709,7 +718,7 @@ describe("install-claude-md — uninstall", () => {
     const claudeHome = makeClaudeHome("uninstall-egress");
     const aegisHome = aegisHomeFor("uninstall-egress");
     withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       const out = captureOutput(() =>
         installClaudeMd({ claudeHome, uninstall: true, json: true }),
       );
@@ -736,7 +745,7 @@ describe("install-claude-md — uninstall", () => {
     const claudeHome = makeClaudeHome("uninstall-egress-text");
     const aegisHome = aegisHomeFor("uninstall-egress-text");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () => {
-      captureOutput(() => installClaudeMd({ claudeHome }));
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       return captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
     assert.match(result.stdout, /removed 5 hook entries/);
@@ -784,20 +793,25 @@ describe("install-claude-md — egress guard registration", () => {
     const claudeHome = makeClaudeHome("egress-md");
     const aegisHome = aegisHomeFor("egress-md");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     const body = readFileSync(join(claudeHome, "CLAUDE.md"), "utf8");
     assert.match(body, /PreToolUse egress guard/);
     assert.match(body, /git push <remote> <branch>/);
     assert.match(body, /never set `REPO_AEGIS_EGRESS_HUMAN`/);
     assert.match(body, /PUBLISHED/);
+    // An agent locked out by a missing pin must stop and hand it to a
+    // person, and must not reach for a gh wrapper the guard refuses.
+    assert.match(body, /never through a script or interpreter/);
+    assert.match(body, /pinned enforcement[\s\S]*binary is missing/);
+    assert.match(body, /do not edit\s+`settings\.json` or disable hooks/);
   });
 
   it("lists both egress hook commands in the dry-run output", () => {
     const claudeHome = makeClaudeHome("egress-dryrun");
     const aegisHome = aegisHomeFor("egress-dryrun");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true })),
     );
     assert.ok(result.stdout.includes(GUARD_EGRESS_HOOK_COMMAND));
     assert.ok(result.stdout.includes(EGRESS_RECEIPT_HOOK_COMMAND));
@@ -810,7 +824,7 @@ describe("install-claude-md — egress guard registration", () => {
     const claudeHome = makeClaudeHome("egress-dryrun-json");
     const aegisHome = aegisHomeFor("egress-dryrun-json");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, dryRun: true, json: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true, json: true })),
     );
     const j = JSON.parse(result.stdout) as {
       guardEgressHook: { hookCommand: string; wouldAdd: boolean };
@@ -826,7 +840,7 @@ describe("install-claude-md — egress guard registration", () => {
     const claudeHome = makeClaudeHome("egress-json");
     const aegisHome = aegisHomeFor("egress-json");
     const result = withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome, json: true })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, json: true })),
     );
     const j = JSON.parse(result.stdout) as {
       guardEgressHook: { hookCommand: string; added: boolean };
@@ -851,7 +865,7 @@ describe("install-claude-md — egress guard registration", () => {
       }),
     );
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       hooks: { PreToolUse: { matcher: string; hooks: { command: string }[] }[] };
@@ -928,7 +942,7 @@ describe("checkGuardHook", () => {
     const claudeHome = makeClaudeHome("guard-check-ok");
     const aegisHome = aegisHomeFor("guard-check-ok");
     withEnv("REPO_AEGIS_HOME", aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome })),
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome })),
     );
     const checks = checkGuardHook(claudeHome);
     assert.equal(checks.length, 1);
@@ -954,5 +968,33 @@ describe("checkGuardHook", () => {
       }),
     );
     assert.equal(checkGuardHook(claudeHome)[0]!.ok, true);
+  });
+});
+
+describe("checkGuardHook — the pinned form (D7)", () => {
+  function claudeHomeWithGuard(name: string, command: string): string {
+    const dir = makeClaudeHome(name);
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] } }),
+    );
+    return dir;
+  }
+
+  it("accepts the pinned guard-egress command that `install claude-md` writes", () => {
+    const home = claudeHomeWithGuard("guard-pinned", GUARD_EGRESS_HOOK_COMMAND);
+    assert.equal(checkGuardHook(home).every(c => c.ok), true);
+  });
+
+  it("still accepts the older by-name command", () => {
+    const home = claudeHomeWithGuard("guard-by-name", "repo-aegis hook guard-egress --agent claude");
+    assert.equal(checkGuardHook(home).every(c => c.ok), true);
+  });
+
+  it("does not accept a pinned command for a different hook, or a command that merely mentions guard-egress", () => {
+    const other = claudeHomeWithGuard("guard-other-hook", pinnedHookCommand(PIN, "hook scan-bash-output"));
+    assert.equal(checkGuardHook(other).every(c => c.ok), false);
+    const mention = claudeHomeWithGuard("guard-mention", "echo hook guard-egress");
+    assert.equal(checkGuardHook(mention).every(c => c.ok), false);
   });
 });

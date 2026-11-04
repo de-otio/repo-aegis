@@ -21,16 +21,19 @@
 //      costume — into a `doctor` finding instead of silence.
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { appendAuditRecord, repoAegisHome } from "@de-otio/repo-aegis-core";
+import { appendAuditRecord, pinProblem, repoAegisHome, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import type { DoctorCheck } from "./doctor-checks.js";
-import { GH_SHIM_SCRIPT, SHIM_HEADER_LINE } from "./shim-script.js";
+import { currentEnforcementPin } from "../enforcement-pin.js";
+import { renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
 
 export interface InstallShimOptions extends OutputOptions {
   uninstall?: boolean;
   force?: boolean;
   /** Do the work, emit nothing. `uninstall` composes this command that way. */
   silent?: boolean;
+  /** Test seam: the pin to render into the shim. Not reachable from the CLI. */
+  pin?: EnforcementPin;
 }
 
 /** What the command did, for `uninstall`'s step report. */
@@ -159,7 +162,20 @@ export function installShim(tool: string | undefined, opts: InstallShimOptions):
 
   // Idempotence is the point, not a nicety: this command is meant to be safe
   // to re-run from a shell profile or a provisioning script.
-  const unchanged = current === GH_SHIM_SCRIPT;
+  const pin = opts.pin ?? currentEnforcementPin();
+  const problem = pinProblem(pin);
+  if (problem !== null) {
+    return emitError(
+      {
+        code: "PIN_PATH_UNSUPPORTED",
+        error: `cannot pin the enforcement binary: ${problem}`,
+        details: "install repo-aegis, and the Node it runs on, at a path without newline characters, then re-run `repo-aegis install shim`",
+      },
+      opts,
+    );
+  }
+  const script = renderShimScript(pin);
+  const unchanged = current === script;
 
   if (!unchanged) {
     try {
@@ -169,7 +185,7 @@ export function installShim(tool: string | undefined, opts: InstallShimOptions):
       } catch {
         /* platform-restricted */
       }
-      writeFileSync(path, GH_SHIM_SCRIPT, { mode: 0o755 });
+      writeFileSync(path, script, { mode: 0o755 });
       // writeFileSync's `mode` is masked by the process umask; chmod
       // unconditionally so the shim is always executable.
       chmodSync(path, 0o755);
@@ -311,7 +327,7 @@ export function checkShim(env: NodeJS.ProcessEnv = process.env): DoctorCheck[] {
   } catch {
     current = null;
   }
-  if (current !== null && current !== GH_SHIM_SCRIPT) {
+  if (current !== null && current !== renderShimScript(currentEnforcementPin())) {
     return [
       {
         code: "SHIM_STALE",

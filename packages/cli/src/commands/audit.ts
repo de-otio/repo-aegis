@@ -43,6 +43,7 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, shouldRevealMatches, type OutputOptions } from "../format.js";
 import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 import { runScan, makeOctokitClient } from "@de-otio/repo-aegis-scan";
 
 interface AuditOptions extends OutputOptions, DenySetFloorOptions {
@@ -1080,7 +1081,7 @@ function checkHooks(cwd: string, repo: RepoConfig): CheckResult {
   if (!repo.isGitRepo) {
     return { name: "hooks", ok: true, findings: [], skipped: true, skipReason: "not a git repo" };
   }
-  const state = resolveHookState(cwd);
+  const state = resolveHookState(cwd, currentEnforcementPin());
   if (state.code === "HOOKS_OK") {
     return { name: "hooks", ok: true, findings: [] };
   }
@@ -1190,7 +1191,7 @@ export async function audit(opts: AuditOptions): Promise<void> {
   // breaks a user-facing command.
   if (repo.isGitRepo) {
     try {
-      const hookState = resolveHookState(cwd);
+      const hookState = resolveHookState(cwd, currentEnforcementPin());
       appendAuditRecord({
         action: "observe-hooks",
         cwd,

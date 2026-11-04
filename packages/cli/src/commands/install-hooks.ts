@@ -7,10 +7,12 @@ import { join, resolve } from "node:path";
 import {
   repoAegisHome,
   appendAuditRecord,
-  PRE_COMMIT_SCRIPT,
-  PRE_PUSH_SCRIPT,
+  pinProblem,
+  renderHookScript,
+  type EnforcementPin,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 
 // Hook script text (PRE_COMMIT_SCRIPT / PRE_PUSH_SCRIPT) lives in
 // core/src/hook-scripts.ts, which is now the SINGLE source of truth —
@@ -75,6 +77,8 @@ interface InstallHooksOptions extends OutputOptions {
    * and `doctor` now check hook liveness directly.
    */
   throwOnError?: boolean;
+  /** Test seam: the pin to render into the scripts. Not reachable from the CLI. */
+  pin?: EnforcementPin;
 }
 
 function git(cwd: string, args: string[]): { ok: boolean; stdout: string } {
@@ -297,6 +301,21 @@ export function installHooks(opts: InstallHooksOptions): void {
     return;
   }
 
+  // The scripts run THIS install's node and CLI by absolute path. Refuse before
+  // anything is written when the pin cannot be quoted into a shell script.
+  const pin = opts.pin ?? currentEnforcementPin();
+  const problem = pinProblem(pin);
+  if (problem !== null) {
+    emitError(
+      {
+        code: "PIN_PATH_UNSUPPORTED",
+        error: `cannot pin the enforcement binary: ${problem}`,
+        details: "install repo-aegis, and the Node it runs on, at a path without newline characters, then re-run `repo-aegis install hooks`",
+      },
+      opts,
+    );
+  }
+
   const scope: HooksScope = opts.local ? "local" : "global";
 
   // --unset-local: clear a shadowing repo-local override before the
@@ -380,10 +399,10 @@ export function installHooks(opts: InstallHooksOptions): void {
       /* platform-restricted */
     }
 
-    writeFileSync(preCommitPath, PRE_COMMIT_SCRIPT, { mode: 0o755 });
+    writeFileSync(preCommitPath, renderHookScript("pre-commit", pin), { mode: 0o755 });
     chmodSync(preCommitPath, 0o755);
 
-    writeFileSync(prePushPath, PRE_PUSH_SCRIPT, { mode: 0o755 });
+    writeFileSync(prePushPath, renderHookScript("pre-push", pin), { mode: 0o755 });
     chmodSync(prePushPath, 0o755);
   } catch (err) {
     emitError(

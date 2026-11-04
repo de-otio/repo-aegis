@@ -75,6 +75,67 @@ const HITS: ReadonlyArray<readonly [command: string, kind: HumanOnlyKind]> = [
   ["repo-aegis --home \"a;b\" approve '*'", "approve"],
   // a substitution inside a commit message runs
   ["git commit -m \"$(repo-aegis approve '*')\"", "approve"],
+  // P7: removing the managed drop-in is a root action only a person takes
+  ["repo-aegis install claude-md --uninstall", "claude-md-uninstall"],
+  ["repo-aegis --json install claude-md --uninstall", "claude-md-uninstall"],
+  ["repo-aegis install claude-md --claude-home /x --uninstall", "claude-md-uninstall"],
+  ["node packages/cli/dist/index.js install claude-md --uninstall", "claude-md-uninstall"],
+  ["script -q /dev/null repo-aegis install claude-md --uninstall", "claude-md-uninstall"],
+  ["expect -c 'spawn repo-aegis install claude-md --uninstall; interact'", "claude-md-uninstall"],
+  ["sudo -u me repo-aegis install claude-md --uninstall", "claude-md-uninstall"],
+  ["bash -c 'repo-aegis install claude-md --uninstall'", "claude-md-uninstall"],
+  ["tmux new -d \"repo-aegis install claude-md --uninstall\"", "claude-md-uninstall"],
+  ["alias ra=repo-aegis; ra install claude-md --uninstall", "claude-md-uninstall"],
+  ["repo-aegis uninstall --yes", "claude-md-uninstall"],
+  ["repo-aegis uninstall --yes --purge-state", "claude-md-uninstall"],
+  // P7: sudo rm / mv / tee on the managed-settings directory, directly or under a pty wrapper
+  ["sudo rm '/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-501.json'", "managed-settings-write"],
+  ["sudo rm /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo mv /tmp/x /etc/claude-code/managed-settings.d/50-x.json", "managed-settings-write"],
+  ["echo '{}' | sudo tee /etc/claude-code/managed-settings.json", "managed-settings-write"],
+  ["script -q /dev/null sudo rm /etc/claude-code/managed-settings.d/a.json", "managed-settings-write"],
+  ["expect -c 'spawn sudo rm /etc/claude-code/managed-settings.d/a.json; interact'", "managed-settings-write"],
+  ["bash -c \"sudo tee /etc/claude-code/managed-settings.d/z.json < /tmp/x\"", "managed-settings-write"],
+  ["cd /etc/claude-code/managed-settings.d && sudo rm 50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo sed -i s/a/b/ /Library/Application\\ Support/ClaudeCode/managed-settings.json", "managed-settings-write"],
+  ["sudo rmdir /etc/claude-code/managed-settings.d", "managed-settings-write"],
+  ["doas rm /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  ["sudo -n bash -c 'rm /etc/claude-code/managed-settings.d/x.json'", "managed-settings-write"],
+  // L4: verbs, interpreters and path spellings the first list missed
+  ["sudo unlink /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo find /etc/claude-code -name '*.json' -delete", "managed-settings-write"],
+  ["sudo find /etc/claude-code/managed-settings.d -type f -exec rm {} +", "managed-settings-write"],
+  ["sudo rm /etc/./claude-code/m*/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo rm /etc//claude-code//managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo rm /etc/x/../claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo rm '/Library/Application Support/./ClaudeCode/managed-settings.d/50-repo-aegis-501.json'", "managed-settings-write"],
+  ["sudo python3.12 -c \"import os; os.remove('/etc/claude-code/managed-settings.d/50-repo-aegis-1000.json')\"", "managed-settings-write"],
+  ["sudo perl5.34 -e 'unlink glob q{/etc/claude-code/managed-settings.d/*}'", "managed-settings-write"],
+  ["sudo ruby3.2 -e 'File.delete(%q{/etc/claude-code/managed-settings.d/x.json})'", "managed-settings-write"],
+  ["sudo node22 -e \"require('fs').unlinkSync('/etc/claude-code/managed-settings.d/x.json')\"", "managed-settings-write"],
+  ["sudo xargs rm < /etc/claude-code/managed-settings.d/list", "managed-settings-write"],
+  ["sudo shred -u /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  ["sudo rsync -a --delete /tmp/empty/ /etc/claude-code/managed-settings.d/", "managed-settings-write"],
+  ["sudo tar xf /tmp/x.tar -C /etc/claude-code/managed-settings.d", "managed-settings-write"],
+  ["sudo env PATH=/tmp rm /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  ["sudo -n /usr/bin/env rm /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  // a glob that can only mean the managed directory: the verb may be hidden in the glob too
+  ["sudo rm /etc/cl*/m*/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo rm -rf /etc/claude-co?e", "managed-settings-write"],
+  ["sudo /bin/r* '/Library/Application Support/Claude*/managed-settings.d/x.json'", "managed-settings-write"],
+  ["sudo rm /Library/Application\\ Support/ClaudeCode/m*/x.json", "managed-settings-write"],
+  ["script -q /dev/null sudo find /etc/claude-code -delete", "managed-settings-write"],
+  ["cd /etc/./claude-code/managed-settings.d && sudo unlink 50-repo-aegis-1000.json", "managed-settings-write"],
+  // any verb under sudo: reads there need no sudo (0755 directory, 0644 file), so no verb list decides
+  ["sudo ls /etc/claude-code", "managed-settings-write"],
+  ["sudo find /etc/claude-code -maxdepth 1 -type f", "managed-settings-write"],
+  ["sudo ls /etc/claude-code/./managed-settings.d", "managed-settings-write"],
+  ["sudo gzip /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo patch /etc/claude-code/managed-settings.json /tmp/p", "managed-settings-write"],
+  ["sudo setfacl -m u:me:rw /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo awk 'BEGIN{system(\"true\")}' /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  ["sudo /opt/tool/bin/anything '/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-501.json'", "managed-settings-write"],
+  ["cd /etc/claude-code/managed-settings.d && sudo gzip 50-repo-aegis-1000.json", "managed-settings-write"],
 ];
 
 const MISSES: ReadonlyArray<string> = [
@@ -118,6 +179,35 @@ const MISSES: ReadonlyArray<string> = [
   "x=$(repo-aegis status); echo approve",
   "x=$(repo-aegis status) && echo approve",
   "",
+  // the managed drop-in: install and a dry run are not refused, nor is looking
+  "repo-aegis install claude-md",
+  "repo-aegis install claude-md --dry-run",
+  "repo-aegis install claude-md --user-settings",
+  "repo-aegis install hooks --uninstall",
+  "repo-aegis install shim --uninstall",
+  "repo-aegis uninstall",
+  "repo-aegis uninstall --purge-state",
+  "git commit -m \"repo-aegis install claude-md --uninstall is refused in agent text\"",
+  "ls /etc/claude-code",
+  "cat /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json",
+  "sudo rm /tmp/x",
+  "sudo apt install foo",
+  "grep -rn managed-settings doc/",
+  "git commit -m 'sudo rm /etc/claude-code/x is refused'",
+  "ls -l '/Library/Application Support/ClaudeCode/managed-settings.d'",
+  // L4: still allowed
+  "sudo find /etc -maxdepth 1 -name hosts",
+  "sudo xargs rm < /tmp/list",
+  "sudo tar tf /tmp/x.tar",
+  "sudo python3.12 -c 'print(1)'",
+  "sudo env true",
+  "python3.12 -c 'print(1)'",
+  "find /tmp -name '*.json' -delete",
+  "unlink /tmp/x",
+  "sudo rm /tmp/./x",
+  "sudo rm /tmp//x/../y",
+  "sudo apt install foo-*",
+  "rsync -a /tmp/a/ /tmp/b/",
 ];
 
 describe("findHumanOnlyCommand — refuses every human-only command, however it is run", () => {
@@ -226,6 +316,18 @@ describe("commandRegions", () => {
 
 describe("humanCommandRefusal — five parts (§3.9)", () => {
   const kinds: HumanOnlyKind[] = ["approve", "owner-add", "upstream-add", "init-migrate", "init-force"];
+  const managedKinds: HumanOnlyKind[] = ["claude-md-uninstall", "managed-settings-write"];
+  for (const kind of managedKinds) {
+    it(kind, () => {
+      const text = humanCommandRefusal({ kind });
+      assert.match(text, /refused\./); // what
+      assert.match(text, /root-owned/); // why: the point of the drop-in
+      assert.match(text, /No approval covers this/); // approval
+      assert.match(text, /A person runs it in their own terminal/); // fix + who
+      assert.match(text, /Agents: do not run that yourself/);
+      assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}, see doc/agent-guide\\.md#agent_ran_human_command\\]`));
+    });
+  }
   for (const kind of kinds) {
     it(kind, () => {
       const text = humanCommandRefusal({ kind });

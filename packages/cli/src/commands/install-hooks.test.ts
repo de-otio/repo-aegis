@@ -17,6 +17,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput } from "../_test-utils.js";
 import { installHooks } from "./install-hooks.js";
+import { currentEnforcementPin } from "../enforcement-pin.js";
+import type { EnforcementPin } from "@de-otio/repo-aegis-core";
 
 let root: string;
 
@@ -153,10 +155,19 @@ describe("install-hooks — fresh install (global, the default)", () => {
     assert.equal(st.mode & 0o111, 0o111, "pre-commit must have all execute bits set");
   });
 
-  it("scripts contain the hook stub body", () => {
+  it("scripts contain the hook stub body, calling the pinned CLI rather than a name", () => {
     const body = readFileSync(join(fx.home, "hooks", "pre-commit"), "utf8");
-    assert.ok(body.includes("repo-aegis check --staged"));
+    assert.ok(body.includes('"$__ra_node" "$__ra_cli" check --staged'));
     assert.ok(body.includes("set -euo pipefail"));
+  });
+
+  it("T1/T12: scripts are rendered for this process's node and CLI (the default pin)", () => {
+    const pin = currentEnforcementPin();
+    for (const name of ["pre-commit", "pre-push"]) {
+      const body = readFileSync(join(fx.home, "hooks", name), "utf8");
+      assert.ok(body.includes(pin.node), `${name} does not name ${pin.node}`);
+      assert.ok(body.includes(pin.cli), `${name} does not name ${pin.cli}`);
+    }
   });
 
   it("sets core.hooksPath in the GLOBAL scope", () => {
@@ -165,6 +176,35 @@ describe("install-hooks — fresh install (global, the default)", () => {
 
   it("leaves the LOCAL scope untouched", () => {
     assert.equal(readScoped(fx, "local"), "");
+  });
+});
+
+describe("install-hooks — T12: pin paths that cannot be quoted safely", () => {
+  it("refuses a pin path containing a newline: exit 2, nothing written, core.hooksPath untouched", () => {
+    const fx = makeFixture("pin-newline");
+    const result = fx.run(() =>
+      captureOutput(() =>
+        installHooks({ cwd: fx.repo, json: true, pin: { node: "/opt/node/bin/node", cli: "/opt/ra\n/dist/index.js" } }),
+      ),
+    );
+    assert.equal(result.exitCode, 2);
+    const err = JSON.parse(result.stderr.trim().split("\n").pop()!) as { code: string };
+    assert.equal(err.code, "PIN_PATH_UNSUPPORTED");
+    assert.equal(existsSync(join(fx.home, "hooks", "pre-commit")), false);
+    assert.equal(existsSync(join(fx.home, "hooks", "pre-push")), false);
+    assert.equal(readScoped(fx, "global"), "");
+  });
+
+  it("accepts a pin path with spaces and quotes and writes it into both scripts", () => {
+    const fx = makeFixture("pin-quotes");
+    const pin = { node: "/opt/my node/bin/node", cli: "/opt/o'brien \"x\"/dist/index.js" };
+    const result = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, pin })));
+    assert.equal(result.exitCode, undefined);
+    for (const name of ["pre-commit", "pre-push"]) {
+      const body = readFileSync(join(fx.home, "hooks", name), "utf8");
+      assert.ok(body.includes("/opt/my node/bin/node"), body);
+      assert.ok(body.includes("o'\\''brien"), `${name}: the single quote must be escaped for the shell`);
+    }
   });
 });
 
@@ -458,13 +498,13 @@ describe("install-hooks — audit forensics", () => {
 // ---------------------------------------------------------------------------
 
 describe("install-hooks — chaining to a repo's own .git/hooks", () => {
-  /** A stub `repo-aegis` on PATH ahead of the real one, so no real scan
-   * runs. Exit code is controlled by the caller via `rc`. */
-  function stubRepoAegis(dir: string, rc: number): void {
+  /** A stub CLI for the pin to point at, so no real scan runs. Exit code is
+   * controlled by the caller via `rc`. Returns the pin to install with. */
+  function stubRepoAegis(dir: string, rc: number): EnforcementPin {
     mkdirSync(dir, { recursive: true });
-    const p = join(dir, "repo-aegis");
-    writeFileSync(p, `#!/bin/sh\nexit ${rc}\n`, { mode: 0o755 });
-    chmodSync(p, 0o755);
+    const cli = join(dir, "stub-cli.cjs");
+    writeFileSync(cli, `process.exit(${rc});\n`);
+    return { node: process.execPath, cli };
   }
 
   function writeChainedHook(repoHooksDir: string, name: string, rc: number, markerPath: string): void {
@@ -480,19 +520,17 @@ describe("install-hooks — chaining to a repo's own .git/hooks", () => {
 
   it("a repo with an executable pre-commit still runs it after a global install", () => {
     const fx = makeFixture("chain-pre-commit-runs");
-    const binDir = join(fx.base, "bin");
-    stubRepoAegis(binDir, 0);
+    const pin = stubRepoAegis(join(fx.base, "bin"), 0);
     const marker = join(fx.base, "chained-marker");
     writeChainedHook(join(fx.repo, ".git", "hooks"), "pre-commit", 0, marker);
 
-    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo })));
+    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, pin })));
 
     const hookPath = join(fx.home, "hooks", "pre-commit");
     const rc = fx.run(() => {
       try {
         execFileSync("bash", [hookPath], {
           cwd: fx.repo,
-          env: { ...process.env, PATH: `${binDir}:${process.env["PATH"]}` },
           stdio: ["ignore", "pipe", "pipe"],
         });
         return 0;
@@ -507,19 +545,17 @@ describe("install-hooks — chaining to a repo's own .git/hooks", () => {
 
   it("chained hook's exit 0 does NOT mask a repo-aegis non-zero exit", () => {
     const fx = makeFixture("chain-does-not-mask");
-    const binDir = join(fx.base, "bin");
-    stubRepoAegis(binDir, 1); // repo-aegis reports a hit
+    const pin = stubRepoAegis(join(fx.base, "bin"), 1); // repo-aegis reports a hit
     const marker = join(fx.base, "chained-marker");
     writeChainedHook(join(fx.repo, ".git", "hooks"), "pre-commit", 0, marker); // chained would say "fine"
 
-    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo })));
+    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, pin })));
 
     const hookPath = join(fx.home, "hooks", "pre-commit");
     const rc = fx.run(() => {
       try {
         execFileSync("bash", [hookPath], {
           cwd: fx.repo,
-          env: { ...process.env, PATH: `${binDir}:${process.env["PATH"]}` },
           stdio: ["ignore", "pipe", "pipe"],
         });
         return 0;
@@ -534,14 +570,13 @@ describe("install-hooks — chaining to a repo's own .git/hooks", () => {
 
   it("no infinite recursion when core.hooksPath resolves to the repo's own .git/hooks", () => {
     const fx = makeFixture("chain-self-recursion");
-    const binDir = join(fx.base, "bin");
-    stubRepoAegis(binDir, 0);
+    const pin = stubRepoAegis(join(fx.base, "bin"), 0);
 
     // The footgun scenario itself: install repo-aegis's own hooks
     // DIRECTLY into the repo's real .git/hooks and point
     // core.hooksPath at that same directory, so the chain target and
     // the running script are the exact same file.
-    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo })));
+    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, pin })));
     const realHooksDir = join(fx.repo, ".git", "hooks");
     const installed = readFileSync(join(fx.home, "hooks", "pre-commit"), "utf8");
     writeFileSync(join(realHooksDir, "pre-commit"), installed, { mode: 0o755 });
@@ -554,7 +589,6 @@ describe("install-hooks — chaining to a repo's own .git/hooks", () => {
       try {
         execFileSync("bash", [join(realHooksDir, "pre-commit")], {
           cwd: fx.repo,
-          env: { ...process.env, PATH: `${binDir}:${process.env["PATH"]}` },
           stdio: ["ignore", "pipe", "pipe"],
           timeout: 5000,
         });

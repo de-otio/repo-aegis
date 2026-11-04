@@ -34,8 +34,8 @@ import {
   mintApproval,
   setAncestryReaderForTests,
   type AncestorInfo,
-  HOOK_SCRIPTS,
   parseEgressIntents,
+  renderHookScript,
   resolveDestinationOffline,
 } from "@de-otio/repo-aegis-core";
 
@@ -846,7 +846,7 @@ describe("pre-push rule h — the shipped pre-push hook script, end to end (L4)"
     );
     chmodSync(join(tmp, "wrapper.sh"), 0o755);
     mkdirSync(join(tmp, "shipped-hooks"));
-    writeFileSync(join(tmp, "shipped-hooks", "pre-push"), HOOK_SCRIPTS["pre-push"]);
+    writeFileSync(join(tmp, "shipped-hooks", "pre-push"), renderHookScript("pre-push", { node: process.execPath, cli }));
     chmodSync(join(tmp, "shipped-hooks", "pre-push"), 0o755);
   });
 

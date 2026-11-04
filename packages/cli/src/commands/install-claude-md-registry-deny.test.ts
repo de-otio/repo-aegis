@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { EnforcementPin } from "@de-otio/repo-aegis-core";
 import { captureOutput, withEnv } from "../_test-utils.js";
 import {
   checkRegistryAgentWritable,
@@ -28,6 +29,19 @@ before(() => {
 after(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
+
+/**
+ * A pin whose CLI package directory and node file sit under the temp dir, outside any git
+ * work tree. The default pin is this checkout's own build, which is inside one (and would add
+ * a warning, and drop the package-directory rule, to every exact-list assertion below).
+ */
+function outsideGitPin(): EnforcementPin {
+  const root = join(tmp, `pin-${n++}`);
+  mkdirSync(join(root, "pkg", "dist"), { recursive: true });
+  writeFileSync(join(root, "pkg", "package.json"), JSON.stringify({ name: "@de-otio/repo-aegis" }));
+  writeFileSync(join(root, "pkg", "dist", "index.js"), "// stub\n");
+  return { node: join(root, "node"), cli: join(root, "pkg", "dist", "index.js") };
+}
 
 interface Env {
   claudeHome: string;
@@ -58,16 +72,17 @@ function readSettings(e: Env): Settings {
 }
 
 function install(e: Env, opts: Record<string, unknown> = {}): { stdout: string } {
-  return inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, ...opts })));
+  return inEnv(e, () => captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, userSettings: true, ...opts })));
 }
 
 const LEDGER = "state/claude-md-deny-rules.json";
 
 describe("registryDenyPlan", () => {
-  it("denies Edit on the registry, its .age, the approvals store, the destination cache, the two trusted state files, hooks/**, bin/** and markers/** — and nothing else", () => {
+  it("denies Edit on the registry, its .age, the approvals store, the destination cache, the two trusted state files, hooks/**, bin/**, markers/** and the pinned code — and nothing else", () => {
     const e = makeEnv("plan");
     const h = e.aegisHome;
-    const plan = inEnv(e, () => registryDenyPlan());
+    const pin = outsideGitPin();
+    const plan = inEnv(e, () => registryDenyPlan(pin));
     assert.deepEqual(plan.rules, [
       `Edit(/${h}/engagements.yaml)`,
       `Edit(/${h}/engagements.yaml.age)`,
@@ -78,6 +93,8 @@ describe("registryDenyPlan", () => {
       `Edit(/${h}/hooks/**)`,
       `Edit(/${h}/bin/**)`,
       `Edit(/${h}/markers/**)`,
+      `Edit(/${pin.node})`,
+      `Edit(/${join(pin.cli, "..", "..")}/**)`,
     ]);
     assert.deepEqual(plan.warnings, []);
     // Claude Code never matches a Write(path) rule: none is written.
@@ -129,7 +146,7 @@ describe("registryDenyPlan", () => {
     const repo = join(tmp, `repo-${n++}`);
     mkdirSync(join(repo, ".git"), { recursive: true });
     const plan = withEnv("REPO_AEGIS_REGISTRY", join(repo, "engagements.yaml"), () =>
-      withEnv("REPO_AEGIS_HOME", e.aegisHome, () => registryDenyPlan()),
+      withEnv("REPO_AEGIS_HOME", e.aegisHome, () => registryDenyPlan(outsideGitPin())),
     );
     assert.ok(plan.rules.includes(`Edit(/${repo}/engagements.yaml)`));
     assert.equal(plan.warnings.length, 1);

@@ -12,7 +12,8 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { HOOK_SCRIPTS } from "@de-otio/repo-aegis-core";
+import { pinnedHookCommand, renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 import { doctor } from "./doctor.js";
 import {
   checkPrePushHook,
@@ -21,7 +22,7 @@ import {
   watchedVariablesIn,
 } from "./doctor-env-checks.js";
 import { captureOutput, fakeGh, withEnv } from "../_test-utils.js";
-import { GH_SHIM_SCRIPT } from "./shim-script.js";
+import { renderShimScript } from "./shim-script.js";
 
 let root: string;
 let n = 0;
@@ -217,8 +218,8 @@ function withWorld<T>(w: RepoWorld, fn: () => T): T {
 function installHooks(w: RepoWorld): void {
   const dir = join(w.aegisHome, "hooks");
   mkdirSync(dir, { recursive: true });
-  for (const name of Object.keys(HOOK_SCRIPTS) as (keyof typeof HOOK_SCRIPTS)[]) {
-    writeFileSync(join(dir, name), HOOK_SCRIPTS[name], { mode: 0o755 });
+  for (const name of ["pre-commit", "pre-push"] as const satisfies readonly HookName[]) {
+    writeFileSync(join(dir, name), renderHookScript(name, currentEnforcementPin()), { mode: 0o755 });
     chmodSync(join(dir, name), 0o755);
   }
   withWorld(w, () => execFileSync("git", ["config", "--local", "core.hooksPath", dir], { cwd: w.repo }));
@@ -229,7 +230,7 @@ function registerGuard(w: RepoWorld): void {
     join(w.claudeHome, "settings.json"),
     JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "repo-aegis hook guard-egress --agent claude" }] }],
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: pinnedHookCommand(currentEnforcementPin(), "hook guard-egress --agent claude") }] }],
       },
     }),
   );
@@ -347,7 +348,7 @@ describe("doctor — R8/R9/R11 end to end", () => {
     registerGuard(w);
     const shimDir = join(w.aegisHome, "bin");
     mkdirSync(shimDir, { recursive: true });
-    writeFileSync(join(shimDir, "gh"), GH_SHIM_SCRIPT, { mode: 0o755 });
+    writeFileSync(join(shimDir, "gh"), renderShimScript(currentEnforcementPin()), { mode: 0o755 });
     chmodSync(join(shimDir, "gh"), 0o755);
 
     const res = withWorld(w, () =>
@@ -379,7 +380,7 @@ describe("doctor — R8/R9/R11 end to end", () => {
     rmSync(w.repo, { recursive: true, force: true }); // no repo findings either
     const shimDir = join(w.aegisHome, "bin");
     mkdirSync(shimDir, { recursive: true });
-    writeFileSync(join(shimDir, "gh"), GH_SHIM_SCRIPT, { mode: 0o755 });
+    writeFileSync(join(shimDir, "gh"), renderShimScript(currentEnforcementPin()), { mode: 0o755 });
     chmodSync(join(shimDir, "gh"), 0o755);
     writeFileSync(join(w.userHome, ".zshenv"), "export GH_REPO=x/y\n");
     const res = withWorld(w, () =>

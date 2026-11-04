@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Stricter (may refuse what 0.11 allowed)
+
+The git hooks and the `gh` shim now run the scanner by the absolute path of the
+Node executable and CLI entry that installed them, and fail closed. **After
+moving or upgrading Node (for example through a version manager), or
+reinstalling repo-aegis, re-run `repo-aegis install hooks` and `repo-aegis
+install shim`**: until you do, commits and pushes are blocked and the shim
+refuses `gh` publishing verbs, with a message naming the missing path and the
+command to run. Existing installs keep their old, unpinned scripts until you
+re-run the installers; `repo-aegis doctor` reports them
+(`ENFORCEMENT_UNPINNED`). Design: `doc/plan-pin-enforcement-binary.md`.
+
+- **Pinned enforcement binary.** `pre-commit`, `pre-push` and the `gh` shim called
+  `repo-aegis` (and, through its `#!/usr/bin/env node` line, `node`) by name, so
+  whatever came first on `PATH` decided what enforced: a file named
+  `repo-aegis` that exits 0 in a directory ahead of the real one switched off the
+  scans and the shim's egress check, and two installs meant different versions
+  in the person's terminal and the agent's shell. `install hooks` and `install
+  shim` now write the absolute paths into the scripts (shell-quoted; a path with
+  a newline or NUL refuses the install, `PIN_PATH_UNSUPPORTED`).
+- **Fail closed.** The hooks used to `exit 0`, and the shim to `exec` the real
+  `gh`, when no `repo-aegis` was found. A missing pinned file now makes the hooks
+  exit 1 and the shim refuse publishing verbs (exit 2); other `gh` verbs still
+  pass through. There is no environment variable to turn this off.
+- **Staleness follows the pin.** `status` and `doctor` compare installed hooks and
+  the shim with the script rendered for the current pin: a hook or shim pinned
+  elsewhere, or an old unpinned one, is `HOOKS_SCRIPT_STALE` / `SHIM_STALE`.
+  Library change: `renderHookScript(name, pin)` and `hookScriptDigest(name, pin)`
+  replace the `PRE_COMMIT_SCRIPT`, `PRE_PUSH_SCRIPT` and `HOOK_SCRIPTS` constants,
+  and `resolveHookState` takes the pin.
+- **`doctor`:** `ENFORCEMENT_UNPINNED` and `ENFORCEMENT_PIN_MISSING` (failures),
+  and `MULTIPLE_INSTALLS` (warning: more than one `repo-aegis` on `PATH`, listed
+  with each version, or the first one is not the pinned one; nothing on `PATH` is
+  executed).
+- **Claude Code hook commands are pinned too.** `install claude-md` now writes each
+  hook (`check-write`, `guard-egress`, `scan-after-write`, `scan-bash-output`,
+  `egress-receipt`, `first-touch`) as a one-line `sh` command that runs the pinned
+  node and CLI by absolute path and exits 2 (a blocking hook error) if either is
+  gone, instead of `repo-aegis hook …` resolved on the agent's PATH. A missing command
+  exits 127, which Claude Code treats as non-blocking, so the old form could be
+  replaced by a file named `repo-aegis` in a directory ahead of the real one.
+  Re-running `install claude-md` replaces older by-name entries in place (and entries
+  pinned to an earlier path); `--uninstall` removes both forms; `doctor`
+  (`ENFORCEMENT_UNPINNED`) reports by-name entries until then, and
+  `GUARD_HOOK_UNREGISTERED` accepts either form. A pin path with a newline or NUL
+  refuses the install (`PIN_PATH_UNSUPPORTED`).
+- **`install claude-md`** adds `permissions.deny` Edit rules for the pinned CLI's
+  package directory and the pinned Node executable, in the same ledger as the
+  registry rules, so an agent cannot overwrite the code the pin points at. A
+  package directory inside a git work tree (a development checkout) is warned
+  about and not denied.
+- **`install claude-md` now writes a root-owned managed-settings drop-in**, not
+  `~/.claude/settings.json`. Run it from your own terminal: it shows the path,
+  size, digest and a diff, asks `[y/N]`, then `sudo` asks for **your password**
+  once. The file (`/Library/Application Support/ClaudeCode/managed-settings.d/
+  50-repo-aegis-<uid>.json` on macOS, `/etc/claude-code/managed-settings.d/…` on
+  Linux) holds the hooks and the `Edit(//…)` deny rules, so the agent running as
+  you cannot edit or remove it, and your own `settings.json` can stay portable
+  (it holds only your preferences again). Each hook starts with a uid guard, so a
+  second account on the machine is unaffected. Only fixed commands run as root,
+  by absolute path, after checks on `sudo`, the tools and the directories
+  (`PRIVILEGED_TOOL_UNSAFE`, `SYSTEM_DIR_UNSAFE`); the file is read back. The
+  first run moves repo-aegis's earlier entries out of `settings.json` (once the
+  drop-in is verified and nothing shadows it) and asks you to confirm `/status`
+  in Claude Code lists `(drop-ins)`. **Before `npm rm -g repo-aegis`, run
+  `repo-aegis install claude-md --uninstall`**; if a fail-closed hook is left
+  behind, every blocked call prints the literal `sudo rm '<path>'` that removes
+  it. `--user-settings` keeps the old behaviour for containers and other places
+  without `sudo` (and is the automatic fallback on an unsupported platform, as
+  root, or without `/usr/bin/id`); `init` uses it. New `doctor` codes:
+  `MANAGED_DROPIN_STALE`, `MANAGED_DROPIN_NOT_ROOT_OWNED`,
+  `MANAGED_DROPIN_UNREADABLE`, `MANAGED_DROPIN_ORPHANED`,
+  `MANAGED_DROPIN_LEDGER_STALE`, `MANAGED_HOOKS_DISABLED`,
+  `MANAGED_SOURCE_SHADOWED`, `MANAGED_HOOKS_NOT_FIRING` (a SessionStart heartbeat
+  proves Claude Code loads the file; server-managed policy and MDM make it ignore
+  drop-ins) and, as warnings, `SUDO_NOPASSWD` and `ENFORCEMENT_IN_USER_SETTINGS`.
+  With `NOPASSWD` sudo the drop-in is no stronger than the user file. The egress
+  guard now also refuses an agent Bash command that uninstalls the drop-in or
+  runs `sudo` on the managed-settings directory
+  (`AGENT_RAN_HUMAN_COMMAND`). `GUARD_HOOK_UNREGISTERED` and
+  `REGISTRY_AGENT_WRITABLE` read the drop-in as well as the user file. Library
+  change: `managedHookCommand` and `isManagedHookCommand` in core. See
+  `doc/configuration.md#the-claude-code-managed-drop-in`.
+
+- **Security-review fixes for the managed drop-in.**
+  - `install claude-md` no longer strips repo-aegis's entries from
+    `~/.claude/settings.json` without a person at a terminal, even when the
+    drop-in is unchanged (it used to, because no root step ran), and no longer
+    does so while `MANAGED_HOOKS_NOT_FIRING` is failing. Without a terminal it
+    prints what a terminal run would remove and leaves the file untouched; if
+    you put the entries back because the drop-in was shadowed, they stay.
+  - An unchanged drop-in in a directory that group or others can write is now
+    refused (`SYSTEM_DIR_UNSAFE`) instead of reported as already installed.
+  - `MANAGED_HOOKS_NOT_FIRING` fails when the heartbeat or the install time is
+    in the future (it cannot be trusted), and skips with its own reason when the
+    file system reports no creation time for Claude Code's session files.
+  - `SUDO_NOPASSWD` runs `sudo -n -k /usr/bin/true` only after the same check
+    that covers every other tool root runs (a root-owned regular file that
+    group and others cannot write).
+  - The agent-command guard refuses any `sudo` or `doas` command, whatever the
+    verb, on a command line that names the managed-settings directory, including
+    globbed and `/./`-spelled paths. Reading the directory needs no `sudo`.
+    It reads command text and is not a boundary.
+  - The privileged write refuses, before any `sudo` call, a symlink, directory
+    or other non-regular file at the drop-in path or its temp name.
+
 ## [0.11.0] - 2026-11-03
 
 ### Stricter (may refuse what 0.10 allowed)

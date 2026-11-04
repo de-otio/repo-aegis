@@ -489,21 +489,51 @@ Installed by `repo-aegis install hooks` (or `init`). They live at
 `~/.config/repo-aegis/hooks/pre-commit` and `pre-push`, with
 `core.hooksPath` set per repo.
 
-Pre-commit shells out to `repo-aegis check --staged`. Pre-push reads
+Pre-commit runs `repo-aegis check --staged`. Pre-push reads
 ref-update lines on stdin and runs `repo-aegis check --range` per
 updated ref (force-pushes use the empty-tree SHA so every commit on
 the new branch is scanned).
 
-Both hooks `exit 0` if `repo-aegis` isn't on PATH (fail-open) so the
-git workflow doesn't break for users who haven't installed the CLI
-globally.
+Both hooks run the CLI **pinned at install time** by absolute path (the
+Node executable and the CLI's `dist/index.js`, written into the script by
+`install hooks`), not whatever `repo-aegis` or `node` is first on PATH. They
+**fail closed**: if a pinned file is gone, the hook exits 1 naming the path and
+`repo-aegis install hooks`. There is no environment variable to turn that off;
+a person re-runs the installer, for example after moving or upgrading Node.
+`install shim` pins the `gh` shim the same way (publishing verbs are refused
+with exit 2; other `gh` verbs pass through). See
+[`doc/configuration.md`](configuration.md#the-pinned-enforcement-binary).
 
 ### Claude Code PostToolUse
 
 Installed by `repo-aegis install claude-md` (or `init --with-claude`).
-The settings.json entry references `repo-aegis hook scan-after-write`
-— a CLI subcommand resolved through PATH at hook time, **not** an
-absolute path to a shell script.
+The settings.json entries run `hook scan-after-write` (and the other
+hook subcommands) on the **pinned** node and CLI by absolute path, wrapped
+in a one-line `sh` command that exits 2 (a blocking hook error) if either
+pinned file is gone, **not** a `repo-aegis` resolved through PATH (a file
+named `repo-aegis` in a directory ahead of the real one on the agent's PATH
+would otherwise replace the hook that judges every command) and not a shell
+script. An older by-name entry is replaced on the next `install claude-md`
+(`doctor` reports it as `ENFORCEMENT_UNPINNED` until then); `--uninstall`
+removes either form. See
+[`doc/configuration.md`](configuration.md#the-pinned-enforcement-binary).
+
+**If every tool call is refused** with `repo-aegis: the pinned enforcement
+binary is missing or not usable (…); re-pin it by running: repo-aegis install
+claude-md`, the pinned node or CLI has gone (Node upgraded or removed,
+repo-aegis reinstalled elsewhere). That refusal is the guard failing closed.
+Stop and ask your human to run `repo-aegis install claude-md` from their own
+terminal. Do not edit `settings.json`, do not run the CLI by another path, and
+do not set `disableAllHooks`. By default the hooks live in a **root-owned managed
+drop-in** (`/Library/Application Support/ClaudeCode/managed-settings.d/` on macOS,
+`/etc/claude-code/managed-settings.d/` on Linux), which you cannot edit and must
+not try to: the refusal text then also names `sudo rm '<that file>'`, a line only
+your human runs, and `repo-aegis install claude-md --uninstall`, `repo-aegis
+uninstall --yes` and any `sudo` command naming that directory are refused in your
+Bash commands (`AGENT_RAN_HUMAN_COMMAND`). With `install claude-md --user-settings`
+the hooks are in `settings.json` instead; that file then holds one machine's
+absolute paths and must not be synced or symlinked from a repository shared by
+other machines, or the same refusal appears there.
 
 The hook fires on every `Write`, `Edit`, and `MultiEdit` tool call.
 It reads your tool-result JSON on stdin, extracts the file_path,
@@ -747,6 +777,7 @@ are the ones you will hit:
 | `REPO_AEGIS_REGISTRY=… gh …`, `GH_CONFIG_DIR=… git push …`, `env -i …`, `git -c remote.origin.url=… push …` | `EGRESS_ENV_OVERRIDE` | the plain command, with no `REPO_AEGIS_*`, `HOME`, `PATH`, `GIT_*`, `GH_*`, `SRT_*`, `SHELL`, `LD_*` or `DYLD_*` assignment, no `env -i` / `-u`, no `--git-dir` / `--work-tree`, no `git -c remote.* \| url.* \| core.sshCommand \| core.hooksPath` |
 | `git remote set-url … && git push …`, `gh repo set-default … && gh issue create …`, `export X=1 && gh …` | `EGRESS_AFTER_STATE_CHANGE` | run the state change as its own call, then the publish alone as the next call, so it is judged against the new state |
 | `script -q /dev/null gh issue create …`, or the same under `unbuffer`, `expect`, `tmux`, `screen`, `ssh -t`, an interpreter's `pty` module | `EGRESS_PTY_WRAPPER` | the same command run directly. A wrapper hands the command a terminal, and a terminal reads as a person. If it needs a person, ask your human. |
+| `node …/wrapper.mjs gh pr view …`, `python tool.py gh …` (an interpreter whose arguments contain `gh`, for example a script that picks a token and runs `gh` for you) | `UNREGISTERED_OWNER_EGRESS` (an unparsed shape: the guard cannot see the destination or tell a read from a write) | plain `gh … --repo <owner>/<repo>`. The guard does not recognise wrapper scripts, by design: an agent can edit them. Reads are refused too. |
 
 One context rule does not fail open, because it is the point of the
 guard: **`UNREGISTERED_OWNER_EGRESS`**. See the next section.
@@ -899,7 +930,7 @@ the row below):
 | <a id="hook_input_too_large"></a>`HOOK_INPUT_TOO_LARGE` | egress guard: the hook input is larger than 1 MiB, so the command cannot be read whole and is not judged | put the large content in a file and pass the file (`--body-file`, `-F`, `--input`, `-d @file`); keep the command itself short. No approval covers it. |
 | <a id="github_api_via_http_client"></a>`GITHUB_API_VIA_HTTP_CLIENT` | egress guard: `curl` or `wget` writing to `api.github.com` or `uploads.github.com` (`-X POST\|PUT\|PATCH\|DELETE`, or a data flag) | use `gh api -X <METHOD> repos/<owner>/<repo>/…` or a `gh` verb with `--repo <owner>/<repo>`, which are checked like any publish. No approval covers it. |
 | <a id="gh_auth_token_network"></a>`GH_AUTH_TOKEN_NETWORK` | egress guard: `gh auth token` (or `gh auth status --show-token`) in a command line that also makes a network call | use `gh api …`, which uses its own credential and is checked. Never put the token in a command. No approval covers it. |
-| <a id="agent_ran_human_command"></a>`AGENT_RAN_HUMAN_COMMAND` | agent hook: the command text runs `repo-aegis approve`, `engagements add --personal-org\|--github-org`, `upstreams add` or `init --migrate-classify\|--force`, in any shape (`bash -c`, a heredoc, `tmux`, an alias), with or without a terminal | stop. These commands are how a person vouches for a publish or an owner. Tell the user what you need and give them the exact line to run in their own terminal. Do not re-word it to get past the hook. A quoted mention next to a repo-aegis word is refused too; re-word the sentence. |
+| <a id="agent_ran_human_command"></a>`AGENT_RAN_HUMAN_COMMAND` | agent hook: the command text runs `repo-aegis approve`, `engagements add --personal-org\|--github-org`, `upstreams add` or `init --migrate-classify\|--force`, or removes the managed drop-in (`install claude-md --uninstall`, `uninstall --yes`) or runs `sudo` (any verb; reading it needs none) on the Claude Code managed-settings directory, in any shape (`bash -c`, a heredoc, `tmux`, an alias, `script`, `expect`), with or without a terminal | stop. These commands are how a person vouches for a publish or an owner. Tell the user what you need and give them the exact line to run in their own terminal. Do not re-word it to get past the hook. A quoted mention next to a repo-aegis word is refused too; re-word the sentence. |
 | <a id="agent_detached_session"></a>`AGENT_DETACHED_SESSION` | agent hook: the command starts a detached session (`tmux new -d`, `tmux new-window` / `send-keys`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`) | run it in the foreground, or as a plain `nohup <command> &` for a dev server. If a long-lived terminal session is really needed, the user starts it. |
 | <a id="owner_add_needs_tty"></a>`OWNER_ADD_NEEDS_TTY` | `engagements add --personal-org\|--github-org`, `upstreams add` or `init --migrate-classify` was run without a person's terminal (no TTY on stderr, or an agent host or pty wrapper above the process, or an unreadable process chain). No env var or approval lifts it. | **Ask your human to run the command themselves**, from their own terminal window; the refusal prints it. Do not retry, wrap it in `script` / `tmux`, or edit `engagements.yaml`. |
 | <a id="owner_set_empty_needs_tty"></a>`OWNER_SET_EMPTY_NEEDS_TTY` | a change that would leave zero registered owners (`engagements end` / `remove` of the engagement holding the last owner, or `init --force` over a registry that declares anything) was run without a terminal; with no owners rule h switches itself off, so this is the same as registering every owner | ask your human to run it from a terminal. Removing one owner among several needs no terminal. |
@@ -920,6 +951,14 @@ the row below):
 | `REGISTRY_UNREADABLE` / `OWNERS_UNDECLARED` (`doctor`, failures) | the registry is encrypted or does not parse, so rule h refuses every non-interactive egress with a destination; or it loads with no owners, so rule h is inert | surface the `fix` line. Never run an owner add or `registry decrypt` yourself: both need a person at a terminal. |
 | `GH_LOGIN_UNREGISTERED` / `GH_MEMBER_ORG_UNREGISTERED` / `REGISTERED_ORG_NOT_MEMBER` (`doctor`) | a logged-in `gh` account, or an organisation it belongs to, is not a registered owner (or, for the info check, a registered owner matches no account) | surface the `fix` line (it names the owners; the summary line does not). Which owners are "ours" is the user's decision, and only a person at a terminal can add one. `SKIP` means `gh` was absent or logged out, not that all is well. |
 | `REGISTRY_AGENT_WRITABLE` / `GH_BINARY_UNTRUSTED` / `GH_CONFIG_REDIRECT` / `PREPUSH_HOOK_MISSING` / `SHELL_STARTUP_OVERRIDES` / `SSH_GITHUB_REDIRECT` (`doctor`, warnings and info) | no `permissions.deny` Edit rule for the registry, approvals, hooks, shim and rendered-markers paths; the `gh` first on `PATH` is in an agent-writable or non-standard place; the guard hook is registered but the global `core.hooksPath` is not the repo-aegis hooks directory; a shell startup file exports `GH_REPO`, `GH_HOST`, `GIT_SSH_COMMAND`, `SRT_*` or `REPO_AEGIS_*`; `Host github.com` in the ssh config points elsewhere or is proxied | suggest the `fix` line (`install claude-md` / `install hooks` / remove the export). Never print a startup file's value. |
+| `ENFORCEMENT_UNPINNED` / `ENFORCEMENT_PIN_MISSING` (`doctor`, failures) | an installed git hook, the `gh` shim or a Claude Code hook command in `settings.json` still calls `repo-aegis` by name (written before the pin existed), so a `repo-aegis` or `node` first on `PATH` decides what enforces; or a pinned node or CLI path no longer exists (Node moved or upgraded, install removed), so that git hook exits 1, that shim refuses publishing verbs, and a Claude Code hook exits 2 on every matching tool call | surface the `fix` line (`repo-aegis install hooks`, `install shim` and/or `install claude-md`). A person at a terminal normally runs it; never look for another way to make a hook pass |
+| `MULTIPLE_INSTALLS` (`doctor`, warning) | more than one `repo-aegis` is reachable on `PATH` (listed with each version), or the first one is not the pinned one, so a terminal and an agent's shell can run different versions | surface the list; the user keeps one install, removes the rest, then re-runs `install hooks` and `install shim` so the pin follows it. Doctor never runs the candidates; versions come from `package.json` |
+| `PIN_PATH_UNSUPPORTED` (`install hooks`, `install shim`, `install claude-md`) | the Node or CLI path contains a newline or NUL, which cannot be written into the generated script | tell the user to install at an ordinary path; there is no override |
+| `MANAGED_DROPIN_STALE` / `MANAGED_DROPIN_NOT_ROOT_OWNED` / `MANAGED_DROPIN_UNREADABLE` (`doctor`, failures) | the managed drop-in differs from what `install claude-md` would write now (moved Node or CLI, a new release, an edit); it or a directory above it is owned by a user, writable by group or others, or a symlink (so an agent could edit what enforces); it is not `0644` / its directories not `0755` (Claude Code starts without a source it cannot read) | surface the `fix` line. A person runs `repo-aegis install claude-md` from their own terminal (sudo asks for their password). Never try to change the file or its directories yourself |
+| `MANAGED_DROPIN_ORPHANED` / `MANAGED_DROPIN_LEDGER_STALE` (`doctor`, failures) | the drop-in exists but the ledger has no entry for it or its pin points at missing files (every hook then blocks with exit 2); or the ledger names a drop-in that is gone (removed by hand) | tell the user to re-run `repo-aegis install claude-md`, or to remove it themselves with the `sudo rm '<path>'` line in the `fix`; for a stale ledger entry `repo-aegis install claude-md --uninstall` clears it. You do not run `sudo` |
+| `MANAGED_HOOKS_DISABLED` / `MANAGED_SOURCE_SHADOWED` / `MANAGED_HOOKS_NOT_FIRING` (`doctor`, failures) | another managed file sets `disableAllHooks: true`; a macOS configuration profile for Claude Code outranks the managed files; or a Claude Code session started after the last drop-in heartbeat, so Claude Code is not loading the drop-in at all (a server-managed policy or an MDM key makes it ignore file drop-ins, and nothing local shows that) | enforcement through Claude Code hooks is not active. Tell the user plainly, and that `/status` in Claude Code should list `(drop-ins)`; do not work around it |
+| `SUDO_NOPASSWD` / `ENFORCEMENT_IN_USER_SETTINGS` (`doctor`, warnings) | `sudo` runs without a password, so the drop-in is no stronger than the user settings file; the hooks are in `~/.claude/settings.json` (written with `--user-settings`, or before the drop-in existed), which must stay per machine | surface the `fix` line; `repo-aegis install claude-md` moves the hooks into the drop-in |
+| `MANAGED_NEEDS_TTY` / `MANAGED_NOT_CONFIRMED` / `PRIVILEGED_TOOL_UNSAFE` / `SYSTEM_DIR_UNSAFE` / `DROPIN_INVALID` (`install claude-md`) | the drop-in is written (or removed) as root and needs a person at a terminal who types `y`; `sudo` or a tool it would run, or the system directory or a parent, is not root-owned/safe; the rendered drop-in failed validation (for example a path with a newline) | tell the user to run the command in their own terminal; for the two safety refusals the output says what is wrong and offers `--user-settings`. There is no flag that skips any of them |
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` / `GUARD_HOOK_UNREGISTERED` (`doctor`) | the `gh` shim is absent, shadowed on `PATH`, or left over from an earlier release; the guard hook is not in `settings.json` | suggest `repo-aegis install shim` / fixing `PATH` order / `repo-aegis install claude-md`. A shadowed shim is also why a `gh` verb can be refused with `SHIM_UNREACHABLE_NEEDS_HUMAN`. |
 
 `audit` also emits per-finding diagnostic codes inside its
@@ -1080,7 +1119,7 @@ shape we don't model.
 | `markers test <s>` | probe a string | `input`, `matches` |
 | `context on/off/status` | toggle strict mode | `action`, `enabled` |
 | `install hooks` | install git hooks | `action`, `hooksDir`, `installed`, `coreHooksPath` |
-| `install claude-md` | install Claude hook | `action`, `claudeHome`, `claudeMd`, `hookCommand`, `settings` |
+| `install claude-md` | install Claude hooks: the root-owned managed drop-in (default), or `settings.json` with `--user-settings` | `action`, `mode` (`managed`/`user-settings`), `claudeHome`, `claudeMd`, then `managed` (`path`, `uid`, `platform`, `digest`, `bytes`, `installed`, `unchanged`, `createdDirs`) and `migration` (managed), or `hookCommand`, `settings` (user-settings); `note?` when it fell back to the user file; `--dry-run` adds `managed.contents` |
 | `install gitignore` | append global gitignore | `action`, `path`, `appended` |
 | `install ci` | emit GHA workflow | (printed to stdout, not JSON) |
 | `hook scan-after-write` | (PostToolUse entry) | same as `check --path` |
@@ -1093,7 +1132,7 @@ shape we don't model.
 | `audit-log path` | print log file path | `action`, `path`, `enabled`, `exists` |
 | `install hooks --uninstall` | reverse `install hooks` | `action`, `hooksDir`, `removed`, `coreHooksPathUnset`, `previousCoreHooksPath` |
 | `install gitignore --uninstall` | strip managed block | `action`, `target`, `removed`, `reason?` |
-| `install claude-md --uninstall` | strip managed block + hook entries | `action`, `claudeMd`, `settings` |
+| `install claude-md --uninstall` | remove the managed drop-in (terminal, sudo), strip managed block + hook entries | `action`, `claudeMd`, `managed` (`path`, `removed`, `dirsRemoved`, `ledgerRemoved`), `settings` |
 | `install ci --uninstall` | remove the workflow file | `action`, `target`, `removed`, `absent?` |
 | `install shim [gh]` | write the `gh` egress shim to `<home>/bin` | `action`, `path`, `changed`, `tool`, `binDir`, `pathInstruction`, `reason?` |
 | `install shim --uninstall` | remove the shim (never a file repo-aegis did not write) | `action`, `path`, `changed`, `reason?` |

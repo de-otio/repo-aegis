@@ -43,11 +43,15 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { findWorkingTrees, defaultScanRoots } from "../repo-walk.js";
+import { currentEnforcementPin } from "../enforcement-pin.js";
 import { checkLabel, isFailure, isReportable, PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
 import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
 import { ghOwnerChecks, registryStateChecks, type DoctorRegistryState, type GhCheckOptions } from "./doctor-owner-checks.js";
 import { checkPrePushHook, checkShellStartupOverrides, checkSshGithubRedirect } from "./doctor-env-checks.js";
+import { enforcementPinChecks } from "./doctor-pin-checks.js";
+import { managedDropinChecks, readDropInSettings, userSettingsEnforcementCheck } from "./doctor-managed-checks.js";
+import { resolveManagedEnv, type ManagedEnv } from "./managed-privileged.js";
 
 interface DoctorOptions extends OutputOptions {
   scanRoot?: string[];
@@ -74,6 +78,8 @@ interface DoctorOptions extends OutputOptions {
   ghOptions?: GhCheckOptions;
   /** Test seam: what the global `core.hooksPath` holds, for `PREPUSH_HOOK_MISSING`. */
   readGlobalHooksPath?: () => string | null;
+  /** Test seam for the managed drop-in checks: platform, uid, file system view, the privileged runner. Honoured only under the Node test runner. */
+  managed?: Partial<ManagedEnv>;
 }
 
 export interface DoctorRepoResult {
@@ -233,10 +239,22 @@ function loadRegistryForDoctor(): RegistryLoad {
 }
 
 function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
-  const checks = [checkPushDefault(), ...checkShim(), ...checkGuardHook(opts.claudeHome)];
+  // The managed drop-in (D8) is where the Claude Code hooks and deny rules live once
+  // `install claude-md` has run; the guard and deny checks read it with the user file.
+  const managedEnv = resolveManagedEnv(opts.managed);
+  const dropin = readDropInSettings(managedEnv);
+  const checks = [
+    checkPushDefault(),
+    ...checkShim(),
+    ...enforcementPinChecks(process.env, undefined, opts.claudeHome),
+    ...checkGuardHook(opts.claudeHome, dropin),
+    ...managedDropinChecks({ env: managedEnv, ...(opts.claudeHome !== undefined && { claudeHome: opts.claudeHome }) }),
+  ];
+  const inUserFile = userSettingsEnforcementCheck(opts.claudeHome);
+  if (inUserFile !== null) checks.push(inUserFile);
   checks.push(...registryStateChecks(reg.state, reg.registry, reg.encrypted));
   // With no registry there is nothing to protect and nothing to compare gh against.
-  if (reg.state !== "missing") checks.push(checkRegistryAgentWritable(opts.claudeHome));
+  if (reg.state !== "missing") checks.push(checkRegistryAgentWritable(opts.claudeHome, undefined, dropin));
   if (reg.state === "loaded" && reg.registry !== null) {
     checks.push(...ghOwnerChecks(reg.registry, process.env, opts.ghOptions));
   }
@@ -334,7 +352,7 @@ export function doctor(opts: DoctorOptions): void {
   for (const root of roots) {
     for (const wt of findWorkingTrees(root)) {
       scanned++;
-      let state = resolveHookState(wt);
+      let state = resolveHookState(wt, currentEnforcementPin());
       if (!state.isGitRepo) continue; // walker found a `.git` entry that git itself doesn't recognise (corrupt/bare edge case) — nothing to evaluate.
 
       const checks = egressChecksOn ? repoEgressChecks(wt, registry) : [];
@@ -378,7 +396,7 @@ export function doctor(opts: DoctorOptions): void {
             // it can also change which scripts count as shadowed. The
             // reported code/effectivePath must reflect the post-fix
             // state, not the stale pre-fix snapshot.
-            state = resolveHookState(wt);
+            state = resolveHookState(wt, currentEnforcementPin());
           }
         }
       }
@@ -400,7 +418,7 @@ export function doctor(opts: DoctorOptions): void {
   // per-repo property. `checkGuardHook` is the same answer the machine checks
   // above reported, so a missing guard hook is not double-reported.
   if (egressChecksOn) {
-    const guardRegistered = checkGuardHook(opts.claudeHome).every(c => c.ok);
+    const guardRegistered = checkGuardHook(opts.claudeHome, readDropInSettings(resolveManagedEnv(opts.managed))).every(c => c.ok);
     const prePush = checkPrePushHook(guardRegistered, opts.readGlobalHooksPath);
     if (prePush !== null) machine.push(prePush);
   }

@@ -697,13 +697,27 @@ merge.
 
 ### `repo-aegis install claude-md`
 
-Wires the repo-aegis hooks into Claude Code:
+Wires the repo-aegis hooks into Claude Code. By default the hooks and the
+deny rules (items 2 and 3) are written to a **root-owned managed-settings
+drop-in** (`/Library/Application Support/ClaudeCode/managed-settings.d/
+50-repo-aegis-<uid>.json` on macOS, `/etc/claude-code/managed-settings.d/…` on
+Linux), from your own terminal: it shows the path, size, digest and a diff,
+asks `[y/N]`, and `sudo` asks for your password. Each hook starts with a uid
+guard so other accounts on the machine are unaffected. The first run also
+removes repo-aegis's earlier entries from `~/.claude/settings.json` once the
+drop-in is verified. `--user-settings` writes `~/.claude/settings.json` instead
+(containers, no `sudo`). Details, recovery and caveats:
+[configuration.md](configuration.md#the-claude-code-managed-drop-in).
 1. Appends a managed block to `~/.claude/CLAUDE.md` describing how the
    agent should react to a marker hit, and how to recover from an egress
    denial (re-issue explicitly; never set `REPO_AEGIS_EGRESS_HUMAN`; read
    the `PUBLISHED →` receipt after a publish).
-2. Adds entries to `~/.claude/settings.json`, all PATH-resolved at hook
-   time and all idempotent:
+2. Adds entries to the managed drop-in (or `~/.claude/settings.json` with
+   `--user-settings`), all idempotent. The commands
+   below are shown by hook name; each is written as a one-line `sh` command
+   that runs the hook on the **pinned** node and CLI by absolute path and
+   exits 2 (blocking) if either is gone, never a `repo-aegis` looked up on
+   PATH. An older by-name entry is replaced, not duplicated:
 
 | Event | Matcher | Command |
 |---|---|---|
@@ -767,7 +781,14 @@ stdin JSON natively, so `jq` is no longer required.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--claude-home <dir>` | `~/.claude` | override default location |
-| `--dry-run` / `--print-only` | off | preview the would-be settings.json + CLAUDE.md additions |
+| `--dry-run` / `--print-only` | off | preview the would-be drop-in (or settings.json) + CLAUDE.md additions; runs nothing as root |
+| `--user-settings` | off | write `~/.claude/settings.json` instead of the managed drop-in; `doctor` warns `ENFORCEMENT_IN_USER_SETTINGS` |
+| `--first-touch` | off | also register the SessionStart `first-touch` hook |
+| `--uninstall` | off | remove the drop-in (terminal and `sudo` password; run this **before** `npm rm -g repo-aegis`), the managed CLAUDE.md block and the settings.json entries |
+
+The drop-in also registers a SessionStart `hook managed-heartbeat`, which records
+`state/managed-hooks-seen` so `doctor` can tell that Claude Code loads the file
+(`MANAGED_HOOKS_NOT_FIRING`).
 
 ### `repo-aegis doctor`
 
@@ -1047,8 +1068,8 @@ shapes), and runs `check --path` on it. Output flows back into the
 agent's tool result as JSON (always — never literal markers).
 
 This is the canonical hook entry. Settings.json from
-`install claude-md` references it by bin name (`repo-aegis hook
-scan-after-write`), which is PATH-resolved at hook time.
+`install claude-md` registers it as a pinned command (the pinned node and
+CLI, by absolute path, exit 2 if either is gone) rather than by bin name.
 
 Silent exits (code 0):
 - empty stdin (the agent invoked the hook with no payload)
@@ -1386,7 +1407,15 @@ now reports, unless `--no-egress-checks`:
 |---|---|---|
 | `PUSH_DEFAULT_IMPLICIT` | global `push.default` is unset or not `nothing` | `git config --global push.default nothing` |
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` | no shim; another `gh` precedes it on `PATH`; the shim on `PATH` is an earlier release's script | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
-| `GUARD_HOOK_UNREGISTERED` | Claude Code `settings.json` has no `guard-egress` entry | `repo-aegis install claude-md` |
+| `ENFORCEMENT_UNPINNED` (**fail**) | an installed git hook, the shim or a Claude Code hook command calls `repo-aegis` by name (an install from before the enforcement pin) | `repo-aegis install hooks` / `install shim` / `install claude-md` |
+| `ENFORCEMENT_PIN_MISSING` (**fail**) | a pinned node or CLI path no longer exists, so that hook exits 1 and that shim refuses publishing verbs | `repo-aegis install hooks` / `repo-aegis install shim` |
+| `MULTIPLE_INSTALLS` (warn) | more than one `repo-aegis` on `PATH` (each listed with its version), or the first one is not the pinned one | keep one install, then re-run `install hooks` and `install shim` |
+| `GUARD_HOOK_UNREGISTERED` | neither the managed drop-in nor Claude Code `settings.json` has a `guard-egress` entry | `repo-aegis install claude-md` |
+| `MANAGED_DROPIN_STALE` / `MANAGED_DROPIN_NOT_ROOT_OWNED` / `MANAGED_DROPIN_UNREADABLE` (**fail**) | the managed drop-in differs from what would be written now; it or a directory above it is owned by a user, writable by group or others or a symlink; it is not `0644` (directories `0755`) | `repo-aegis install claude-md` |
+| `MANAGED_DROPIN_ORPHANED` / `MANAGED_DROPIN_LEDGER_STALE` (**fail**) | the drop-in has no ledger entry or its pin points at missing files (every hook blocks); or the ledger names a drop-in that is gone | `repo-aegis install claude-md`, or remove it: `sudo rm '<path>'` (printed); `install claude-md --uninstall` clears a stale ledger |
+| `MANAGED_HOOKS_DISABLED` / `MANAGED_SOURCE_SHADOWED` / `MANAGED_HOOKS_NOT_FIRING` (**fail**) | another managed file sets `disableAllHooks: true`; a macOS `com.anthropic.claudecode` profile outranks the files; or a Claude Code session started after the last heartbeat (server-managed policy and MDM keys make Claude Code ignore drop-ins, invisibly) | check `/status` in Claude Code lists `(drop-ins)`; have the policy owner add the hooks, or `install claude-md --user-settings` |
+| `SUDO_NOPASSWD` (warn) | `sudo -n -k true` succeeds, so an agent with a fake terminal can rewrite or remove the drop-in: no stronger than the user file | require a sudo password for this account |
+| `ENFORCEMENT_IN_USER_SETTINGS` (warn) | repo-aegis hooks are in `~/.claude/settings.json`, which must stay per machine | `repo-aegis install claude-md` |
 | `CLASS_VISIBILITY_UNRESOLVED` (per repo) | a repo with a GitHub remote has no explicit class or no cached visibility | `repo-aegis classify --apply && repo-aegis status` in that repo |
 | `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
 | `REGISTRY_UNREADABLE` (**fail**) | the registry exists but is encrypted at rest or does not parse, so rule h refuses every non-interactive egress that has a destination | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal), or repair the file |

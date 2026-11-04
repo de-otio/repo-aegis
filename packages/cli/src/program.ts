@@ -333,8 +333,12 @@ export async function buildProgram(): Promise<Command> {
 
   install
     .command("claude-md")
-    .description("install Claude Code PostToolUse hook + CLAUDE.md snippet")
+    .description("install the Claude Code hooks and deny rules as a root-owned managed-settings drop-in (asks for your sudo password), plus a CLAUDE.md snippet")
     .option("--claude-home <dir>", "override default ~/.claude location")
+    .option(
+      "--user-settings",
+      "write the hooks and deny rules to ~/.claude/settings.json instead of the managed drop-in: for containers and other places without sudo (that file must then stay per machine)",
+    )
     .option("--dry-run", "preview the would-be settings.json + CLAUDE.md additions without writing")
     .option("--print-only", "alias for --dry-run")
     .option(
@@ -343,12 +347,13 @@ export async function buildProgram(): Promise<Command> {
     )
     .option(
       "--uninstall",
-      "strip the managed CLAUDE.md block and remove repo-aegis hook entries from settings.json (idempotent)",
+      "remove the managed drop-in (asks for your sudo password, from a terminal), strip the managed CLAUDE.md block and remove repo-aegis hook entries from settings.json (idempotent). Run this BEFORE `npm rm -g repo-aegis`",
     )
     .action((opts, cmd) => {
       const merged = withGlobals(opts, cmd) as {
         dryRun?: boolean;
         printOnly?: boolean;
+        userSettings?: boolean;
       };
       if (merged.printOnly) merged.dryRun = true;
       installClaudeMd(merged);
@@ -505,6 +510,14 @@ export async function buildProgram(): Promise<Command> {
     .action(async (opts, cmd) => {
       const { hookFirstTouch } = await import("./commands/hook-first-touch.js");
       hookFirstTouch(withGlobals(opts, cmd));
+    });
+
+  hook
+    .command("managed-heartbeat")
+    .description("SessionStart (managed drop-in only): record that Claude Code loaded the managed settings, for `doctor`'s MANAGED_HOOKS_NOT_FIRING")
+    .action(async () => {
+      const { hookManagedHeartbeat } = await import("./commands/hook-managed-heartbeat.js");
+      hookManagedHeartbeat();
     });
 
   // `audit-log` subcommand group — operator compliance trail. OFF by
