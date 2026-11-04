@@ -24,6 +24,7 @@ import {
   isPinnedHookCommand,
   pinnedHookCommand,
   pinProblem,
+  testSeamsEnabled,
   type EnforcementPin,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
@@ -31,6 +32,9 @@ import { readIfExists } from "../fs-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { applyManagedInstall, chooseTarget, planManagedInstall, uninstallManaged, type ManagedSeams } from "./install-claude-md-managed.js";
 import { managedShadowChecks } from "./managed-shadow-checks.js";
+import { heartbeatCheck } from "./managed-heartbeat-check.js";
+import { readManagedLedger } from "./managed-ledger.js";
+import { isHumanTerminal } from "../require-terminal.js";
 import type { DoctorCheck } from "./doctor-checks.js";
 import {
   BASH_HOOK_ARGS,
@@ -925,7 +929,7 @@ interface Migration {
  * rules by the ledger and the shape of our own rules, so what the person wrote
  * stays. A missing or unparseable file is left alone.
  */
-function migrateUserSettings(settingsPath: string, pin: EnforcementPin): Migration {
+function migrateUserSettings(settingsPath: string, pin: EnforcementPin, mode: "apply" | "plan" = "apply"): Migration {
   const none: Migration = { hooksRemoved: 0, rulesRemoved: 0 };
   let raw: string | null;
   let settings: SettingsJson;
@@ -938,6 +942,8 @@ function migrateUserSettings(settingsPath: string, pin: EnforcementPin): Migrati
   }
   const hooks = stripHookEntries(settings);
   const rules = stripDenyRules(settings, settingsPath, pin);
+  // "plan" counts what "apply" would remove; it only edits the parsed copy in memory.
+  if (mode === "plan") return { hooksRemoved: hooks.removed, rulesRemoved: rules.removed };
   if (hooks.removed > 0 || rules.removed > 0) {
     try {
       writeFileSync(settingsPath, stringifyLike(raw, settings));
@@ -1026,9 +1032,27 @@ function installManagedMode(ctx: ManagedModeContext): void {
 
   // D8.5: the drop-in is in place and read back. Only now, and only if no other
   // managed source shadows it, do repo-aegis's own earlier entries leave the user file.
+  // The user file is also the fallback a person re-adds when the drop-in is shadowed, so
+  // the migration waits for (a) no shadowing source, (b) a heartbeat that does not fail
+  // (MANAGED_HOOKS_NOT_FIRING; skipped on a first install is fine), and (c) a person at a
+  // terminal whenever it would remove anything: an unchanged drop-in has no root step to
+  // ask for one, and an agent must not be able to strip the fallback by re-running this.
   const settingsPath = join(claudeHome, "settings.json");
-  const shadowed = managedShadowChecks(env, paths).filter(c => !c.ok);
-  const migration: Migration = shadowed.length === 0 ? migrateUserSettings(settingsPath, pin) : { hooksRemoved: 0, rulesRemoved: 0 };
+  const none: Migration = { hooksRemoved: 0, rulesRemoved: 0 };
+  const heartbeat = heartbeatCheck(
+    { claudeHome, ...(testSeamsEnabled() && opts.managed?.sessionBirths !== undefined && { sessionBirths: opts.managed.sessionBirths }) },
+    readManagedLedger()?.installedAt ?? null,
+  );
+  const shadowed: DoctorCheck[] = [...managedShadowChecks(env, paths).filter(c => !c.ok), ...(heartbeat.ok ? [] : [heartbeat])];
+  let migration: Migration = none;
+  let needsTerminal: Migration | null = null;
+  if (shadowed.length === 0) {
+    const wouldRemove = migrateUserSettings(settingsPath, pin, "plan");
+    if (wouldRemove.hooksRemoved + wouldRemove.rulesRemoved > 0) {
+      if (isHumanTerminal(opts.managed?.terminal ?? {})) migration = migrateUserSettings(settingsPath, pin);
+      else needsTerminal = wouldRemove;
+    }
+  }
 
   try {
     mkdirSync(claudeHome, { recursive: true });
@@ -1071,6 +1095,7 @@ function installManagedMode(ctx: ManagedModeContext): void {
         hooksRemoved: migration.hooksRemoved,
         denyRulesRemoved: migration.rulesRemoved,
         keptBecause: shadowed.map((c: DoctorCheck) => ({ code: c.code, detail: c.detail })),
+        needsTerminal: needsTerminal === null ? null : { hooksWouldRemove: needsTerminal.hooksRemoved, denyRulesWouldRemove: needsTerminal.rulesRemoved },
       },
       registryDeny: {
         rules: denyPlan.rules,
@@ -1094,6 +1119,12 @@ function installManagedMode(ctx: ManagedModeContext): void {
     emitText(
       `removed ${migration.hooksRemoved} hook entr${migration.hooksRemoved === 1 ? "y" : "ies"} and ${migration.rulesRemoved} permissions.deny rule(s) ` +
         `from ${settingsPath}: the drop-in carries them now, and that file no longer has to stay per machine`,
+    );
+  }
+  if (needsTerminal !== null) {
+    emitText(
+      `a run from a terminal would remove ${needsTerminal.hooksRemoved} hook entr${needsTerminal.hooksRemoved === 1 ? "y" : "ies"} and ${needsTerminal.rulesRemoved} permissions.deny rule(s) ` +
+        `from ${settingsPath}; it was left untouched because removing them needs a person at a terminal (run \`repo-aegis install claude-md\` from your own terminal)`,
     );
   }
   for (const c of shadowed) {

@@ -58,6 +58,13 @@ function run(e: Env, opts: Record<string, unknown>) {
   );
 }
 
+/** `install claude-md` again, with `terminal` and any further managed seams. */
+function rerun(e: Env, terminal: Record<string, unknown>, seams: Record<string, unknown> = {}) {
+  return withEnv("REPO_AEGIS_HOME", e.aegisHome, () =>
+    captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, pin: PIN, managed: { env: e.sys.env, terminal, ...seams } })),
+  );
+}
+
 /** What the user keeps in their own file, in an order that is not alphabetical. */
 const USER_OWN = {
   model: "sonnet",
@@ -213,17 +220,74 @@ describe("D8.5: it only happens after the managed write is verified and nothing 
     assert.equal(readFileSync(mac.settingsPath, "utf8"), JSON.stringify(USER_OWN, null, 2) + "\n");
   });
 
-  it("an already-installed, unchanged drop-in still migrates old entries (and needs no terminal for the root step)", () => {
+  it("an already-installed, unchanged drop-in still migrates old entries, with a person at the terminal and no root step", () => {
     const e = makeEnv();
     run(e, {});
     const text = seedWithOurEntries(e, 2);
     assert.ok(text.includes("hooks"));
     const before = e.sys.calls.length;
-    const out = withEnv("REPO_AEGIS_HOME", e.aegisHome, () =>
-      captureOutput(() => installClaudeMd({ claudeHome: e.claudeHome, pin: PIN, managed: { env: e.sys.env, terminal: { stderrIsTTY: false } } })),
-    );
+    const out = rerun(e, PERSON);
     assert.equal(out.exitCode, undefined, out.stderr);
-    assert.equal(e.sys.calls.length, before);
+    assert.equal(e.sys.calls.length, before, "nothing ran as root");
     assert.equal(readFileSync(e.settingsPath, "utf8"), JSON.stringify(USER_OWN, null, 2) + "\n");
+  });
+});
+
+// Security review M1: with the drop-in unchanged there is no root step, so nothing
+// asked for a terminal, and an agent could strip the user-file fallback that a
+// person had put back because the drop-in was shadowed.
+describe("M1: migration needs a person at a terminal and a heartbeat that does not fail", () => {
+  /** An unchanged drop-in installed an hour ago, and a user file a person re-added our entries to. */
+  function installedThenReadded(): { e: Env; text: string } {
+    const e = makeEnv();
+    run(e, {});
+    const l = JSON.parse(readFileSync(join(e.aegisHome, "state", "claude-md-managed.json"), "utf8")) as Record<string, unknown>;
+    writeFileSync(join(e.aegisHome, "state", "claude-md-managed.json"), JSON.stringify({ ...l, installedAt: new Date(Date.now() - 3_600_000).toISOString() }));
+    const text = seedWithOurEntries(e, 2);
+    e.sys.calls.length = 0;
+    return { e, text };
+  }
+
+  it("drop-in unchanged + the heartbeat failing: the user file stays byte-identical and says why", () => {
+    const { e, text } = installedThenReadded();
+    // A session started after the install and no heartbeat was ever recorded.
+    const out = rerun(e, PERSON, { sessionBirths: () => [Date.now() - 60_000] });
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.equal(readFileSync(e.settingsPath, "utf8"), text);
+    assert.match(out.stdout, /MANAGED_HOOKS_NOT_FIRING/);
+    assert.equal(e.sys.calls.length, 0, "nothing ran as root");
+  });
+
+  it("drop-in unchanged + the heartbeat fine: it migrates", () => {
+    const { e } = installedThenReadded();
+    writeFileSync(join(e.aegisHome, "state", "managed-hooks-seen"), new Date().toISOString() + "\n");
+    const out = rerun(e, PERSON, { sessionBirths: () => [Date.now() - 60_000] });
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.equal(readFileSync(e.settingsPath, "utf8"), JSON.stringify(USER_OWN, null, 2) + "\n");
+  });
+
+  it("drop-in unchanged + no terminal: the user file stays byte-identical and the output lists what a terminal run would remove", () => {
+    const { e, text } = installedThenReadded();
+    const out = rerun(e, { stderrIsTTY: false });
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.equal(readFileSync(e.settingsPath, "utf8"), text);
+    assert.match(out.stdout, /from a terminal/);
+    assert.match(out.stdout, /would remove \d+ hook entr(y|ies) and \d+ permissions\.deny rule/);
+    assert.equal(e.sys.calls.length, 0);
+  });
+
+  it("a terminal where an agent host sits above the process counts as no terminal", () => {
+    const { e, text } = installedThenReadded();
+    const out = rerun(e, { stderrIsTTY: true, ancestry: () => [{ pid: 2, ppid: 1, comm: "claude", argv: ["claude"], uid: 501 }, { pid: 1, ppid: 0, comm: "launchd", argv: ["launchd"], uid: 0 }] });
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.equal(readFileSync(e.settingsPath, "utf8"), text);
+  });
+
+  it("no terminal and nothing to remove says nothing about migration", () => {
+    const e = makeEnv();
+    run(e, {});
+    const out = rerun(e, { stderrIsTTY: false });
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.doesNotMatch(out.stdout, /would remove/);
   });
 });

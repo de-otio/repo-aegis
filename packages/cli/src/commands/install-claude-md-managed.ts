@@ -42,6 +42,8 @@ import type { EnforcementPin } from "@de-otio/repo-aegis-core";
 export interface ManagedSeams {
   env?: Partial<ManagedEnv>;
   terminal?: ConfirmOptions;
+  /** Session start times (ms) for the heartbeat check that gates the migration. */
+  sessionBirths?: () => number[];
 }
 
 export type ManagedTarget =
