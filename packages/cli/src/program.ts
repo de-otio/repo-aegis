@@ -347,7 +347,7 @@ export async function buildProgram(): Promise<Command> {
     )
     .option(
       "--uninstall",
-      "strip the managed CLAUDE.md block and remove repo-aegis hook entries from settings.json (idempotent)",
+      "remove the managed drop-in (asks for your sudo password, from a terminal), strip the managed CLAUDE.md block and remove repo-aegis hook entries from settings.json (idempotent). Run this BEFORE `npm rm -g repo-aegis`",
     )
     .action((opts, cmd) => {
       const merged = withGlobals(opts, cmd) as {

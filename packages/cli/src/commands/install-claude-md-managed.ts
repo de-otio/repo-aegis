@@ -12,7 +12,7 @@
 // digest and diff, write the ledger, and only then ask root to write. The
 // password prompt of `sudo` is the control; the terminal check is a convenience.
 import { emitError, type OutputOptions } from "../format.js";
-import { confirmOnTerminal, requireTerminal, type ConfirmOptions } from "../require-terminal.js";
+import { confirmOnTerminal, isHumanTerminal, requireTerminal, type ConfirmOptions } from "../require-terminal.js";
 import {
   digestOf,
   lineDiff,
@@ -24,6 +24,8 @@ import {
 } from "./managed-dropin.js";
 import {
   fileProblem,
+  removalNeeded,
+  removeDropIn,
   resolveManagedEnv,
   sudoRmLine,
   verifyDirectoryChain,
@@ -31,6 +33,7 @@ import {
   writeDropIn,
   type CreatedDirs,
   type ManagedEnv,
+  type RemovePlan,
 } from "./managed-privileged.js";
 import { readManagedLedger, removeManagedLedger, writeManagedLedger, type ManagedLedger } from "./managed-ledger.js";
 import type { EnforcementPin } from "@de-otio/repo-aegis-core";
@@ -255,4 +258,97 @@ export function applyManagedInstall(
     /* the first ledger write already recorded the digest */
   }
   return { created, wrote: true };
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall (D8.9)
+// ---------------------------------------------------------------------------
+
+/** What `uninstallManaged` did, for the report. */
+export interface ManagedRemoval {
+  /** The uid-derived drop-in path, or null where this platform has none. */
+  path: string | null;
+  /** True when the drop-in file was there and is now gone. */
+  removed: boolean;
+  /** Directories removed, innermost first. */
+  dirsRemoved: string[];
+  /** The ledger was present and is now removed. */
+  ledgerRemoved: boolean;
+}
+
+/**
+ * Remove the drop-in for this uid (D8.9), whatever the ledger says about the
+ * file: the path comes from platform and uid, so a deleted or wiped ledger cannot
+ * leave a fail-closed hook behind. The ledger only decides which EMPTY directories
+ * repo-aegis may remove, and it holds booleans, not paths. Needs root only if
+ * there is something to remove; then it needs a person (terminal and `y`), an
+ * unsafe `sudo` or directory is refused, and the removal is read back.
+ *
+ * `silent` (the full `repo-aegis uninstall` step) throws instead of exiting, so
+ * the other uninstall steps still run.
+ */
+export function uninstallManaged(opts: { managed?: ManagedSeams; silent?: boolean } & OutputOptions): ManagedRemoval {
+  const env = resolveManagedEnv(opts.managed?.env);
+  const paths = managedPaths(env.platform, env.uid);
+  const none: ManagedRemoval = { path: paths?.file ?? null, removed: false, dirsRemoved: [], ledgerRemoved: false };
+  if (paths === null) return none;
+
+  const terminal = opts.managed?.terminal ?? {};
+  const refuse = (code: string, message: string, details?: string): never => {
+    if (opts.silent) throw new Error(`${message}${details === undefined ? "" : ` (${details})`}`);
+    return emitError({ code, error: message, ...(details !== undefined && { details }) }, opts);
+  };
+
+  const ledger = readManagedLedger();
+  const plan: RemovePlan = {
+    removeLegacy: ledger?.legacyFile === true,
+    dropinDirCreated: ledger?.createdDirs.dropin === true,
+    systemDirCreated: ledger?.createdDirs.system === true,
+  };
+  const existed = env.fs.lstat(paths.file) !== null;
+  const dirsBefore = [paths.dropinDir, paths.systemDir].filter(d => env.fs.lstat(d) !== null);
+  let dirsRemoved: string[] = [];
+
+  if (removalNeeded(env, paths, plan)) {
+    const needsTty =
+      "the managed drop-in is removed as root, and that needs a person at a terminal: this shell has no TTY on stderr. " +
+      "Run `repo-aegis install claude-md --uninstall` from your own terminal.";
+    if (opts.silent) {
+      if (!isHumanTerminal(terminal)) refuse("MANAGED_NEEDS_TTY", needsTty.replace("this shell has no TTY on stderr", "there is no terminal here (a terminal is required)"));
+    } else {
+      requireTerminal("MANAGED_NEEDS_TTY", needsTty, { ...terminal, ...opts });
+    }
+    const toolIssue = verifyPrivilegedTools(env).filter(p => !(p.tool === "id" && p.missing));
+    if (toolIssue.length > 0) {
+      refuse("PRIVILEGED_TOOL_UNSAFE", `refusing to run sudo: ${toolIssue.map(p => `${p.path}: ${p.reason}`).join("; ")}`, `nothing was run as root; remove the file by hand once you have checked sudo: ${sudoRmLine(paths.file)}`);
+    }
+    const dirIssue = verifyDirectoryChain(env, paths);
+    if (dirIssue !== null) {
+      refuse("SYSTEM_DIR_UNSAFE", `refusing to write below ${paths.systemDir}: ${dirIssue}`, `nothing was run as root; remove the file by hand once you have checked the directory: ${sudoRmLine(paths.file)}`);
+    }
+    const lines = [
+      "repo-aegis will remove, as root:",
+      `  ${paths.file}`,
+      ...(plan.dropinDirCreated || plan.systemDirCreated
+        ? [`  and ${[plan.dropinDirCreated ? paths.dropinDir : null, plan.systemDirCreated ? paths.systemDir : null].filter((d): d is string => d !== null).join(", ")} if empty (repo-aegis created them)`]
+        : []),
+      "  nothing else: not managed-settings.json, not other drop-ins, not other users' files.",
+      "sudo will ask for your password next. Only a person at this terminal should continue.",
+    ];
+    if (!confirmOnTerminal(lines.join("\n"), "Remove this as root?", { ...terminal, ...opts })) {
+      refuse("MANAGED_NOT_CONFIRMED", "not confirmed: nothing was removed");
+    }
+    const result = removeDropIn(env, paths, plan);
+    if (!result.ok) {
+      if (opts.silent) throw new Error(result.message);
+      process.stderr.write(`repo-aegis: ${result.message}\n`);
+      process.exit(1);
+    }
+    dirsRemoved = [paths.dropinDir, paths.systemDir].filter(d => dirsBefore.includes(d) && env.fs.lstat(d) === null);
+  }
+
+  // The ledger goes only after a verified removal: the file is gone now.
+  let ledgerRemoved = false;
+  if (env.fs.lstat(paths.file) === null && ledger !== null) ledgerRemoved = removeManagedLedger();
+  return { path: paths.file, removed: existed && env.fs.lstat(paths.file) === null, dirsRemoved, ledgerRemoved };
 }

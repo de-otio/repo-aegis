@@ -28,7 +28,7 @@ import {
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { readIfExists } from "../fs-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
-import { applyManagedInstall, chooseTarget, planManagedInstall, type ManagedSeams } from "./install-claude-md-managed.js";
+import { applyManagedInstall, chooseTarget, planManagedInstall, uninstallManaged, type ManagedSeams } from "./install-claude-md-managed.js";
 import { managedShadowChecks } from "./doctor-managed-checks.js";
 import type { DoctorCheck } from "./doctor-checks.js";
 import {
@@ -1357,6 +1357,10 @@ interface UninstallClaudeMdContext {
 function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
   const { claudeHome, claudeMdPath, settingsPath, opts } = ctx;
 
+  // 0. The managed drop-in (D8.9) first: the step a person can refuse or that can
+  // fail. If it does, nothing else is removed and enforcement stays where it is.
+  const managedRemoval = uninstallManaged(opts);
+
   // 1. Strip the managed block from CLAUDE.md (if present).
   let claudeMdStripped = false;
   const body = readIfExists(claudeMdPath);
@@ -1444,6 +1448,8 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
         registryDenyRulesRemoved: denyRulesRemoved,
         settingsAbsent,
+        managedDropInRemoved: managedRemoval.removed,
+        managedDirsRemoved: managedRemoval.dirsRemoved.length,
       },
     });
   } catch {
@@ -1457,6 +1463,12 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
       action: "uninstall-claude-md",
       claudeHome,
       claudeMd: { path: claudeMdPath, stripped: claudeMdStripped, absent: claudeMdAbsent },
+      managed: {
+        path: managedRemoval.path,
+        removed: managedRemoval.removed,
+        dirsRemoved: managedRemoval.dirsRemoved,
+        ledgerRemoved: managedRemoval.ledgerRemoved,
+      },
       settings: {
         path: settingsPath,
         absent: settingsAbsent,
@@ -1473,6 +1485,12 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
     return;
   }
 
+  if (managedRemoval.removed) {
+    emitText(`removed the managed drop-in ${managedRemoval.path}`);
+    for (const d of managedRemoval.dirsRemoved) emitText(`removed the empty directory ${d}, which repo-aegis created`);
+  } else if (managedRemoval.path !== null) {
+    emitText(`no managed drop-in at ${managedRemoval.path}`);
+  }
   if (claudeMdAbsent) emitText(`${claudeMdPath} not present (nothing to strip)`);
   else if (claudeMdStripped) emitText(`stripped managed block from ${claudeMdPath}`);
   else emitText(`no managed block found in ${claudeMdPath}`);
