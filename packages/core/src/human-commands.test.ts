@@ -101,6 +101,31 @@ const HITS: ReadonlyArray<readonly [command: string, kind: HumanOnlyKind]> = [
   ["sudo rmdir /etc/claude-code/managed-settings.d", "managed-settings-write"],
   ["doas rm /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
   ["sudo -n bash -c 'rm /etc/claude-code/managed-settings.d/x.json'", "managed-settings-write"],
+  // L4: verbs, interpreters and path spellings the first list missed
+  ["sudo unlink /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo find /etc/claude-code -name '*.json' -delete", "managed-settings-write"],
+  ["sudo find /etc/claude-code/managed-settings.d -type f -exec rm {} +", "managed-settings-write"],
+  ["sudo rm /etc/./claude-code/m*/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo rm /etc//claude-code//managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo rm /etc/x/../claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo rm '/Library/Application Support/./ClaudeCode/managed-settings.d/50-repo-aegis-501.json'", "managed-settings-write"],
+  ["sudo python3.12 -c \"import os; os.remove('/etc/claude-code/managed-settings.d/50-repo-aegis-1000.json')\"", "managed-settings-write"],
+  ["sudo perl5.34 -e 'unlink glob q{/etc/claude-code/managed-settings.d/*}'", "managed-settings-write"],
+  ["sudo ruby3.2 -e 'File.delete(%q{/etc/claude-code/managed-settings.d/x.json})'", "managed-settings-write"],
+  ["sudo node22 -e \"require('fs').unlinkSync('/etc/claude-code/managed-settings.d/x.json')\"", "managed-settings-write"],
+  ["sudo xargs rm < /etc/claude-code/managed-settings.d/list", "managed-settings-write"],
+  ["sudo shred -u /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  ["sudo rsync -a --delete /tmp/empty/ /etc/claude-code/managed-settings.d/", "managed-settings-write"],
+  ["sudo tar xf /tmp/x.tar -C /etc/claude-code/managed-settings.d", "managed-settings-write"],
+  ["sudo env PATH=/tmp rm /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  ["sudo -n /usr/bin/env rm /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  // a glob that can only mean the managed directory: the verb may be hidden in the glob too
+  ["sudo rm /etc/cl*/m*/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo rm -rf /etc/claude-co?e", "managed-settings-write"],
+  ["sudo /bin/r* '/Library/Application Support/Claude*/managed-settings.d/x.json'", "managed-settings-write"],
+  ["sudo rm /Library/Application\\ Support/ClaudeCode/m*/x.json", "managed-settings-write"],
+  ["script -q /dev/null sudo find /etc/claude-code -delete", "managed-settings-write"],
+  ["cd /etc/./claude-code/managed-settings.d && sudo unlink 50-repo-aegis-1000.json", "managed-settings-write"],
 ];
 
 const MISSES: ReadonlyArray<string> = [
@@ -161,6 +186,21 @@ const MISSES: ReadonlyArray<string> = [
   "grep -rn managed-settings doc/",
   "git commit -m 'sudo rm /etc/claude-code/x is refused'",
   "ls -l '/Library/Application Support/ClaudeCode/managed-settings.d'",
+  // L4: still allowed
+  "sudo find /etc/claude-code -maxdepth 1 -type f",
+  "sudo find /etc -maxdepth 1 -name hosts",
+  "sudo xargs rm < /tmp/list",
+  "sudo tar tf /tmp/x.tar",
+  "sudo python3.12 -c 'print(1)'",
+  "sudo env true",
+  "python3.12 -c 'print(1)'",
+  "find /tmp -name '*.json' -delete",
+  "unlink /tmp/x",
+  "sudo rm /tmp/./x",
+  "sudo rm /tmp//x/../y",
+  "sudo ls /etc/claude-code/./managed-settings.d",
+  "sudo apt install foo-*",
+  "rsync -a /tmp/a/ /tmp/b/",
 ];
 
 describe("findHumanOnlyCommand — refuses every human-only command, however it is run", () => {

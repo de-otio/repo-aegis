@@ -326,36 +326,73 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
   return null;
 }
 
+/**
+ * Spell a path the way the file system reads it: `/./` and a trailing `/.` are dropped, `//` is one `/`, and
+ * `/x/../` cancels. Only for matching words against the managed-settings location, never to run anything.
+ */
+function normalizePath(w: string): string {
+  let out = w.replace(/\/{2,}/g, "/");
+  for (let prev = ""; prev !== out; ) {
+    prev = out;
+    out = out.replace(/\/\.(?=\/|$)/g, "").replace(/\/(?!\.\.\/)[^/]+\/\.\.(?=\/|$)/g, "");
+  }
+  return out;
+}
+
 /** Words that name the Claude Code managed-settings location: `managed-settings*`, `/etc/claude-code`, `.../Application Support/ClaudeCode`. */
 function isManagedSettingsWord(w: string): boolean {
-  const l = w.toLowerCase();
+  const l = normalizePath(w).toLowerCase();
   return l.includes("managed-settings") || l.includes("/etc/claude-code") || l.includes("support/claudecode");
 }
+
+/**
+ * Part of the managed-settings location that a glob can leave standing: `claude`, `etc/cl`, `support/c`,
+ * `managed`. A word with one of these next to a glob, under `sudo`, is read as naming the location.
+ */
+const LOCATION_FRAGMENT = /claude|etc\/cl|support\/c|managed/;
+const GLOB = /[*?[]/;
 
 /** Privilege wrappers, and the commands that change a file or run one under it. */
 const PRIVILEGE_WORDS = new Set(["sudo", "doas"]);
 const MUTATING_WORDS = new Set([
   "rm", "rmdir", "mv", "cp", "tee", "install", "chmod", "chown", "chgrp", "ln", "truncate", "dd", "sed", "touch", "mkdir",
-  "perl", "python", "python3", "ruby", "node", "sh", "bash", "zsh", "dash", "ksh", "vi", "vim", "nano", "ed",
+  "unlink", "shred", "rsync", "tar", "env", "xargs", "find",
+  "sh", "bash", "zsh", "dash", "ksh", "vi", "vim", "nano", "ed",
 ]);
+/** Interpreters match by prefix: `python3.12`, `perl5.34`, `ruby3.2`, `node22`, `nodejs`. */
+const INTERPRETER_PREFIXES = ["python", "perl", "ruby", "node"];
+/** `find` only changes things with one of these; a plain `sudo find /etc/claude-code` is a lookup. */
+const FIND_ACTIONS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]);
+
+function isMutatingRegion(words: readonly string[]): boolean {
+  return words.some(w => {
+    const base = tokenBase(w);
+    if (base === "find") return words.some(x => FIND_ACTIONS.has(x));
+    return MUTATING_WORDS.has(base) || INTERPRETER_PREFIXES.some(p => base.startsWith(p));
+  });
+}
 
 /**
  * `sudo rm`, `mv`, `tee` ... on the managed-settings location, in any region of the command line
  * (so a `cd` before it, a pipe into `tee`, `bash -c`, `script` and `expect` all count). The words
  * are the same message-stripped, quote-stripped words the program-word search reads, so a
  * commit message that mentions the path is data.
+ *
+ * Paths are read after `/./`, `//` and `/x/../` are folded away. A `sudo` region that holds a glob and
+ * a fragment of the location (`/etc/cl*`, `Claude*`) counts too: the glob can hide the verb as well as
+ * the path. Prompt-adjacent: a script that builds the path at run time is not seen here. The control
+ * is the `sudo` password prompt (P7), not this text.
  */
 function writesManagedSettings(command: string): boolean {
-  const lower = command.toLowerCase();
-  if (!lower.includes("managed-settings") && !lower.includes("claude-code") && !lower.includes("claudecode")) return false;
   const regions = splitRegions(command).map(r => r.words);
   // A `cd` region keeps only its program word (its argument is a directory, not a command), so a `cd` into the
   // directory followed by `sudo rm <relative name>` needs its own look.
-  const cdsInto = /(?:^|[;&|(\n])\s*(?:cd|pushd)\s+[^;&|\n)]*(?:managed-settings|\/etc\/claude-code|support\/claudecode)/i.test(command);
+  const cdsInto = /(?:^|[;&|(\n])\s*(?:cd|pushd)\s+[^;&|\n)]*(?:managed-settings|\/etc\/claude-code|support\/claudecode)/i.test(normalizePath(command));
+  const privileged = regions.filter(words => words.some(w => PRIVILEGE_WORDS.has(tokenBase(w))));
+  if (privileged.length === 0) return false;
+  if (privileged.some(words => words.some(w => GLOB.test(w)) && words.some(w => LOCATION_FRAGMENT.test(normalizePath(w).toLowerCase())))) return true;
   if (!cdsInto && !regions.flat().some(isManagedSettingsWord)) return false;
-  return regions.some(
-    words => words.some(w => PRIVILEGE_WORDS.has(tokenBase(w))) && words.some(w => MUTATING_WORDS.has(tokenBase(w))),
-  );
+  return privileged.some(isMutatingRegion);
 }
 
 /**
