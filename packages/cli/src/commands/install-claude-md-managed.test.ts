@@ -8,7 +8,7 @@
 // nothing ever escalates. Placeholder names only.
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EnforcementPin } from "@de-otio/repo-aegis-core";
@@ -273,6 +273,20 @@ describe("install claude-md (managed): failures after the person said yes", () =
     assert.equal(existsSync(join(e.claudeHome, "CLAUDE.md")), false, "CLAUDE.md is only touched once the drop-in is in place");
     assert.ok(!e.sys.calls.some(c => c.args[0] === "/bin/mv"));
     assert.equal(ledger(e)?.createdDirs.dropin ?? false, true, "the directories it did create are recorded so uninstall can remove them");
+  });
+
+  it("L7: a symlink at the drop-in path exits 1 with no root step, and the symlink's target is not written", () => {
+    const e = makeEnv();
+    install(e);
+    const paths = managedPaths("linux", 1000)!;
+    rmSync(e.sys.at(paths.file));
+    symlinkSync(e.sys.at("/victim"), e.sys.at(paths.file));
+    e.sys.calls.length = 0;
+    const out = install(e, { json: true });
+    assert.equal(out.exitCode, 1);
+    assert.match(out.stderr, /not a regular file/);
+    assert.equal(e.sys.toolCalls().length, 0, "nothing ran as root");
+    assert.equal(existsSync(e.sys.at("/victim")), false);
   });
 
   it("a read-back mismatch (P6) exits 1 and prints the sudo rm line", () => {

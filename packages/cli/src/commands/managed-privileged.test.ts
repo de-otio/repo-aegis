@@ -356,6 +356,45 @@ describe("P3: a failed write never reaches mv and cleans up", () => {
   });
 });
 
+// Security review L7: `tee` and `mv` follow a symlink at the target, so a symlink,
+// directory or other non-file at either name is refused before root does anything.
+describe("L7: the file and the temp name must be regular files (or absent) before tee", () => {
+  const paths = managedPaths("linux", 1000)!;
+  const cases: Array<[string, "file" | "tmp", (s: FakeSystem, at: string) => void]> = [
+    ["a symlink at the temp name", "tmp", (s, at) => symlinkSync(s.at("/victim"), s.at(at))],
+    ["a directory at the temp name", "tmp", (s, at) => mkdirSync(s.at(at))],
+    ["a symlink at the drop-in path", "file", (s, at) => symlinkSync(s.at("/victim"), s.at(at))],
+    ["a dangling symlink at the drop-in path", "file", (s, at) => symlinkSync(s.at("/nowhere/at/all"), s.at(at))],
+    ["a directory at the drop-in path", "file", (s, at) => mkdirSync(s.at(at))],
+  ];
+  for (const [name, which, make] of cases) {
+    it(`${name} is refused with no sudo call at all`, () => {
+      const s = fake("linux", 1000);
+      makeDir(s, paths.systemDir);
+      makeDir(s, paths.dropinDir);
+      make(s, which === "file" ? paths.file : paths.tmp);
+      const r = writeDropIn(s.env, paths, TEXT);
+      assert.equal(r.ok, false);
+      assert.equal(r.ok ? "" : r.step, "target");
+      assert.match(r.ok ? "" : r.message, new RegExp(`${(which === "file" ? paths.file : paths.tmp).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*not a regular file`));
+      assert.match(r.ok ? "" : r.message, /nothing was run as root/);
+      assert.equal(s.calls.length, 0, "not even sudo -k");
+    });
+  }
+
+  it("a regular file at either name is fine: it is replaced", () => {
+    const s = fake("linux", 1000);
+    putFile(s, paths.tmp, "old junk\n", 0o600);
+    putFile(s, paths.file, '{"hooks":{}}\n', 0o644);
+    assert.equal(writeDropIn(s.env, paths, TEXT).ok, true);
+    assert.equal(readFileSync(s.at(paths.file), "utf8"), TEXT);
+  });
+
+  it("absent names are fine", () => {
+    assert.equal(writeDropIn(fake("linux", 1000).env, paths, TEXT).ok, true);
+  });
+});
+
 describe("P6: read-back after writing", () => {
   const paths = managedPaths("linux", 1000)!;
 

@@ -361,6 +361,19 @@ export function writeDropIn(env: ManagedEnv, paths: ManagedPaths, text: string):
   const dirIssue = verifyDirectoryChain(env, paths);
   if (dirIssue !== null) return refuse("directories", `${dirIssue}; nothing was run as root`);
 
+  // L7: `tee` and `mv` follow a symlink at the target, so neither name may be anything but a
+  // regular file (or absent). An agent cannot plant one in a root-owned directory, but the
+  // check costs one lstat and keeps a surprise from being written through.
+  for (const path of [paths.file, paths.tmp]) {
+    const st = env.fs.lstat(path);
+    if (st !== null && (st.isSymlink || !st.isFile)) {
+      return refuse(
+        "target",
+        `${path} exists and is not a regular file (a symlink or a directory); nothing was run as root. Look at it, and remove it by hand if it is not yours: ${sudoRmLine(path)} (sudo rmdir for a directory)`,
+      );
+    }
+  }
+
   const sudo = new Sudo(env);
   const t = sudo.tools;
   const digest = digestOf(text);
