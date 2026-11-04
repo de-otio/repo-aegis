@@ -82,7 +82,7 @@ export interface ManagedPlan {
   bytes: number;
   /** The file as it is now, or null when there is none. */
   current: string | null;
-  /** The current file is exactly this text, with the right owner and mode: nothing to do. */
+  /** The current file is exactly this text, with the right owner and mode, in a root-only directory chain: nothing to do. */
   unchanged: boolean;
   diff: string[];
 }
@@ -128,7 +128,9 @@ export function planManagedInstall(
     );
   }
   const digest = digestOf(text);
-  const unchanged = current === text && fileProblem(env, paths.file, digest) === null;
+  // Also requires a safe directory chain (P4): a drop-in that is byte-for-byte right but sits
+  // in a directory a non-root user can write is not "installed"; the normal path refuses it.
+  const unchanged = current === text && fileProblem(env, paths.file, digest) === null && verifyDirectoryChain(env, paths) === null;
   return { spec, text, digest, bytes: Buffer.byteLength(text), current, unchanged, diff: lineDiff(current ?? "", text) };
 }
 

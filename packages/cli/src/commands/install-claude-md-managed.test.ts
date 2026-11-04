@@ -8,7 +8,7 @@
 // nothing ever escalates. Placeholder names only.
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EnforcementPin } from "@de-otio/repo-aegis-core";
@@ -171,6 +171,32 @@ describe("install claude-md (managed): idempotence and re-pin", () => {
     assert.equal(out.exitCode, undefined, out.stderr);
     assert.equal(e.sys.calls.length, before);
     assert.match(out.stdout, /already installed|unchanged/);
+  });
+
+  // Security review L2: "unchanged" looked only at the file, so a drop-in directory that
+  // had become group-writable was reported as installed and fine.
+  it("L2: an unchanged file in a group-writable managed-settings.d is not 'already installed': it is refused before any root step", () => {
+    const e = makeEnv();
+    install(e);
+    const paths = managedPaths("linux", 1000)!;
+    chmodSync(e.sys.at(paths.dropinDir), 0o775);
+    const before = e.sys.calls.length;
+    const out = install(e, { json: true });
+    assert.equal(out.exitCode, 2, out.stdout);
+    const err = lastJsonLine<{ code: string; error: string }>(out.stderr);
+    assert.equal(err.code, "SYSTEM_DIR_UNSAFE");
+    assert.match(err.error, /managed-settings\.d/);
+    assert.equal(e.sys.calls.length, before, "nothing ran as root");
+    assert.doesNotMatch(out.stdout, /already installed/);
+  });
+
+  it("L2: the same unsafe directory is refused without a terminal too, rather than reported as unchanged", () => {
+    const e = makeEnv();
+    install(e);
+    chmodSync(e.sys.at(managedPaths("linux", 1000)!.dropinDir), 0o775);
+    const out = install(e, { json: true }, { stderrIsTTY: false, stdinIsTTY: false });
+    assert.equal(out.exitCode, 2);
+    assert.doesNotMatch(out.stdout, /already installed/);
   });
 
   it("a new pin replaces the file and keeps the created-directories record", () => {
