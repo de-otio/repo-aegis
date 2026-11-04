@@ -114,6 +114,12 @@ export interface SpawnOptions {
   input?: string;
   /** Always false: nothing is ever run through a shell. */
   shell: false;
+  /**
+   * Capture the child's stderr instead of showing it. For a probe whose expected
+   * outcome is a failure message (`sudo -n` saying "a password is required"),
+   * which would otherwise read as an error in the person's terminal.
+   */
+  quiet?: true;
 }
 
 export interface SpawnResult {
@@ -129,6 +135,11 @@ export type SpawnFn = (file: string, args: readonly string[], options: SpawnOpti
  * inject one would otherwise ask for a password. `sudo` prompts on the controlling
  * terminal, so stdin may stay the terminal (or a pipe for `tee`).
  */
+/** The child's stdio: stdin is the terminal unless input is given; stderr is shown unless `quiet`. */
+export function spawnStdio(options: SpawnOptions): ["pipe" | "inherit", "pipe", "pipe" | "inherit"] {
+  return [options.input !== undefined ? "pipe" : "inherit", "pipe", options.quiet ? "pipe" : "inherit"];
+}
+
 export const realSpawn: SpawnFn = (file, args, options) => {
   if (testSeamsEnabled()) {
     throw new Error(`refusing to run ${file} from the test runner: inject a spawn`);
@@ -138,7 +149,7 @@ export const realSpawn: SpawnFn = (file, args, options) => {
     shell: false,
     ...(options.input !== undefined && { input: options.input }),
     encoding: "utf8",
-    stdio: [options.input !== undefined ? "pipe" : "inherit", "pipe", "inherit"],
+    stdio: spawnStdio(options),
   });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 };

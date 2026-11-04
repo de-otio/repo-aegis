@@ -211,7 +211,12 @@ function sudoNopasswdCheck(env: ManagedEnv, installed: boolean): DoctorCheck {
       true,
     );
   }
-  const r = env.spawn(privilegedTools(env.platform).sudo, ["-n", "-k", "/usr/bin/true"], { env: sudoEnvironment(env.processEnv), shell: false });
+  const r = env.spawn(privilegedTools(env.platform).sudo, ["-n", "-k", "/usr/bin/true"], {
+    env: sudoEnvironment(env.processEnv),
+    shell: false,
+    // sudo's "a password is required" is the passing outcome; shown, it reads as an error.
+    quiet: true,
+  });
   if (r.status !== 0) return ok("sudo asks for a password");
   return {
     code: "SUDO_NOPASSWD",

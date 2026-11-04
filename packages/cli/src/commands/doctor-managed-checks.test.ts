@@ -26,7 +26,7 @@ import { checkGuardHook, checkRegistryAgentWritable, installClaudeMd, registryDe
 import { managedPaths } from "./managed-dropin.js";
 import { managedHeartbeatPath, managedLedgerPath, readManagedLedger } from "./managed-ledger.js";
 import { scanSessions } from "./managed-heartbeat-check.js";
-import { sudoEnvironment } from "./managed-privileged.js";
+import { spawnStdio, sudoEnvironment } from "./managed-privileged.js";
 
 let tmp: string;
 let n = 0;
@@ -518,6 +518,13 @@ describe("SUDO_NOPASSWD (D8.7, P7)", () => {
     assert.deepEqual(call.options.env, sudoEnvironment(e.sys.env.processEnv));
     assert.equal(call.options.shell, false);
     assert.equal(call.options.input, undefined);
+    assert.equal(call.options.quiet, true);
+  });
+
+  it("captures sudo's stderr rather than showing it: the passing outcome is its error message", () => {
+    assert.deepEqual(spawnStdio({ env: {}, shell: false, quiet: true }), ["inherit", "pipe", "pipe"]);
+    assert.deepEqual(spawnStdio({ env: {}, shell: false }), ["inherit", "pipe", "inherit"]);
+    assert.deepEqual(spawnStdio({ env: {}, shell: false, input: "x" }), ["pipe", "pipe", "inherit"]);
   });
 
   it("passes when sudo needs a password", () => {
