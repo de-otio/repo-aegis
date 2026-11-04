@@ -352,36 +352,19 @@ function isManagedSettingsWord(w: string): boolean {
 const LOCATION_FRAGMENT = /claude|etc\/cl|support\/c|managed/;
 const GLOB = /[*?[]/;
 
-/** Privilege wrappers, and the commands that change a file or run one under it. */
+/** Privilege wrappers. */
 const PRIVILEGE_WORDS = new Set(["sudo", "doas"]);
-const MUTATING_WORDS = new Set([
-  "rm", "rmdir", "mv", "cp", "tee", "install", "chmod", "chown", "chgrp", "ln", "truncate", "dd", "sed", "touch", "mkdir",
-  "unlink", "shred", "rsync", "tar", "env", "xargs", "find",
-  "sh", "bash", "zsh", "dash", "ksh", "vi", "vim", "nano", "ed",
-]);
-/** Interpreters match by prefix: `python3.12`, `perl5.34`, `ruby3.2`, `node22`, `nodejs`. */
-const INTERPRETER_PREFIXES = ["python", "perl", "ruby", "node"];
-/** `find` only changes things with one of these; a plain `sudo find /etc/claude-code` is a lookup. */
-const FIND_ACTIONS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]);
-
-function isMutatingRegion(words: readonly string[]): boolean {
-  return words.some(w => {
-    const base = tokenBase(w);
-    if (base === "find") return words.some(x => FIND_ACTIONS.has(x));
-    return MUTATING_WORDS.has(base) || INTERPRETER_PREFIXES.some(p => base.startsWith(p));
-  });
-}
 
 /**
- * `sudo rm`, `mv`, `tee` ... on the managed-settings location, in any region of the command line
- * (so a `cd` before it, a pipe into `tee`, `bash -c`, `script` and `expect` all count). The words
- * are the same message-stripped, quote-stripped words the program-word search reads, so a
- * commit message that mentions the path is data.
+ * `sudo` (any verb) on a command line that names the managed-settings location, in any region
+ * (so a `cd` before it, a pipe into `tee`, `bash -c`, `script` and `expect` all count). No verb list
+ * decides: the directory is `0755` and the drop-in `0644`, so reading them never needs `sudo`, and
+ * every verb a list leaves out would be a way past it. The words are the same message-stripped,
+ * quote-stripped words the program-word search reads, so a commit message that mentions the path is data.
  *
  * Paths are read after `/./`, `//` and `/x/../` are folded away. A `sudo` region that holds a glob and
- * a fragment of the location (`/etc/cl*`, `Claude*`) counts too: the glob can hide the verb as well as
- * the path. Prompt-adjacent: a script that builds the path at run time is not seen here. The control
- * is the `sudo` password prompt (P7), not this text.
+ * a fragment of the location (`/etc/cl*`, `Claude*`) counts too. Prompt-adjacent: a script that builds
+ * the path at run time is not seen here. The control is the `sudo` password prompt (P7), not this text.
  */
 function writesManagedSettings(command: string): boolean {
   const regions = splitRegions(command).map(r => r.words);
@@ -391,8 +374,7 @@ function writesManagedSettings(command: string): boolean {
   const privileged = regions.filter(words => words.some(w => PRIVILEGE_WORDS.has(tokenBase(w))));
   if (privileged.length === 0) return false;
   if (privileged.some(words => words.some(w => GLOB.test(w)) && words.some(w => LOCATION_FRAGMENT.test(normalizePath(w).toLowerCase())))) return true;
-  if (!cdsInto && !regions.flat().some(isManagedSettingsWord)) return false;
-  return privileged.some(isMutatingRegion);
+  return cdsInto || regions.flat().some(isManagedSettingsWord);
 }
 
 /**
@@ -462,7 +444,7 @@ const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string; w
       "agent that ran it would be taking the protection off itself, with or without a terminal attached",
   },
   "managed-settings-write": {
-    what: "sudo rm/mv/tee (or another write) on the Claude Code managed-settings directory",
+    what: "sudo on a command line that names the Claude Code managed-settings directory (reading it needs no sudo)",
     fix: "repo-aegis install claude-md   (or --uninstall; doc/configuration.md has the sudo line that removes the file)",
     why:
       "That directory holds the root-owned drop-in that keeps repo-aegis's hooks out of an agent's reach, so an agent that wrote " +

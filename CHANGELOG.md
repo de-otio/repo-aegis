@@ -85,7 +85,7 @@ re-run the installers; `repo-aegis doctor` reports them
   drop-ins) and, as warnings, `SUDO_NOPASSWD` and `ENFORCEMENT_IN_USER_SETTINGS`.
   With `NOPASSWD` sudo the drop-in is no stronger than the user file. The egress
   guard now also refuses an agent Bash command that uninstalls the drop-in or
-  runs `sudo rm`/`mv`/`tee` on the managed-settings directory
+  runs `sudo` on the managed-settings directory
   (`AGENT_RAN_HUMAN_COMMAND`). `GUARD_HOOK_UNREGISTERED` and
   `REGISTRY_AGENT_WRITABLE` read the drop-in as well as the user file. Library
   change: `managedHookCommand` and `isManagedHookCommand` in core. See
@@ -106,9 +106,9 @@ re-run the installers; `repo-aegis doctor` reports them
   - `SUDO_NOPASSWD` runs `sudo -n -k /usr/bin/true` only after the same check
     that covers every other tool root runs (a root-owned regular file that
     group and others cannot write).
-  - The agent-command guard also refuses `sudo unlink`, `find -delete`/`-exec`,
-    `xargs`, `shred`, `rsync`, `tar`, `env`, `python*`/`perl*`/`ruby*`/`node*`
-    and globbed or `/./`-spelled paths aimed at the managed-settings directory.
+  - The agent-command guard refuses any `sudo` or `doas` command, whatever the
+    verb, on a command line that names the managed-settings directory, including
+    globbed and `/./`-spelled paths. Reading the directory needs no `sudo`.
     It reads command text and is not a boundary.
   - The privileged write refuses, before any `sudo` call, a symlink, directory
     or other non-regular file at the drop-in path or its temp name.

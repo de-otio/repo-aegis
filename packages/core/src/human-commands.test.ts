@@ -126,6 +126,16 @@ const HITS: ReadonlyArray<readonly [command: string, kind: HumanOnlyKind]> = [
   ["sudo rm /Library/Application\\ Support/ClaudeCode/m*/x.json", "managed-settings-write"],
   ["script -q /dev/null sudo find /etc/claude-code -delete", "managed-settings-write"],
   ["cd /etc/./claude-code/managed-settings.d && sudo unlink 50-repo-aegis-1000.json", "managed-settings-write"],
+  // any verb under sudo: reads there need no sudo (0755 directory, 0644 file), so no verb list decides
+  ["sudo ls /etc/claude-code", "managed-settings-write"],
+  ["sudo find /etc/claude-code -maxdepth 1 -type f", "managed-settings-write"],
+  ["sudo ls /etc/claude-code/./managed-settings.d", "managed-settings-write"],
+  ["sudo gzip /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo patch /etc/claude-code/managed-settings.json /tmp/p", "managed-settings-write"],
+  ["sudo setfacl -m u:me:rw /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo awk 'BEGIN{system(\"true\")}' /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  ["sudo /opt/tool/bin/anything '/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-501.json'", "managed-settings-write"],
+  ["cd /etc/claude-code/managed-settings.d && sudo gzip 50-repo-aegis-1000.json", "managed-settings-write"],
 ];
 
 const MISSES: ReadonlyArray<string> = [
@@ -180,14 +190,12 @@ const MISSES: ReadonlyArray<string> = [
   "git commit -m \"repo-aegis install claude-md --uninstall is refused in agent text\"",
   "ls /etc/claude-code",
   "cat /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json",
-  "sudo ls /etc/claude-code",
   "sudo rm /tmp/x",
   "sudo apt install foo",
   "grep -rn managed-settings doc/",
   "git commit -m 'sudo rm /etc/claude-code/x is refused'",
   "ls -l '/Library/Application Support/ClaudeCode/managed-settings.d'",
   // L4: still allowed
-  "sudo find /etc/claude-code -maxdepth 1 -type f",
   "sudo find /etc -maxdepth 1 -name hosts",
   "sudo xargs rm < /tmp/list",
   "sudo tar tf /tmp/x.tar",
@@ -198,7 +206,6 @@ const MISSES: ReadonlyArray<string> = [
   "unlink /tmp/x",
   "sudo rm /tmp/./x",
   "sudo rm /tmp//x/../y",
-  "sudo ls /etc/claude-code/./managed-settings.d",
   "sudo apt install foo-*",
   "rsync -a /tmp/a/ /tmp/b/",
 ];
