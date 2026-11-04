@@ -153,20 +153,36 @@ export interface ConfirmOptions extends RequireTerminalOptions {
   readAnswer?: () => string;
 }
 
-function readLineFromStdin(): string {
+/** Reads up to one byte into `buf`; returns the count. Throws like `fs.readSync`. */
+export type ByteReader = (buf: Buffer) => number;
+
+const POLL = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Read one line, one byte at a time so nothing past the newline is consumed.
+ * Touching `process.stdin` (the `isTTY` check) puts a terminal's fd 0 into
+ * non-blocking mode, so a read before the person has typed throws `EAGAIN`:
+ * wait briefly and read again instead of taking that as "no answer". Any other
+ * error is no answer.
+ */
+export function readLine(read: ByteReader = buf => readSync(0, buf, 0, 1, null)): string {
   const buf = Buffer.alloc(1);
   let line = "";
-  try {
-    // One byte at a time so nothing past the newline is consumed.
-    while (line.length < 64) {
-      const n = readSync(0, buf, 0, 1, null);
-      if (n === 0) break;
-      const ch = buf.toString("utf8");
-      if (ch === "\n") break;
-      line += ch;
+  while (line.length < 64) {
+    let n: number;
+    try {
+      n = read(buf);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EAGAIN") {
+        Atomics.wait(POLL, 0, 0, 50);
+        continue;
+      }
+      return "";
     }
-  } catch {
-    return "";
+    if (n === 0) break;
+    const ch = buf.toString("utf8");
+    if (ch === "\n") break;
+    line += ch;
   }
   return line;
 }
@@ -183,7 +199,7 @@ function readLineFromStdin(): string {
 export function confirmOnTerminal(summary: string, question: string, opts: ConfirmOptions = {}): boolean {
   if (!(opts.stdinIsTTY ?? !!process.stdin.isTTY)) return false;
   process.stderr.write(`${summary}\n${question} [y/N] `);
-  const answer = (opts.readAnswer ?? readLineFromStdin)().trim().toLowerCase();
+  const answer = (opts.readAnswer ?? readLine)().trim().toLowerCase();
   process.stderr.write("\n");
   return answer === "y" || answer === "yes";
 }

@@ -23,7 +23,7 @@ import {
   withStreamTty,
   withStreamTtyAsync,
 } from "./_test-utils.js";
-import { isHumanTerminal, requireTerminal, terminalVerdict } from "./require-terminal.js";
+import { isHumanTerminal, readLine, requireTerminal, terminalVerdict } from "./require-terminal.js";
 import { ANCESTRY_UNDETERMINABLE_NOTE, currentHumanPresent } from "./human-presence.js";
 import { approve } from "./commands/approve.js";
 import { engagementsAdd, engagementsRemove } from "./commands/engagements-mutate.js";
@@ -376,5 +376,28 @@ describe("currentHumanPresent (rules g/h)", () => {
 
   it("no TTY is not present and nothing is printed", () => {
     assert.deepEqual(present(UNREADABLE, false), { value: false, stderr: "" });
+  });
+});
+
+describe("readLine (the [y/N] answer)", () => {
+  /** A reader that serves `steps` in order: an errno code throws, a string yields its bytes one per call. */
+  const reader = (steps: readonly string[]) => {
+    const queue = steps.flatMap(s => (s === "EAGAIN" || s === "EIO" ? [s] : [...s]));
+    return (buf: Buffer): number => {
+      const next = queue.shift();
+      if (next === undefined) return 0;
+      if (next === "EAGAIN" || next === "EIO") throw Object.assign(new Error(next), { code: next });
+      buf.write(next);
+      return 1;
+    };
+  };
+
+  it("waits through EAGAIN (a non-blocking terminal before the person types) and reads the answer", () => {
+    assert.equal(readLine(reader(["EAGAIN", "EAGAIN", "y\n"])), "y");
+  });
+
+  it("stops at the newline and treats any other read error as no answer", () => {
+    assert.equal(readLine(reader(["yes\nextra"])), "yes");
+    assert.equal(readLine(reader(["y", "EIO"])), "");
   });
 });
