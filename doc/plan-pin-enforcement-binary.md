@@ -75,17 +75,18 @@ Every D8 test (T15–T25) runs in CI, not only on a developer machine.
 
 - **Unit tests, in `npm test` on the existing Ubuntu matrix (Node 20, 22, 24).** The platform, uid, `sudo` runner and filesystem root are injected, so the macOS and the Linux renderings, paths and ownership checks both run on the Ubuntu runner. Nothing in them escalates.
 - **New job `managed-dropin-e2e`, on `ubuntu-latest` and `macos-latest`.** GitHub's runners have passwordless `sudo`, so this job does the real thing against the real system directory:
-  1. `install claude-md`, driven through a pty (`script`), because the installer requires a terminal (D8.3);
+  1. `install claude-md`, driven over `ssh -tt localhost`, because the installer requires a person's terminal (D8.3). A pty wrapper such as `script` does not pass: the terminal check refuses any wrapper among the ancestors, and a root `sshd` is one of the positive roots it requires;
   2. assert the file is owned by 0:0 with mode 0644, the digest matches, and the uid guard is present;
   3. run the rendered hook as the runner user, with the pin present (it decides) and with the pin removed (exit 2, and the message contains the literal `sudo rm` line);
   4. on Linux, run the hook as a second user (`useradd`): exit 0;
   5. `install claude-md --uninstall`: the file is gone, the directories repo-aegis created are gone, a `managed-settings.json` or another drop-in placed beforehand is untouched;
-  6. `doctor` reports nothing for D8 afterwards, except `SUDO_NOPASSWD`, which it must report on the runner;
+  6. while the drop-in is installed, `SUDO_NOPASSWD` is the only D8 finding `doctor` reports, and it must report it on the runner; after uninstall it reports none (`SUDO_NOPASSWD` is checked only while a drop-in exists);
   7. a fake `sudo`, `id` and `tee` placed first on `PATH`, each writing a marker file: assert that none of them ever ran (P1, D8.4);
   8. a shadowing `id` that prints `0` does not change the hook's verdict (D8.4);
   9. uninstall with the ledger deleted still removes the drop-in (D8.9);
   10. on Linux, the second user with the owner's home at `0750` gets exit 0, not exit 2 (D8.4 ordering);
   11. a leftover hidden `.tmp` is ignored by Claude Code and cleaned up by the next install.
+- The job is `tests/managed-dropin-e2e.sh`, which refuses to run outside a GitHub-hosted runner.
 - More unit tests (`npm test`): an injected `tee` failure never reaches `mv` (P3); a symlinked parent is refused (P4); `sudo` is spawned with exactly the P2 environment; the heartbeat check fires when a session file is newer than the heartbeat (D8.12); a sibling drop-in with `disableAllHooks: true` is reported (D8.7).
 - The e2e job cannot prove that Claude Code loads the file, because that needs an authenticated `claude`. The heartbeat (D8.12) is the check that ships in its place.
 
