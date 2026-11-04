@@ -99,6 +99,14 @@ const HUMAN_COMMANDS: ReadonlyArray<readonly [label: string, command: string]> =
   ["absolute path", "/opt/homebrew/bin/repo-aegis approve '*'"],
   ["node dist", "node packages/cli/dist/index.js approve '*'"],
   ["npx", "npx -y @de-otio/repo-aegis approve '*'"],
+  // P7: the managed drop-in
+  ["install claude-md --uninstall", "repo-aegis install claude-md --uninstall"],
+  ["install claude-md --uninstall under script", "script -q /dev/null repo-aegis install claude-md --uninstall"],
+  ["install claude-md --uninstall under expect", "expect -c 'spawn repo-aegis install claude-md --uninstall; interact'"],
+  ["full uninstall", "repo-aegis uninstall --yes"],
+  ["sudo rm of the drop-in", "sudo rm '/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-501.json'"],
+  ["sudo tee into the system directory", "echo '{}' | sudo tee /etc/claude-code/managed-settings.d/50-x.json"],
+  ["sudo mv under script", "script -q /dev/null sudo mv /tmp/x /etc/claude-code/managed-settings.json"],
 ];
 
 describe("hook guard-egress — AGENT_RAN_HUMAN_COMMAND", { skip: !cliBuilt() }, () => {

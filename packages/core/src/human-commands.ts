@@ -31,7 +31,15 @@ import { refusal } from "./refusal.js";
 
 export const AGENT_RAN_HUMAN_COMMAND = "AGENT_RAN_HUMAN_COMMAND";
 
-export type HumanOnlyKind = "approve" | "owner-add" | "upstream-add" | "init-migrate" | "init-force";
+export type HumanOnlyKind =
+  | "approve"
+  | "owner-add"
+  | "upstream-add"
+  | "init-migrate"
+  | "init-force"
+  // The managed drop-in (doc/plan-pin-enforcement-binary.md P7): removing it, or writing its directory as root.
+  | "claude-md-uninstall"
+  | "managed-settings-write";
 
 export interface HumanOnlyHit {
   kind: HumanOnlyKind;
@@ -312,7 +320,42 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
     if (win.includes("--migrate-classify")) return "init-migrate";
     if (win.includes("--force")) return "init-force";
   }
+  // `install claude-md --uninstall` removes the root-owned drop-in; the full `uninstall --yes` runs it.
+  if (win.includes("install") && win.includes("claude-md") && win.includes("--uninstall")) return "claude-md-uninstall";
+  if (win.includes("uninstall") && win.includes("--yes")) return "claude-md-uninstall";
   return null;
+}
+
+/** Words that name the Claude Code managed-settings location: `managed-settings*`, `/etc/claude-code`, `.../Application Support/ClaudeCode`. */
+function isManagedSettingsWord(w: string): boolean {
+  const l = w.toLowerCase();
+  return l.includes("managed-settings") || l.includes("/etc/claude-code") || l.includes("support/claudecode");
+}
+
+/** Privilege wrappers, and the commands that change a file or run one under it. */
+const PRIVILEGE_WORDS = new Set(["sudo", "doas"]);
+const MUTATING_WORDS = new Set([
+  "rm", "rmdir", "mv", "cp", "tee", "install", "chmod", "chown", "chgrp", "ln", "truncate", "dd", "sed", "touch", "mkdir",
+  "perl", "python", "python3", "ruby", "node", "sh", "bash", "zsh", "dash", "ksh", "vi", "vim", "nano", "ed",
+]);
+
+/**
+ * `sudo rm`, `mv`, `tee` ... on the managed-settings location, in any region of the command line
+ * (so a `cd` before it, a pipe into `tee`, `bash -c`, `script` and `expect` all count). The words
+ * are the same message-stripped, quote-stripped words the program-word search reads, so a
+ * commit message that mentions the path is data.
+ */
+function writesManagedSettings(command: string): boolean {
+  const lower = command.toLowerCase();
+  if (!lower.includes("managed-settings") && !lower.includes("claude-code") && !lower.includes("claudecode")) return false;
+  const regions = splitRegions(command).map(r => r.words);
+  // A `cd` region keeps only its program word (its argument is a directory, not a command), so a `cd` into the
+  // directory followed by `sudo rm <relative name>` needs its own look.
+  const cdsInto = /(?:^|[;&|(\n])\s*(?:cd|pushd)\s+[^;&|\n)]*(?:managed-settings|\/etc\/claude-code|support\/claudecode)/i.test(command);
+  if (!cdsInto && !regions.flat().some(isManagedSettingsWord)) return false;
+  return regions.some(
+    words => words.some(w => PRIVILEGE_WORDS.has(tokenBase(w))) && words.some(w => MUTATING_WORDS.has(tokenBase(w))),
+  );
 }
 
 /**
@@ -321,6 +364,11 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
  */
 export function findHumanOnlyCommand(command: string): HumanOnlyHit | null {
   if (typeof command !== "string" || command === "") return null;
+  try {
+    if (writesManagedSettings(command)) return { kind: "managed-settings-write" };
+  } catch {
+    /* fall through to the program-word search */
+  }
   const lower = command.toLowerCase();
   if (!lower.includes("aegis") && !/dist\/index\.js/.test(lower)) return null;
   try {
@@ -348,7 +396,7 @@ export function findHumanOnlyCommand(command: string): HumanOnlyHit | null {
   return null;
 }
 
-const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string }>> = {
+const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string; why?: string }>> = {
   approve: {
     what: "repo-aegis approve",
     fix: "repo-aegis approve <owner>/<repo>   (or <owner>/*)",
@@ -369,6 +417,20 @@ const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string }>
     what: "repo-aegis init --force",
     fix: "repo-aegis init --force",
   },
+  "claude-md-uninstall": {
+    what: "repo-aegis install claude-md --uninstall (or repo-aegis uninstall --yes)",
+    fix: "repo-aegis install claude-md --uninstall",
+    why:
+      "This command removes the root-owned managed-settings drop-in that keeps repo-aegis's hooks out of an agent's reach, so an " +
+      "agent that ran it would be taking the protection off itself, with or without a terminal attached",
+  },
+  "managed-settings-write": {
+    what: "sudo rm/mv/tee (or another write) on the Claude Code managed-settings directory",
+    fix: "repo-aegis install claude-md   (or --uninstall; doc/configuration.md has the sudo line that removes the file)",
+    why:
+      "That directory holds the root-owned drop-in that keeps repo-aegis's hooks out of an agent's reach, so an agent that wrote " +
+      "it with sudo would be rewriting or removing its own guard, with or without a terminal attached",
+  },
 };
 
 /**
@@ -382,8 +444,9 @@ export function humanCommandRefusal(hit: HumanOnlyHit): string {
     code: AGENT_RAN_HUMAN_COMMAND,
     what: d.what,
     why:
+      d.why ??
       "This command is how a person vouches for a publish or an owner, so it counts only when a person decides to " +
-      "run it; an agent that ran it would be vouching for itself, with or without a terminal attached",
+        "run it; an agent that ran it would be vouching for itself, with or without a terminal attached",
     approval: "No approval covers this, and a terminal, wrapper or alias does not change who runs it",
     fixes: [{ by: "person", step: `runs it in their own terminal: ${d.fix}` }],
   });

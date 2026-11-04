@@ -75,6 +75,32 @@ const HITS: ReadonlyArray<readonly [command: string, kind: HumanOnlyKind]> = [
   ["repo-aegis --home \"a;b\" approve '*'", "approve"],
   // a substitution inside a commit message runs
   ["git commit -m \"$(repo-aegis approve '*')\"", "approve"],
+  // P7: removing the managed drop-in is a root action only a person takes
+  ["repo-aegis install claude-md --uninstall", "claude-md-uninstall"],
+  ["repo-aegis --json install claude-md --uninstall", "claude-md-uninstall"],
+  ["repo-aegis install claude-md --claude-home /x --uninstall", "claude-md-uninstall"],
+  ["node packages/cli/dist/index.js install claude-md --uninstall", "claude-md-uninstall"],
+  ["script -q /dev/null repo-aegis install claude-md --uninstall", "claude-md-uninstall"],
+  ["expect -c 'spawn repo-aegis install claude-md --uninstall; interact'", "claude-md-uninstall"],
+  ["sudo -u me repo-aegis install claude-md --uninstall", "claude-md-uninstall"],
+  ["bash -c 'repo-aegis install claude-md --uninstall'", "claude-md-uninstall"],
+  ["tmux new -d \"repo-aegis install claude-md --uninstall\"", "claude-md-uninstall"],
+  ["alias ra=repo-aegis; ra install claude-md --uninstall", "claude-md-uninstall"],
+  ["repo-aegis uninstall --yes", "claude-md-uninstall"],
+  ["repo-aegis uninstall --yes --purge-state", "claude-md-uninstall"],
+  // P7: sudo rm / mv / tee on the managed-settings directory, directly or under a pty wrapper
+  ["sudo rm '/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-501.json'", "managed-settings-write"],
+  ["sudo rm /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo mv /tmp/x /etc/claude-code/managed-settings.d/50-x.json", "managed-settings-write"],
+  ["echo '{}' | sudo tee /etc/claude-code/managed-settings.json", "managed-settings-write"],
+  ["script -q /dev/null sudo rm /etc/claude-code/managed-settings.d/a.json", "managed-settings-write"],
+  ["expect -c 'spawn sudo rm /etc/claude-code/managed-settings.d/a.json; interact'", "managed-settings-write"],
+  ["bash -c \"sudo tee /etc/claude-code/managed-settings.d/z.json < /tmp/x\"", "managed-settings-write"],
+  ["cd /etc/claude-code/managed-settings.d && sudo rm 50-repo-aegis-1000.json", "managed-settings-write"],
+  ["sudo sed -i s/a/b/ /Library/Application\\ Support/ClaudeCode/managed-settings.json", "managed-settings-write"],
+  ["sudo rmdir /etc/claude-code/managed-settings.d", "managed-settings-write"],
+  ["doas rm /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
+  ["sudo -n bash -c 'rm /etc/claude-code/managed-settings.d/x.json'", "managed-settings-write"],
 ];
 
 const MISSES: ReadonlyArray<string> = [
@@ -118,6 +144,23 @@ const MISSES: ReadonlyArray<string> = [
   "x=$(repo-aegis status); echo approve",
   "x=$(repo-aegis status) && echo approve",
   "",
+  // the managed drop-in: install and a dry run are not refused, nor is looking
+  "repo-aegis install claude-md",
+  "repo-aegis install claude-md --dry-run",
+  "repo-aegis install claude-md --user-settings",
+  "repo-aegis install hooks --uninstall",
+  "repo-aegis install shim --uninstall",
+  "repo-aegis uninstall",
+  "repo-aegis uninstall --purge-state",
+  "git commit -m \"repo-aegis install claude-md --uninstall is refused in agent text\"",
+  "ls /etc/claude-code",
+  "cat /etc/claude-code/managed-settings.d/50-repo-aegis-1000.json",
+  "sudo ls /etc/claude-code",
+  "sudo rm /tmp/x",
+  "sudo apt install foo",
+  "grep -rn managed-settings doc/",
+  "git commit -m 'sudo rm /etc/claude-code/x is refused'",
+  "ls -l '/Library/Application Support/ClaudeCode/managed-settings.d'",
 ];
 
 describe("findHumanOnlyCommand — refuses every human-only command, however it is run", () => {
@@ -226,6 +269,18 @@ describe("commandRegions", () => {
 
 describe("humanCommandRefusal — five parts (§3.9)", () => {
   const kinds: HumanOnlyKind[] = ["approve", "owner-add", "upstream-add", "init-migrate", "init-force"];
+  const managedKinds: HumanOnlyKind[] = ["claude-md-uninstall", "managed-settings-write"];
+  for (const kind of managedKinds) {
+    it(kind, () => {
+      const text = humanCommandRefusal({ kind });
+      assert.match(text, /refused\./); // what
+      assert.match(text, /root-owned/); // why: the point of the drop-in
+      assert.match(text, /No approval covers this/); // approval
+      assert.match(text, /A person runs it in their own terminal/); // fix + who
+      assert.match(text, /Agents: do not run that yourself/);
+      assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}, see doc/agent-guide\\.md#agent_ran_human_command\\]`));
+    });
+  }
   for (const kind of kinds) {
     it(kind, () => {
       const text = humanCommandRefusal({ kind });
