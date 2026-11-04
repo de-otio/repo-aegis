@@ -487,7 +487,9 @@ mutating `gh` verbs, `npm publish`), and returns `allow` / `ask` / `deny`.
   (`GH_PR_CREATE_IMPLICIT_TARGET`), an environment or option override on the
   publishing command (`EGRESS_ENV_OVERRIDE`), a publish that follows a
   config change in the same command (`EGRESS_AFTER_STATE_CHANGE`), and a
-  publish run under a pty wrapper (`EGRESS_PTY_WRAPPER`). These need no
+  publish run under a pty wrapper (`EGRESS_PTY_WRAPPER`), and a write through
+  `dot gh` without `--as bot` as its first option
+  (`DOT_GH_WRITE_NEEDS_BOT`). These need no
   registry, no classification and no network, so they work on a machine that
   has only just installed the tool.
 - **Rule h refuses an owner nobody registered.** With no person present, a

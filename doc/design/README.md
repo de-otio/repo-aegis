@@ -344,6 +344,10 @@ Stable across all subcommands. Never reused.
 
 ## Threat model
 
+repo-aegis stops **accidental** leaks: into public repositories, and from one
+customer to another. It is not a wall against an agent that sets out to get
+around it.
+
 | Threat                                              | Mitigation                                                                                                                                                                                                                              |
 | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Registry contents in error messages                 | Errors redirect to `engagements list`; never enumerate inline.                                                                                                                                                                          |

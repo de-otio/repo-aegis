@@ -84,11 +84,13 @@ receipt in the tool result and stop if the destination named there is
 not the one you intended.
 
 Run \`gh\` directly, never through a script or interpreter that runs it
-for you: the guard cannot judge that shape and refuses it, reads
-included. If every tool call is refused because the pinned enforcement
-binary is missing, stop and ask the human to run
-\`repo-aegis install claude-md\` from their terminal; do not edit
-\`settings.json\` or disable hooks.
+for you (\`dot gh\`, below, is the one wrapper the guard reads): it cannot
+judge any other shape and refuses it, reads included. If every tool
+call is refused because the pinned enforcement binary is missing, stop
+and ask the human to run \`repo-aegis install claude-md\` from their
+terminal; do not edit \`settings.json\` or disable hooks.
+
+- Writes through \`dot gh\` carry \`--as bot\` as the first option (\`dot gh --as bot pr create --repo <owner>/<repo> …\`); a write without it is refused (\`DOT_GH_WRITE_NEEDS_BOT\`).
 ${CLAUDE_MD_END}
 `;
 

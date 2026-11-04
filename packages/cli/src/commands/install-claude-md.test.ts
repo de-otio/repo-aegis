@@ -803,6 +803,11 @@ describe("install-claude-md — egress guard registration", () => {
     // An agent locked out by a missing pin must stop and hand it to a
     // person, and must not reach for a gh wrapper the guard refuses.
     assert.match(body, /never through a script or interpreter/);
+    // `dot gh` is the one wrapper the guard reads; its writes carry --as bot first.
+    assert.match(
+      body,
+      /- Writes through `dot gh` carry `--as bot` as the first option \(`dot gh --as bot pr create --repo <owner>\/<repo> …`\); a write without it is refused \(`DOT_GH_WRITE_NEEDS_BOT`\)\./,
+    );
     assert.match(body, /pinned enforcement[\s\S]*binary is missing/);
     assert.match(body, /do not edit\s+`settings\.json` or disable hooks/);
   });

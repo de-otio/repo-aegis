@@ -147,6 +147,7 @@ exception is rule h, which fails closed on a write whose owner it cannot name
 
 | # | Kind | Rule | Decision | Code |
 |---|---|---|---|---|
+| D2 | shape | a recognised `dot gh` call (below) that is a write, with no person present and no leading `--as bot` (evaluated before everything else, so its agent-side fix is named first) | deny | `DOT_GH_WRITE_NEEDS_BOT` |
 | pty | shape | the egress runs under a pty wrapper, such as `script`, `unbuffer`, `expect`, `socat`, `ssh -t`, `tmux`, `screen`, or an interpreter's pty module (evaluated before a) | deny | `EGRESS_PTY_WRAPPER` |
 | a | shape | `git push` with no `<remote> <refspec>` | deny | `PUSH_IMPLICIT_TARGET` |
 | b | shape | egress verb with `precededByCd` | deny | `EGRESS_AFTER_CD` |
@@ -171,6 +172,41 @@ registry that exists but cannot be read (unparseable, or encrypted at rest) does
 **not** skip it: rule h then refuses every non-interactive egress that has a
 destination, because an agent that can write the file could otherwise switch
 the rule off with one bad line of YAML. A person at a terminal still passes.
+
+**`dot gh` is the one wrapper the parser reads** (doc/plan-recognise-dot-gh.md).
+Every other wrapper (an interpreter, a script) is an `unparsed-shape`, which
+rule h refuses as an owner it cannot name. The recognised shape is one shell
+segment, after the existing handling of `cd`, `&&`, env assignments and
+redirections:
+
+```
+node <path ending in /dot.mjs> gh [--as <id> | --as=<id> | --explain]… <gh args…>
+dot gh [--as <id> | --as=<id> | --explain]… <gh args…>
+```
+
+`node` is the bare word or an absolute path; no option comes between it and a
+literal script named `dot.mjs`; `NODE_OPTIONS` / `NODE_PATH` must not be in force
+on the segment. dot's own options are read only at the front, as `dot gh` itself
+reads them. The rest is parsed as the argument vector of a plain `gh`, and the
+intent carries `wrapper: { kind: "dot-gh", as }`; from there rules a–h judge it
+exactly as a plain `gh` (public-repo approval, markers, unregistered owners).
+`--explain` and own options that `dot gh` refuses (`--as` with no usable value)
+run no `gh`, so they are no intent. The one added step, **D2**: with no person
+present, a write through `dot gh` needs `--as bot` as its first option, because
+without `--as` `dot gh` picks the identity from the repository's owner, and for
+the user's own organisation that is the user. A write is any intent the
+remainder yields, resolved or not. D2 deliberately precedes the shape rules, so
+`cd … && dot gh pr create …` with no `--as` is refused as
+`DOT_GH_WRITE_NEEDS_BOT` first. The shim is unchanged: the `gh` that `dot gh`
+spawns reaches it with literal arguments and is judged there as a plain `gh`;
+it cannot see `--as`, so D2 lives at the hook only. `bot` is a fixed name:
+repo-aegis does not read dot gh's identity table.
+
+Accepted limits (the threat model is accidents, not a deliberate agent): `dot.mjs`
+and its identity table are files an agent can edit, and `--as bot` is trusted as
+a word. A person's own public write or merge through `dot gh` is judged at the
+`gh` shim, which `dot gh` hands a piped stderr, so the shim's terminal test
+never sees a person: such a call needs `REPO_AEGIS_EGRESS_HUMAN=1` or plain `gh`.
 
 Two further shape rules apply to the command text alone and are not part of the
 per-intent table: `GITHUB_API_VIA_HTTP_CLIENT` (`curl` or `wget` writing to
@@ -772,7 +808,7 @@ every agent and every human, with no repo-aegis involvement at all.
 | Egress hook is decision-only | `hook guard-egress` returns `allow`/`ask`/`deny`; it never emits `updatedInput`. Rewriting a command reconstructs the implicit-destination defect. |
 | `ask` degrades to `deny` | On a framework without an `ask` decision, `ask` becomes `deny` with a "have a human run or approve this" reason — never `allow`. |
 | An `ask` needs a layer beneath it | Rule g′: on a `gh` verb, where the enforcing framework reports the `gh` shim is not first on its `PATH`, `ask` becomes `deny` (`SHIM_UNREACHABLE_NEEDS_HUMAN`) — an unanswered `ask` with nothing below it is not a refusal. `git push` (pre-push hook) and `npm publish` (no shim) are out of scope; an unknown `PATH` changes nothing. §4b. |
-| Shape rules are unconditional; context rules fail open (except rule h) | Rules that need no registry/class/visibility (`PUSH_IMPLICIT_TARGET`, `EGRESS_AFTER_CD`, `EGRESS_UNGUARDED_CHAIN`, `PAYLOAD_MODE_DEPENDENT_PATH`, `EGRESS_ENV_OVERRIDE`, `EGRESS_AFTER_STATE_CHANGE`, `GH_PR_CREATE_IMPLICIT_TARGET`, `EGRESS_PTY_WRAPPER`) always apply. Rules that need context never block on missing context, but may still `ask`. Rule h is the exception: it refuses a write whose owner it cannot name, and an unreadable registry. |
+| Shape rules are unconditional; context rules fail open (except rule h) | Rules that need no registry/class/visibility (`PUSH_IMPLICIT_TARGET`, `EGRESS_AFTER_CD`, `EGRESS_UNGUARDED_CHAIN`, `PAYLOAD_MODE_DEPENDENT_PATH`, `EGRESS_ENV_OVERRIDE`, `EGRESS_AFTER_STATE_CHANGE`, `GH_PR_CREATE_IMPLICIT_TARGET`, `DOT_GH_WRITE_NEEDS_BOT`, `EGRESS_PTY_WRAPPER`) always apply. Rules that need context never block on missing context, but may still `ask`. Rule h is the exception: it refuses a write whose owner it cannot name, and an unreadable registry. |
 | Human-presence test | `isatty(2)` on stderr that no agent host or pty wrapper sits above, or `REPO_AEGIS_EGRESS_HUMAN=1` (rules g and h only). Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`: documented human-only; agents are instructed never to set it. `approve` and the owner adds do not honour the env escape and also require the process chain to reach a login session, `sshd`, a terminal emulator or an attached multiplexer. A speed bump, not proof of a person; the sandbox is the boundary. |
 | Rule h: only the registry decides | `owner ∈ personalOrgs ∪ engagements[*].githubOrgs`, or an exact `owner/repo` in `allowedUpstreams` on a PR / issue / comment verb. Not the destination cache, not a local `repo-aegis.class`, not an approval, not the authenticated `gh` login (the active account changes under other sessions; `doctor` reports unregistered logins instead). Missing registry or no owners: skipped, with a note. Unreadable or encrypted registry: refuse. |
 | Unresolved writes fail closed | A write whose owner cannot be named offline is treated as unregistered (D5). The deliberate departure from "context rules fail open". |
@@ -844,6 +880,9 @@ every agent and every human, with no repo-aegis involvement at all.
 
 ## Non-goals
 
+- **Stopping an agent that sets out to get around the guard.** repo-aegis
+  stops *accidental* leaks: into public repositories, and from one customer to
+  another. It is not a wall against a deliberate bypass.
 - **Defeating `--no-verify`, `-c core.hooksPath=…`, or calling the real `gh`
   by absolute path.** Client-side controls are advisory by construction; this
   design adds friction and makes bypass a visible, auditable act. Server-side

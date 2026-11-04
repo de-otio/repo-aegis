@@ -1090,6 +1090,7 @@ context rules fail open (except rule h), and no layer ever rewrites a command:
 
 | # | Rule | Code | Decision |
 |---|---|---|---|
+| D2 | a write through `dot gh` (`node <path>/dot.mjs gh …` or `dot gh …`) with no person present and no leading `--as bot`; evaluated first. Any other wrapper is an unparsed shape, refused by rule h | `DOT_GH_WRITE_NEEDS_BOT` | deny |
 | pty | the publish runs under a pty wrapper (`script`, `unbuffer`, `expect`, `socat`, `ssh -t`, `tmux`, `screen`, an interpreter's pty module) | `EGRESS_PTY_WRAPPER` | deny |
 | a | `git push` without both `<remote>` and `<refspec>` | `PUSH_IMPLICIT_TARGET` | deny |
 | b | egress after a `cd` / `pushd` earlier in the same command | `EGRESS_AFTER_CD` | deny |

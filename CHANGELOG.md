@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `dot gh` is recognised; agent writes through it need `--as bot`
+
+- **`dot gh` is recognised.** Since 0.11.0 the egress guard refused `node
+  <script> gh …` as an unparsed shape, so an agent that followed its
+  organisation's rule and wrote as the bot (`dot gh --as bot pr create …`) was
+  stopped, and plain `gh` (which writes as the active person) was its only
+  path. The parser now reads exactly `node <path>/dot.mjs gh [--as <id>]
+  [--explain] <gh args…>` and `dot gh …` as the `gh` call they make, and judges
+  it as a plain `gh` (rules a–h, public-repo approval, markers). Every other
+  wrapper shape stays refused. `--explain` runs no `gh` and is no egress.
+  Design: `doc/plan-recognise-dot-gh.md`.
+- **`DOT_GH_WRITE_NEEDS_BOT`.** With no person present, a write through `dot gh`
+  must carry `--as bot` as `dot gh`'s first option; without it `dot gh` picks
+  the identity from the repository's owner, which for the user's own
+  organisation is the user. The refusal gives the corrected command. Reads may
+  use any identity. The `install claude-md` block and `doc/agent-guide.md` say
+  so.
+- **Changed:** a `dot gh` call with a person present is now judged as a plain
+  `gh` instead of as an unparsed shape. Agent calls were all refused before, so
+  nothing is stricter for agents except the wording of the refusal.
+- **Known limit:** a person's own public write or merge through `dot gh` is
+  judged at the `gh` shim, which `dot gh` hands a piped stderr, so the shim's
+  terminal test never sees a person; such a call needs
+  `REPO_AEGIS_EGRESS_HUMAN=1` or plain `gh`.
+
 ### Stricter (may refuse what 0.11 allowed)
 
 The git hooks and the `gh` shim now run the scanner by the absolute path of the
