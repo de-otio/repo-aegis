@@ -264,6 +264,11 @@ How it shows up elsewhere:
   package directory and the pinned Node executable, so an agent cannot overwrite
   the code the pin points at. A package directory inside a git work tree (a
   development checkout) is not denied; the install prints a warning instead.
+- Because of the two points above, the Claude Code settings file holds paths
+  that are specific to one machine. Keep it per machine. Do not sync it, or
+  symlink it from a repository that other machines check out: every hook would
+  exit 2 on a machine where the paths do not exist, and each machine's install
+  would overwrite the file for all the others.
 
 Not covered: which `gh` binary the shim runs (it still looks for the first `gh`
 on `PATH` that is not itself), and the shim's existing rule that a fault in the

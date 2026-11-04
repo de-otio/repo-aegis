@@ -57,3 +57,5 @@ Existing tests that assert the old fail-open text or the constant-template diges
 ## 5. Rollout note
 
 Existing installs keep their unpinned scripts until a person re-runs the installers; `doctor` reports them (`ENFORCEMENT_UNPINNED`). A Node upgrade through a version manager changes `process.execPath`, which now blocks commits and pushes until the installers are re-run; the refusal says exactly what to run.
+
+The Claude Code settings file that `install claude-md` writes now holds machine-specific absolute paths (D4, D7). It must be a per-machine file. A settings file synced or symlinked from a shared repository breaks every other machine (each hook exits 2) and is rewritten by whichever machine ran the installer last. `doc/configuration.md` says so.
