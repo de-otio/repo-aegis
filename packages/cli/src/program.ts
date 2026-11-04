@@ -512,6 +512,14 @@ export async function buildProgram(): Promise<Command> {
       hookFirstTouch(withGlobals(opts, cmd));
     });
 
+  hook
+    .command("managed-heartbeat")
+    .description("SessionStart (managed drop-in only): record that Claude Code loaded the managed settings, for `doctor`'s MANAGED_HOOKS_NOT_FIRING")
+    .action(async () => {
+      const { hookManagedHeartbeat } = await import("./commands/hook-managed-heartbeat.js");
+      hookManagedHeartbeat();
+    });
+
   // `audit-log` subcommand group — operator compliance trail. OFF by
   // default; opt-in via `audit-log on`. State-changing operations
   // (allow/deny, engagements add/end/remove, classify --apply, init,

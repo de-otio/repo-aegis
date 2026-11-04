@@ -20,6 +20,7 @@ import {
   registryPath,
   repoAegisHome,
   statePath,
+  isManagedHookCommand,
   isPinnedHookCommand,
   pinnedHookCommand,
   pinProblem,
@@ -29,7 +30,7 @@ import { emitJson, emitText, emitError, type OutputOptions } from "../format.js"
 import { readIfExists } from "../fs-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { applyManagedInstall, chooseTarget, planManagedInstall, uninstallManaged, type ManagedSeams } from "./install-claude-md-managed.js";
-import { managedShadowChecks } from "./doctor-managed-checks.js";
+import { managedShadowChecks } from "./managed-shadow-checks.js";
 import type { DoctorCheck } from "./doctor-checks.js";
 import {
   BASH_HOOK_ARGS,
@@ -152,24 +153,33 @@ interface InstallClaudeMdOptions extends OutputOptions {
   managed?: ManagedSeams;
 }
 
-interface SettingsJson {
+export interface SettingsJson {
   hooks?: Record<string, HookMatcherEntry[]>;
   permissions?: { deny?: unknown; [k: string]: unknown };
   [k: string]: unknown;
 }
 
-interface HookMatcherEntry {
+export interface HookMatcherEntry {
   matcher?: string;
   hooks?: HookCommand[];
 }
 
-interface HookCommand {
+export interface HookCommand {
   type?: string;
   command?: string;
 }
 
 function defaultClaudeHome(): string {
   return join(homedir(), ".claude");
+}
+
+/** settings.json parsed, or null when it is absent or does not parse. For `doctor`, which never throws. */
+export function readSettingsFile(path: string): SettingsJson | null {
+  try {
+    return existsSync(path) ? readSettings(path) : null;
+  } catch {
+    return null;
+  }
 }
 
 function readSettings(path: string): SettingsJson {
@@ -1526,10 +1536,10 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
 /** The prefix a registered by-name guard command must start with, whatever `--agent` follows it. */
 const GUARD_EGRESS_COMMAND_PREFIX = "repo-aegis hook guard-egress";
 
-/** True for a registered guard command: the pinned form `install claude-md` writes, or the older by-name form. */
+/** True for a registered guard command: the managed drop-in's form, the pinned user-settings form, or the older by-name form. */
 function isGuardEgressCommand(command: string): boolean {
   const c = command.trim();
-  return c.startsWith(GUARD_EGRESS_COMMAND_PREFIX) || isPinnedHookCommand(c, "guard-egress");
+  return c.startsWith(GUARD_EGRESS_COMMAND_PREFIX) || isPinnedHookCommand(c, "guard-egress") || isManagedHookCommand(c, "guard-egress");
 }
 
 /**
@@ -1576,7 +1586,7 @@ export function unpinnedClaudeHooks(claudeHome?: string): string[] {
  * reported as unregistered with the reason, never thrown. `doctor` must
  * survive a machine whose Claude Code config does not exist.
  */
-export function checkGuardHook(claudeHome?: string): import("./doctor-checks.js").DoctorCheck[] {
+export function checkGuardHook(claudeHome?: string, managed: SettingsJson | null = null): import("./doctor-checks.js").DoctorCheck[] {
   const home = claudeHome ?? defaultClaudeHome();
   const settingsPath = join(home, "settings.json");
   const unregistered = (detail: string): import("./doctor-checks.js").DoctorCheck[] => [
@@ -1587,12 +1597,29 @@ export function checkGuardHook(claudeHome?: string): import("./doctor-checks.js"
       fix: "repo-aegis install claude-md",
     },
   ];
+  const hasGuard = (s: SettingsJson): boolean =>
+    (s.hooks?.["PreToolUse"] ?? []).some(
+      entry =>
+        entry.matcher === BASH_HOOK_MATCHER &&
+        (entry.hooks ?? []).some(h => typeof h.command === "string" && isGuardEgressCommand(h.command)),
+    );
+
+  // The managed drop-in (D8) counts: it is where the guard lives once `install claude-md` has run.
+  if (managed !== null && hasGuard(managed)) {
+    return [
+      {
+        code: "GUARD_HOOK_UNREGISTERED",
+        ok: true,
+        detail: `\`${GUARD_EGRESS_COMMAND_PREFIX}\` is registered as a PreToolUse(Bash) hook in the managed drop-in`,
+      },
+    ];
+  }
 
   let settings: SettingsJson;
   try {
     if (!existsSync(settingsPath)) {
       return unregistered(
-        `no settings.json at ${settingsPath}, so the PreToolUse(Bash) egress guard is not registered`,
+        `no settings.json at ${settingsPath} and no managed drop-in, so the PreToolUse(Bash) egress guard is not registered`,
       );
     }
     settings = readSettings(settingsPath);
@@ -1602,16 +1629,7 @@ export function checkGuardHook(claudeHome?: string): import("./doctor-checks.js"
     );
   }
 
-  const entries = settings.hooks?.["PreToolUse"] ?? [];
-  const registered = entries.some(
-    entry =>
-      entry.matcher === BASH_HOOK_MATCHER &&
-      (entry.hooks ?? []).some(
-        h => typeof h.command === "string" && isGuardEgressCommand(h.command),
-      ),
-  );
-
-  if (!registered) {
+  if (!hasGuard(settings)) {
     return unregistered(
       `settings.json at ${settingsPath} has no PreToolUse(Bash) entry running \`${GUARD_EGRESS_COMMAND_PREFIX}\`, ` +
         `so publishing commands are not destination-checked before they run`,
@@ -1677,6 +1695,7 @@ export function denyRuleCoversPath(rule: unknown, target: string, home: string =
 export function checkRegistryAgentWritable(
   claudeHome?: string,
   plan: RegistryDenyPlan = registryDenyPlan(),
+  managed: SettingsJson | null = null,
 ): import("./doctor-checks.js").DoctorCheck {
   const home = claudeHome ?? defaultClaudeHome();
   const settingsPath = join(home, "settings.json");
@@ -1695,12 +1714,17 @@ export function checkRegistryAgentWritable(
   try {
     settings = readSettings(settingsPath);
   } catch {
-    return warn(
-      `settings.json at ${settingsPath} could not be parsed, so a deny rule for the registry files cannot be confirmed`,
-    );
+    // An unparseable user file does not hide the managed drop-in's rules.
+    if (managed === null) {
+      return warn(
+        `settings.json at ${settingsPath} could not be parsed, so a deny rule for the registry files cannot be confirmed`,
+      );
+    }
+    settings = {};
   }
 
-  const deny = denyList(settings);
+  // Claude Code merges permissions.deny across scopes, so the drop-in's rules count with the user file's.
+  const deny = [...denyList(settings), ...(managed === null ? [] : denyList(managed))];
   const uncovered = plan.sampleTargets.filter(t => !deny.some(rule => denyRuleCoversPath(rule, t)));
   if (uncovered.length > 0) {
     return warn(

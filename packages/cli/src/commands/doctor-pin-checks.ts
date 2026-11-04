@@ -90,7 +90,7 @@ function unpinnedCheck(scripts: InstalledScript[], claudeHooks: string[]): Docto
 }
 
 /** True when `path` is not a file this user can execute (the pinned node) or read (the pinned CLI). */
-function unusable(path: string, need: "exec" | "read"): boolean {
+export function unusable(path: string, need: "exec" | "read"): boolean {
   try {
     if (!statSync(path).isFile()) return true;
     accessSync(path, need === "exec" ? constants.X_OK : constants.R_OK);

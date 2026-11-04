@@ -84,6 +84,8 @@ export function makeFakeSystem(opts: FakeSystemOptions): FakeSystem {
     writeFileSync(at(tool), "#!/bin/sh\n", { mode: 0o755 });
   }
 
+  // Not a tool the installer runs, but the probe `doctor` hands to `sudo -n -k`.
+  writeFileSync(at("/usr/bin/true"), "#!/bin/sh\n", { mode: 0o755 });
   const base = realFs(root);
   const setuid = new Map<string, boolean>([["/usr/bin/sudo", true]]);
   const owned = (virtual: string, st: FsStat | null): FsStat | null =>
