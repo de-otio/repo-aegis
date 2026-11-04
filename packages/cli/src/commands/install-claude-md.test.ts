@@ -800,6 +800,11 @@ describe("install-claude-md — egress guard registration", () => {
     assert.match(body, /git push <remote> <branch>/);
     assert.match(body, /never set `REPO_AEGIS_EGRESS_HUMAN`/);
     assert.match(body, /PUBLISHED/);
+    // An agent locked out by a missing pin must stop and hand it to a
+    // person, and must not reach for a gh wrapper the guard refuses.
+    assert.match(body, /never through a script or interpreter/);
+    assert.match(body, /pinned enforcement[\s\S]*binary is missing/);
+    assert.match(body, /do not edit\s+`settings\.json` or disable hooks/);
   });
 
   it("lists both egress hook commands in the dry-run output", () => {

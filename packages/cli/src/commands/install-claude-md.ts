@@ -63,21 +63,25 @@ an approval — \`repo-aegis approve <org>/<repo>\` from their terminal
 command. After a command that published, read the \`PUBLISHED → …\`
 receipt in the tool result and stop if the destination named there is
 not the one you intended.
+
+Run \`gh\` directly, never through a script or interpreter that runs it
+for you: the guard cannot judge that shape and refuses it, reads
+included. If every tool call is refused because the pinned enforcement
+binary is missing, stop and ask the human to run
+\`repo-aegis install claude-md\` from their terminal; do not edit
+\`settings.json\` or disable hooks.
 ${CLAUDE_MD_END}
 `;
 
 /**
- * The `command` value written into Claude Code `settings.json` for the
- * PostToolUse hook on Write/Edit/MultiEdit. References the `repo-aegis`
- * bin by name (PATH-resolved at hook time) instead of a generated bash
- * script under `~/.claude/hooks/`. Renaming or moving `claudeHome` no
- * longer breaks the hook, and `jq` is no longer required because the
+ * The CLI arguments of the PostToolUse hook on Write/Edit/MultiEdit. The
+ * `command` written into `settings.json` runs them on the pinned node and
+ * CLI by absolute path (D7 of doc/plan-pin-enforcement-binary.md), never a
+ * `repo-aegis` resolved through PATH; `jq` is not needed because the
  * subcommand parses stdin JSON natively.
  *
- * Keep this string stable across releases. If you change it, document a
- * migration path: the previous absolute-path `command` won't auto-update
- * in users' settings.json. `install claude-md` is idempotent on the
- * current value but will not strip a stale older one.
+ * Keep these arguments stable across releases: `install claude-md` and
+ * `--uninstall` recognise an existing entry, pinned or by name, by them.
  */
 const HOOK_ARGS = "hook scan-after-write";
 
