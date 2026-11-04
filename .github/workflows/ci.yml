@@ -72,6 +72,35 @@ jobs:
       - name: Shim smoke test
         run: npm run test:shim
 
+  # The managed-settings drop-in (doc/plan-pin-enforcement-binary.md §2.3) is
+  # written as root into the real system directory, so only a real `sudo` on a
+  # real machine proves the root-owned file, the uid guard and a clean
+  # uninstall. Hosted runners have password-less sudo; the script refuses to
+  # run anywhere else. It cannot prove Claude Code loads the file (that needs
+  # an authenticated `claude`): the SessionStart heartbeat covers that.
+  managed-dropin-e2e:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.0.0  # zizmor: ignore[cache-poisoning]
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+        timeout-minutes: 5
+      - run: npm run build
+        timeout-minutes: 5
+      - name: Managed drop-in end to end (real sudo)
+        timeout-minutes: 5
+        run: bash tests/managed-dropin-e2e.sh
+
   # This repo ships workflow YAML as a PRODUCT: the composite actions, the
   # reference examples, and — via `repo-aegis install ci` — the templates that
   # land in consumer repos. Those artefacts get the same linting as our own
@@ -144,7 +173,7 @@ jobs:
   # without re-editing branch protection.
   ci-success:
     if: always()
-    needs: [test, action-smoke, shim-smoke, workflow-lint]
+    needs: [test, action-smoke, shim-smoke, managed-dropin-e2e, workflow-lint]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

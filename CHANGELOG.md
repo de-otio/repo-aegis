@@ -112,6 +112,9 @@ re-run the installers; `repo-aegis doctor` reports them
     It reads command text and is not a boundary.
   - The privileged write refuses, before any `sudo` call, a symlink, directory
     or other non-regular file at the drop-in path or its temp name.
+- CI: a new `managed-dropin-e2e` job (Ubuntu and macOS) installs and uninstalls
+  the drop-in with real `sudo` against the real system directory
+  (`tests/managed-dropin-e2e.sh`). It is the first macOS job in CI.
 
 ## [0.11.0] - 2026-11-03
 
