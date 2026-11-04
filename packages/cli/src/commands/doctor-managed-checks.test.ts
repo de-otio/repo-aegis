@@ -304,6 +304,8 @@ describe("MANAGED_HOOKS_DISABLED and MANAGED_SOURCE_SHADOWED (D8.7)", () => {
 
 describe("D8.12: MANAGED_HOOKS_NOT_FIRING (the heartbeat)", () => {
   const T = Date.UTC(2026, 10, 4, 12, 0, 0);
+  /** The clock is injected: these timestamps are fixed, and a heartbeat later than the real now is rightly refused (L1). */
+  const now = (): number => T + 3_600_000;
   const iso = (ms: number): string => new Date(ms).toISOString();
   function withHeartbeat(e: Env, at: number | null): void {
     if (at === null) return;
@@ -323,7 +325,7 @@ describe("D8.12: MANAGED_HOOKS_NOT_FIRING (the heartbeat)", () => {
     install(e);
     installedAt(e, T - 3_600_000);
     withHeartbeat(e, T - 2 * HEARTBEAT_MARGIN_MS);
-    const c = byCode(checks(e, { sessionBirths: () => [T - 10_000_000, T] }), "MANAGED_HOOKS_NOT_FIRING");
+    const c = byCode(checks(e, { sessionBirths: () => [T - 10_000_000, T], now }), "MANAGED_HOOKS_NOT_FIRING");
     assert.equal(c.ok, false);
     assert.match(c.detail, /server-managed|first-wins|MDM|profile/);
     assert.ok((c.fix ?? "").includes("/status"));
@@ -333,7 +335,7 @@ describe("D8.12: MANAGED_HOOKS_NOT_FIRING (the heartbeat)", () => {
     const e = makeEnv();
     install(e);
     installedAt(e, T - 3_600_000);
-    assert.equal(byCode(checks(e, { sessionBirths: () => [T] }), "MANAGED_HOOKS_NOT_FIRING").ok, false);
+    assert.equal(byCode(checks(e, { sessionBirths: () => [T], now }), "MANAGED_HOOKS_NOT_FIRING").ok, false);
   });
 
   it("passes when the heartbeat is at or after the newest session start, or within the margin before it (the file can appear after the hook ran)", () => {
@@ -342,7 +344,7 @@ describe("D8.12: MANAGED_HOOKS_NOT_FIRING (the heartbeat)", () => {
       install(e);
       installedAt(e, T - 3_600_000);
       withHeartbeat(e, hb);
-      assert.equal(byCode(checks(e, { sessionBirths: () => [T] }), "MANAGED_HOOKS_NOT_FIRING").ok, true, `hb=${T - hb}`);
+      assert.equal(byCode(checks(e, { sessionBirths: () => [T], now }), "MANAGED_HOOKS_NOT_FIRING").ok, true, `hb=${T - hb}`);
     }
   });
 
@@ -351,17 +353,17 @@ describe("D8.12: MANAGED_HOOKS_NOT_FIRING (the heartbeat)", () => {
     install(e);
     installedAt(e, T - 3_600_000);
     withHeartbeat(e, T - 60_000);
-    assert.equal(byCode(checks(e, { sessionBirths: () => [T - 60_000] }), "MANAGED_HOOKS_NOT_FIRING").ok, true);
+    assert.equal(byCode(checks(e, { sessionBirths: () => [T - 60_000], now }), "MANAGED_HOOKS_NOT_FIRING").ok, true);
   });
 
   it("says nothing it cannot prove: no sessions, or none since the install, is a skip", () => {
     const e = makeEnv();
     install(e);
     installedAt(e, T);
-    const none = byCode(checks(e, { sessionBirths: () => [] }), "MANAGED_HOOKS_NOT_FIRING");
+    const none = byCode(checks(e, { sessionBirths: () => [], now }), "MANAGED_HOOKS_NOT_FIRING");
     assert.equal(none.ok, true);
     assert.equal(none.skipped, true);
-    const old = byCode(checks(e, { sessionBirths: () => [T - 86_400_000] }), "MANAGED_HOOKS_NOT_FIRING");
+    const old = byCode(checks(e, { sessionBirths: () => [T - 86_400_000], now }), "MANAGED_HOOKS_NOT_FIRING");
     assert.equal(old.ok, true);
     assert.equal(old.skipped, true);
   });
@@ -445,6 +447,59 @@ describe("D8.12: sessions read from real transcript files", () => {
     const c2 = byCode(none, "MANAGED_HOOKS_NOT_FIRING");
     assert.equal(c2.skipped, true);
     assert.match(c2.detail, /no Claude Code session was found/);
+  });
+});
+
+// Security review L1: a timestamp that has not happened yet satisfies "the heartbeat is
+// newer than every session" until then. state/ is agent-writable.
+describe("D8.12: a timestamp in the future is not trusted (L1)", () => {
+  const NOW = Date.UTC(2026, 10, 4, 12, 0, 0);
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  function setup(over: { heartbeat?: number; installedAt?: number }): Env {
+    const e = makeEnv();
+    install(e);
+    inHome(e, () => {
+      const l = readManagedLedger()!;
+      writeFileSync(managedLedgerPath(), JSON.stringify({ ...l, installedAt: iso(over.installedAt ?? NOW - 3_600_000) }));
+      if (over.heartbeat !== undefined) writeFileSync(managedHeartbeatPath(), iso(over.heartbeat) + "\n");
+    });
+    return e;
+  }
+  const run = (e: Env, births: number[]): DoctorCheck =>
+    byCode(checks(e, { sessionBirths: () => births, now: () => NOW }), "MANAGED_HOOKS_NOT_FIRING");
+
+  it("a heartbeat later than now plus the margin fails and says it is in the future, even when it would cover the newest session", () => {
+    const e = setup({ heartbeat: NOW + 24 * 3_600_000 });
+    const c = run(e, [NOW - 60_000]);
+    assert.equal(c.ok, false, c.detail);
+    assert.notEqual(c.skipped, true);
+    assert.match(c.detail, /in the future/);
+    assert.match(c.detail, /rewritten/);
+  });
+
+  it("it fails even when no session has started yet (a forged heartbeat is not a skip)", () => {
+    const e = setup({ heartbeat: NOW + 24 * 3_600_000 });
+    const c = run(e, []);
+    assert.equal(c.ok, false, c.detail);
+    assert.match(c.detail, /in the future/);
+  });
+
+  it("a ledger installedAt later than now fails, instead of hiding every session as 'before the install'", () => {
+    const e = setup({ installedAt: NOW + 24 * 3_600_000 });
+    const c = run(e, [NOW - 60_000]);
+    assert.equal(c.ok, false, c.detail);
+    assert.notEqual(c.skipped, true);
+    assert.match(c.detail, /in the future/);
+  });
+
+  it("a little clock skew is not an alarm: a heartbeat a minute ahead still passes", () => {
+    const e = setup({ heartbeat: NOW + 60_000 });
+    assert.equal(run(e, [NOW - 60_000]).ok, true);
+  });
+
+  it("the doctor result carries a fix", () => {
+    const e = setup({ heartbeat: NOW + 24 * 3_600_000 });
+    assert.ok((run(e, []).fix ?? "").length > 0);
   });
 });
 

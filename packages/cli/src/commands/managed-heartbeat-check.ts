@@ -72,6 +72,14 @@ export function sessionStartTimes(claudeHome: string): number[] {
   return scanSessions(claudeHome).births;
 }
 
+/**
+ * How far ahead of the clock a recorded timestamp (the heartbeat, or the ledger's
+ * `installedAt`) may be before it is called rewritten. A heartbeat in the future
+ * satisfies the comparison for every session that starts before it; clocks drift
+ * by seconds, not by minutes.
+ */
+export const FUTURE_SKEW_MS = 5 * 60 * 1000;
+
 export interface HeartbeatContext {
   /** Default `~/.claude`; only its `projects/` is read, for the heartbeat comparison. */
   claudeHome?: string;
@@ -79,10 +87,42 @@ export interface HeartbeatContext {
   sessionBirths?: () => number[];
   /** Test seam: the whole scan, including transcripts whose creation time is unknown. */
   sessionScan?: () => SessionScan;
+  /** Test seam: the clock, in ms. */
+  now?: () => number;
 }
 
 export function heartbeatCheck(ctx: HeartbeatContext, installedAt: string | null): DoctorCheck {
   const claudeHome = ctx.claudeHome ?? join(homedir(), ".claude");
+  let heartbeat: number | null = null;
+  try {
+    const raw = readIfExists(managedHeartbeatPath());
+    const t = raw === null ? NaN : Date.parse(raw.trim());
+    heartbeat = Number.isNaN(t) ? null : t;
+  } catch {
+    heartbeat = null;
+  }
+  const installed = installedAt === null ? 0 : Date.parse(installedAt);
+  const now = (ctx.now ?? Date.now)();
+
+  // L1: a timestamp that has not happened yet would hide a drop-in Claude Code is not
+  // loading. state/ is writable by the agent, so neither value can be taken on trust.
+  const future: string[] = [];
+  if (heartbeat !== null && heartbeat > now + FUTURE_SKEW_MS) future.push(`the SessionStart heartbeat (${new Date(heartbeat).toISOString()})`);
+  if (!Number.isNaN(installed) && installed > now + FUTURE_SKEW_MS) future.push(`the install time in the ledger (${new Date(installed).toISOString()})`);
+  if (future.length > 0) {
+    return {
+      code: "MANAGED_HOOKS_NOT_FIRING",
+      ok: false,
+      detail:
+        `${future.join(" and ")} is in the future (now is ${new Date(now).toISOString()}): the file was rewritten, or the clock moved. ` +
+        "A timestamp like that would make a drop-in that Claude Code is not loading look healthy, so the heartbeat cannot be trusted",
+      fix:
+        `delete ${managedHeartbeatPath()} (the next Claude Code session records a real one)` +
+        (installed > now + FUTURE_SKEW_MS ? ", and run `repo-aegis install claude-md --uninstall` then `repo-aegis install claude-md` to write a fresh install record" : "") +
+        "; then check /status in Claude Code shows the managed drop-in",
+    };
+  }
+
   const scan: SessionScan =
     ctx.sessionScan !== undefined
       ? ctx.sessionScan()
@@ -94,7 +134,6 @@ export function heartbeatCheck(ctx: HeartbeatContext, installedAt: string | null
         : scanSessions(claudeHome);
   const births = scan.births;
   const skip = (detail: string): DoctorCheck => ({ code: "MANAGED_HOOKS_NOT_FIRING", ok: true, skipped: true, detail });
-  const installed = installedAt === null ? 0 : Date.parse(installedAt);
   const since = births.filter(b => b > (Number.isNaN(installed) ? 0 : installed));
   if (scan.transcripts === 0) return skip("no Claude Code session was found under the projects directory, so the heartbeat cannot be compared yet");
   if (births.length === 0) {
@@ -104,14 +143,6 @@ export function heartbeatCheck(ctx: HeartbeatContext, installedAt: string | null
   }
   if (since.length === 0) return skip("no Claude Code session has started since the drop-in was installed, so the heartbeat cannot be compared yet");
   const newest = Math.max(...since);
-  let heartbeat: number | null = null;
-  try {
-    const raw = readIfExists(managedHeartbeatPath());
-    const t = raw === null ? NaN : Date.parse(raw.trim());
-    heartbeat = Number.isNaN(t) ? null : t;
-  } catch {
-    heartbeat = null;
-  }
   if (heartbeat !== null && newest <= heartbeat + HEARTBEAT_MARGIN_MS) {
     return { code: "MANAGED_HOOKS_NOT_FIRING", ok: true, detail: "Claude Code ran the drop-in's SessionStart heartbeat for the newest session" };
   }
