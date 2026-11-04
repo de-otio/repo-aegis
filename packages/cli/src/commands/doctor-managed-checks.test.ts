@@ -95,7 +95,6 @@ const byCode = (found: DoctorCheck[], code: DoctorCheckCode): DoctorCheck => {
   assert.ok(c, `no ${code} in ${found.map(f => f.code).join(", ")}`);
   return c;
 };
-const failing = (found: DoctorCheck[]): string[] => found.filter(c => !c.ok && (c.severity ?? "fail") === "fail").map(c => c.code);
 
 const ALL_CODES: DoctorCheckCode[] = [
   "MANAGED_DROPIN_STALE",

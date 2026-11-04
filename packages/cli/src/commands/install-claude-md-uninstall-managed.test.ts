@@ -68,7 +68,6 @@ const installed = (): Env => {
   e.sys.calls.length = 0;
   return e;
 };
-const tool = (e: Env): string[][] => e.sys.toolCalls().map(c => [...c.args]);
 
 describe("T24: uninstall removes the drop-in and what the ledger says repo-aegis created", () => {
   it("removes the file, then the two directories it created, then the ledger; sudo -k first and last", () => {
