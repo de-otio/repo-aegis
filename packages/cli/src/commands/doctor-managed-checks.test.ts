@@ -8,7 +8,7 @@
 // system; ownership, the privileged runner and the sessions are injected.
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EnforcementPin } from "@de-otio/repo-aegis-core";
@@ -19,11 +19,13 @@ import {
   HEARTBEAT_MARGIN_MS,
   managedDropinChecks,
   readDropInSettings,
+  sessionStartTimes,
   userSettingsEnforcementCheck,
 } from "./doctor-managed-checks.js";
 import { checkGuardHook, checkRegistryAgentWritable, installClaudeMd, registryDenyPlan } from "./install-claude-md.js";
 import { managedPaths } from "./managed-dropin.js";
 import { managedHeartbeatPath, managedLedgerPath, readManagedLedger } from "./managed-ledger.js";
+import { scanSessions } from "./managed-heartbeat-check.js";
 import { sudoEnvironment } from "./managed-privileged.js";
 
 let tmp: string;
@@ -362,6 +364,87 @@ describe("D8.12: MANAGED_HOOKS_NOT_FIRING (the heartbeat)", () => {
     const old = byCode(checks(e, { sessionBirths: () => [T - 86_400_000] }), "MANAGED_HOOKS_NOT_FIRING");
     assert.equal(old.ok, true);
     assert.equal(old.skipped, true);
+  });
+});
+
+// Security review M2: every D8.12 test above injects `sessionBirths`, so the code that
+// reads the real transcripts had no test at all.
+describe("D8.12: sessions read from real transcript files", () => {
+  /** `<claudeHome>/projects/<dir>/<name>` files, created now. */
+  function transcripts(claudeHome: string, files: Record<string, string>): void {
+    for (const [rel, body] of Object.entries(files)) {
+      const abs = join(claudeHome, "projects", rel);
+      mkdirSync(join(abs, ".."), { recursive: true });
+      writeFileSync(abs, body);
+    }
+  }
+  /** The file system under the temp dir reports a creation time. Skipped tests say so rather than pass vacuously. */
+  const hasBirthtime = (p: string): boolean => statSync(p).birthtimeMs > 0;
+
+  it("sessionStartTimes counts one birth for projects/<dir>/<id>.jsonl and ignores a non-.jsonl sibling", t => {
+    const home = join(tmp, `home-${n++}`);
+    transcripts(home, { "-proj-a/abc.jsonl": "{}\n", "-proj-a/notes.txt": "x", "-proj-a/abc.jsonl.bak": "x" });
+    if (!hasBirthtime(join(home, "projects", "-proj-a", "abc.jsonl"))) return t.skip("this file system reports no creation time");
+    const births = sessionStartTimes(home);
+    assert.equal(births.length, 1);
+    assert.ok(births[0]! > 0);
+    assert.ok(Math.abs(births[0]! - Date.now()) < 60_000, "the birth is when the file was created");
+  });
+
+  it("a missing projects directory, and an empty one, give no sessions", () => {
+    const home = join(tmp, `home-${n++}`);
+    assert.deepEqual(scanSessions(home), { births: [], transcripts: 0, unknownBirth: 0 });
+    mkdirSync(join(home, "projects", "-empty"), { recursive: true });
+    assert.deepEqual(scanSessions(home), { births: [], transcripts: 0, unknownBirth: 0 });
+  });
+
+  it("without the seam, a real transcript newer than the install and no heartbeat fails MANAGED_HOOKS_NOT_FIRING", t => {
+    const e = makeEnv();
+    install(e);
+    // The install happened an hour ago; the session's file is created now.
+    inHome(e, () => {
+      const l = readManagedLedger()!;
+      writeFileSync(managedLedgerPath(), JSON.stringify({ ...l, installedAt: new Date(Date.now() - 3_600_000).toISOString() }));
+    });
+    transcripts(e.claudeHome, { "-proj-a/abc.jsonl": "{}\n", "-proj-a/notes.txt": "x" });
+    if (!hasBirthtime(join(e.claudeHome, "projects", "-proj-a", "abc.jsonl"))) return t.skip("this file system reports no creation time");
+    const found = inHome(e, () => managedDropinChecks({ env: e.sys.env, claudeHome: e.claudeHome, pin: e.pin }));
+    const c = byCode(found, "MANAGED_HOOKS_NOT_FIRING");
+    assert.equal(c.ok, false, c.detail);
+    assert.match(c.detail, /never been recorded/);
+  });
+
+  it("the same transcript passes once a heartbeat was recorded after it", t => {
+    const e = makeEnv();
+    install(e);
+    inHome(e, () => {
+      const l = readManagedLedger()!;
+      writeFileSync(managedLedgerPath(), JSON.stringify({ ...l, installedAt: new Date(Date.now() - 3_600_000).toISOString() }));
+      writeFileSync(managedHeartbeatPath(), new Date().toISOString() + "\n");
+    });
+    transcripts(e.claudeHome, { "-proj-a/abc.jsonl": "{}\n" });
+    if (!hasBirthtime(join(e.claudeHome, "projects", "-proj-a", "abc.jsonl"))) return t.skip("this file system reports no creation time");
+    const found = inHome(e, () => managedDropinChecks({ env: e.sys.env, claudeHome: e.claudeHome, pin: e.pin }));
+    assert.equal(byCode(found, "MANAGED_HOOKS_NOT_FIRING").ok, true);
+  });
+
+  it("a file system that reports no creation time is a skip with its own reason, not 'no session found'", () => {
+    const e = makeEnv();
+    install(e);
+    transcripts(e.claudeHome, { "-proj-a/abc.jsonl": "{}\n", "-proj-a/def.jsonl": "{}\n" });
+    const noBirth = inHome(e, () =>
+      managedDropinChecks({ env: e.sys.env, claudeHome: e.claudeHome, pin: e.pin, sessionScan: () => scanSessions(e.claudeHome, () => 0) }),
+    );
+    const c = byCode(noBirth, "MANAGED_HOOKS_NOT_FIRING");
+    assert.equal(c.ok, true);
+    assert.equal(c.skipped, true);
+    assert.match(c.detail, /no creation time/);
+    assert.doesNotMatch(c.detail, /no Claude Code session was found/);
+
+    const none = inHome(e, () => managedDropinChecks({ env: e.sys.env, claudeHome: join(tmp, `nowhere-${n++}`), pin: e.pin }));
+    const c2 = byCode(none, "MANAGED_HOOKS_NOT_FIRING");
+    assert.equal(c2.skipped, true);
+    assert.match(c2.detail, /no Claude Code session was found/);
   });
 });
 

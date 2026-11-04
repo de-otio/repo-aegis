@@ -20,15 +20,29 @@ import { managedHeartbeatPath } from "./managed-ledger.js";
  */
 export const HEARTBEAT_MARGIN_MS = 10 * 60 * 1000;
 
-/** When each Claude Code session under `<claudeHome>/projects/` began (the transcript's creation time), in ms. */
-export function sessionStartTimes(claudeHome: string): number[] {
-  const out: number[] = [];
+/** What was found under `<claudeHome>/projects/`. */
+export interface SessionScan {
+  /** Creation time (ms) of each transcript whose file system reports one. */
+  births: number[];
+  /** How many `.jsonl` transcripts there are. */
+  transcripts: number;
+  /** Of those, how many have no creation time (a file system that reports 0). */
+  unknownBirth: number;
+}
+
+/**
+ * Read the sessions under `<claudeHome>/projects/<dir>/<id>.jsonl`: when each began
+ * (the transcript's creation time). `birthOf` is a test seam for a file system that
+ * has no creation time.
+ */
+export function scanSessions(claudeHome: string, birthOf: (path: string) => number = p => statSync(p).birthtimeMs): SessionScan {
+  const scan: SessionScan = { births: [], transcripts: 0, unknownBirth: 0 };
   const projects = join(claudeHome, "projects");
   let dirs: string[];
   try {
     dirs = readdirSync(projects);
   } catch {
-    return out;
+    return scan;
   }
   for (const d of dirs) {
     let files: string[];
@@ -40,15 +54,22 @@ export function sessionStartTimes(claudeHome: string): number[] {
     for (const f of files) {
       if (!f.endsWith(".jsonl")) continue;
       try {
-        const born = statSync(join(projects, d, f)).birthtimeMs;
+        const born = birthOf(join(projects, d, f));
+        scan.transcripts++;
         // A filesystem without creation times reports 0: unknown, not "long ago".
-        if (born > 0) out.push(born);
+        if (born > 0) scan.births.push(born);
+        else scan.unknownBirth++;
       } catch {
         /* a transcript that vanished */
       }
     }
   }
-  return out;
+  return scan;
+}
+
+/** When each Claude Code session under `<claudeHome>/projects/` began, in ms. */
+export function sessionStartTimes(claudeHome: string): number[] {
+  return scanSessions(claudeHome).births;
 }
 
 export interface HeartbeatContext {
@@ -56,15 +77,31 @@ export interface HeartbeatContext {
   claudeHome?: string;
   /** Test seam: session start times in ms. */
   sessionBirths?: () => number[];
+  /** Test seam: the whole scan, including transcripts whose creation time is unknown. */
+  sessionScan?: () => SessionScan;
 }
 
 export function heartbeatCheck(ctx: HeartbeatContext, installedAt: string | null): DoctorCheck {
   const claudeHome = ctx.claudeHome ?? join(homedir(), ".claude");
-  const births = (ctx.sessionBirths ?? (() => sessionStartTimes(claudeHome)))();
+  const scan: SessionScan =
+    ctx.sessionScan !== undefined
+      ? ctx.sessionScan()
+      : ctx.sessionBirths !== undefined
+        ? (() => {
+            const b = ctx.sessionBirths();
+            return { births: b, transcripts: b.length, unknownBirth: 0 };
+          })()
+        : scanSessions(claudeHome);
+  const births = scan.births;
   const skip = (detail: string): DoctorCheck => ({ code: "MANAGED_HOOKS_NOT_FIRING", ok: true, skipped: true, detail });
   const installed = installedAt === null ? 0 : Date.parse(installedAt);
   const since = births.filter(b => b > (Number.isNaN(installed) ? 0 : installed));
-  if (births.length === 0) return skip("no Claude Code session was found under the projects directory, so the heartbeat cannot be compared yet");
+  if (scan.transcripts === 0) return skip("no Claude Code session was found under the projects directory, so the heartbeat cannot be compared yet");
+  if (births.length === 0) {
+    return skip(
+      `the file system reports no creation time for the ${scan.unknownBirth} Claude Code session file(s) under the projects directory, so the heartbeat cannot be compared against when a session started`,
+    );
+  }
   if (since.length === 0) return skip("no Claude Code session has started since the drop-in was installed, so the heartbeat cannot be compared yet");
   const newest = Math.max(...since);
   let heartbeat: number | null = null;
