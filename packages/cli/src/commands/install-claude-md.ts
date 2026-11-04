@@ -28,6 +28,17 @@ import {
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { readIfExists } from "../fs-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
+import {
+  BASH_HOOK_ARGS,
+  BASH_HOOK_MATCHER,
+  CHECK_WRITE_HOOK_ARGS,
+  EGRESS_RECEIPT_HOOK_ARGS,
+  FIRST_TOUCH_HOOK_ARGS,
+  FIRST_TOUCH_HOOK_MATCHER,
+  GUARD_EGRESS_HOOK_ARGS,
+  HOOK_ARGS,
+  HOOK_MATCHER,
+} from "./claude-hook-specs.js";
 
 const CLAUDE_MD_BEGIN = "<!-- repo-aegis: managed block — do not edit between markers -->";
 const CLAUDE_MD_END = "<!-- repo-aegis: end managed block -->";
@@ -72,65 +83,6 @@ binary is missing, stop and ask the human to run
 \`settings.json\` or disable hooks.
 ${CLAUDE_MD_END}
 `;
-
-/**
- * The CLI arguments of the PostToolUse hook on Write/Edit/MultiEdit. The
- * `command` written into `settings.json` runs them on the pinned node and
- * CLI by absolute path (D7 of doc/plan-pin-enforcement-binary.md), never a
- * `repo-aegis` resolved through PATH; `jq` is not needed because the
- * subcommand parses stdin JSON natively.
- *
- * Keep these arguments stable across releases: `install claude-md` and
- * `--uninstall` recognise an existing entry, pinned or by name, by them.
- */
-const HOOK_ARGS = "hook scan-after-write";
-
-/**
- * PreToolUse hook command for cross-org write refusal. Same matcher
- * as `HOOK_ARGS` (Write|Edit|MultiEdit) but a different event
- * (PreToolUse), so a non-zero exit blocks the tool *before* it runs.
- * Added in v0.3.0 to make the cross-org-write refusal genuine
- * prevention rather than post-write detection.
- */
-const CHECK_WRITE_HOOK_ARGS = "hook check-write";
-
-/**
- * SessionStart hook command — Phase 1 onboarding. Calls
- * `firstTouchClassify` and emits the result as JSON. Same naming
- * stability rule as `HOOK_ARGS` above.
- */
-const FIRST_TOUCH_HOOK_ARGS = "hook first-touch";
-
-const FIRST_TOUCH_HOOK_MATCHER = "*";
-
-/**
- * PostToolUse hook command for Bash output scanning. Invoked with a
- * `Bash` matcher entry, distinct from the file-write matcher. Same
- * naming-stability rule as the other hook commands.
- */
-const BASH_HOOK_ARGS = "hook scan-bash-output";
-
-const BASH_HOOK_MATCHER = "Bash";
-
-/**
- * PreToolUse(Bash) egress guard — doc/design/egress-guard.md §4. Judges
- * the *destination* of a publishing command before the shell runs it, which
- * is the axis every content-based control in this tool is blind to. The
- * `--agent claude` flag is explicit rather than defaulted so the registered
- * command reads the same as the Codex / Gemini snippets in
- * doc/agent-install.md, where the flag is what selects the `ask` degradation.
- *
- * Same naming-stability rule as the other hook commands: changing this
- * string does not auto-update anyone's settings.json.
- */
-const GUARD_EGRESS_HOOK_ARGS = "hook guard-egress --agent claude";
-
-/**
- * PostToolUse(Bash) receipt — doc/design/egress-guard.md §5. Shares the
- * `Bash` matcher entry with `scan-bash-output`; both hooks run on the same
- * tool result and neither replaces the other.
- */
-const EGRESS_RECEIPT_HOOK_ARGS = "hook egress-receipt";
 
 /**
  * The `command` written into settings.json for each hook, for `pin`
@@ -203,8 +155,6 @@ interface HookCommand {
   type?: string;
   command?: string;
 }
-
-const HOOK_MATCHER = "Write|Edit|MultiEdit";
 
 function defaultClaudeHome(): string {
   return join(homedir(), ".claude");

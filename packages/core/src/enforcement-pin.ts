@@ -133,3 +133,68 @@ export function isPinnedHookCommand(command: string, hookName: string): boolean 
     command.endsWith("; exit 2")
   );
 }
+
+// ---------------------------------------------------------------------------
+// The managed drop-in's hook commands (doc/plan-pin-enforcement-binary.md D8)
+// ---------------------------------------------------------------------------
+
+/** The `id` the managed hook commands ask for the account's uid. By absolute path: a `PATH` lookup could be shadowed. */
+export const MANAGED_ID_PATH = "/usr/bin/id";
+
+/** Where a managed hook command runs, and what it names when it blocks. */
+export interface ManagedHookContext {
+  /** The uid of the account the drop-in is for, digits only. */
+  uid: string;
+  /** Absolute path of the drop-in file: the exit-2 message tells the person to `sudo rm` it. */
+  dropinPath: string;
+  /** Test seam: the `id` to run, default {@link MANAGED_ID_PATH}. */
+  idPath?: string;
+}
+
+/**
+ * A hook `command` for the managed-settings drop-in: {@link pinnedHookCommand}
+ * behind a uid guard, in POSIX `sh` (dash on Debian and Ubuntu).
+ *
+ * A managed file applies to every account on the machine but the pin names one
+ * account's node and CLI, so a hook must do nothing for the others. The guard
+ * asks `/usr/bin/id` by absolute path (D8.4): a `PATH` lookup, or a failing
+ * `id`, must not turn into a pass, so a failing `id` blocks (exit 2) and a
+ * different uid exits 0. The guard comes BEFORE the pin check: another account
+ * often cannot even see the pin (home directories are 0750).
+ *
+ * The blocking message names both ways out (D8.10): re-pin, or remove the
+ * root-owned file, whose literal path it prints. The user cannot edit that file.
+ */
+export function managedHookCommand(pin: EnforcementPin, hookArgs: string, ctx: ManagedHookContext): string {
+  assertPinnable(pin);
+  if (!/^[0-9]+$/.test(ctx.uid)) throw new Error("the uid is not a number");
+  if (/[\n\r\0]/.test(ctx.dropinPath)) throw new Error("the drop-in path contains a newline or NUL character");
+  const n = shellQuote(pin.node);
+  const c = shellQuote(pin.cli);
+  const remove = `sudo rm ${shellQuote(ctx.dropinPath)}`;
+  const idFailed = shellQuote(
+    `repo-aegis: cannot tell which user this is (${ctx.idPath ?? MANAGED_ID_PATH} failed), so this managed hook blocks the tool call; ` +
+      `to remove it run: ${remove}`,
+  );
+  const pinMissing = shellQuote(
+    `repo-aegis: the pinned enforcement binary is missing or not usable (${pin.node}, ${pin.cli}); ` +
+      `re-pin it by running: repo-aegis install claude-md   or remove this managed hook: ${remove}`,
+  );
+  return (
+    `__u=$(${ctx.idPath ?? MANAGED_ID_PATH} -u 2>/dev/null) || { printf '%s\\n' ${idFailed} >&2; exit 2; }; ` +
+    `[ "$__u" = ${ctx.uid} ] || exit 0; ` +
+    `if [ -f ${n} ] && [ -x ${n} ] && [ -f ${c} ] && [ -r ${c} ]; then exec ${n} ${c} ${hookArgs}; fi; ` +
+    `printf '%s\\n' ${pinMissing} >&2; exit 2`
+  );
+}
+
+/** True when `command` is a {@link managedHookCommand} that runs `hookName` (for example `guard-egress`). */
+export function isManagedHookCommand(command: string, hookName: string): boolean {
+  return (
+    command.startsWith("__u=$(") &&
+    command.includes(" -u 2>/dev/null) || { printf '%s\\n' ") &&
+    command.includes("; then exec ") &&
+    command.includes(` hook ${hookName}`) &&
+    command.endsWith("; exit 2")
+  );
+}
