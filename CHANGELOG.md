@@ -91,6 +91,28 @@ re-run the installers; `repo-aegis doctor` reports them
   change: `managedHookCommand` and `isManagedHookCommand` in core. See
   `doc/configuration.md#the-claude-code-managed-drop-in`.
 
+- **Security-review fixes for the managed drop-in.**
+  - `install claude-md` no longer strips repo-aegis's entries from
+    `~/.claude/settings.json` without a person at a terminal, even when the
+    drop-in is unchanged (it used to, because no root step ran), and no longer
+    does so while `MANAGED_HOOKS_NOT_FIRING` is failing. Without a terminal it
+    prints what a terminal run would remove and leaves the file untouched; if
+    you put the entries back because the drop-in was shadowed, they stay.
+  - An unchanged drop-in in a directory that group or others can write is now
+    refused (`SYSTEM_DIR_UNSAFE`) instead of reported as already installed.
+  - `MANAGED_HOOKS_NOT_FIRING` fails when the heartbeat or the install time is
+    in the future (it cannot be trusted), and skips with its own reason when the
+    file system reports no creation time for Claude Code's session files.
+  - `SUDO_NOPASSWD` runs `sudo -n -k /usr/bin/true` only after the same check
+    that covers every other tool root runs (a root-owned regular file that
+    group and others cannot write).
+  - The agent-command guard also refuses `sudo unlink`, `find -delete`/`-exec`,
+    `xargs`, `shred`, `rsync`, `tar`, `env`, `python*`/`perl*`/`ruby*`/`node*`
+    and globbed or `/./`-spelled paths aimed at the managed-settings directory.
+    It reads command text and is not a boundary.
+  - The privileged write refuses, before any `sudo` call, a symlink, directory
+    or other non-regular file at the drop-in path or its temp name.
+
 ## [0.11.0] - 2026-11-03
 
 ### Stricter (may refuse what 0.10 allowed)

@@ -343,13 +343,21 @@ shell access, check `command -v repo-aegis` and `npm ls -g repo-aegis` first.
 ### Moving from `settings.json`
 
 After the drop-in is written and read back, and only if no other managed source
-outranks it (`MANAGED_HOOKS_DISABLED`, `MANAGED_SOURCE_SHADOWED`), the install
-removes its own earlier hook entries and ledgered deny rules from
-`~/.claude/settings.json` (indentation and trailing newline kept; nothing else
-touched) and tells you to confirm that `/status` in Claude Code shows
-`(drop-ins)` or `(file + drop-ins)`. The first SessionStart then records a
-heartbeat that `doctor` checks (`MANAGED_HOOKS_NOT_FIRING`); Claude Code reloads
-managed files when they change, so this takes effect in running sessions.
+outranks it (`MANAGED_HOOKS_DISABLED`, `MANAGED_SOURCE_SHADOWED`) and the
+heartbeat check is not failing (`MANAGED_HOOKS_NOT_FIRING`; "skipped" on a first
+install is fine), the install removes its own earlier hook entries and ledgered
+deny rules from `~/.claude/settings.json` (indentation and trailing newline
+kept; nothing else touched) and tells you to confirm that `/status` in Claude
+Code shows `(drop-ins)` or `(file + drop-ins)`. **Removing anything from that
+file needs a person at a terminal**, even when the drop-in itself is unchanged
+and no root step runs: without one, the install prints what a run from a
+terminal would remove and leaves the file byte-identical. (If you put the
+entries back because the drop-in was shadowed, an agent re-running the install
+cannot strip them again.) The first SessionStart then records a heartbeat that
+`doctor` checks; Claude Code reloads managed files when they change, so this
+takes effect in running sessions. A heartbeat or install time dated in the
+future fails the check, because a rewritten timestamp could hide a drop-in that
+is not loaded.
 
 ### Without sudo: `--user-settings`
 
@@ -389,7 +397,10 @@ is still there it exits 1 naming the path. It never touches
 `managed-settings.json`, another drop-in, or another uid's drop-in.
 The ledger is `state/claude-md-managed.json` (digest, whether each directory was
 created by repo-aegis, install time); it is written before the privileged write
-and removed only after a verified removal.
+and removed only after a verified removal. The ledger is advisory: it sits in
+`state/`, which an agent can write, so it never supplies a path to root. Forging
+it can at most make uninstall remove the legacy `50-repo-aegis.json` (when that
+file exists) or an empty directory.
 
 ### What the drop-in does not guarantee
 
