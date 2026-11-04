@@ -100,6 +100,7 @@ export type EgressCode =
   | "EGRESS_ENV_OVERRIDE"
   | "EGRESS_AFTER_STATE_CHANGE"
   | "GH_PR_CREATE_IMPLICIT_TARGET"
+  | "DOT_GH_WRITE_NEEDS_BOT"
   | "CROSS_ORG_EGRESS"
   | "PAYLOAD_MARKER_HIT"
   | "UNREGISTERED_OWNER_EGRESS"
@@ -120,6 +121,7 @@ export const SHAPE_RULE_CODES: ReadonlySet<EgressCode> = new Set<EgressCode>([
   "EGRESS_ENV_OVERRIDE",
   "EGRESS_AFTER_STATE_CHANGE",
   "GH_PR_CREATE_IMPLICIT_TARGET",
+  "DOT_GH_WRITE_NEEDS_BOT",
 ]);
 
 export interface Destination {
@@ -1337,6 +1339,18 @@ function ghPrCreateImplicitTargetReason(): string {
   });
 }
 
+/**
+ * The refusal for a `dot gh` write with no person present and no leading `--as bot` (D2,
+ * doc/plan-recognise-dot-gh.md §3.3). Static: neither the gh arguments nor the identity given are echoed.
+ */
+const DOT_GH_WRITE_NEEDS_BOT_REASON = [
+  "repo-aegis: dot gh write without --as bot: refused. With no person present, a write through dot gh must run as the bot.",
+  "Without --as, dot gh picks the account from the repository's owner, which for your user's own organisation is the user themself, so the agent would publish as them.",
+  "Re-issue with --as bot as dot gh's first option:",
+  "  dot gh --as bot <the same gh arguments>",
+  "If the bot lacks the permission (it has no issues, secrets, Actions or workflow-file access), stop and report it to your human; do not switch to --as owner or plain gh. [DOT_GH_WRITE_NEEDS_BOT]",
+].join("\n");
+
 function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecision {
   const verb = describeVerb(intent.verb);
   const deny = (code: EgressCode, reason: string, destination?: Destination): EgressDecision => ({
@@ -1346,6 +1360,15 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     ...(destination && { destination }),
     intent,
   });
+
+  // ---- D2: a `dot gh` write with no person present must run as the bot -------
+  // Every intent is a write (reads yield none), so the wrapper is all the classification needed. First, because the
+  // fix is the agent's (add `--as bot`) where most refusals below belong to a person. Without `--as`, dot gh takes
+  // the identity from the owner, and for the user's own organisation that is the user: an agent that forgot
+  // `--as bot` would publish as them. Everything else about the call is judged below as for a plain `gh`.
+  if (intent.wrapper?.kind === "dot-gh" && !opts.humanPresent && intent.wrapper.as !== "bot") {
+    return deny("DOT_GH_WRITE_NEEDS_BOT", DOT_GH_WRITE_NEEDS_BOT_REASON);
+  }
 
   // ---- pty wrapper (issue #151, PR 2b) -------------------------------------
   // Unconditional and first: it needs no registry, no destination and no

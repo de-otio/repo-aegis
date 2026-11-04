@@ -216,6 +216,13 @@ export interface EgressIntent {
    * outright (`EGRESS_PTY_WRAPPER`). Never carries part of the command line.
    */
   ptyWrapper?: string;
+  /**
+   * Set when the `gh` call is made through `dot gh` (`node <path>/dot.mjs gh [--as <id>] …` or `dot gh …`,
+   * {@link recogniseDotGh}). Every other field describes the `gh` arguments that follow dot's own options,
+   * exactly as for a plain `gh`. `as` is the identity dot gh was asked to use (its leading `--as`), or null
+   * when it picks one from the repository's owner; the policy requires `bot` for a write with no person present.
+   */
+  wrapper?: { kind: "dot-gh"; as: string | null };
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +813,63 @@ function resolveCommand(input: string[], assigns: Assignment[] = [], envFlags: s
 function baseName(token: string): string {
   const slash = token.lastIndexOf("/");
   return slash === -1 ? token : token.slice(slash + 1);
+}
+
+/** What {@link recogniseDotGh} found in a `dot gh` call. */
+interface DotGhCall {
+  /** Index (in the segment's tokens) of the `gh` word that follows `dot` / the script. */
+  ghIdx: number;
+  /** The `gh` arguments: everything after dot gh's own leading options. */
+  rest: string[];
+  /** The last leading `--as` / `--as=`, or null. */
+  as: string | null;
+  /** dot gh runs no `gh`: `--explain` was given, or it refuses its own options (`--as` with no usable value). */
+  runsNoGh: boolean;
+}
+
+/**
+ * Recognise `node <path>/dot.mjs gh [--as <id> | --as=<id> | --explain]… <gh args…>` and `dot gh …` at the
+ * command word `start`. Narrow on purpose: `node` is the bare word or an absolute path, no option comes between
+ * it and a literal script named `dot.mjs`, and `NODE_OPTIONS` / `NODE_PATH` are not in force on the segment;
+ * anything else stays an `unparsed-shape`. Like dot gh itself, its own options are read only at the front, so
+ * an `--as` after a `gh` word belongs to `gh`. The option loop mirrors `splitOwnOptions` in dot-work
+ * `scripts/dot-gh.mjs`, including its refusal of `--as` with a missing, empty or `-`-leading value: dot gh then
+ * runs no `gh`, which `runsNoGh` says, like `--explain`.
+ */
+function recogniseDotGh(toks: readonly string[], start: number, segDanger: ReadonlySet<string>): DotGhCall | null {
+  const word = toks[start];
+  if (word === undefined) return null;
+  let ghIdx: number;
+  if (word === "dot") {
+    ghIdx = start + 1;
+  } else if (baseName(word) === "node" && (word === "node" || word.startsWith("/"))) {
+    if (segDanger.has("NODE_OPTIONS") || segDanger.has("NODE_PATH")) return null;
+    const script = toks[start + 1];
+    if (script === undefined || script.startsWith("-") || /[$`*?[{]/.test(script) || baseName(script) !== "dot.mjs") return null;
+    ghIdx = start + 2;
+  } else {
+    return null;
+  }
+  if (toks[ghIdx] !== "gh") return null;
+  let as: string | null = null;
+  let runsNoGh = false;
+  let i = ghIdx + 1;
+  for (; i < toks.length; i++) {
+    const a = toks[i]!;
+    if (a === "--explain") {
+      runsNoGh = true;
+    } else if (a === "--as") {
+      const v = toks[i + 1];
+      if (v === undefined || v.startsWith("-")) return { ghIdx, rest: [], as: null, runsNoGh: true };
+      as = v;
+      i++;
+    } else if (a.startsWith("--as=")) {
+      as = a.slice("--as=".length);
+    } else {
+      break;
+    }
+  }
+  return { ghIdx, rest: toks.slice(i), as, runsNoGh: runsNoGh || as === "" };
 }
 
 // ---------------------------------------------------------------------------
@@ -3263,6 +3327,8 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
 
       // `sh -c '"$@"' sh gh issue create …`: the words after the text are `$0`, `$1`, … of the text (C1).
       let positionalsRun = false;
+      /** This segment is a recognised `dot gh` call: its `gh` word is accounted for by the intent (or by dot gh refusing to run). */
+      let dotGh: DotGhCall | null = null;
       if (resolved.nestedText !== undefined) {
         const substituted =
           resolved.nestedArgs !== undefined && resolved.nestedArgs.length > 0
@@ -3292,6 +3358,12 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
         } else if (cmd === "git") intent = classifyGit(args, base, assigns, { aliases: ctx.gitAliases });
         else if (cmd === "gh") {
           intent = classifyGh(args, base, { envRepo: envRaw, envOverridden, aliases: ctx.aliases });
+        } else if ((dotGh = recogniseDotGh(toks, resolved.start, segDanger)) !== null) {
+          // `dot gh …` judges the `gh` arguments it is given; `--explain`, or options dot gh refuses, run no `gh`.
+          if (!dotGh.runsNoGh) {
+            const inner = classifyGh(dotGh.rest, base, { envRepo: envRaw, envOverridden, aliases: ctx.aliases });
+            if (inner !== null) intent = { ...inner, wrapper: { kind: "dot-gh", as: dotGh.as } };
+          }
         } else if (cmd === "npm" || cmd === "pnpm" || cmd === "yarn") intent = classifyNpm(cmd, args, base);
         else if (hasExpansion(word)) {
           // `$GH issue create`, `$(which gh) pr comment 5`: the command is whatever the expansion yields.
@@ -3340,16 +3412,19 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
       // into an intent of its own (the command word's own mention is the one it did) is reported.
       if (!hidden) {
         // `GIT_PAGER='gh …' git log`: a variable assigned for this command can name a program too.
+        // A recognised `dot gh` is read as the `gh` call it makes: its `gh` word is the mention the intent covers.
         const found = countMentions(
           flattenWords([
-            ...scanTokens(toks, resolved.start, cmd, resolved.nestedFrom),
+            ...(dotGh !== null
+              ? scanTokens(toks, dotGh.ghIdx, "gh", resolved.nestedFrom)
+              : scanTokens(toks, resolved.start, cmd, resolved.nestedFrom)),
             // The words after `-c TEXT` that TEXT does not run are still words of this command line.
             ...(positionalsRun ? [] : (resolved.nestedArgs ?? [])),
             ...assigns.map(a => a.value),
             ...scriptTexts,
           ]),
         );
-        if (found.gh > (cmd === "gh" ? 1 : 0)) sentinel("gh");
+        if (found.gh > (cmd === "gh" || dotGh !== null ? 1 : 0)) sentinel("gh");
         if (found.git > (cmd === "git" ? 1 : 0)) sentinel("git");
       }
 
