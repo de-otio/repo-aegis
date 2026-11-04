@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-11-04
+
+### Fixed — `doctor` printed `sudo: a password is required`
+
+- The `SUDO_NOPASSWD` check runs `sudo -n -k /usr/bin/true`, and sudo's
+  refusal is the passing outcome. Its stderr went straight to the terminal,
+  where it read as an error. The probe now captures it.
+
 ## [0.11.2] - 2026-11-04
 
 ### Fixed — `[y/N]` prompts answered "no" before the person could type
@@ -1781,7 +1789,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.11.3...HEAD
+[0.11.3]: https://github.com/de-otio/repo-aegis/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/de-otio/repo-aegis/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/de-otio/repo-aegis/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/de-otio/repo-aegis/compare/v0.10.3...v0.11.0
