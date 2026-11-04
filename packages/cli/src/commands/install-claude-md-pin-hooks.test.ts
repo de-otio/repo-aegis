@@ -223,9 +223,12 @@ describe("T13/T19: install claude-md --user-settings writes pinned hook commands
 
 const subprocess = { skip: cliBuilt() ? undefined : `built CLI not found at ${cliPath}` };
 
+/** The POSIX shell the hook commands must work in (D8.8): dash where it is installed (Debian and Ubuntu's `sh`), else this platform's `/bin/sh`. */
+const POSIX_SH = ["/bin/dash", "/usr/bin/dash"].find(p => existsSync(p)) ?? "/bin/sh";
+
 /** Runs a settings.json hook `command` the way Claude Code does: through `sh -c`, tool call on stdin. */
 function runHookCommand(command: string, input: string, env: NodeJS.ProcessEnv): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("sh", ["-c", command], { input, env, encoding: "utf8" });
+  const r = spawnSync(POSIX_SH, ["-c", command], { input, env, encoding: "utf8" });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 

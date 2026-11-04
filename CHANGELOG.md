@@ -58,6 +58,38 @@ re-run the installers; `repo-aegis doctor` reports them
   registry rules, so an agent cannot overwrite the code the pin points at. A
   package directory inside a git work tree (a development checkout) is warned
   about and not denied.
+- **`install claude-md` now writes a root-owned managed-settings drop-in**, not
+  `~/.claude/settings.json`. Run it from your own terminal: it shows the path,
+  size, digest and a diff, asks `[y/N]`, then `sudo` asks for **your password**
+  once. The file (`/Library/Application Support/ClaudeCode/managed-settings.d/
+  50-repo-aegis-<uid>.json` on macOS, `/etc/claude-code/managed-settings.d/…` on
+  Linux) holds the hooks and the `Edit(//…)` deny rules, so the agent running as
+  you cannot edit or remove it, and your own `settings.json` can stay portable
+  (it holds only your preferences again). Each hook starts with a uid guard, so a
+  second account on the machine is unaffected. Only fixed commands run as root,
+  by absolute path, after checks on `sudo`, the tools and the directories
+  (`PRIVILEGED_TOOL_UNSAFE`, `SYSTEM_DIR_UNSAFE`); the file is read back. The
+  first run moves repo-aegis's earlier entries out of `settings.json` (once the
+  drop-in is verified and nothing shadows it) and asks you to confirm `/status`
+  in Claude Code lists `(drop-ins)`. **Before `npm rm -g repo-aegis`, run
+  `repo-aegis install claude-md --uninstall`**; if a fail-closed hook is left
+  behind, every blocked call prints the literal `sudo rm '<path>'` that removes
+  it. `--user-settings` keeps the old behaviour for containers and other places
+  without `sudo` (and is the automatic fallback on an unsupported platform, as
+  root, or without `/usr/bin/id`); `init` uses it. New `doctor` codes:
+  `MANAGED_DROPIN_STALE`, `MANAGED_DROPIN_NOT_ROOT_OWNED`,
+  `MANAGED_DROPIN_UNREADABLE`, `MANAGED_DROPIN_ORPHANED`,
+  `MANAGED_DROPIN_LEDGER_STALE`, `MANAGED_HOOKS_DISABLED`,
+  `MANAGED_SOURCE_SHADOWED`, `MANAGED_HOOKS_NOT_FIRING` (a SessionStart heartbeat
+  proves Claude Code loads the file; server-managed policy and MDM make it ignore
+  drop-ins) and, as warnings, `SUDO_NOPASSWD` and `ENFORCEMENT_IN_USER_SETTINGS`.
+  With `NOPASSWD` sudo the drop-in is no stronger than the user file. The egress
+  guard now also refuses an agent Bash command that uninstalls the drop-in or
+  runs `sudo rm`/`mv`/`tee` on the managed-settings directory
+  (`AGENT_RAN_HUMAN_COMMAND`). `GUARD_HOOK_UNREGISTERED` and
+  `REGISTRY_AGENT_WRITABLE` read the drop-in as well as the user file. Library
+  change: `managedHookCommand` and `isManagedHookCommand` in core. See
+  `doc/configuration.md#the-claude-code-managed-drop-in`.
 
 ## [0.11.0] - 2026-11-03
 
