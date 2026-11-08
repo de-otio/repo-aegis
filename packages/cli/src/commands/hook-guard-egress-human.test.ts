@@ -70,6 +70,11 @@ const HUMAN_COMMANDS: ReadonlyArray<readonly [label: string, command: string]> =
   ["upstreams add", "repo-aegis upstreams add upstream-org/lib"],
   ["init --migrate-classify", "repo-aegis init --migrate-classify"],
   ["init --force", "repo-aegis init --force"],
+  ["identity add", "repo-aegis identity add me --gh-login alice"],
+  ["identity remove", "repo-aegis identity remove me"],
+  ["identity require --off", "repo-aegis identity require --off"],
+  ["engagements set-identity", "repo-aegis engagements set-identity customer-a --person me"],
+  ["set-identity for a personal org", "repo-aegis engagements set-identity --personal-org acme --agent me-bot"],
   // wrappers and shells
   ["sudo", "sudo -u someone repo-aegis approve '*'"],
   ["env", "env FOO=1 repo-aegis approve '*'"],
@@ -100,6 +105,11 @@ const HUMAN_COMMANDS: ReadonlyArray<readonly [label: string, command: string]> =
   ["node dist", "node packages/cli/dist/index.js approve '*'"],
   ["npx", "npx -y @de-otio/repo-aegis approve '*'"],
   // P7: the managed drop-in
+  // the internal entry points (M3c/L2): reached only through the gh shim and git
+  ["internal gh entry", "repo-aegis gh --home /x -- pr view 1"],
+  ["internal gh entry via npx", "npx repo-aegis gh -- api user"],
+  ["internal gh entry via dist", "node /p/packages/cli/dist/index.js gh -- pr view 1"],
+  ["internal git-credential entry", "printf 'host=x\\n\\n' | repo-aegis git-credential get"],
   ["install claude-md --uninstall", "repo-aegis install claude-md --uninstall"],
   ["install claude-md --uninstall under script", "script -q /dev/null repo-aegis install claude-md --uninstall"],
   ["install claude-md --uninstall under expect", "expect -c 'spawn repo-aegis install claude-md --uninstall; interact'"],

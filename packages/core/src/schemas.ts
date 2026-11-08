@@ -132,6 +132,117 @@ const registryHostSchema = z
     },
   );
 
+// ---------------------------------------------------------------------------
+// GitHub identities (registry schemaVersion 3; doc/plan-owner-identity.md §5.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * An identity's name, and a github-app's slug. Never starts with `-`, so a
+ * value can never be read as an option when it is later passed to another
+ * program (§12.1 A16).
+ */
+export const IDENTITY_NAME_REGEX = /^[a-z0-9][a-z0-9-]{0,62}$/;
+/**
+ * A GitHub login (case-insensitive on GitHub, kept as typed). Never starts with `-` or `_` (§12.1 A16). One
+ * optional `_shortcode` suffix is allowed: the Enterprise Managed User form `handle_shortcode`. The shortcode
+ * can identify a customer, so `status` and `doctor` text never print the login of an engagement-only identity.
+ */
+export const GH_LOGIN_REGEX = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:_[A-Za-z0-9]{1,20})?$/;
+
+const identityNameSchema = z.string().regex(IDENTITY_NAME_REGEX, {
+  message: "identity name must match ^[a-z0-9][a-z0-9-]{0,62}$ (lowercase, digits, hyphens; no leading hyphen)",
+});
+
+const identityDefinitionSchema = z.discriminatedUnion(
+  "kind",
+  [
+    z.strictObject({
+      kind: z.literal("gh-login"),
+      login: z.string({ message: "'login' must be a string" }).regex(GH_LOGIN_REGEX, {
+        message: `login must match ${GH_LOGIN_REGEX.source} (a GitHub login, or an Enterprise Managed User login handle_shortcode; no leading hyphen or underscore)`,
+      }),
+    }),
+    z.strictObject({
+      kind: z.literal("github-app"),
+      app: z.string({ message: "'app' must be a string" }).regex(IDENTITY_NAME_REGEX, {
+        message: "app slug must match ^[a-z0-9][a-z0-9-]{0,62}$ (lowercase, digits, hyphens; no leading hyphen)",
+      }),
+    }),
+  ],
+  { message: "identity 'kind' must be \"gh-login\" or \"github-app\"" },
+);
+
+/** The on-disk form of one identity. */
+export type IdentityDefinition = z.infer<typeof identityDefinitionSchema>;
+
+/** A `personalOrgs` entry that carries identities: `{ name, person?, agent? }`. */
+const personalOrgObjectSchema = z.strictObject({
+  name: orgNameSchema,
+  person: identityNameSchema.optional(),
+  agent: identityNameSchema.optional(),
+});
+
+/** A `personalOrgs` entry after parsing: a plain org name or an object that maps it to identities. */
+export type PersonalOrgEntry = string | z.infer<typeof personalOrgObjectSchema>;
+
+/**
+ * One `personalOrgs` entry: a plain org name (unmapped, as in schemaVersion 2) or `{ name, person?, agent? }`.
+ * A hand-written union, because zod's own reports "Invalid input" for a bad branch and never says which
+ * field is wrong.
+ */
+const personalOrgEntrySchema = z.unknown().transform((value, ctx): PersonalOrgEntry => {
+  const parsed =
+    typeof value === "string"
+      ? orgNameSchema.safeParse(value)
+      : value !== null && typeof value === "object" && !Array.isArray(value)
+        ? personalOrgObjectSchema.safeParse(value)
+        : null;
+  if (parsed === null) {
+    ctx.issues.push({
+      code: "custom",
+      input: value,
+      message: "personalOrgs entry must be an org name or an object { name, person?, agent? }",
+    });
+    return z.NEVER;
+  }
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      ctx.issues.push({ code: "custom", input: value, message: issue.message, path: issue.path });
+    }
+    return z.NEVER;
+  }
+  return parsed.data;
+});
+
+/** The org name of a parsed `personalOrgs` entry. */
+export function personalOrgName(entry: PersonalOrgEntry): string {
+  return typeof entry === "string" ? entry : entry.name;
+}
+
+/** Keys an engagement may carry (schemaVersion 3 rejects any other). */
+const KNOWN_ENGAGEMENT_KEYS: ReadonlySet<string> = new Set([
+  "id", "name", "started", "ended", "reposActive", "markers", "notes", "githubOrgs", "person", "agent",
+]);
+
+/** Top-level keys the registry reads. Unknown top-level keys stay allowed, except near-misses of these (v3). */
+const KNOWN_TOP_LEVEL_KEYS: readonly string[] = [
+  "schemaVersion", "always_block", "personalOrgs", "allowedUpstreams", "publicRegistries", "privateInfra",
+  "selfIdentity", "alwaysBlockExemptPaths", "engagements", "identities", "requireIdentity",
+];
+
+/** Levenshtein distance, for catching a mistyped key (`agnet`, `identites`) that passthrough would swallow. */
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length]!;
+}
+
 const engagementSchema = z
   .object({
     id: z
@@ -157,6 +268,13 @@ const engagementSchema = z
      * enforced by the registry-level superRefine.
      */
     githubOrgs: z.array(orgNameSchema).optional(),
+    /**
+     * GitHub identities (schemaVersion 3) for every org in `githubOrgs`: the
+     * `person` column (a gh-login identity) and the `agent` column (a
+     * github-app identity). Names of top-level `identities` entries.
+     */
+    person: identityNameSchema.optional(),
+    agent: identityNameSchema.optional(),
   })
   .passthrough(); // Forward-compat: unknown sibling fields are kept, not rejected.
 
@@ -175,7 +293,20 @@ export const registryFileSchema = z
      * origin's org is here is auto-classified as `public-eligible`.
      * Disjoint from any engagement's `githubOrgs`.
      */
-    personalOrgs: z.array(orgNameSchema).optional(),
+    personalOrgs: z.array(personalOrgEntrySchema).optional(),
+    /**
+     * GitHub identities by name (schemaVersion 3, doc/plan-owner-identity.md
+     * §5.1). Referenced by `personalOrgs` object entries and by an engagement's
+     * `person` / `agent`. Nothing in this phase chooses or injects a token from
+     * them.
+     */
+    identities: z.record(z.string(), identityDefinitionSchema).optional(),
+    /**
+     * When true, an agent write to a registered owner with no identity entry
+     * at all is refused (§12.2 Q4, narrower rule). Set by the first
+     * `set-identity`; cleared only by `identity require --off`.
+     */
+    requireIdentity: z.boolean({ message: "'requireIdentity' must be true or false" }).optional(),
     /**
      * Exact `owner/repo` upstreams an agent may open PRs, issues and comments
      * against without a person present (issue #151, D6). An entry registers
@@ -296,7 +427,94 @@ export const registryFileSchema = z
   // (personalOrgs ∪ Σ engagements[*].githubOrgs) union, and within
   // personalOrgs itself. Same-string overlap is a fail-closed parse error.
   .superRefine((data, ctx) => {
-    const personalOrgs = data.personalOrgs ?? [];
+    // Names only: an object entry maps its org to identities but is the same org for every rule below.
+    const personalOrgs = (data.personalOrgs ?? []).map(personalOrgName);
+    const schemaVersion = data.schemaVersion ?? 1;
+    const identities = new Map(Object.entries(data.identities ?? {}));
+    // 0. schemaVersion 3 gate: the identity keys are not understood below it, so a lower
+    // declared version with them is a mismatch, not a quiet upgrade.
+    if (schemaVersion < REGISTRY_IDENTITIES_MIN_VERSION) {
+      const needs = (path: (string | number)[], what: string): void =>
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `${what} requires schemaVersion ${REGISTRY_IDENTITIES_MIN_VERSION}, but this registry declares schemaVersion ${schemaVersion}`,
+        });
+      if (data.identities !== undefined) needs(["identities"], "'identities'");
+      if (data.requireIdentity !== undefined) needs(["requireIdentity"], "'requireIdentity'");
+      (data.personalOrgs ?? []).forEach((entry, i) => {
+        if (typeof entry !== "string") needs(["personalOrgs", i], "an object-form personalOrgs entry");
+      });
+      data.engagements.forEach((eng, i) => {
+        if (eng.person !== undefined) needs(["engagements", i, "person"], "an engagement's 'person'");
+        if (eng.agent !== undefined) needs(["engagements", i, "agent"], "an engagement's 'agent'");
+      });
+    }
+    // 0a. From version 3 a mistyped key must not pass silently: a misspelt `agent:` or `requireIdentity:` would
+    // otherwise be kept by passthrough and quietly leave an owner unmapped or the requirement off.
+    if (schemaVersion >= REGISTRY_IDENTITIES_MIN_VERSION) {
+      data.engagements.forEach((eng, i) => {
+        for (const key of Object.keys(eng)) {
+          if (!KNOWN_ENGAGEMENT_KEYS.has(key)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["engagements", i],
+              message: `unknown key "${key}" in a schemaVersion ${schemaVersion} engagement (known: ${[...KNOWN_ENGAGEMENT_KEYS].join(", ")})`,
+            });
+          }
+        }
+      });
+      for (const key of Object.keys(data)) {
+        if (KNOWN_TOP_LEVEL_KEYS.includes(key)) continue;
+        const near = KNOWN_TOP_LEVEL_KEYS.find(k => editDistance(key.toLowerCase(), k.toLowerCase()) <= 2);
+        if (near !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [key],
+            message: `unknown top-level key "${key}" looks like a misspelling of "${near}"`,
+          });
+        }
+      }
+    }
+    // 0b. identity names (record keys are not validated by the record schema) and references.
+    for (const name of identities.keys()) {
+      if (!IDENTITY_NAME_REGEX.test(name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["identities", name],
+          message: "identity name must match ^[a-z0-9][a-z0-9-]{0,62}$ (lowercase, digits, hyphens; no leading hyphen)",
+        });
+      }
+    }
+    const checkRef = (path: (string | number)[], column: "person" | "agent", name: string | undefined): void => {
+      if (name === undefined) return;
+      const def = identities.get(name);
+      if (def === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `${column} refers to identity "${name}", which is not defined in 'identities'`,
+        });
+        return;
+      }
+      const want = column === "agent" ? "github-app" : "gh-login";
+      if (def.kind !== want) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `${column} identity "${name}" is kind "${def.kind}"; ${column} must refer to a ${want} identity`,
+        });
+      }
+    };
+    (data.personalOrgs ?? []).forEach((entry, i) => {
+      if (typeof entry === "string") return;
+      checkRef(["personalOrgs", i, "person"], "person", entry.person);
+      checkRef(["personalOrgs", i, "agent"], "agent", entry.agent);
+    });
+    data.engagements.forEach((eng, i) => {
+      checkRef(["engagements", i, "person"], "person", eng.person);
+      checkRef(["engagements", i, "agent"], "agent", eng.agent);
+    });
     // 1. personalOrgs internal duplicates.
     const personalSeen = new Map<string, number>();
     for (let i = 0; i < personalOrgs.length; i++) {
@@ -371,6 +589,9 @@ export const registryFileSchema = z
   });
 
 export type RegistryFile = z.infer<typeof registryFileSchema>;
+
+/** The registry `schemaVersion` that introduced `identities` and the keys that reference them. */
+export const REGISTRY_IDENTITIES_MIN_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Per-repo override (.repo-aegis.yml)

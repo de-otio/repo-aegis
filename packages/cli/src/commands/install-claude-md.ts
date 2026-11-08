@@ -175,7 +175,7 @@ export interface HookCommand {
   command?: string;
 }
 
-function defaultClaudeHome(): string {
+export function defaultClaudeHome(): string {
   return join(homedir(), ".claude");
 }
 

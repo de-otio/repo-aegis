@@ -19,6 +19,7 @@
 // package.json next to the entry file, never from running it.
 import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parsePinFromScript, repoAegisHome, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import type { DoctorCheck } from "./doctor-checks.js";
@@ -126,7 +127,7 @@ function pinMissingCheck(scripts: InstalledScript[]): DoctorCheck {
   };
 }
 
-function canonical(path: string): string {
+export function canonical(path: string): string {
   try {
     return realpathSync(path);
   } catch {
@@ -135,7 +136,7 @@ function canonical(path: string): string {
 }
 
 /** Every distinct (by canonical path) executable `repo-aegis` on `pathValue`, in PATH order. */
-function repoAegisOnPath(pathValue: string | undefined): Array<{ path: string; real: string }> {
+export function repoAegisOnPath(pathValue: string | undefined): Array<{ path: string; real: string }> {
   const found: Array<{ path: string; real: string }> = [];
   if (pathValue === undefined || pathValue === "") return found;
   for (const entry of pathValue.split(delimiter)) {
@@ -154,7 +155,7 @@ function repoAegisOnPath(pathValue: string | undefined): Array<{ path: string; r
 }
 
 /** The version in the repo-aegis package.json above `entry`, or null; never runs `entry`. */
-function versionOf(entry: string): string | null {
+export function versionOf(entry: string): string | null {
   let dir = dirname(entry);
   for (let i = 0; i < 4; i++) {
     const text = readText(join(dir, "package.json"));
@@ -215,4 +216,32 @@ export function enforcementPinChecks(
 ): DoctorCheck[] {
   const scripts = installedScripts(env["REPO_AEGIS_HOME"] ?? repoAegisHome());
   return [unpinnedCheck(scripts, unpinnedClaudeHooks(claudeHome)), pinMissingCheck(scripts), multipleInstallsCheck(env["PATH"], pin)];
+}
+
+/** A `repo-aegis` reachable on PATH and the version of its package, or null when that cannot be read. */
+export interface InstallOnPath {
+  path: string;
+  version: string | null;
+}
+
+/** The version of the repo-aegis that is running this code, or null when its package.json cannot be found. */
+export function runningInstallVersion(): string | null {
+  return versionOf(fileURLToPath(import.meta.url));
+}
+
+/** `a < b` for dotted numeric versions (a prerelease suffix is ignored); unparseable parts count as 0. */
+export function versionIsOlder(a: string, b: string): boolean {
+  const parts = (v: string): number[] => v.split("-")[0]!.split(".").map(p => Number.parseInt(p, 10) || 0);
+  const pa = parts(a);
+  const pb = parts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d < 0;
+  }
+  return false;
+}
+
+/** The CLI paths the installed git hooks and gh shim under `home` are pinned to (what they actually run). */
+export function pinnedCliPaths(home: string): string[] {
+  return installedScripts(home).flatMap(s => (s.pin === null ? [] : [s.pin.cli]));
 }

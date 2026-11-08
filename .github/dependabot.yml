@@ -50,3 +50,9 @@ updates:
     commit-message:
       prefix: "chore(actions)"
       include: "scope"
+    groups:
+      # init and analyze must move together: separate PRs each pin one half
+      # to a newer version than the other, and CodeQL fails on the mismatch.
+      codeql-action:
+        patterns:
+          - "github/codeql-action/*"

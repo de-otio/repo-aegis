@@ -7,12 +7,20 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { captureOutput, fakeGh, lastJsonLine, withEnv } from "../_test-utils.js";
-import { checkShim, ghShimIsFirstOnPath, installShim, shimPathFor, type ShimResult } from "./install-shim.js";
+import { checkShim, ghShimIsFirstOnPath, installShim as installShimReal, shimPathFor, type InstallShimOptions, type ShimResult } from "./install-shim.js";
 import type { EnforcementPin } from "@de-otio/repo-aegis-core";
 import { currentEnforcementPin } from "../enforcement-pin.js";
-import { renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
+import { parseHomeFromScript, parseTaaadPinFromScript, renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
 
 let root: string;
+
+/**
+ * `installShim` with no taaad pinned unless a case says otherwise: the developer's machine may have a real
+ * taaad on PATH, and the shim these cases compare against must not depend on it.
+ */
+function installShim(tool: string | undefined, opts: InstallShimOptions): ShimResult {
+  return installShimReal(tool, { taaad: null, ...opts });
+}
 
 before(() => {
   root = mkdtempSync(join(tmpdir(), "repo-aegis-install-shim-test-"));
@@ -30,7 +38,7 @@ function makeHome(name: string): { home: string; run: <T>(fn: () => T) => T } {
 }
 
 const PIN: EnforcementPin = { node: "/opt/node/bin/node", cli: "/opt/ra/dist/index.js" };
-const SHIM_SCRIPT = renderShimScript(PIN);
+const SHIM_SCRIPT = renderShimScript(PIN, { home: "/opt/ra-home", taaad: null });
 
 describe("the rendered shim script", () => {
   it("is a bash script carrying the generated-by header on its own line", () => {
@@ -62,14 +70,41 @@ describe("the rendered shim script", () => {
       !/(^|[;&|(!`]|\bthen\b|\bdo\b|\$\()\s*repo-aegis(\s|$)/m.test(code),
       "still calls repo-aegis by name",
     );
-    // egress-check and egress-readback, the two calls the shim makes, both go through the pin.
-    assert.ok(code.includes('"$__ra_node" "$__ra_cli" egress-check'));
-    assert.ok(code.includes('"$__ra_node" "$__ra_cli" egress-readback'));
+    // D1: the one call the shim makes goes through the pin, with the pinned home, and nothing follows it.
+    assert.ok(code.includes('exec "$__ra_node" "$__ra_cli" gh --home "$__ra_home" -- "$@"'));
+    assert.ok(code.includes("__ra_home='/opt/ra-home'"));
+    assert.ok(!code.includes("egress-check"), "the shim no longer makes its own decision call");
+    assert.ok(!code.includes("egress-readback"), "the read-back runs inside `repo-aegis gh`");
+  });
+
+  it("D1: execs the CLI for every verb but --version, help and completion; no shell code follows the exec", () => {
+    const lines = SHIM_SCRIPT.split("\n");
+    const execIdx = lines.findIndex(l => l.startsWith('exec "$__ra_node"'));
+    assert.ok(execIdx > 0, "no exec of the pinned CLI");
+    assert.deepEqual(
+      lines.slice(execIdx + 1).filter(l => l.trim() !== "" && !l.trim().startsWith("#")),
+      [],
+      "code after the exec",
+    );
+    assert.ok(SHIM_SCRIPT.includes("--version|help|completion) exec"), "the skip list");
+    // The old verb pre-filter is gone: a read group is no longer passed through by the shell.
+    assert.ok(!SHIM_SCRIPT.includes("pr|issue|release"), "the bash verb pre-filter must be gone");
+    // The token cannot be seen by shell code: the script never mentions one.
+    assert.ok(!/GH_TOKEN|GITHUB_TOKEN/.test(SHIM_SCRIPT));
+  });
+
+  it("pins taaad (launcher, interpreter, package directory) and reads it back", () => {
+    const taaad = { launcher: "/opt/pipx/venvs/taaad/bin/taaad", interpreter: "/usr/bin/python3", packageDir: "/opt/pipx/venvs/taaad" };
+    const text = renderShimScript(PIN, { home: "/opt/ra-home", taaad });
+    assert.deepEqual(parseTaaadPinFromScript(text), taaad);
+    assert.equal(parseTaaadPinFromScript(SHIM_SCRIPT), null);
+    assert.equal(parseHomeFromScript(text), "/opt/ra-home");
+    assert.throws(() => renderShimScript(PIN, { home: "/opt/ra-home", taaad: { ...taaad, packageDir: "/opt/a\nb" } }), /newline|NUL/i);
   });
 
   it("T12: a pin path with a newline or NUL is refused at render time", () => {
-    assert.throws(() => renderShimScript({ ...PIN, cli: "/opt/a\nb/index.js" }), /newline|NUL/i);
-    assert.throws(() => renderShimScript({ ...PIN, node: "/opt/a\0b/node" }), /newline|NUL/i);
+    assert.throws(() => renderShimScript({ ...PIN, cli: "/opt/a\nb/index.js" }, { home: "/opt/ra-home" }), /newline|NUL/i);
+    assert.throws(() => renderShimScript({ ...PIN, node: "/opt/a\0b/node" }, { home: "/opt/ra-home" }), /newline|NUL/i);
   });
 });
 
@@ -106,6 +141,25 @@ describe("the shim with a pinned binary that is gone (T7: fails closed on publis
     assert.ok(existsSync(ghLog));
   });
 
+  it("T18: every verb but --version, help and completion reaches the pinned CLI, not the real gh (no bash pre-filter)", () => {
+    const { home, run } = makeHome("t18");
+    const cli = join(root, "t18", "stub-cli.cjs");
+    mkdirSync(join(root, "t18"), { recursive: true });
+    writeFileSync(cli, `process.stdout.write("pinned-cli-ran:" + process.argv.slice(2).join(" ") + "\\n");\n`);
+    run(() => captureOutput(() => installShim(undefined, { pin: { node: process.execPath, cli } })));
+    const ghDir = fakeGh(join(root, "t18", "real-gh"), 'echo "real gh: $*"');
+    const env = { ...process.env, REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), ghDir, process.env["PATH"] ?? ""].join(delimiter) };
+    const shim = join(home, "bin", "gh");
+    for (const args of [["project", "item-add", "1", "--owner", "o"], ["ssh-key", "add", "k.pub"], ["auth", "token"], ["pr", "view", "1"], ["-R", "o/r", "issue", "list"]]) {
+      const r = spawnSync("bash", [shim, ...args], { env, encoding: "utf8" });
+      assert.equal(r.stdout, `pinned-cli-ran:gh --home ${home} -- ${args.join(" ")}\n`, args.join(" "));
+    }
+    for (const args of [["--version"], ["help", "pr"], ["completion", "-s", "zsh"]]) {
+      const r = spawnSync("bash", [shim, ...args], { env, encoding: "utf8" });
+      assert.equal(r.stdout, `real gh: ${args.join(" ")}\n`, args.join(" "));
+    }
+  });
+
   it("refuses when the pinned node is gone, too", () => {
     const { home, run } = makeHome("t7-node");
     const missingNode = join(root, "t7-node", "no-such-node");
@@ -126,7 +180,7 @@ describe("install shim", () => {
 
     assert.equal(out.exitCode, undefined);
     assert.ok(existsSync(path));
-    assert.equal(readFileSync(path, "utf8"), renderShimScript(currentEnforcementPin()));
+    assert.equal(readFileSync(path, "utf8"), renderShimScript(currentEnforcementPin(), { home, taaad: null }));
     assert.equal(statSync(path).mode & 0o777, 0o755);
     assert.ok(out.stdout.includes(`export PATH="${join(home, "bin")}:$PATH"`));
   });
@@ -150,7 +204,7 @@ describe("install shim", () => {
 
     const out = run(() => captureOutput(() => installShim(undefined, {})));
     assert.equal(out.exitCode, undefined);
-    assert.equal(readFileSync(path, "utf8"), renderShimScript(currentEnforcementPin()));
+    assert.equal(readFileSync(path, "utf8"), renderShimScript(currentEnforcementPin(), { home, taaad: null }));
   });
 
   it("refuses a file it did not write, and says how to override", () => {
@@ -176,7 +230,7 @@ describe("install shim", () => {
 
     const out = run(() => captureOutput(() => installShim(undefined, { force: true })));
     assert.equal(out.exitCode, undefined);
-    assert.equal(readFileSync(path, "utf8"), renderShimScript(currentEnforcementPin()));
+    assert.equal(readFileSync(path, "utf8"), renderShimScript(currentEnforcementPin(), { home, taaad: null }));
   });
 
   it("refuses any tool but gh with USAGE", () => {
@@ -203,14 +257,13 @@ describe("install shim", () => {
     const cli = join(odd, "stub cli.cjs");
     writeFileSync(cli, `process.stdout.write("pinned-cli-ran:" + process.argv.slice(2).join(" "));\n`);
     run(() => captureOutput(() => installShim(undefined, { pin: { node: process.execPath, cli } })));
-    // A `gh` whose first argument is a publishing group, so the shim calls the pinned
-    // CLI; the stub prints what it was asked and exits 0 with no verdict, so the
-    // shim passes the command through to the fake gh.
+    // D1: every call but the skip list goes to the pinned CLI, which the stub stands in for. It prints what it was
+    // asked; the real gh is never reached by the shell.
     const ghDir = fakeGh(join(root, "pin-quotes", "real-gh"), 'echo "gh argv: $*"');
     const env = { ...process.env, REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), ghDir, process.env["PATH"] ?? ""].join(delimiter) };
     const r = spawnSync("bash", [join(home, "bin", "gh"), "pr", "list"], { env, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.stdout, "gh argv: pr list\n");
+    assert.equal(r.stdout, `pinned-cli-ran:gh --home ${home} -- pr list`);
     assert.equal(r.stderr, "", "the pinned stub CLI at a quoted path must have run without a pin error");
   });
 
@@ -232,7 +285,28 @@ describe("install shim", () => {
       tool: "gh",
       binDir: join(home, "bin"),
       pathInstruction: `export PATH="${join(home, "bin")}:$PATH"`,
+      taaad: { pinned: false },
     });
+  });
+
+  it("pins the taaad it is given and reports that a user-owned one is not root-only-writable (D4)", () => {
+    const { home, run } = makeHome("taaad");
+    const pkg = join(root, "taaad", "venv");
+    mkdirSync(join(pkg, "bin"), { recursive: true });
+    const launcher = join(pkg, "bin", "taaad");
+    writeFileSync(launcher, "#!/bin/sh\n", { mode: 0o755 });
+    const taaad = { launcher, interpreter: "/bin/sh", packageDir: pkg };
+    const out = run(() => captureOutput(() => installShim(undefined, { json: true, taaad })));
+    const payload = JSON.parse(out.stdout) as { taaad: { pinned: boolean; rootOwned: boolean; problem?: string; launcher: string } };
+    assert.equal(payload.taaad.pinned, true);
+    assert.equal(payload.taaad.launcher, launcher);
+    // The test's own user owns it: never root-owned.
+    assert.equal(payload.taaad.rootOwned, false);
+    assert.ok(payload.taaad.problem !== undefined && payload.taaad.problem.includes("not owned by root"));
+    const text = readFileSync(join(home, "bin", "gh"), "utf8");
+    assert.deepEqual(parseTaaadPinFromScript(text), taaad);
+    const plain = run(() => captureOutput(() => installShim(undefined, { taaad })));
+    assert.ok(plain.stdout.includes("TAAAD_AGENT_WRITABLE"), plain.stdout);
   });
 
   it("shimPathFor honours REPO_AEGIS_HOME", () => {

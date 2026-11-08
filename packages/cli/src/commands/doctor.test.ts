@@ -75,7 +75,7 @@ function makeFixture(
   const binDir = join(home, "bin");
   if (fxOpts.shim !== false) {
     mkdirSync(binDir, { recursive: true });
-    writeFileSync(join(binDir, "gh"), renderShimScript(currentEnforcementPin()), { mode: 0o755 });
+    writeFileSync(join(binDir, "gh"), renderShimScript(currentEnforcementPin(), { home, taaad: null }), { mode: 0o755 });
     chmodSync(join(binDir, "gh"), 0o755);
   }
   if (fxOpts.guardHook !== false) {

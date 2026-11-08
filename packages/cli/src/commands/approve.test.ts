@@ -82,6 +82,26 @@ describe("approve", () => {
     // --list and --revoke need no TTY: they publish nothing.
     assert.equal(run(undefined, { list: true, stderrIsTTY: false, json: true }).exitCode, undefined);
   });
+  it("records the mapped person's login and prints it; a '*' approval and an unmapped owner carry none", () => {
+    const reg = join(root, "identities.yaml");
+    writeFileSync(
+      reg,
+      "schemaVersion: 3\nidentities:\n  alice: { kind: gh-login, login: alice }\n  bot: { kind: github-app, app: example-bot }\n" +
+        "personalOrgs:\n  - { name: example-org, person: alice, agent: bot }\n  - { name: bot-only, agent: bot }\n  - plain-org\nengagements: []\n",
+    );
+    const mapped = run("example-org/svc", { registryPath: reg, json: true });
+    assert.equal(mapped.exitCode, undefined, mapped.stderr);
+    assert.equal((JSON.parse(mapped.stdout) as { approval: { login?: string } }).approval.login, "alice");
+    const text = run("example-org/*", { registryPath: reg });
+    assert.match(text.stdout, /example-org\/\*  as alice  by /);
+    assert.match(text.stdout, /bound to the GitHub account alice/);
+    for (const target of ["*", "plain-org/x", "bot-only/x", "unknown-org/x"]) {
+      const r = run(target, { registryPath: reg, json: true });
+      assert.equal((JSON.parse(r.stdout) as { approval: { login?: string } }).approval.login, undefined, target);
+    }
+    const listed = run(undefined, { registryPath: reg, list: true });
+    assert.match(listed.stdout, /as alice/);
+  });
 });
 
 describe("approve — mint-time scope warnings (issue #151, D7, plan §3.2/§3.9)", () => {
@@ -213,4 +233,5 @@ describe("approve — mint-time scope warnings (issue #151, D7, plan §3.2/§3.9
     assert.equal(r.exitCode, 2);
     assert.ok(!/warning/.test(r.stdout));
   });
+
 });

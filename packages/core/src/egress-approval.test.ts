@@ -9,6 +9,7 @@ import {
   approvalScopeOf,
   approvalsPath,
   findApproval,
+  findLoginApproval,
   findUncoveringStarApproval,
   starApprovalCovers,
   listApprovals,
@@ -328,5 +329,62 @@ describe("approval form × owner kind (D7, issue #151)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("login-bound approvals (doc/plan-owner-identity.md N3, A11)", () => {
+  function store(fn: (p: string) => void): void {
+    const root = mkdtempSync(join(tmpdir(), "egress-approval-login-"));
+    try {
+      fn(join(root, "a.json"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const dest = { org: "example-org", repo: "svc" };
+
+  it("records the login on an <org>/<repo> or <org>/* approval, and never on '*'", () => {
+    store(p => {
+      const a = mintApproval({ target: dest, login: "alice", path: p, now: T0 });
+      const b = mintApproval({ target: { org: "example-org", repo: "*" }, login: "alice", path: p, now: T0 });
+      const star = mintApproval({ target: { org: "*", repo: "*" }, login: "alice", path: p, now: T0 });
+      assert.equal(a.login, "alice");
+      assert.equal(b.login, "alice");
+      assert.equal(star.login, undefined);
+      assert.equal(readApprovalStore(p).approvals.find(x => x.id === star.id)?.login, undefined);
+      assert.equal(readApprovalStore(p).approvals.find(x => x.id === a.id)?.login, "alice");
+    });
+  });
+
+  it("findLoginApproval matches the login (case-insensitively), the repository or the whole owner, and nothing else", () => {
+    store(p => {
+      const a = mintApproval({ target: dest, login: "alice", path: p, now: T0 });
+      assert.equal(findLoginApproval(dest, "alice", p, T0)?.id, a.id);
+      assert.equal(findLoginApproval(dest, "ALICE", p, T0)?.id, a.id);
+      assert.equal(findLoginApproval(dest, "bob", p, T0), null, "another login");
+      assert.equal(findLoginApproval({ org: "example-org", repo: "other" }, "alice", p, T0), null, "another repository");
+      assert.equal(findLoginApproval({ org: "other-org", repo: "svc" }, "alice", p, T0), null, "another owner");
+      assert.equal(findLoginApproval({ org: "example-org", repo: "*" }, "alice", p, T0), null, "a repo approval does not cover the org");
+    });
+  });
+
+  it("an approval with no login, a '*' approval, a ref-limited one and an expired one match nothing", () => {
+    store(p => {
+      mintApproval({ target: dest, path: p, now: T0 });
+      mintApproval({ target: { org: "*", repo: "*" }, path: p, now: T0 });
+      mintApproval({ target: dest, login: "alice", ref: "main", path: p, now: T0 });
+      assert.equal(findLoginApproval(dest, "alice", p, T0), null);
+      mintApproval({ target: dest, login: "alice", ttlMs: 1000, path: p, now: T0 });
+      assert.equal(findLoginApproval(dest, "alice", p, new Date(T0.getTime() + 2000)), null, "expired");
+      assert.notEqual(findLoginApproval(dest, "alice", p, T0), null, "control: live");
+    });
+  });
+
+  it("<org>/* approval covers any repository of the owner", () => {
+    store(p => {
+      mintApproval({ target: { org: "example-org", repo: "*" }, login: "alice", path: p, now: T0 });
+      assert.notEqual(findLoginApproval(dest, "alice", p, T0), null);
+      assert.notEqual(findLoginApproval({ org: "example-org", repo: "*" }, "alice", p, T0), null);
+    });
   });
 });

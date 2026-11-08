@@ -25,7 +25,8 @@ import { appendAuditRecord, pinProblem, repoAegisHome, type EnforcementPin } fro
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import type { DoctorCheck } from "./doctor-checks.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
-import { renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
+import { parseHomeFromScript, parseTaaadPinFromScript, renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
+import { resolveTaaadPin, taaadTrustProblem, type TaaadPin } from "./taaad-pin.js";
 
 export interface InstallShimOptions extends OutputOptions {
   uninstall?: boolean;
@@ -34,6 +35,11 @@ export interface InstallShimOptions extends OutputOptions {
   silent?: boolean;
   /** Test seam: the pin to render into the shim. Not reachable from the CLI. */
   pin?: EnforcementPin;
+  /**
+   * Test seam: the taaad to pin (null: none). Default: the first `taaad` on this process's PATH, which `install
+   * shim` run by a person finds the way they would run it. Not reachable from the CLI.
+   */
+  taaad?: TaaadPin | null;
 }
 
 /** What the command did, for `uninstall`'s step report. */
@@ -174,7 +180,20 @@ export function installShim(tool: string | undefined, opts: InstallShimOptions):
       opts,
     );
   }
-  const script = renderShimScript(pin);
+  const taaad = opts.taaad !== undefined ? opts.taaad : resolveTaaadPin(process.env["PATH"], dir);
+  let script: string;
+  try {
+    script = renderShimScript(pin, { home: repoAegisHome(), taaad });
+  } catch (err) {
+    return emitError(
+      {
+        code: "PIN_PATH_UNSUPPORTED",
+        error: `cannot pin the enforcement binary: ${(err as Error).message}`,
+        details: "install repo-aegis, taaad and the Node they run on at paths without newline characters, then re-run `repo-aegis install shim`",
+      },
+      opts,
+    );
+  }
   const unchanged = current === script;
 
   if (!unchanged) {
@@ -206,6 +225,9 @@ export function installShim(tool: string | undefined, opts: InstallShimOptions):
     }
   }
 
+  // D4: github-app identities need a taaad that only root can change. Said now, because the person
+  // running the installer is the one who can fix it (`doctor` repeats it as a finding).
+  const taaadProblem = taaad === null ? null : taaadTrustProblem(taaad);
   const result: ShimResult = {
     action: "install-shim",
     path,
@@ -215,12 +237,26 @@ export function installShim(tool: string | undefined, opts: InstallShimOptions):
 
   if (opts.silent) return result;
   if (opts.json) {
-    emitJson({ ...result, tool: name, binDir: dir, pathInstruction: pathInstruction() });
+    emitJson({
+      ...result,
+      tool: name,
+      binDir: dir,
+      pathInstruction: pathInstruction(),
+      taaad: taaad === null ? { pinned: false } : { pinned: true, ...taaad, rootOwned: taaadProblem === null, ...(taaadProblem !== null && { problem: taaadProblem }) },
+    });
     return result;
   }
   emitText(unchanged ? `already installed: ${path}` : `installed shim at ${path}`);
   emitText(`The shim only guards once ${dir} comes FIRST on PATH. Add to your shell profile:`);
   emitText(`  ${pathInstruction()}`);
+  if (taaad === null) {
+    emitText("No taaad was found on PATH, so github-app identities are unavailable until you install it and re-run this command.");
+  } else if (taaadProblem !== null) {
+    emitText(`taaad is pinned (${taaad.launcher}). Note (TAAAD_AGENT_WRITABLE, a warning): ${taaadProblem}.`);
+    emitText("App identities work as is; for extra protection, install taaad into a root-owned prefix (see doc/configuration.md, \"identities in practice\").");
+  } else {
+    emitText(`taaad pinned: ${taaad.launcher} (root-owned).`);
+  }
   emitText(`Then check it with: repo-aegis doctor`);
   return result;
 }
@@ -327,7 +363,18 @@ export function checkShim(env: NodeJS.ProcessEnv = process.env): DoctorCheck[] {
   } catch {
     current = null;
   }
-  if (current !== null && current !== renderShimScript(currentEnforcementPin())) {
+  // The home and the taaad pin are read back from the file itself: they are what this install pinned, and
+  // `doctor` judges the taaad pin on its own (TAAAD_AGENT_WRITABLE). A shim with no readable home is stale.
+  const pinnedHome = current === null ? null : parseHomeFromScript(current);
+  const rerendered = (() => {
+    if (current === null || pinnedHome === null) return null;
+    try {
+      return renderShimScript(currentEnforcementPin(), { home: pinnedHome, taaad: parseTaaadPinFromScript(current) });
+    } catch {
+      return null;
+    }
+  })();
+  if (current !== null && (rerendered === null || current !== rerendered || pinnedHome !== home)) {
     return [
       {
         code: "SHIM_STALE",

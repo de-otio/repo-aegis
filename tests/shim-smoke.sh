@@ -14,7 +14,9 @@
 #   c) a permitted `pr create` with a body file actually runs `gh` AND reads
 #      the published body back, exiting 1 on a mismatch;
 #   d) with nothing but the shim's own directory on PATH the shim exits 127
-#      instead of exec'ing itself forever.
+#      instead of exec'ing itself forever;
+#   g, h) with an owner mapped to a GitHub identity, token verbs and untrusted
+#      binaries are refused and the real gh never runs.
 #
 # Assumes `npm run build` has run. Runnable as `bash tests/shim-smoke.sh`
 # from anywhere; `npm run test:shim` is the same thing.
@@ -62,7 +64,7 @@ if [ -z "${NODE_BIN}" ]; then
   exit 1
 fi
 
-# A `repo-aegis` the shim can find on PATH.
+# A `repo-aegis` on PATH, for installing the shim only: the installed shim pins node and the CLI by absolute path.
 BIN="${WORK}/bin"
 mkdir -p "${BIN}"
 cat > "${BIN}/repo-aegis" <<EOF
@@ -270,6 +272,40 @@ if grep -q "gh argv: pr comment" "${WORK}/f.out"; then
 else
   pass "f) the real gh never ran"
 fi
+
+# ---------------------------------------------------------------------------
+# g) with an owner mapped to a GitHub identity, token verbs are refused without a person
+# ---------------------------------------------------------------------------
+# The shim hands every call but --version/help/completion to the pinned `repo-aegis gh`. No TTY here, so
+# the caller counts as an agent: `gh auth token` is GH_AUTH_NEEDS_HUMAN (exit 2, gh never runs), and a read
+# for the mapped owner needs a gh repo-aegis may hand a token, which a fake gh under $HOME is not
+# (GH_BINARY_UNTRUSTED, exit 2, gh never runs).
+cat > "${REPO_AEGIS_HOME}/engagements.yaml" <<'YAML'
+schemaVersion: 3
+identities:
+  alice: { kind: gh-login, login: alice }
+personalOrgs:
+  - { name: acme, person: alice }
+engagements: []
+YAML
+g_rc=0
+(cd "${REPO}" && run_with_timeout 20 gh auth token) >"${WORK}/g.out" 2>"${WORK}/g.err" || g_rc=$?
+if [ "${g_rc}" -eq 2 ] && grep -q "GH_AUTH_NEEDS_HUMAN" "${WORK}/g.err"; then
+  pass "g) gh auth token without a person is GH_AUTH_NEEDS_HUMAN"
+else
+  fail "g) expected exit 2 and GH_AUTH_NEEDS_HUMAN, got ${g_rc}: $(cat "${WORK}/g.err")"
+fi
+if grep -q "gh argv: auth" "${WORK}/g.out"; then fail "g) the real gh RAN"; else pass "g) the real gh never ran"; fi
+
+h_rc=0
+(cd "${REPO}" && run_with_timeout 20 gh pr view 1 --repo acme/svc) >"${WORK}/h.out" 2>"${WORK}/h.err" || h_rc=$?
+if [ "${h_rc}" -eq 2 ] && grep -q "GH_BINARY_UNTRUSTED" "${WORK}/h.err"; then
+  pass "h) a mapped call with an untrusted gh is refused"
+else
+  fail "h) expected exit 2 and GH_BINARY_UNTRUSTED, got ${h_rc}: $(cat "${WORK}/h.err")"
+fi
+if grep -q "gh argv: pr view" "${WORK}/h.out"; then fail "h) the real gh RAN"; else pass "h) the real gh never ran"; fi
+rm -f "${REPO_AEGIS_HOME}/engagements.yaml"
 
 # ---------------------------------------------------------------------------
 # d) the shim never resolves to itself

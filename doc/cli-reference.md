@@ -180,6 +180,14 @@ installed and active for pattern validation, or `"in-process"`
 otherwise. See the design doc's locked-decisions row "Regex backend
 (validation)" for what the field means.
 
+When the registry defines identities or maps owners to them (schemaVersion 3),
+the JSON also carries `identity`:
+`{ identities: [{ name, kind, login | app }], mappings: [{ target, kind:
+"personal-org" | "engagement", person?, agent? }], requireIdentity }`, and text
+mode prints an `identities:` block. It holds names, kinds, logins and app
+slugs only, never anything secret. An engagement is named by its id and never
+by its orgs; a personal org is named by the org. A login is printed in text only when a personal org uses its identity; an engagement-only or unreferenced one prints as `<engagement-only login>` (an Enterprise Managed User shortcode can identify a customer). `--json` carries every login.
+
 #### `visibilityProbe` — why "unknown" is never the whole answer
 
 GitHub visibility drives the egress-hygiene gate, so a probe that
@@ -568,6 +576,79 @@ person or `repo-aegis approve <owner>/<repo>`.
 JSON: `{ "action": "upstreams-add", "upstream", "added" }`,
 `{ "action": "upstreams-remove", "upstream", "removed" }`,
 `{ "action": "upstreams-list", "upstreams" }`.
+
+### Identities (schema version 3)
+
+`identity add|remove|require` and `engagements set-identity` record which
+GitHub identity belongs to which owner (see
+[configuration.md](configuration.md#registry-schema-version-3-github-identities-per-owner)).
+This release stores and shows the mapping only; no command chooses or injects
+a token from it.
+
+**Every command here needs a person at a terminal**, checked the same way as
+`engagements add --personal-org`: otherwise it exits 2 with
+`IDENTITY_CHANGE_NEEDS_TTY` (no environment variable or approval lifts it) and
+writes nothing. The agent hook also refuses any Bash command whose text runs
+one (`AGENT_RAN_HUMAN_COMMAND`). The gate runs before validation, so an invalid
+argument is no oracle for an agent.
+
+#### `repo-aegis identity add <name> --gh-login <login> | --app <slug>`
+
+Defines an identity: `--gh-login` makes a `gh-login` identity (a person),
+`--app` a `github-app` identity (an agent). Exactly one is required. Names and
+slugs are lower-cased and validated against the schema's shapes; a login is
+kept as typed. The first identity writes `schemaVersion: 3`, and is refused
+(`MULTIPLE_INSTALLS`) while a `repo-aegis` on `PATH`, or one an installed hook,
+the shim or a Claude Code hook (managed drop-in or `settings.json`) is pinned to, cannot read version 3: it is judged by the supported
+version read from that install's own core package, never by running it (an
+older pinned `hook check-write` exits 1, which is non-blocking, so it would stop
+protecting cross-org writes). Adding the same
+definition again is a no-op; a different definition under an existing name is
+`IDENTITY_EXISTS`.
+
+#### `repo-aegis identity remove <name>`
+
+Refused with `IDENTITY_IN_USE` while a personal org or an engagement still
+names it (clear them first), `IDENTITY_NOT_FOUND` for an unknown name. The file
+stays at version 3.
+
+#### `repo-aegis identity require --off | --on`
+
+`--off` clears `requireIdentity` (writes `requireIdentity: false`, so a later
+`set-identity` does not turn it back on); it needs a terminal and is
+human-only. `--on` sets it again; it only tightens, so it needs no terminal and
+**an agent may run it** (the hook does not refuse it). `--on` on a registry
+below version 3 is `NOTHING_TO_REQUIRE`. The first `set-identity` also turns it
+on.
+
+#### `repo-aegis engagements set-identity <engagement-id> [--person <name>] [--agent <name>] [--clear]`
+
+Maps all of an engagement's `githubOrgs` to identities. `--person` must name a
+`gh-login` identity and `--agent` a `github-app` identity
+(`IDENTITY_KIND_MISMATCH`, `IDENTITY_NOT_FOUND`); a column that is not given is
+left as it is. `--clear` removes both and cannot be combined with the others.
+The first mapping sets `schemaVersion: 3` and, unless the key is already
+present, `requireIdentity: true`.
+
+**Personal orgs** (the form is `engagements set-identity --personal-org`, not a
+separate `personal-org` command): `repo-aegis engagements set-identity --personal-org <org>
+[--person <name>] [--agent <name>] [--clear]`. Personal orgs have no command
+group of their own (they are added with `engagements add --personal-org`), so
+this mirrors that form; it takes no `<id>`. The org must already be registered
+(`PERSONAL_ORG_NOT_FOUND`): this command never adds an owner. A plain entry
+becomes `{ name, person?, agent? }` and goes back to a plain string when
+cleared; a comment on the entry is kept.
+
+An engagement with no `githubOrgs` is refused (`ENGAGEMENT_HAS_NO_ORGS`): an
+identity would map nothing. The version guard (`MULTIPLE_INSTALLS`) sits on the
+step that raises `schemaVersion` to 3, so `set-identity` on a file that is
+already version 3 does not repeat it.
+
+All of these keep the registry's comments and other fields, are audited as
+`registry-identity-change` with the kind of change and no names, and print
+JSON with `--json`. The other registry commands (`engagements add|end|remove`,
+`upstreams add|remove`) leave identities and object-form personal orgs as they
+found them.
 
 ---
 
@@ -1245,8 +1326,8 @@ Before the egress parse, and for **any** Bash command, the hook also refuses
 (deny, exit 2): a raw HTTP client writing to the GitHub API
 (`GITHUB_API_VIA_HTTP_CLIENT`) and `gh auth token` next to a network call
 (`GH_AUTH_TOKEN_NETWORK`); a command whose text runs `repo-aegis approve`,
-`engagements add --personal-org|--github-org`, `upstreams add` or `init
---migrate-classify|--force`, in any shape (`AGENT_RAN_HUMAN_COMMAND`); and a
+`engagements add --personal-org|--github-org`, `upstreams add`, `identity add|remove`, `identity require --off`, `engagements set-identity` or
+`init --migrate-classify|--force`, in any shape (`AGENT_RAN_HUMAN_COMMAND`); and a
 command that starts a detached session: `tmux new -d`, `tmux new-window` /
 `send-keys`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`
 (`AGENT_DETACHED_SESSION`). These are text-level speed bumps: a program word
@@ -1315,11 +1396,62 @@ harness supplies one, outranks any text.
 
 Writes `<home>/bin/gh` (the only `tool` today), a wrapper to put first on
 `PATH`. It locates the real `gh` by scanning `PATH` past its own directory
-— never a hard-coded path, never itself — passes every non-publishing
-invocation through untouched, and for the publishing verbs runs
-`repo-aegis egress-check` first. Idempotent: a second run reports
+— never a hard-coded path, never itself — passes `--version`, `help` and
+`completion` through untouched, and `exec`s `repo-aegis gh --home <home> -- "$@"`
+(see [`repo-aegis gh`](#repo-aegis-gh---home-home----gh-args)) for every other
+invocation, publishing or not: no shell code runs after the `exec`, so nothing in
+the shim can see a token. With the pinned node or CLI gone, such a call is refused
+(exit 2), reads included. Idempotent: a second run reports
 `already installed`. A file at that path that repo-aegis did not write
 is refused with `SHIM_PATH_OCCUPIED` unless `--force` is passed.
+
+It also **pins taaad**, the tool that mints GitHub App tokens: the first `taaad`
+on `PATH`, as the realpaths of its launcher, of the interpreter named by its
+shebang and of its package directory (the venv root), written into the shim next
+to the pinned node and CLI (not into the agent-writable `state/` directory). The
+command says whether all three are owned by root and writable by root only; if
+not, `doctor` warns (`TAAAD_AGENT_WRITABLE`); App identities still work. `--json` carries a `taaad` object (`pinned`, the paths,
+`rootOwned`, `problem`).
+
+### `repo-aegis gh --home <home> -- <gh args>`
+
+What the shim runs; not meant to be typed. In order:
+
+1. the egress decision, exactly as `egress-check` makes it (same refusals, exit 2;
+   same receipts and body read-back), from the same code;
+2. the identity decision (`chooseIdentity`), from the registry **and the
+   approvals under `--home` only**: `REPO_AEGIS_HOME`, `REPO_AEGIS_REGISTRY` and
+   the other `REPO_AEGIS_*` variables of the caller are ignored. Presence comes from
+   `checkTerminal()` (a TTY and a process chain with a positive root): `REPO_AEGIS_EGRESS_HUMAN`
+   and approvals do not count;
+3. refuse (exit 2, the structured reason on stderr, `gh` not run); or run the real `gh`
+   with the caller's environment unchanged (an unmapped owner, a call that names none,
+   or a person at a terminal for an owner with only an agent identity, with a hint); or
+   **inject**: a token for the chosen identity goes to the trusted `gh` as `GH_TOKEN` in
+   that child's environment, and nowhere else.
+
+Token sources: a `gh-login` identity runs `gh auth token --hostname github.com --user <login>`
+with the trusted `gh` and every token and redirect variable removed; a `github-app` identity
+runs the pinned `taaad mint --app <slug> --repo <owner>/<repo> --permissions read|write|contents-write --json`
+with an environment of exactly `HOME`, `PATH=/usr/bin:/bin`, `TERM` and `LANG`, and accepts the
+answer only when `installationAccount` is the owner, `repositories` is exactly the repository
+and the permissions are no wider than the scope. A supplied `GH_TOKEN` / `GITHUB_TOKEN` is never
+used for a mapped owner with no person present; with one, it must be the mapped account's token
+(SHA-256, `timingSafeEqual`).
+
+The injected `gh` gets an allowlisted environment: `HOME`, a PATH the caller cannot extend,
+`TERM`, `LANG` / `LC_*`, `TMPDIR`, `GH_REPO` when set, `GH_TOKEN`, and fixed `GH_PAGER=`,
+`GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `GH_NO_EXTENSION_UPDATE_NOTIFIER=1`,
+`GIT_TERMINAL_PROMPT=0` and `GIT_CONFIG_COUNT` overrides (`core.fsmonitor=false`,
+`core.hooksPath=/dev/null`, `credential.helper=`, `core.sshCommand=ssh`). Pagers, editors, proxies,
+`BASH_ENV`, `SHELLOPTS` and the caller's `GIT_CONFIG_*` do not reach it. An injecting call prints
+`repo-aegis: as <identity> (<kind>) for <owner>/<repo>` on stderr and appends a record (identity,
+kind, owner/repo, verb, approval id; never the token) to `<home>/state/gh-decisions.jsonl`
+whatever the audit log's setting; refusals are recorded too.
+
+Any fault between choosing and spawning on a mapped owner is `GH_IDENTITY_UNAVAILABLE` and `gh`
+does not run (never a call as the active account). On an unmapped call a fault warns and `gh` runs
+unchanged. Exit status is `gh`'s own.
 
 Installing is not enabling: the shim only guards once `<home>/bin`
 precedes the real `gh` on `PATH`, which this command prints (also as
@@ -1331,6 +1463,37 @@ halves are done.
 file carries a header line); a foreign file at the shim path is left in
 place and reported (`changed: false`, with the reason). The top-level
 `uninstall` applies the same rule.
+
+### `repo-aegis install git-credential [--uninstall]`
+
+Makes the repo-aegis credential helper the **first** helper git runs for
+`https://github.com` and sets `credential.https://github.com.useHttpPath=true`
+(so the helper sees `<owner>/<repo>`), both in the **global** git config. Needs
+a person at a terminal (`GIT_CREDENTIAL_NEEDS_TTY`), for `--uninstall` too:
+removing the helper would hand an agent's pushes to the person's own credential.
+
+The helper line is `!'<pinned node>' '<pinned cli>' git-credential --home '<pinned home>'`. "First" is checked, not assumed:
+
+- it is inserted after the last empty reset entry (`helper =`) of `credential.https://github.com.helper` in the global config, before that key's first entry when there is no reset, or appended when the key is absent;
+- the result is simulated first. If another helper would still answer first (a system-scope one such as `osxkeychain`, or a global generic one with no reset in front), the install **refuses and changes nothing**, with the command that fixes it (`git config --global --add credential.https://github.com.helper ""`, which makes git forget the helpers before it for github.com; re-add the ones you still want after the repo-aegis line);
+- afterwards the real config is read back, and a wrong order is rolled back;
+- re-running it repairs an order that `gh auth setup-git` or an upgrade broke, and replaces a line whose pin moved.
+
+`--uninstall` removes exactly what was added: the helper line (by exact value) and, when this install set it, `useHttpPath` (restoring its previous value). What was added is recorded in `<home>/state/git-credential-install.json`; with no ledger nothing is removed. After an install and an uninstall the global config is byte-identical to before (tested). The top-level `repo-aegis uninstall` runs this step; without a terminal it reports the step as failed and leaves the config alone. `doctor` reports `GIT_CREDENTIAL_HELPER_ORDER` (a failure when an owner is mapped to an agent identity and the order is wrong).
+
+### `repo-aegis git-credential --home <pinned home> <get|store|erase>`
+
+The git credential helper itself; git runs it, you do not (`install git-credential` configures it). It reads the credential protocol on stdin.
+
+- `store` and `erase`: ignored, exit 0.
+- `get` for `protocol=https`, `host=github.com` (any case, also `github.com:443`) with a path `<owner>/<repo>[.git]`:
+  - **a person present** (`identityPresence`: a terminal that is a person's): prints nothing, so the next helper answers as it would without repo-aegis;
+  - **no person present** (an agent, or no terminal): `chooseIdentity` decides from the registry in `--home` only. An unmapped owner, or an owner with only a `person` identity (agents read as the person), prints nothing. An owner with an `agent` identity gets `username=x-access-token` and `password=<token>`, minted by the pinned taaad as `mint --app <slug> --repo <owner>/<repo> --permissions <scope> --json` with an environment of exactly `HOME`, `PATH=/usr/bin:/bin`, `TERM` and `LANG`, and checked (installation account equals the owner, the repositories are exactly the one, the permissions are no wider than the scope). A URL with an embedded username still yields `x-access-token`.
+  - the scope is `contents-write` when the nearest `git` above `git-remote-https` is `push` or `send-pack`, and `read` for any other remote operation (fetch, pull, clone, ls-remote, an alias).
+- **Every refusal** prints exactly `quit=true` on stdout (git then stops asking and does not prompt), the refusal with its code on stderr, and exits 0. Falling through on a refusal would give the agent the person's credential. The refusals: no `git-remote-https` in the process chain, such as `git credential fill` run by hand (`AGENT_CREDENTIAL_DIRECT_FILL`), or an unreadable chain (`AGENT_PUSH_CHAIN_UNREADABLE`); a configuration or environment that could redirect or capture the token (`AGENT_PUSH_CREDENTIAL_CONFIG`); a second, different path in one request (`AGENT_PUSH_CREDENTIAL_PATH`); an unreadable registry, taaad failing or the App not installed on the repository (`GH_IDENTITY_UNAVAILABLE`); an installation of another account (`GH_IDENTITY_INSTALLATION_MISMATCH`); no pinned taaad (`GH_BINARY_UNTRUSTED`); and the `chooseIdentity` refusals (`GH_IDENTITY_PRESENCE_UNKNOWN`, `GH_IDENTITY_WRITE_NEEDS_HUMAN`, …).
+- The token is written to stdout only: never to stderr, the audit log (which records identity, owner, repository and scope) or any argument vector.
+
+The pre-push hook adds `AGENT_PUSH_NEEDS_APP`: with no person present, an owner mapped to an agent identity and an SSH push URL (`git@…`, `ssh://…`, or an `~/.ssh/config` alias for github.com) is refused with the HTTPS form; over HTTPS the helper order is re-checked (`GIT_CREDENTIAL_HELPER_ORDER`). The existing destination checks run first and are unchanged.
 
 ### `repo-aegis approve <org>/<repo> | <org>/* | * [--ref <ref>] [--ttl <duration>] [--note <text>]`, `approve --list`, `approve --revoke <id|all>`
 
@@ -1345,6 +1508,14 @@ shim, the git pre-push hook — for rule g and nothing else: the shape rules,
 rule h (`UNREGISTERED_OWNER_EGRESS`), the cross-org boundary and the payload
 scan still apply. Default TTL 15 minutes; `--ttl 2h`, `90s`, `1d`; never more
 than 24 hours.
+
+**The account.** For an `<org>/<repo>` or `<org>/*` approval on an owner whose registry entry maps a
+`person` identity (a `gh-login`), the approval records that login, and minting prints it (`as <login>`,
+and in `--json` as `approval.login`; `--list` shows it). That login is what lets an agent **write as that
+account** to an owner with no `agent` App (`GH_IDENTITY_WRITE_NEEDS_HUMAN` otherwise); only an approval
+that carries exactly that account, for that owner and repository (or `<owner>/*`), covers it. An approval
+minted before accounts were recorded, one for another account, a ref-limited one and a `*` approval never
+do: `*` records no account.
 
 **Scope.** Since 0.11.0 a `*` approval is not a global wildcard. It covers a
 destination only when the owner is in `personalOrgs`, plus destination-less
@@ -1422,6 +1593,8 @@ now reports, unless `--no-egress-checks`:
 | `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
 | `REGISTRY_UNREADABLE` (**fail**) | the registry exists but is encrypted at rest or does not parse, so rule h refuses every non-interactive egress that has a destination | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal), or repair the file |
 | `OWNERS_UNDECLARED` (**fail**) | the registry loads but declares no owners, so rule h is inert | `repo-aegis engagements add --personal-org <login>` (a person, at a terminal) |
+| `GIT_CREDENTIAL_HELPER_ORDER` (**fail**, only when some owner is mapped to an `agent` identity) | the repo-aegis git credential helper is not installed, is from another install (a moved CLI or Node), or another helper answers first for `https://github.com` (a reset entry, a system-scope helper, `gh auth setup-git`); an agent's HTTPS push there would be authenticated as the person | a person runs `repo-aegis install git-credential` from a terminal |
+| `OWNER_IDENTITY_UNMAPPED` (warn; **fail** when `requireIdentity` is set) | a registered owner has no identity entry (no `person` and no `agent`); one finding per owner, the owner is named only in `--json` (registered owners can be customer names) | `repo-aegis identity add`, then `repo-aegis engagements set-identity` (a person, at a terminal) |
 | `GH_LOGIN_UNREGISTERED` | a logged-in `gh` account's login is not a registered owner | `--personal-org <login>` (a person, at a terminal) |
 | `GH_MEMBER_ORG_UNREGISTERED` | an organisation a logged-in `gh` account belongs to is not registered | `--personal-org` or `--github-org`, or leave it and let rule h refuse it |
 | `REGISTERED_ORG_NOT_MEMBER` (info) | a registered owner is no checked account's login or organisation (normal for archived engagements) | none required |

@@ -7,6 +7,160 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `repo-aegis gh`: the `gh` shim chooses the GitHub identity per call (phase 3 of `doc/plan-owner-identity.md` §13.3)
+
+- **The shim now execs `repo-aegis gh --home <pinned home> -- "$@"` for every `gh` call except `--version`, `help` and `completion`.** The bash verb pre-filter is gone: reads in any group, and groups that were never publishing, are judged by the CLI too, at the price of one Node start per call. No shell code runs after the `exec`. With the pinned node or CLI missing the shim refuses every such call (exit 2), reads included; before, reads fell open. Re-run `repo-aegis install shim` after upgrading (`SHIM_STALE`).
+- `repo-aegis gh` makes the egress decision exactly as `egress-check` does (shared code: same refusals, receipts and body read-back), then the identity decision from the registry and approvals under `--home` only (`REPO_AEGIS_HOME`, `REPO_AEGIS_REGISTRY` and other `REPO_AEGIS_*` in the environment are ignored), then runs `gh`. An unmapped owner runs the real `gh` with the caller's environment unchanged, as before. A mapped owner runs the trusted `gh` with a token for the chosen identity (`gh-login` via `gh auth token`, `github-app` via the pinned `taaad mint`, validated: installation account, exactly one repository, permissions no wider than the verb), in an allowlisted environment (no pager, editor, proxy, `BASH_ENV`, `SHELLOPTS` or `GIT_CONFIG_*` of the caller; fixed `GIT_CONFIG_COUNT` overrides for gh's git children). The token lives only in that child's environment. Prints `repo-aegis: as <identity> (<kind>) for <owner>/<repo>` and records the call (never the token) in `<home>/state/gh-decisions.jsonl`, whatever the audit log's setting.
+- A fault between choosing and spawning on a mapped owner is `GH_IDENTITY_UNAVAILABLE` and `gh` does not run; an unmapped call keeps warn-and-run. New refusal codes `GH_IDENTITY_UNAVAILABLE`, `GH_IDENTITY_TOKEN_MISMATCH`, `GH_IDENTITY_INSTALLATION_MISMATCH`, `GH_BINARY_UNTRUSTED` (at the CLI) and `TAAAD_AGENT_WRITABLE`, with core's existing identity codes, in `doc/agent-guide.md`.
+- `install shim` also pins taaad (launcher, interpreter, package directory) in the shim, and says whether all three are root-owned and writable by root only. If not, `doctor` warns with `TAAAD_AGENT_WRITABLE`, and App identities still work: repo-aegis guards against honest mistakes, and only an agent that deliberately edits taaad could exploit it. A `github-app` identity with no taaad pinned is a `doctor` failure. taaad `mint` exit codes 3 (prompt limit) and 4 (prompt declined) get their own messages. The git credential helper now reads the same pin (and applies the same root-ownership test) instead of `<home>/state/taaad-pin.json`, which is no longer read. One `mintAppToken` (in `taaad-mint.ts`) serves both.
+- `repo-aegis approve` records the destination owner's mapped person login in an `<org>/<repo>` or `<org>/*` approval and prints it; only such an approval, minted for that login, lets an agent write as that account to an owner with no `agent` identity. `*` approvals and approvals from before this release carry none and never cover it.
+- Hardening of the injecting call, for the agent column: git options for a clone (`--`, `--template`, `--config`, `-c` on `repo clone`, `repo fork --clone`, `gist clone`) are `GH_IDENTITY_ARG_UNSAFE` (core), and for verbs that run git in the working directory (`pr checkout`, `pr create`, `repo sync`, clones, `issue develop --checkout`) the effective git config is checked first, before a token is minted: a local, worktree or command-scope `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `url.*.insteadOf`, credential helper, or `http.proxy`-style setting refuses the call. With the registry missing or unreadable, `gh auth token` and the other token verbs are still refused without a person, and an unreadable registry refuses any agent call that names an owner (`GH_IDENTITY_UNAVAILABLE`). A fault in the egress parse on a mapped owner is refused for an agent.
+- **Behaviour change for people:** a `gh` call from a non-terminal context (cron, a script with piped stderr) now counts as an agent for owners that are mapped; a mapped owner's App token or login token replaces the active account.
+
+### Added — git credential helper and the pre-push rule (phase 4 of `doc/plan-owner-identity.md` §5.6, §13.4)
+
+- `repo-aegis git-credential --home <home> <get|store|erase>`: a git credential helper. For an agent's HTTPS push to an owner with an `agent` identity it returns `x-access-token` and a token narrowed to that repository (`contents: write` for a push, read for a fetch), minted by the pinned taaad; with a person present, an unmapped owner or a person-only owner it prints nothing and the next helper answers. Every refusal prints exactly `quit=true` with the code on stderr: a request that does not come from `git-remote-https` (`git credential fill` run by hand: `AGENT_CREDENTIAL_DIRECT_FILL`), an unreadable process chain (`AGENT_PUSH_CHAIN_UNREADABLE`), repository-local credential helpers, proxies, TLS and trace settings (`AGENT_PUSH_CREDENTIAL_CONFIG`), a second differing path (`AGENT_PUSH_CREDENTIAL_PATH`), taaad failing or the App not installed.
+- `repo-aegis install git-credential [--uninstall]` (needs a terminal): makes the helper the first one git runs for github.com in the global config, after any reset entry, refusing with instructions when a system-scope or global helper would still answer first; sets `credential.useHttpPath`. `--uninstall` removes exactly what it added (ledger in `<home>/state`); the global config is byte-identical after a round trip. `repo-aegis uninstall` runs it.
+- Pre-push: with no person present, an owner mapped to an agent identity and an SSH push URL (`git@…`, `ssh://…`, an ssh-config alias) is refused with `AGENT_PUSH_NEEDS_APP` and the HTTPS form; over HTTPS the helper order is re-checked (`GIT_CREDENTIAL_HELPER_ORDER`).
+- `doctor`: `GIT_CREDENTIAL_HELPER_ORDER`, a failure when an owner is mapped to an agent identity and the helper is missing, stale or not first.
+- The helper uses the taaad pinned by `install shim` (see `repo-aegis gh` above); with none, or one that is not root-owned, it refuses (`GH_BINARY_UNTRUSTED`).
+
+### Added — identity choice for `gh` calls (phase 3 core of `doc/plan-owner-identity.md` §13.1)
+
+No egress behaviour changes: nothing calls these yet. `@de-otio/repo-aegis-core`
+exports the pure `identityPresence()`, `ghCallTargets()` and `chooseIdentity()`
+(eleven ordered rules: auth verbs, targets, several owners, unmapped owner,
+presence, redirect, supplied token, unsafe arguments, then the person or agent
+column) with seeded-random property tests.
+
+### Changed — stricter for agents: identity hook rules (`doc/plan-owner-identity.md` §13.2)
+
+New refusals in the agent hook (`hook guard-egress`). They apply to Bash commands
+an agent runs; none is lifted by an approval. This is a breaking change for
+non-terminal automation that runs `gh auth token`, `taaad mint` and the like
+through the hook: with no person present they are now refused.
+
+- **A1** — any command that runs `gh`, `git`, `taaad` or `security` with a
+  `REPO_AEGIS_*` variable set (prefix, `env`, `sudo env`, `sh -c`, `eval`, `$(…)`,
+  heredoc-fed shell, or an earlier `export`) is `EGRESS_ENV_OVERRIDE`, and under a
+  pty wrapper `EGRESS_PTY_WRAPPER`, whatever the command publishes. These checks
+  now run before the "no egress intent" exit, so a read such as
+  `REPO_AEGIS_EGRESS_HUMAN=1 gh pr view` is refused too. A person present does not
+  lift them.
+- **A10** — with no person present, `gh auth` with anything but a plain `status`,
+  `gh config set|clear-cache`, `gh alias set|import|delete` and
+  `gh extension install|upgrade|exec` are `GH_AUTH_NEEDS_HUMAN`. `gh auth token`
+  alone (no network call) used to pass the hook.
+- **N9** — with no person present, `taaad env|agent|credential-helper|mint`,
+  `security find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain`
+  and a `python*` / `node` / `perl` / `ruby` / `osascript` `-c` / `-e` text that
+  mentions `keyring` or `SecItemCopyMatching` are `TOKEN_MINT_NEEDS_HUMAN`. Speed
+  bumps, not proofs; the keychain ACLs are the control.
+- **N8** — a recognised `dot gh` write whose literal owner has an identity mapped
+  in the registry is `DOT_GH_OWNER_MAPPED` (re-issue the same arguments to plain
+  `gh`), decided before `DOT_GH_WRITE_NEEDS_BOT`. Unmapped owners are unchanged.
+- **Security-review follow-ups to the above** (same release, stricter for agents):
+  - `git credential fill|get|approve`, `git credential-<helper> get` and
+    `git-credential-<helper> get` (osxkeychain, manager, …) are
+    `TOKEN_MINT_NEEDS_HUMAN` with no person present, and count as token reads for
+    `GH_AUTH_TOKEN_NETWORK`, which refuses them next to a network program whether
+    or not a person is present.
+  - Any segment that assigns or exports a `REPO_AEGIS_*` name with no command
+    following (`X=1`, `export X[=…]`, `declare|typeset -x`, `readonly`, `read X`) is
+    `EGRESS_ENV_OVERRIDE`, never lifted: the Bash tool's shell persists across
+    calls. `REPO_AEGIS_EGRESS_HUMAN` is also ignored when a TTY sits under an agent
+    host (an agent ancestor or the agent environment signal); a person's own
+    terminal, and the no-TTY case, behave as before.
+  - N9 also covers the `keyring` CLI and `secret-tool` (any path), `security -i`
+    and `security` fed a listed subcommand on stdin, interpreter text naming
+    `find-generic-password`, `find-internet-password`, `dump-keychain`,
+    `SecKeychain`, `keytar`, `keyring` or `SecItemCopyMatching` (osascript
+    `do shell script` included), and text piped into a non-shell interpreter.
+  - A10 reads `--show-token=…` and `-t=…`, and a `gh` reached through
+    `G=gh; $G …`, `alias g=gh`, `$(which gh)` or `$(command -v gh)`. A bare
+    `gh auth` and `gh auth --help` are no longer refused.
+  - The write hook refuses an agent's Edit or Write to gh's `config.yml` and
+    `hosts.yml` in `$GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh` and `~/.config/gh`
+    (`GH_CONFIG_WRITE_REFUSED`).
+- **Internal entry points and credential-helper reads** (stricter for agents):
+  `repo-aegis gh …` and `repo-aegis git-credential …`, in any program-word form
+  (`repo-aegis`, `npx repo-aegis`, `node …/dist/index.js`, a pinned path, behind
+  `env`/`sudo`/`sh -c`/an alias), are `AGENT_RAN_HUMAN_COMMAND`: the `gh` shim and
+  git reach them, not an agent. (The shim's own `exec` is not Bash text the hook
+  sees, so it is unaffected.) `git credential fill|approve|reject` and the helper
+  `get` forms are `TOKEN_MINT_NEEDS_HUMAN` with no person present wherever they sit
+  on the line, whatever else it runs.
+- `refusal` codes are documented in `doc/agent-guide.md`; the shape rules in
+  `doc/design/egress-guard.md`.
+
+### Added — registry schema version 3: GitHub identities per owner (phase 2 of `doc/plan-owner-identity.md`)
+
+No egress behaviour changes: nothing chooses or injects a token from the new
+data yet.
+
+- The registry accepts `schemaVersion: 3` with a top-level `identities` map
+  (`{ kind: gh-login, login }` or `{ kind: github-app, app }`), `personalOrgs`
+  entries that are a string or `{ name, person?, agent? }`, an engagement's
+  `person` / `agent` (for all its `githubOrgs`) and `requireIdentity`. Parsing
+  fails closed and names the path: every reference must resolve, `agent` must
+  name a `github-app` and `person` a `gh-login`, unknown keys are rejected,
+  names and slugs match `^[a-z0-9][a-z0-9-]{0,62}$`, logins
+  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:_[A-Za-z0-9]{1,20})?$` (an Enterprise Managed User `handle_shortcode` is accepted), and using any of it below version 3
+  is an error naming the version. Identity names are checked on the raw YAML
+  keys (a `__proto__` key is an error, not silently dropped). From version 3 an
+  engagement may carry only its known keys (`id`, `name`, `started`, `ended`,
+  `reposActive`, `markers`, `notes`, `githubOrgs`, `person`, `agent`), and a
+  top-level key within edit distance 2 of a known one (`identites`,
+  `requireIdentiy`) is an error; other top-level keys are still passed
+  through, and below version 3 nothing new is rejected. A build without this
+  release refuses the file as newer than it supports: rule h then refuses
+  every non-interactive egress, and an older pinned `hook check-write` exits 1,
+  which Claude Code treats as non-blocking, so the cross-org write check fails
+  open on that install.
+- `Registry.personalOrgs` stays a list of names; the mapping is a separate
+  `identityMap` (lower-cased owner to `{ person?, agent? }`), so
+  `registeredOwners()`, `approvalScopeOf()` and the deny set read what they
+  always read.
+- New human-only commands (each needs a terminal, `IDENTITY_CHANGE_NEEDS_TTY`,
+  and the agent hook refuses them as `AGENT_RAN_HUMAN_COMMAND`):
+  `repo-aegis identity add <name> --gh-login <login> | --app <slug>`,
+  `identity remove <name>` (refused while referenced), `identity require --off`,
+  and `engagements set-identity <id> [--person] [--agent] [--clear]`. For a
+  personal org the form is `engagements set-identity --personal-org <org> ...`
+  (there is no separate `personal-org` command group). The registry is written
+  as version 3 only when the first identity or mapping is set; the first
+  `set-identity` also sets `requireIdentity: true`. `identity require --on`
+  only tightens, needs no terminal and may be run by an agent. `set-identity`
+  refuses an engagement with no `githubOrgs` (it would map nothing).
+- Every path that RAISES the schema version (the first `identity add`) refuses
+  with `MULTIPLE_INSTALLS` while a `repo-aegis` on `PATH`, or one that an
+  installed git hook, the `gh` shim, or a Claude Code hook (the managed drop-in or
+  `settings.json`, which runs `hook check-write`) is pinned to, cannot read version 3. That
+  is judged by the supported version read from the install's own core package
+  (never by running it); when it cannot be read the package version is
+  compared, and an install whose version cannot be read is refused.
+- `status` lists identities and mappings (names, kinds, logins, slugs; an
+  engagement by id, never by its orgs). Text prints a login only when a personal
+  org uses the identity: an Enterprise Managed User shortcode can identify a
+  customer, so engagement-only and unreferenced logins print as
+  `<engagement-only login>`; `--json` carries them all. `doctor` reports
+  `OWNER_IDENTITY_UNMAPPED` per registered owner with no identity entry: a
+  warning, a failure when `requireIdentity` is set (the text says how many
+  owners are still unmapped; owners are named only in `--json`).
+### Fixed
+
+- The registry mutators that scan `personalOrgs` for an existing org (`engagements
+  add --personal-org`, `init --migrate-classify`) and the owner-set-empty gate
+  now see object-form entries, so an entry with identities is neither added
+  twice nor invisible to the check that stops the last owner being removed
+  without a terminal.
+- `init --force` counts `identities` and `requireIdentity` as content, so it needs a
+  terminal on an identity-only registry.
+- `hook check-write` now blocks (exit 2) when the registry cannot be read,
+  with a message that names no org or engagement. It used to exit 1, which
+  Claude Code treats as non-blocking, so an unreadable registry switched the
+  cross-org write check off.
+
 ### Fixed — code scanning
 
 - Two regexes in the human-only command detector (`NAME=VALUE` bindings and

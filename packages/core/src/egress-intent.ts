@@ -3477,27 +3477,167 @@ export interface SimpleCommand {
 }
 
 /**
+ * A {@link SimpleCommand} with the facts the identity hook rules (plan-owner-identity §13.2) need: the
+ * `REPO_AEGIS_*` variables in force on it (its own prefix or `env` assignments, an enclosing command's, and an
+ * earlier `export` / bare assignment on the line), the terminal wrapper it runs under, and what it leaves set in
+ * the shell. Names only, never values. A bare assignment (`X=1` with no command) is a fact with `cmd: ""`.
+ */
+export interface CommandFact extends SimpleCommand {
+  /** `REPO_AEGIS_*` variable names set for this command, deduplicated. */
+  repoAegisEnv: string[];
+  /**
+   * `REPO_AEGIS_*` names this segment leaves set in the shell, which the Bash tool keeps across calls: a bare
+   * assignment, `export X[=…]`, `declare|typeset -x`, `readonly`, `read X`, `printf -v X`, ….
+   */
+  assignsRepoAegis: string[];
+  /** Set when the segment runs under a terminal-providing wrapper (the label the egress parser would use). */
+  ptyWrapper?: string;
+  /**
+   * With `ptyWrapper`, or text fed on stdin (a heredoc, a here-string, what `echo` / `printf` / `cat <<EOF` pipes
+   * in): the arguments and that text, so a mention inside is visible.
+   */
+  text?: string;
+}
+
+const REPO_AEGIS_ENV_PREFIX = "REPO_AEGIS_";
+
+function repoAegisNames(names: Iterable<string>): string[] {
+  return [...new Set([...names].filter(n => n.startsWith(REPO_AEGIS_ENV_PREFIX)))];
+}
+
+/** The programs the identity rules care about, which a name can stand for. */
+const NAMED_PROGRAMS: ReadonlySet<string> = new Set(["gh", "git", "taaad", "security"]);
+
+function namedProgram(word: string): string | null {
+  const b = baseName(word);
+  return NAMED_PROGRAMS.has(b) ? b : null;
+}
+
+/** `$(which gh)`, `$(command -v gh)`, `$(type -p gh)`, `` `which gh` ``: the program looked up. */
+const PROGRAM_LOOKUP_RE = /^(?:\$\(|`)\s*(?:command\s+-v|which|type\s+-p|whence)\s+(\S+?)\s*(?:\)|`)$/;
+
+/**
+ * The program a command word stands for through this line's own bindings (`G=gh; $G …`, `alias g=gh`), or a
+ * lookup in place (`$(which gh) …`); null when it is none of gh, git, taaad or security. Variables are keyed
+ * `$NAME`, aliases by their bare name.
+ */
+function boundProgram(word: string, binds: ReadonlyMap<string, string>): string | null {
+  const lookup = PROGRAM_LOOKUP_RE.exec(word);
+  if (lookup !== null) return namedProgram(lookup[1]!);
+  const v = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(word);
+  if (v !== null) return binds.get(`$${v[1]!}`) ?? null;
+  return binds.get(word) ?? null;
+}
+
+/** Record what `NAME=value` words and `alias n=value` bind, for the later segments of the line. */
+function learnBindings(
+  binds: Map<string, string>,
+  assigns: readonly Assignment[],
+  cmd: string,
+  args: readonly string[],
+): void {
+  const valueProgram = (value: string): string | null => {
+    const lookup = PROGRAM_LOOKUP_RE.exec(value);
+    if (lookup !== null) return namedProgram(lookup[1]!);
+    return namedProgram(value.split(/\s+/)[0] ?? "");
+  };
+  const setVar = (name: string, value: string): void => {
+    const p = valueProgram(value);
+    if (p !== null) binds.set(`$${name}`, p);
+    else binds.delete(`$${name}`);
+  };
+  for (const a of assigns) setVar(a.name, a.value);
+  if (cmd === "export" || cmd === "declare" || cmd === "typeset" || cmd === "readonly" || cmd === "local") {
+    for (const a of args) {
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(a);
+      if (m !== null) setVar(m[1]!, m[2]!);
+    }
+  }
+  if (cmd === "alias") {
+    for (const a of args) {
+      const eq = a.indexOf("=");
+      if (eq <= 0) continue;
+      const p = valueProgram(a.slice(eq + 1));
+      if (p !== null) binds.set(a.slice(0, eq), p);
+    }
+  }
+}
+
+/**
+ * The `REPO_AEGIS_*` names a command leaves set in the shell: `export X[=…]` (any flags), `readonly X`,
+ * `declare|typeset … -x X`, and the other assignments the parser knows (`read X`, `printf -v X`, `let`, …).
+ */
+function persistentRepoAegisNames(rawTokens: readonly string[], cmd: string, args: readonly string[]): string[] {
+  const names: string[] = [];
+  const declares = cmd === "declare" || cmd === "typeset";
+  if (cmd === "export" || cmd === "readonly" || declares) {
+    const flags = args.filter(a => /^-[A-Za-z]+$/.test(a)).join("");
+    if (!declares || flags.includes("x")) {
+      for (const a of args) {
+        if (a.startsWith("-")) continue;
+        const m = /^([A-Za-z_][A-Za-z0-9_]*)/.exec(a);
+        if (m !== null) names.push(m[1]!);
+      }
+    }
+  }
+  names.push(...shellAssignedOverrideLabels(rawTokens, cmd, args));
+  return repoAegisNames(names);
+}
+
+/**
  * Every command a shell line runs, in order, including those inside `sh -c '…'` (with its `$@` / `$1`
  * arguments substituted), `eval`, `$(…)`, backticks, and the text a shell is fed on stdin (a heredoc, a
  * here-string, or what `echo` / `printf` / `cat <<EOF` pipes into it), to the parser's nesting depth.
  * Redirections, assignments and wrappers are removed. It makes no judgement about egress. Pure; never throws.
  */
 export function simpleCommands(command: string, depth = 0, budget: { bytes: number } = { bytes: 0 }): SimpleCommand[] {
-  const out: SimpleCommand[] = [];
-  if (typeof command !== "string" || command.length === 0 || depth > MAX_NEST_DEPTH) return out;
+  return commandFacts(command, depth, budget)
+    .filter(f => f.cmd !== "")
+    .map(({ cmd, args }) => ({ cmd, args }));
+}
+
+/**
+ * {@link simpleCommands} plus the per-command environment and wrapper facts, with a command word reached
+ * through a name this line binds (`G=gh; $G …`, `alias g=gh`) or looks up (`$(which gh) …`) reported as that
+ * program. Bare assignments are facts with an empty `cmd`. Pure; never throws.
+ */
+export function commandFacts(command: string, depth = 0, budget: { bytes: number } = { bytes: 0 }): CommandFact[] {
+  const out: CommandFact[] = [];
+  walkCommands(command, depth, budget, new Set(), new Map(), new Map(), out);
+  return out;
+}
+
+/** Returns the `REPO_AEGIS_*` names set for the rest of the line by this text (so an `eval`'s caller can carry them on). */
+function walkCommands(
+  command: string,
+  depth: number,
+  budget: { bytes: number },
+  inherited: ReadonlySet<string>,
+  wrapperNames: Map<string, string>,
+  binds: Map<string, string>,
+  out: CommandFact[],
+): string[] {
+  if (typeof command !== "string" || command.length === 0 || depth > MAX_NEST_DEPTH) return [];
   // Every nested text counts against one budget for the whole line (issue #151, F1); past it, nested text
   // is not read. The egress parse fails closed on the same line, so what this misses is still refused.
   if (depth > 0) {
     budget.bytes += command.length;
-    if (budget.bytes > PARSE_EXPANSION_BUDGET) return out;
+    if (budget.bytes > PARSE_EXPANSION_BUDGET) return [];
   }
+  /** Variables set by earlier segments of this line (an `export`, a bare assignment). */
+  let running: string[] = [];
   try {
     const segments = tokenise(command);
+    const wrapperBySegment = segments.map(seg => segmentPtyWrapper(seg, wrapperNames));
     segments.forEach((seg, idx) => {
       const rawTokens = seg.funcDef ? seg.tokens.slice(1) : seg.tokens;
       const tokens = stripRedirections(rawTokens);
-      const resolved = resolveCommand(tokens);
-      for (const w of tokens) for (const inner of substitutionTexts(w)) out.push(...simpleCommands(inner, depth + 1, budget));
+      const assigns: Assignment[] = [];
+      const resolved = resolveCommand(tokens, assigns);
+      const segEnv = new Set<string>([...inherited, ...running, ...repoAegisNames(assigns.map(a => a.name))]);
+      for (const w of tokens) {
+        for (const inner of substitutionTexts(w)) walkCommands(inner, depth + 1, budget, segEnv, wrapperNames, binds, out);
+      }
       if (resolved.nestedText !== undefined) {
         const args = resolved.nestedArgs ?? [];
         let text = resolved.nestedText;
@@ -3509,26 +3649,54 @@ export function simpleCommands(command: string, depth = 0, budget: { bytes: numb
             text = `${resolved.nestedText}\n${args.slice(1).map(quoteWord).join(" ")}`;
           }
         }
-        out.push(...simpleCommands(text, depth + 1, budget));
+        const left = walkCommands(text, depth + 1, budget, segEnv, wrapperNames, binds, out);
+        // `eval` runs in this shell: what it exports is seen by the segments after it.
+        if (resolved.isEval) running = [...running, ...left];
         return;
       }
-      if (resolved.start >= resolved.tokens.length) return;
-      const cmd = baseName(resolved.tokens[resolved.start]!);
+      if (resolved.start >= resolved.tokens.length) {
+        // `REPO_AEGIS_X=1` on its own: set for the rest of the line, and in the shell the next call reuses.
+        const names = repoAegisNames(assigns.map(a => a.name));
+        running = [...running, ...names];
+        learnBindings(binds, assigns, "", []);
+        if (names.length > 0) out.push({ cmd: "", args: [], repoAegisEnv: [...segEnv], assignsRepoAegis: names });
+        return;
+      }
+      const word = resolved.tokens[resolved.start]!;
+      const cmd = boundProgram(word, binds) ?? baseName(word);
       const args = resolved.tokens.slice(resolved.start + 1);
-      out.push({ cmd, args });
+      running = [
+        ...running,
+        ...repoAegisNames([...exportedOverrideLabels(cmd, args), ...shellAssignedOverrideLabels(rawTokens, cmd, args)]),
+      ];
+      const wrapper = wrapperBySegment[idx];
+      const stdinTexts = [
+        ...seg.heredocs,
+        ...hereStrings(rawTokens),
+        ...(seg.joinedBy === "|" && idx > 0 ? pipedText(segments[idx - 1]!) : []),
+      ];
+      out.push({
+        cmd,
+        args,
+        repoAegisEnv: [...segEnv],
+        assignsRepoAegis: persistentRepoAegisNames(rawTokens, cmd, args),
+        ...(wrapper !== null && wrapper !== undefined && { ptyWrapper: wrapper }),
+        ...((wrapper != null || stdinTexts.length > 0) && { text: [...args, ...stdinTexts].join("\n") }),
+      });
+      learnBindings(binds, assigns, cmd, args);
       // Text fed to a shell on stdin is a program.
       if (SHELL_INTERPRETERS.has(cmd)) {
         const texts = [...seg.heredocs, ...hereStrings(rawTokens)];
         if (texts.length === 0 && seg.joinedBy === "|" && readsCommandsFromStdin(args) && idx > 0) {
           texts.push(...pipedText(segments[idx - 1]!));
         }
-        for (const t of texts) out.push(...simpleCommands(t, depth + 1, budget));
+        for (const t of texts) walkCommands(t, depth + 1, budget, segEnv, wrapperNames, binds, out);
       }
     });
   } catch {
     /* total: a line that cannot be taken apart contributes what was read before the problem */
   }
-  return out;
+  return running;
 }
 
 /** What the segment before a `| sh` feeds it: its heredocs and here-strings, and the words of `echo` / `printf`. */
@@ -3551,4 +3719,29 @@ export function ghCommandWords(args: readonly string[]): { group: string; sub: s
   const found = findGhCommand([...args]);
   if (found === null) return null;
   return { group: args[found.groupIdx]!, sub: found.subIdx === undefined ? undefined : args[found.subIdx] };
+}
+
+/** Whether `word` is one of gh's built-in command groups (anything else is an alias or an extension). */
+export function isGhBuiltinGroup(word: string): boolean {
+  return GH_BUILTIN_COMMANDS.has(word);
+}
+
+/**
+ * A `gh` argv taken apart the way the egress parser takes it apart (cobra's command words, pflag's flags):
+ * the group, the subcommand, every flag occurrence (canonical `-R` / `--repo` spelling, `=` and attached
+ * values resolved) and the positionals, in order. No alias expansion. Null when there is no command word.
+ * Pure; never throws.
+ */
+export function scanGhCommand(
+  args: readonly string[],
+): { group: string; sub: string | undefined; flags: readonly { flag: string; value: string | undefined }[]; positionals: readonly string[] } | null {
+  const list = [...args];
+  const found = findGhCommand(list);
+  if (found === null) return null;
+  const group = list[found.groupIdx]!;
+  const sub = found.subIdx === undefined ? undefined : list[found.subIdx];
+  const skip = new Set<number>([found.groupIdx]);
+  if (found.subIdx !== undefined) skip.add(found.subIdx);
+  const { events, positionals } = scanGhArgs(list, skip, flagSpec(group, sub));
+  return { group, sub, flags: events, positionals };
 }
