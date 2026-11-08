@@ -211,7 +211,10 @@ never sees a person: such a call needs `REPO_AEGIS_EGRESS_HUMAN=1` or plain `gh`
 Two further shape rules apply to the command text alone and are not part of the
 per-intent table: `GITHUB_API_VIA_HTTP_CLIENT` (`curl` or `wget` writing to
 `api.github.com` or `uploads.github.com`) and `GH_AUTH_TOKEN_NETWORK` (`gh auth
-token` in a command that also makes a network call). They are speed bumps, not
+token` in a command that also makes a network call). For `git`, only a
+subcommand that can reach a remote counts: a positive list of local built-ins
+(`tag`, `log`, `status`, …) does not, and an alias, an unknown subcommand or a
+`-c` / `--config-env` / `--exec-path` option does. They are speed bumps, not
 proofs: an interpreter's `-c` text can still do either.
 
 Reasons name the destination (`<org>/<repo>`, visibility, class) and the

@@ -8,7 +8,8 @@
 //     write method (`-X POST|PUT|PATCH|DELETE`) or a data flag. A raw HTTP client reaches any owner and the
 //     guard cannot name it.
 //   - GH_AUTH_TOKEN_NETWORK: `gh auth token` in a command line that also makes a network call. The token
-//     goes to whatever receives it.
+//     goes to whatever receives it. A `git` subcommand that only works on the local repository (`tag`,
+//     `log`, `status`, …) is not a network call; every other git invocation is.
 //
 // Both are shape rules: they read the command text only, need no registry, and no approval lifts them. This
 // is a speed bump, not a proof (an interpreter's `-c` text or a script can still do both); the plan names it
@@ -128,15 +129,58 @@ function writesGithubApi(c: SimpleCommand): boolean {
   return false;
 }
 
-/** Programs that open a network connection of their own. */
+/** Programs that open a network connection of their own. `git` is judged by its subcommand instead. */
 const NETWORK_COMMANDS: ReadonlySet<string> = new Set([
   "curl", "wget", "http", "https", "xh", "xhs", "nc", "ncat", "netcat", "socat", "telnet", "ssh", "scp", "sftp", "ftp",
-  // interpreters and git can open a connection of their own
-  "node", "perl", "ruby", "git",
+  // interpreters can open a connection of their own
+  "node", "perl", "ruby",
 ]);
 
-function isNetworkCommand(cmd: string): boolean {
-  return NETWORK_COMMANDS.has(cmd) || /^python[\d.]*$/.test(cmd);
+/**
+ * Built-in git subcommands that work on the local repository only. A positive list: anything else (`push`,
+ * `fetch`, `pull`, `clone`, `ls-remote`, `remote`, `submodule`, `send-email`, `archive --remote`,
+ * `maintenance` prefetch, an alias, an external `git-<name>`) counts as a network call. Accepted limit: in a
+ * partial clone some of these lazily fetch missing objects from the configured remote.
+ */
+const GIT_LOCAL_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "add", "annotate", "blame", "branch", "cat-file", "check-attr", "check-ignore", "checkout", "cherry", "commit",
+  "config", "count-objects", "describe", "diff", "diff-files", "diff-index", "diff-tree", "for-each-ref", "grep",
+  "hash-object", "help", "init", "log", "ls-files", "ls-tree", "merge-base", "mv", "name-rev", "reflog", "restore",
+  "rev-list", "rev-parse", "rm", "shortlog", "show", "show-branch", "show-ref", "stash", "status", "switch",
+  "symbolic-ref", "tag", "var", "version", "whatchanged",
+]);
+
+/** git global options that take the next word as their value and cannot change what runs or where it goes. */
+const GIT_SAFE_GLOBALS_WITH_VALUE: ReadonlySet<string> = new Set(["-C", "--git-dir", "--work-tree", "--namespace"]);
+/** git global options with no value that cannot change what runs or where it goes. */
+const GIT_SAFE_GLOBAL_FLAGS: ReadonlySet<string> = new Set([
+  "-p", "--paginate", "-P", "--no-pager", "--bare", "--no-replace-objects", "--literal-pathspecs",
+  "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks",
+]);
+
+/**
+ * Whether a `git` invocation may open a network connection. Fails closed: any global option not known to be
+ * harmless (`-c`, `--config-env` and `--exec-path` can turn a local subcommand into anything), a subcommand
+ * with a shell expansion, a missing subcommand, or one not on {@link GIT_LOCAL_SUBCOMMANDS} counts as one.
+ */
+function gitMayReachNetwork(args: readonly string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (!a.startsWith("-")) return /[$`]/.test(a) || !GIT_LOCAL_SUBCOMMANDS.has(a);
+    const name = a.includes("=") ? a.slice(0, a.indexOf("=")) : a;
+    if (GIT_SAFE_GLOBALS_WITH_VALUE.has(name)) {
+      if (name === a) i++; // the value is the next word
+      continue;
+    }
+    if (GIT_SAFE_GLOBAL_FLAGS.has(a)) continue;
+    return true;
+  }
+  return true;
+}
+
+function isNetworkCommand(c: SimpleCommand): boolean {
+  if (c.cmd === "git") return gitMayReachNetwork(c.args);
+  return NETWORK_COMMANDS.has(c.cmd) || /^python[\d.]*$/.test(c.cmd);
 }
 
 /** `gh auth token`, and `gh auth status --show-token` / `-t`, which prints the same credential. */
@@ -182,7 +226,7 @@ export function checkNetworkRules(command: string): NetworkRuleHit | null {
   }
 
   const tokenReader = commands.some(readsGhToken);
-  if (tokenReader && commands.some(c => isNetworkCommand(c.cmd))) {
+  if (tokenReader && commands.some(isNetworkCommand)) {
     return {
       code: "GH_AUTH_TOKEN_NETWORK",
       reason: refusal({

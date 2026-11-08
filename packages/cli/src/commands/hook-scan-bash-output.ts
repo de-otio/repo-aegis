@@ -23,6 +23,7 @@
 // Universal markers: pattern set lives in `core/src/secret-markers.ts`
 // and is not configurable. Engagement-scoped customer markers continue
 // to flow through the existing file-write hook.
+import { readHookStdin } from "./hook-input.js";
 import {
   scanForSecrets,
   summariseHits,
@@ -37,24 +38,12 @@ interface HookOptions {
 }
 
 /**
- * Read all of stdin to a string. Bash output can be larger than file
- * writes, so we permit a higher cap (8 MiB) before truncating. The
- * hook is silent on truncation — partial scanning of a large output
- * is still better than no scan, and noisy stderr would surface to the
- * agent as an out-of-band error.
+ * Bash output can be larger than file writes, so this hook reads up to 8 MiB. Past that, the cut-off JSON
+ * cannot be parsed, so the text that WAS read is scanned as it stands (#156): until 0.11.3 the parse failure
+ * meant no scan at all. Secret shapes are runs of URL-safe characters, which JSON string escaping leaves
+ * intact; offsets in that case count from the start of the payload, not of the output.
  */
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  const MAX = 8 * 1024 * 1024;
-  for await (const chunk of process.stdin) {
-    const b = typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer);
-    total += b.length;
-    if (total > MAX) break;
-    chunks.push(b);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
+const BASH_OUTPUT_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Extract Bash stdout + stderr from the Claude Code PostToolUse JSON.
@@ -115,8 +104,8 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
  * The hook NEVER reveals matched substrings.
  */
 export async function hookScanBashOutput(opts: HookOptions = {}): Promise<void> {
-  const stdinText = await readStdin();
-  const output = extractBashOutput(stdinText);
+  const input = await readHookStdin(BASH_OUTPUT_MAX_BYTES);
+  const output = input.truncated ? input.text : extractBashOutput(input.text);
   if (!output) process.exit(0);
 
   let hits: SecretMarkerHit[];

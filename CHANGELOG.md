@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-11-08
+
+### Fixed — `GH_AUTH_TOKEN_NETWORK` refused lines with a local `git` command
+
+- `gh auth token` next to any `git` command was refused as a token handed to
+  a network call, so a status script that listed tags with `git -C <dir> tag`
+  next to `gh` reads could not run. Only git subcommands that can reach a
+  remote now count: a positive list of local built-ins (`tag`, `log`,
+  `status`, `diff`, `rev-parse`, `describe`, …) does not. `push`, `fetch`,
+  `pull`, `clone`, `ls-remote`, `remote`, `submodule`, aliases, unknown
+  subcommands and any `-c`, `--config-env` or `--exec-path` option still do.
+
+### Security
+
+- Write hooks no longer let a payload past 1 MiB through unchecked (#156).
+  `hook check-write` and `hook scan-after-write` cut the payload at 1 MiB and
+  then failed to parse the prefix, so the path policy and the marker scan were
+  both skipped and the hooks exited 0. They now read the file path from the
+  payload's start with a JSON lexer (a key inside another string's content is
+  never taken for one). The path is all the policy needs, and the scan reads
+  the file from disk. If the path is not in the prefix, `check-write` refuses
+  with `HOOK_INPUT_TOO_LARGE` and `scan-after-write` reports that the file was
+  not scanned.
+- `hook scan-bash-output` had the same flaw past its 8 MiB cap, so a large
+  output was not scanned at all, despite its comment. It now scans the text it
+  read.
+- The `gh` alias config is read through one file descriptor, so the size cap
+  and the read see the same file, and a FIFO at the path cannot hang the
+  guard (code scanning: file-system race).
+- The tmux socket in a process title is found in linear time instead of with
+  a regex that rescans the line from every `(` (code scanning: polynomial
+  ReDoS).
+- Development only: `minimatch` is overridden to `^11.0.5` (GHSA-g3hv-75wg-m249,
+  denial of service; reached only through `c8`, never shipped).
+
 ## [0.11.3] - 2026-11-04
 
 ### Fixed — `doctor` printed `sudo: a password is required`
@@ -1789,7 +1824,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.11.3...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.11.4...HEAD
+[0.11.4]: https://github.com/de-otio/repo-aegis/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/de-otio/repo-aegis/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/de-otio/repo-aegis/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/de-otio/repo-aegis/compare/v0.11.0...v0.11.1

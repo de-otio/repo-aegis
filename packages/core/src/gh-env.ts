@@ -8,7 +8,7 @@
 // this module reads them.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -35,19 +35,44 @@ export function ghConfigDir(env: NodeJS.ProcessEnv = process.env, home: string =
  * in it is UNKNOWN, which is not the same as empty.
  */
 function readYamlObject(path: string): Record<string, unknown> | null | "absent" {
-  let size: number;
+  let text: string | null;
   try {
-    size = statSync(path).size;
+    text = readBounded(path, GH_CONFIG_MAX);
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : null;
   }
+  if (text === null) return null;
   try {
-    if (size > GH_CONFIG_MAX) return null;
-    const doc: unknown = parseYaml(readFileSync(path, "utf8"));
+    const doc: unknown = parseYaml(text);
     if (doc === null || doc === undefined) return {}; // an empty file
     return typeof doc === "object" && !Array.isArray(doc) ? (doc as Record<string, unknown>) : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * A regular file's text, read through one descriptor so the size check and the read see the same file (no
+ * stat-then-read race: a file swapped after the check cannot be read past the cap). `null` when it is not a
+ * regular file or holds more than `max` bytes; throws the open error (`ENOENT` for a missing file).
+ */
+function readBounded(path: string, max: number): string | null {
+  // O_NONBLOCK: opening a FIFO planted at the path must not hang the guard (it is then refused as not a file).
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return null;
+    // Sized from this descriptor's stat, plus one byte to notice growth past the cap during the read.
+    const buf = Buffer.alloc(Math.min(st.size, max) + 1);
+    let n = 0;
+    while (n < buf.length) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+    }
+    return n > max ? null : buf.subarray(0, n).toString("utf8");
+  } finally {
+    closeSync(fd);
   }
 }
 
