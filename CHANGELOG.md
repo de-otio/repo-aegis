@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — code scanning
+
+- Two regexes in the human-only command detector (`NAME=VALUE` bindings and
+  shell function definitions) are replaced by linear-time scans that return
+  exactly the same matches; the old regexes remain in the tests as the oracle.
+  Closes the `js/polynomial-redos` alerts.
+- Removed unused imports and an unused helper (`js/unused-local-variable`).
+
 ## [0.11.4] - 2026-11-08
 
 ### Fixed — `GH_AUTH_TOKEN_NETWORK` refused lines with a local `git` command

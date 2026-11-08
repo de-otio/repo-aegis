@@ -81,7 +81,7 @@ import {
 import { registryPath } from "./paths.js";
 import { checkTerminal, type AncestryReader } from "./process-ancestry.js";
 import { homedir } from "node:os";
-import { parseRemoteUrl, parseRemoteUrlResolved, resolveRemoteUrl } from "./remote-url.js";
+import { parseRemoteUrlResolved, resolveRemoteUrl } from "./remote-url.js";
 import { resolvePushUrls, detectSshOverride } from "./push-urls.js";
 import { ghBaseRepo } from "./gh-base-repo.js";
 import { readRepoConfig, type RepoClass, type RepoConfig } from "./repo.js";
@@ -452,18 +452,6 @@ function gitConfigGet(cwd: string, key: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** `o/r`, `host/o/r`, or a full remote URL → org/repo. */
-function parseRepoFlag(flag: string): { org: string; repo: string } | null {
-  const viaUrl = parseRemoteUrl(flag);
-  if (viaUrl) return { org: viaUrl.org, repo: viaUrl.repo };
-  const parts = flag.replace(/\.git$/, "").split("/").filter(Boolean);
-  if (parts.length === 2) return { org: parts[0]!.toLowerCase(), repo: parts[1]!.toLowerCase() };
-  if (parts.length === 3 && /github\.com$/i.test(parts[0]!)) {
-    return { org: parts[1]!.toLowerCase(), repo: parts[2]!.toLowerCase() };
-  }
-  return null;
 }
 
 function ownOrigin(base: string): { org: string; repo: string } | null {
