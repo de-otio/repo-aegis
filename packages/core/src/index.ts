@@ -545,10 +545,11 @@ export {
 export type { IdentityDefinition, PersonalOrgEntry } from "./schemas.js";
 
 // Which GitHub identity a `gh` call runs as (doc/plan-owner-identity.md §13.1). Pure; nothing calls it yet.
-export { identityPresence, ghCallTargets, chooseIdentity } from "./identity-choice.js";
+export { identityPresence, ghCallTargets, ghCallInfo, chooseIdentity } from "./identity-choice.js";
 export type {
   IdentityPresence,
   GhCallTarget,
+  GhCallInfo,
   IdentityScope,
   IdentityRefusalCode,
   IdentityChoice,
