@@ -278,15 +278,140 @@ function mentionsProgram(text: string): boolean {
  */
 function definedNames(text: string): Set<string> {
   const names = new Set<string>();
-  const assign = /(?:^|[\s;&|(])([A-Za-z_][\w.-]*)=((?:'[^']*'|"[^"]*"|[^\s;&|]*))/g;
-  for (let m = assign.exec(text); m !== null; m = assign.exec(text)) {
-    if (mentionsProgram(m[2]!)) names.add(m[1]!);
+  for (const a of scanAssignments(text)) {
+    if (mentionsProgram(a.value)) names.add(a.name);
   }
-  const fn = /(?:function\s+([A-Za-z_][\w.-]*)|([A-Za-z_][\w.-]*)\s*\(\s*\))\s*\{([^}]*)\}/g;
-  for (let m = fn.exec(text); m !== null; m = fn.exec(text)) {
-    if (mentionsProgram(m[3]!)) names.add((m[1] ?? m[2])!);
+  for (const f of scanFunctions(text)) {
+    if (mentionsProgram(f.body)) names.add(f.name);
   }
   return names;
+}
+
+const isSpace = (c: string): boolean => /\s/.test(c);
+const isNameStart = (c: string): boolean => /[A-Za-z_]/.test(c);
+const isNameChar = (c: string): boolean => /[\w.-]/.test(c);
+
+/** End (exclusive) of the run of name characters (`[\w.-]`) that starts at `from`. */
+function nameRunEnd(text: string, from: number): number {
+  let j = from;
+  while (j < text.length && isNameChar(text[j]!)) j++;
+  return j;
+}
+
+/** End (exclusive) of the run of whitespace that starts at `from`. */
+function spaceRunEnd(text: string, from: number): number {
+  let j = from;
+  while (j < text.length && isSpace(text[j]!)) j++;
+  return j;
+}
+
+/**
+ * Every `NAME=VALUE` binding in `text`, in order. A linear-time scan with the same matches as
+ * `/(?:^|[\s;&|(])([A-Za-z_][\w.-]*)=((?:'[^']*'|"[^"]*"|[^\s;&|]*))/g`: a name starts at the
+ * beginning of the text or right after one of `\s ; & | (`; the value is a closed `'…'` or `"…"`
+ * if one opens there, else the run up to the next `\s ; & |`. (The old regex was flagged as
+ * polynomial-time; the equivalence test keeps it as the oracle.)
+ * @internal exported for the equivalence test.
+ */
+export function scanAssignments(text: string): Array<{ name: string; value: string }> {
+  const out: Array<{ name: string; value: string }> = [];
+  const n = text.length;
+  // A closing quote that is not there stays not there: remember it so a failed search is not repeated.
+  const closeAt: Record<string, number> = { "'": -2, '"': -2 };
+  const closeOf = (q: string, from: number): number => {
+    const c = closeAt[q]!;
+    if (c === -1) return -1;
+    if (c >= from) return c;
+    return (closeAt[q] = text.indexOf(q, from));
+  };
+  /** `NAME=VALUE` with the name starting at `at`, or null. */
+  const matchAt = (at: number): { name: string; value: string; end: number } | null => {
+    if (at >= n || !isNameStart(text[at]!)) return null;
+    const e = nameRunEnd(text, at);
+    if (text[e] !== "=") return null;
+    const vs = e + 1;
+    let ve = -1;
+    const q = text[vs];
+    if (q === "'" || q === '"') {
+      const close = closeOf(q, vs + 1);
+      if (close !== -1) ve = close + 1;
+    }
+    if (ve === -1) {
+      ve = vs;
+      while (ve < n && !isSpace(text[ve]!) && !";&|".includes(text[ve]!)) ve++;
+    }
+    return { name: text.slice(at, e), value: text.slice(vs, ve), end: ve };
+  };
+  let s = 0;
+  while (s < n) {
+    // `^` is an alternative only at index 0; elsewhere the name follows a one-character separator.
+    let m = s === 0 ? matchAt(0) : null;
+    if (m === null && (isSpace(text[s]!) || ";&|(".includes(text[s]!))) m = matchAt(s + 1);
+    if (m === null) {
+      s++;
+    } else {
+      out.push({ name: m.name, value: m.value });
+      s = m.end; // a global regex resumes at the match end
+    }
+  }
+  return out;
+}
+
+/**
+ * Every `function NAME {…}` / `NAME() {…}` definition in `text`, in order, with the body up to the
+ * first `}`. A linear-time scan with the same matches as
+ * `/(?:function\s+([A-Za-z_][\w.-]*)|([A-Za-z_][\w.-]*)\s*\(\s*\))\s*\{([^}]*)\}/g`.
+ * @internal exported for the equivalence test.
+ */
+export function scanFunctions(text: string): Array<{ name: string; body: string }> {
+  const out: Array<{ name: string; body: string }> = [];
+  const n = text.length;
+  let closeAt = -2;
+  const nextClose = (from: number): number => {
+    if (closeAt === -1) return -1;
+    if (closeAt >= from) return closeAt;
+    return (closeAt = text.indexOf("}", from));
+  };
+  /** `\s*\{([^}]*)\}` from `from`: the body and the match end, or null. */
+  const tail = (from: number): { body: string; end: number } | null => {
+    const b = spaceRunEnd(text, from);
+    if (text[b] !== "{") return null;
+    const c = nextClose(b + 1);
+    return c === -1 ? null : { body: text.slice(b + 1, c), end: c + 1 };
+  };
+  let runEnd = 0; // alt 2 already failed for the name run that ends here
+  let s = 0;
+  while (s < n) {
+    let hit: { name: string; body: string; end: number } | null = null;
+    if (text.startsWith("function", s)) {
+      const k = spaceRunEnd(text, s + 8);
+      if (k > s + 8 && k < n && isNameStart(text[k]!)) {
+        const e = nameRunEnd(text, k);
+        const t = tail(e);
+        if (t !== null) hit = { name: text.slice(k, e), ...t };
+      }
+    }
+    if (hit === null && s >= runEnd && isNameStart(text[s]!)) {
+      // Every start inside one name run reaches the same end, so one try per run is enough.
+      const e = nameRunEnd(text, s);
+      runEnd = e;
+      let p = spaceRunEnd(text, e);
+      if (text[p] === "(") {
+        p = spaceRunEnd(text, p + 1);
+        if (text[p] === ")") {
+          const t = tail(p + 1);
+          if (t !== null) hit = { name: text.slice(s, e), ...t };
+        }
+      }
+    }
+    if (hit !== null) {
+      out.push({ name: hit.name, body: hit.body });
+      s = hit.end;
+    } else {
+      s++;
+    }
+  }
+  return out;
 }
 
 /** The words after `words[from]`: up to {@link MAX_WORDS}, with at most {@link WINDOW} ordinary (non-flag, non-flag-value) words. */

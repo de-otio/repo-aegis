@@ -60,7 +60,7 @@
 // regular file and the read. The file is opened with O_NONBLOCK and its type is
 // checked on the open descriptor, so a swapped-in fifo cannot hang the reader,
 // but the content read is whatever is there at that moment.
-import { constants, closeSync, fstatSync, openSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { constants, closeSync, fstatSync, openSync, readFileSync, readdirSync } from "node:fs";
 import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
