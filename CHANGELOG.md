@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pull`, `clone`, `ls-remote`, `remote`, `submodule`, aliases, unknown
   subcommands and any `-c`, `--config-env` or `--exec-path` option still do.
 
+### Security
+
+- The `gh` alias config is read through one file descriptor, so the size cap
+  and the read see the same file, and a FIFO at the path cannot hang the
+  guard (code scanning: file-system race).
+- The tmux socket in a process title is found in linear time instead of with
+  a regex that rescans the line from every `(` (code scanning: polynomial
+  ReDoS).
+- Development only: `minimatch` is overridden to `^11.0.5` (GHSA-g3hv-75wg-m249,
+  denial of service; reached only through `c8`, never shipped).
+
 ## [0.11.3] - 2026-11-04
 
 ### Fixed — `doctor` printed `sudo: a password is required`
