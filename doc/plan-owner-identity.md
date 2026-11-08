@@ -1,6 +1,16 @@
 # Plan: the identity follows the target owner
 
-Status: **spec, not implemented.** Branch `plan/owner-identity`. Revives and extends `doc/plan-gh-identity-selection.md` (parked 2026-11-04 on branch `plan/gh-identity-selection`), whose decisions and security review (H1–H5, M1–M5) are carried over here and referenced by their ids. Changes the stance of `doc/plan-recognise-dot-gh.md` §0 for this one concern (§2). Security review of this spec: §12.
+Status (2026-11-08, handoff): **implemented as phases 2–4 on draft PR #170** (branch `feat/owner-identity`, worktree `../repo-aegis-wt-owner-identity`). The full suite was green before the last commit, which makes a non-root-owned taaad a `doctor` warning (Q5 revised under §2.1). Next:
+1. Confirm the full suite and CI on #170 pass, then mark it ready and merge.
+2. Release repo-aegis (version to be decided).
+3. Clean up the worktrees `repo-aegis-wt-{registry-v3,identity-choice,hook-rules,gh-cli,git-helper,cleanup,codeql,owner-identity}`.
+
+Related:
+- #169, the code-scanning cleanup, is open.
+- taaad `mint` is merged (taaad PR #4). Another session is preparing taaad v0.5.6 (branch `fix/pem-keychain-acl-v0.5.6`); its tag is the owner's call.
+- Agreed with that session: `taaad mint` exit code 3 = prompt limit, 4 = prompt declined.
+
+Branch `plan/owner-identity`. Revives and extends `doc/plan-gh-identity-selection.md` (parked 2026-11-04 on branch `plan/gh-identity-selection`), whose decisions and security review (H1–H5, M1–M5) are carried over here and referenced by their ids. Changes the stance of `doc/plan-recognise-dot-gh.md` §0 for this one concern (§2). Security review of this spec: §12.
 
 ## 1. Problem
 
