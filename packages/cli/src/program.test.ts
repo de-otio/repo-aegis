@@ -253,7 +253,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "identity", flags: [], subcommands: ["add", "remove", "require"] },
   { path: "identity add", flags: ["--app", "--gh-login"], subcommands: [] },
   { path: "identity remove", flags: [], subcommands: [] },
-  { path: "identity require", flags: ["--off"], subcommands: [] },
+  { path: "identity require", flags: ["--off", "--on"], subcommands: [] },
 
   // ---- upstreams ----
   {
