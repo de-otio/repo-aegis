@@ -279,7 +279,6 @@ export function humanPresence(
   stderrIsTTY?: boolean,
   ancestry?: AncestryReader,
 ): HumanPresence {
-  if ((env ?? process.env)[EGRESS_HUMAN_ENV] === "1") return { present: true, ancestry: "skipped" };
   const check = checkTerminal({
     // Left unset when the caller gave none, so a synthetic (test) chain is judged against an empty
     // environment rather than the developer's own (which, under Claude Code, says CLAUDECODE=1).
@@ -287,6 +286,10 @@ export function humanPresence(
     ...(stderrIsTTY !== undefined && { stderrIsTTY }),
     ...(ancestry !== undefined && { ancestry }),
   });
+  // The human-only override decides, except where an agent host demonstrably sits above this process (a TTY, and
+  // an agent ancestor or the agent environment signal): there the variable was set by the agent's own environment,
+  // not by a person. With no TTY nothing is read, as before.
+  if ((env ?? process.env)[EGRESS_HUMAN_ENV] === "1" && check.kind !== "agent") return { present: true, ancestry: "skipped" };
   switch (check.kind) {
     case "no-tty":
       return { present: false, ancestry: "skipped" };

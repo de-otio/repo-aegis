@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
+import { homedir } from "node:os";
 import { basename } from "node:path";
 import {
+  isGhConfigFile,
   loadRegistry,
   RegistryEncryptedError,
   RegistryNotFoundError,
@@ -120,6 +122,23 @@ export async function hookCheckWrite(): Promise<void> {
           `for exactly this case, but it is a human-run, TTY-gated command: it refuses to ` +
           `run non-interactively unless a human has explicitly set ` +
           `REPO_AEGIS_WAIVE_NONINTERACTIVE=1.`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
+  }
+
+  // gh's own config (`config.yml`, `hosts.yml`) picks its pager, editor, aliases and account: an agent that can
+  // write it can redirect the credential the identity layer injects. Refused wherever the file is, like the waiver file.
+  if (isGhConfigFile(filePath, { env: process.env, home: homedir(), cwd: cwd ?? process.cwd() })) {
+    emitJsonAndExit(
+      {
+        code: "GH_CONFIG_WRITE_REFUSED",
+        error:
+          `agent write to ${basename(filePath)} in gh's config directory refused: it controls which account, pager, ` +
+          `editor and aliases gh uses, so changing it could redirect the credential repo-aegis injects. No approval ` +
+          `covers this. Tell your human what you need changed; a person edits it, or runs \`gh config set\` or ` +
+          `\`gh auth\`, from their own terminal. [GH_CONFIG_WRITE_REFUSED, see doc/agent-guide.md#gh_config_write_refused]`,
         details: { filePath },
       },
       EXIT_BLOCK,

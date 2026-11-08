@@ -240,6 +240,17 @@ and they run on every agent command, ahead of the "no egress intent" exit:
   are `TOKEN_MINT_NEEDS_HUMAN`. Speed bumps like `GH_AUTH_TOKEN_NETWORK`: a
   script file or another interpreter still gets through; the keychain ACLs are
   the control.
+- **Review follow-ups.** `git credential fill|get|approve` and the
+  `git[ -]credential-<helper> get` forms are N9 and are token reads for
+  `GH_AUTH_TOKEN_NETWORK`; a segment that leaves a `REPO_AEGIS_*` name set in the
+  shell (a bare assignment, `export`, `declare -x`, `readonly`, `read`) is A1,
+  because the agent's shell persists across calls, and `REPO_AEGIS_EGRESS_HUMAN`
+  no longer counts under an agent host above a TTY; N9 adds the `keyring` and
+  `secret-tool` CLIs, `security -i` and stdin text, and interpreter or piped
+  text naming a keychain route; A10 reads `--show-token=…` and a gh reached
+  through `G=gh; $G`, an alias or `$(which gh)`. The write hook refuses an
+  agent's Edit or Write to gh's `config.yml` and `hosts.yml`
+  (`GH_CONFIG_WRITE_REFUSED`).
 - **N8** — a recognised `dot gh` write whose literal owner (`--repo` / `-R` /
   `GH_REPO`, a URL, a `repos/<o>/<r>` endpoint) has an identity mapped in a v3
   registry is `DOT_GH_OWNER_MAPPED`, decided before D2; a person present or an
