@@ -142,7 +142,7 @@ const OWNERLESS_GROUPS: ReadonlySet<string> = new Set([
  */
 export function ghCallInfo(
   args: readonly string[],
-  ctx: { ghRepoEnv?: string; cwdRemoteOwnerRepo?: { owner: string; repo: string } },
+  ctx: { ghRepoEnv?: string; cwdRemoteOwnerRepo?: { owner: string; repo: string }; isWrite?: boolean },
 ): GhCallInfo {
   const out: GhCallTarget[] = [];
   const foreignOwners: string[] = [];
@@ -208,7 +208,11 @@ export function ghCallInfo(
             literal = true;
           } else if (t.kind === "cwd") {
             baseForPlaceholder = repoFlag === undefined; // L1: an explicit --repo replaces the base
-          } else if (!isGraphqlEndpoint(endpoint)) {
+          } else if (isGraphqlEndpoint(endpoint)) {
+            // The egress parser classifies the operation: only a graphql WRITE keeps the base (an agent write
+            // with only a cwd base is then refused); a graphql read names no owner, so no base, no injection.
+            ownerless = ctx.isWrite !== true;
+          } else {
             ownerless = true; // user/*, notifications, search/*, gists, …: no owner, no base (M2)
           }
         }
@@ -281,11 +285,11 @@ export function ghCallInfo(
  *
  * A reference on another host (anything but github.com / www.github.com) yields NO target; see
  * {@link ghCallInfo} for the flag. A literal that cannot be read yields no target and no fallback to a lower
- * source. Aliases are not expanded. Owners are lowercased. Pure; never throws.
+ * source. `ctx.isWrite` (the egress parser's verdict) decides graphql: a write keeps the base, a read gets none. Aliases are not expanded. Owners are lowercased. Pure; never throws.
  */
 export function ghCallTargets(
   args: readonly string[],
-  ctx: { ghRepoEnv?: string; cwdRemoteOwnerRepo?: { owner: string; repo: string } },
+  ctx: { ghRepoEnv?: string; cwdRemoteOwnerRepo?: { owner: string; repo: string }; isWrite?: boolean },
 ): GhCallTarget[] {
   return ghCallInfo(args, ctx).targets;
 }

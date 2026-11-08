@@ -133,8 +133,20 @@ describe("ghCallTargets", () => {
       assert.deepEqual(T(["api", ep], ctx), [], ep);
     }
   });
-  it("M2: graphql keeps the base (a mutation with only a cwd base is refused for agent writes)", () => {
-    assert.deepEqual(T(["api", "graphql", "-f", "query=x"], { cwdRemoteOwnerRepo: { owner: "c", repo: "d" } }), [{ owner: "c", repo: "d", source: "cwd" }]);
+  it("graphql: a write keeps the base, a read (or unknown) gets none", () => {
+    const base = { cwdRemoteOwnerRepo: { owner: "c", repo: "d" } };
+    assert.deepEqual(T(["api", "graphql", "-f", "query=x"], { ...base, isWrite: true }), [{ owner: "c", repo: "d", source: "cwd" }]);
+    assert.deepEqual(T(["api", "graphql", "-f", "query=x"], { ...base, ghRepoEnv: "e/f", isWrite: true }), [{ owner: "e", repo: "f", source: "gh-repo-env" }]);
+    assert.deepEqual(T(["api", "graphql", "-f", "query=x"], { ...base, isWrite: false }), []);
+    assert.deepEqual(T(["api", "graphql", "-f", "query=x"], base), []);
+  });
+  it("graphql write with only a cwd base is refused for an agent with an agent identity; a read is not injected", () => {
+    const args = ["api", "graphql", "-f", "query=x"];
+    const base = { cwdRemoteOwnerRepo: { owner: "both-org", repo: "r" } };
+    const w = chooseIdentity(input({ args, presence: "agent", isWrite: true, targets: ghCallTargets(args, { ...base, isWrite: true }) }));
+    assert.equal(refused(w), "GH_IDENTITY_NEEDS_LITERAL_TARGET");
+    const r = chooseIdentity(input({ args, presence: "agent", isWrite: false, targets: ghCallTargets(args, { ...base, isWrite: false }) }));
+    assert.deepEqual(r, { kind: "none" });
   });
   it("M2: owner-less groups get no base", () => {
     const ctx = { cwdRemoteOwnerRepo: { owner: "c", repo: "d" }, ghRepoEnv: "e/f" };
