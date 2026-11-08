@@ -218,6 +218,9 @@ function registryDeclaresContent(text: string): boolean {
     nonEmpty(r["always_block"]) ||
     nonEmpty(r["personalOrgs"]) ||
     nonEmpty(r["allowedUpstreams"]) ||
+    // schemaVersion 3: identities and the requirement are as much the operator's as the owners they map.
+    nonEmpty(r["identities"] !== null && typeof r["identities"] === "object" ? Object.keys(r["identities"] as object) : undefined) ||
+    r["requireIdentity"] !== undefined ||
     nonEmpty(r["engagements"]) ||
     nonEmpty(r["selfIdentity"]) ||
     nonEmpty(r["privateInfra"]) ||

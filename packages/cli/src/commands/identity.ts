@@ -41,9 +41,9 @@ import {
   type Doc,
 } from "./registry-mutate.js";
 import { ensureSchemaVersion, findEngagementNode } from "./engagements-mutate.js";
-import { olderInstallsOnPath, runningInstallVersion, type InstallOnPath } from "./doctor-pin-checks.js";
+import type { InstallGuardOptions } from "./install-readers.js";
 
-interface BaseOptions extends RequireTerminalOptions {
+interface BaseOptions extends RequireTerminalOptions, InstallGuardOptions {
   registryPath?: string;
 }
 
@@ -58,10 +58,6 @@ export interface SetIdentityOptions extends BaseOptions {
   person?: string;
   agent?: string;
   clear?: boolean;
-  /** TEST-ONLY seam: the PATH searched for older installs (default `process.env.PATH`). */
-  pathEnv?: string;
-  /** TEST-ONLY seam: the running version (default: this package's). */
-  runningVersion?: string;
 }
 
 function audit(change: string): void {
@@ -154,7 +150,7 @@ export function identityAdd(name: string | undefined, opts: IdentityAddOptions):
         `identity "${identity}" already exists with a different definition; remove it first (it must be unreferenced)`,
       );
     }
-    ensureSchemaVersion(doc, REGISTRY_IDENTITIES_MIN_VERSION);
+    ensureSchemaVersion(doc, REGISTRY_IDENTITIES_MIN_VERSION, opts);
     if (!isMap(doc.get("identities"))) doc.set("identities", doc.createNode({}));
     (doc.get("identities") as YAMLMap).set(identity, flowMap(doc, def));
     commitRegistry(doc, path, { ...opts, ownersBefore, command: { kind: "identity-change" } });
@@ -199,26 +195,42 @@ export function identityRemove(name: string | undefined, opts: BaseOptions): voi
   emitText(`removed identity ${identity}`);
 }
 
-export function identityRequire(opts: BaseOptions & { off?: boolean }): void {
-  requireTerminalForIdentityChange({ kind: "identity-require-off" }, opts);
-  if (opts.off !== true) failUsage("identity require takes --off (the first set-identity turns it on)", opts);
+/**
+ * `identity require --off | --on`. `--off` loosens, so it needs a terminal and is human-only. `--on` only
+ * tightens (the same state the first `set-identity` creates), so it needs neither and an agent may run it.
+ */
+export function identityRequire(opts: BaseOptions & { off?: boolean; on?: boolean }): void {
+  if (opts.on === true && opts.off === true) failUsage("identity require takes --on or --off, not both", opts);
+  if (opts.on !== true) {
+    requireTerminalForIdentityChange({ kind: "identity-require-off" }, opts);
+    if (opts.off !== true) failUsage("identity require takes --off (clear) or --on (set)", opts);
+  }
+  const want = opts.on === true;
   const path = opts.registryPath ?? defaultRegistryPath();
   const changed = withRegistryLock(opts, () => {
     const doc = loadDoc(path);
     const ownersBefore = ownerCount(doc);
     const cur = doc.get("requireIdentity");
-    if (cur === undefined) return false; // never set: nothing to clear (and nothing to bump to v3 for)
-    if (cur === false) return false;
-    doc.set("requireIdentity", false);
+    if (want) {
+      if (cur === true) return false;
+      // Without identities there is nothing to require, and setting it would raise the version for nothing.
+      if (!(doc.get("schemaVersion") === 3 || (doc.get("schemaVersion") as Scalar | null)?.value === 3)) {
+        throw new RegistryCliError("NOTHING_TO_REQUIRE", "the registry has no identities (schemaVersion below 3); add and map some first");
+      }
+      doc.set("requireIdentity", true);
+    } else {
+      if (cur === undefined || cur === false) return false; // never set: nothing to clear (and no bump to v3)
+      doc.set("requireIdentity", false);
+    }
     commitRegistry(doc, path, { ...opts, ownersBefore, command: { kind: "identity-change" } });
     return true;
   });
-  if (changed) audit("identity-require-off");
+  if (changed) audit(want ? "identity-require-on" : "identity-require-off");
   if (opts.json) {
-    emitJson({ action: "identity-require", requireIdentity: false, changed });
+    emitJson({ action: "identity-require", requireIdentity: want, changed });
     return;
   }
-  emitText(changed ? "requireIdentity cleared" : "requireIdentity was not set");
+  emitText(changed ? `requireIdentity ${want ? "set" : "cleared"}` : `requireIdentity was ${want ? "already set" : "not set"}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,21 +239,6 @@ export function identityRequire(opts: BaseOptions & { off?: boolean }): void {
 
 function failUsage(error: string, opts: OutputOptions): never {
   return emitError({ code: "USAGE", error }, opts);
-}
-
-/** Refuse while another install on PATH is older (or unreadable): it would refuse the v3 file by version. */
-function assertNoOlderInstalls(opts: SetIdentityOptions): void {
-  const running = opts.runningVersion ?? runningInstallVersion();
-  if (running === null) return; // cannot compare: do not block on our own ignorance
-  const older: InstallOnPath[] = olderInstallsOnPath(opts.pathEnv ?? process.env["PATH"], running);
-  if (older.length === 0) return;
-  throw new RegistryCliError(
-    "MULTIPLE_INSTALLS",
-    `another repo-aegis on PATH is older than this one (${running}) or its version cannot be read: ` +
-      `${older.map(o => `${o.path} (${o.version ?? "unknown"})`).join("; ")}. ` +
-      "An older build refuses a schemaVersion 3 registry, and then rule h refuses every non-interactive egress. " +
-      "Remove or upgrade it, then run `repo-aegis doctor`.",
-  );
 }
 
 /** Check a `--person` / `--agent` value names an identity of the right kind, as the schema will. */
@@ -297,7 +294,6 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
     const doc = loadDoc(path);
     const ownersBefore = ownerCount(doc);
     if (opts.clear !== true) {
-      assertNoOlderInstalls(opts);
       if (person !== undefined) checkReference(doc, "person", person);
       if (agent !== undefined) checkReference(doc, "agent", agent);
     }
@@ -307,12 +303,15 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
     } else {
       const node = findEngagementNode(doc, id!);
       if (node === null) throw new RegistryCliError("ENGAGEMENT_NOT_FOUND", `engagement "${id}" not found`);
+      if (opts.clear !== true && personalOrgItemNames(node).length === 0) {
+        throw new RegistryCliError("ENGAGEMENT_HAS_NO_ORGS", `engagement "${id}" has no githubOrgs, so an identity would map nothing; add an org first`);
+      }
       changed = editMapColumns(node, person, agent, opts.clear === true);
     }
     if (!changed) return { changed: false, firstSet: false, render: null };
     let firstSet = false;
     if (opts.clear !== true) {
-      ensureSchemaVersion(doc, REGISTRY_IDENTITIES_MIN_VERSION);
+      ensureSchemaVersion(doc, REGISTRY_IDENTITIES_MIN_VERSION, opts);
       if (doc.get("requireIdentity") === undefined) {
         doc.set("requireIdentity", true);
         firstSet = true;
@@ -335,6 +334,12 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
   if (!result.changed) emitText(`${target}: identities unchanged`);
   else emitText(`${target}: identities ${opts.clear === true ? "cleared" : "set"}`);
   if (result.firstSet) emitText("requireIdentity set to true (turn it off with `repo-aegis identity require --off`)");
+}
+
+/** The `githubOrgs` of an engagement node. */
+function personalOrgItemNames(node: YAMLMap): string[] {
+  const seq = node.get("githubOrgs");
+  return isSeq(seq) ? seq.items.map(strOf).filter((x): x is string => x !== null) : [];
 }
 
 /** Set or clear `person` / `agent` on a map node. True when the node changed. */

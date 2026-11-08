@@ -510,3 +510,35 @@ engagements:
     assert.equal(r.code, 2, `expected refuse; got ${r.code} ${r.stderr}`);
   });
 });
+
+describe("hook check-write: an unreadable registry blocks (exit 2), never fails open", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  const payload = (): string => JSON.stringify({ tool_input: { file_path: join(tmp, "loose.txt") }, cwd: tmp });
+
+  it("a registry that does not validate: exit 2, REGISTRY_ERROR, and no org or engagement name in the output", () => {
+    const env = setupAegisHome("ck-bad-registry");
+    // Duplicate org: the zod message would name it, and the engagement ids.
+    writeRegistry(
+      env.aegisHome,
+      "schemaVersion: 2\npersonalOrgs: [secret-org-name, secret-org-name]\nengagements:\n  - { id: secret-engagement-id, name: N, markers: [] }\n",
+    );
+    const r = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], { input: payload() });
+    assert.equal(r.code, 2, r.stderr);
+    const out = `${r.stdout}${r.stderr}`;
+    assert.match(out, /REGISTRY_ERROR/);
+    assert.doesNotMatch(out, /secret-org-name|secret-engagement-id/);
+  });
+
+  it("a registry of a schemaVersion this build cannot read: exit 2", () => {
+    const env = setupAegisHome("ck-newer-registry");
+    writeRegistry(env.aegisHome, "schemaVersion: 99\nengagements: []\n");
+    const r = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], { input: payload() });
+    assert.equal(r.code, 2, r.stderr);
+    assert.match(`${r.stdout}${r.stderr}`, /REGISTRY_ERROR/);
+  });
+
+  it("a missing registry still passes (nothing to protect yet)", () => {
+    const env = setupAegisHome("ck-no-registry");
+    const r = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], { input: payload() });
+    assert.equal(r.code, 0, r.stderr);
+  });
+});

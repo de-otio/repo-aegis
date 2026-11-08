@@ -217,8 +217,9 @@ export async function buildProgram(): Promise<Command> {
     });
   identity
     .command("require")
-    .description("turn requireIdentity off (the first set-identity turns it on). Needs a terminal.")
-    .option("--off", "clear requireIdentity")
+    .description("turn requireIdentity on or off (the first set-identity turns it on). --off needs a terminal; --on only tightens and needs none.")
+    .option("--off", "clear requireIdentity (needs a terminal)")
+    .option("--on", "set requireIdentity (no terminal needed)")
     .action(async (opts, cmd) => {
       const { identityRequire } = await import("./commands/identity.js");
       identityRequire(withGlobals(opts, cmd));

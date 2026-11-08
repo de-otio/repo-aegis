@@ -20,8 +20,17 @@ data yet.
   name a `github-app` and `person` a `gh-login`, unknown keys are rejected,
   names and slugs match `^[a-z0-9][a-z0-9-]{0,62}$`, logins
   `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`, and using any of it below version 3
-  is an error naming the version. A build without this release refuses the
-  file as newer than it supports.
+  is an error naming the version. Identity names are checked on the raw YAML
+  keys (a `__proto__` key is an error, not silently dropped). From version 3 an
+  engagement may carry only its known keys (`id`, `name`, `started`, `ended`,
+  `reposActive`, `markers`, `notes`, `githubOrgs`, `person`, `agent`), and a
+  top-level key within edit distance 2 of a known one (`identites`,
+  `requireIdentiy`) is an error; other top-level keys are still passed
+  through, and below version 3 nothing new is rejected. A build without this
+  release refuses the file as newer than it supports: rule h then refuses
+  every non-interactive egress, and an older pinned `hook check-write` exits 1,
+  which Claude Code treats as non-blocking, so the cross-org write check fails
+  open on that install.
 - `Registry.personalOrgs` stays a list of names; the mapping is a separate
   `identityMap` (lower-cased owner to `{ person?, agent? }`), so
   `registeredOwners()`, `approvalScopeOf()` and the deny set read what they
@@ -30,16 +39,24 @@ data yet.
   and the agent hook refuses them as `AGENT_RAN_HUMAN_COMMAND`):
   `repo-aegis identity add <name> --gh-login <login> | --app <slug>`,
   `identity remove <name>` (refused while referenced), `identity require --off`,
-  and `engagements set-identity <id> | --personal-org <org> [--person] [--agent]
-  [--clear]`. The registry is written as version 3 only when the first identity
-  or mapping is set; the first `set-identity` also sets `requireIdentity: true`.
-  `set-identity` refuses while another `repo-aegis` on `PATH` is older
-  (`MULTIPLE_INSTALLS`).
+  and `engagements set-identity <id> [--person] [--agent] [--clear]`. For a
+  personal org the form is `engagements set-identity --personal-org <org> ...`
+  (there is no separate `personal-org` command group). The registry is written
+  as version 3 only when the first identity or mapping is set; the first
+  `set-identity` also sets `requireIdentity: true`. `identity require --on`
+  only tightens, needs no terminal and may be run by an agent. `set-identity`
+  refuses an engagement with no `githubOrgs` (it would map nothing).
+- Every path that RAISES the schema version (the first `identity add`) refuses
+  with `MULTIPLE_INSTALLS` while a `repo-aegis` on `PATH`, or one that an
+  installed git hook or the `gh` shim is pinned to, cannot read version 3. That
+  is judged by the supported version read from the install's own core package
+  (never by running it); when it cannot be read the package version is
+  compared, and an install whose version cannot be read is refused.
 - `status` lists identities and mappings (names, kinds, logins, slugs; an
   engagement by id, never by its orgs). `doctor` reports
   `OWNER_IDENTITY_UNMAPPED` per registered owner with no identity entry: a
-  warning, a failure when `requireIdentity` is set.
-
+  warning, a failure when `requireIdentity` is set (the text says how many
+  owners are still unmapped; owners are named only in `--json`).
 ### Fixed
 
 - The registry mutators that scan `personalOrgs` for an existing org (`engagements
@@ -47,6 +64,12 @@ data yet.
   now see object-form entries, so an entry with identities is neither added
   twice nor invisible to the check that stops the last owner being removed
   without a terminal.
+- `init --force` counts `identities` and `requireIdentity` as content, so it needs a
+  terminal on an identity-only registry.
+- `hook check-write` now blocks (exit 2) when the registry cannot be read,
+  with a message that names no org or engagement. It used to exit 1, which
+  Claude Code treats as non-blocking, so an unreadable registry switched the
+  cross-org write check off.
 
 ## [0.11.4] - 2026-11-08
 

@@ -198,7 +198,9 @@ engagements:
   `{ name, person?, agent? }`; an engagement may carry `person` / `agent`,
   which apply to all its `githubOrgs`.
 - **`requireIdentity`** is set to `true` by the first `engagements
-  set-identity` and cleared only by `identity require --off`. It makes
+  set-identity` and cleared by `identity require --off` (a person, at a
+  terminal). `identity require --on` sets it again; it only tightens, so it
+  needs no terminal and an agent may run it. It makes
   `doctor` report `OWNER_IDENTITY_UNMAPPED` as a failure instead of a warning.
   In a later phase it will also make an agent write to a registered owner with
   no identity entry refuse. An owner with only a `person` identity is not
@@ -211,14 +213,28 @@ engagements:
   resolves, the kinds match the column, an unknown key inside `identities` or a
   `personalOrgs` object is an error, and an owner still appears in only one
   place (the duplicate and personal/engagement disjointness rules apply to
-  object entries too).
+  object entries too). Identity names are checked on the raw YAML keys, so a
+  `__proto__` key is an error.
+- **Typos are errors from version 3.** An engagement may carry only `id`,
+  `name`, `started`, `ended`, `reposActive`, `markers`, `notes`, `githubOrgs`,
+  `person` and `agent`. A top-level key within edit distance 2 of a known one
+  (`identites`, `requireIdentiy`) is rejected; other unknown top-level keys
+  are still passed through, as in every version. Below version 3 nothing new
+  is rejected.
 - **Version gate.** `identities`, an object-form `personalOrgs` entry, an
   engagement's `person` / `agent` and `requireIdentity` need
   `schemaVersion: 3`; with a lower version the registry is rejected, naming
   the version. A build that predates version 3 refuses the file as newer than
-  it supports, and then rule h refuses every non-interactive egress, so
-  upgrade every install on `PATH` first. `engagements set-identity` checks
-  for that and refuses while another `repo-aegis` on `PATH` is older.
+  it supports: rule h then refuses every non-interactive egress, and an older
+  pinned `hook check-write` exits 1, which Claude Code treats as non-blocking,
+  so the cross-org write check **fails open** on that install. Upgrade every
+  install first. Every command that raises the version (the first `identity
+  add`) checks for that and refuses (`MULTIPLE_INSTALLS`) while a `repo-aegis`
+  on `PATH`, or one that an installed git hook or the `gh` shim is pinned to,
+  cannot read version 3. "Cannot read" is judged by the supported version
+  read from that install's own core package, never by running it; if that is
+  unreadable the package version is compared, and an install whose version is
+  unreadable is refused.
 - **Written only on adoption.** The file stays at its version until the first
   identity is defined (`identity add`) or mapped. It is never lowered.
 - **Parsed shape.** `Registry.personalOrgs` stays a list of names. The
@@ -227,7 +243,7 @@ engagements:
 
 Changing any of this is an owner-registry change: a person at a terminal
 runs `repo-aegis identity add|remove|require --off` or `repo-aegis engagements
-set-identity` (`IDENTITY_CHANGE_NEEDS_TTY`), and the agent hook refuses the
+set-identity` (a personal org is `engagements set-identity --personal-org <org>`) (`IDENTITY_CHANGE_NEEDS_TTY`), and the agent hook refuses the
 command text (`AGENT_RAN_HUMAN_COMMAND`). See
 [cli-reference.md](cli-reference.md#identities-schema-version-3).
 

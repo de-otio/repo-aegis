@@ -129,16 +129,14 @@ export function registryStateChecks(
 export function ownerIdentityChecks(registry: Registry): DoctorCheck[] {
   const mapped = registry.identityMap ?? new Map();
   const required = registry.requireIdentity === true;
-  return [...registeredOwners(registry)]
-    .filter(owner => !mapped.has(owner))
-    .sort()
-    .map(owner => ({
+  const unmapped = [...registeredOwners(registry)].filter(owner => !mapped.has(owner)).sort();
+  return unmapped.map(owner => ({
       code: "OWNER_IDENTITY_UNMAPPED" as const,
       ok: false,
       ...(required ? {} : { severity: "warn" as const }),
       names: [owner],
       detail: required
-        ? "a registered owner has no identity entry, and requireIdentity is set, so an agent write to it is refused"
+        ? `${unmapped.length} registered owner(s) are still unmapped, and requireIdentity is set, so an agent write to one with no identity entry is refused`
         : "a registered owner has no identity entry, so no GitHub identity is recorded for it",
       fix:
         "map the owner to an identity (it is listed in --json): repo-aegis identity add <name> --gh-login <login>, then " +

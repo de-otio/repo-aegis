@@ -597,7 +597,12 @@ argument is no oracle for an agent.
 Defines an identity: `--gh-login` makes a `gh-login` identity (a person),
 `--app` a `github-app` identity (an agent). Exactly one is required. Names and
 slugs are lower-cased and validated against the schema's shapes; a login is
-kept as typed. The first identity writes `schemaVersion: 3`. Adding the same
+kept as typed. The first identity writes `schemaVersion: 3`, and is refused
+(`MULTIPLE_INSTALLS`) while a `repo-aegis` on `PATH`, or one an installed hook
+or the shim is pinned to, cannot read version 3: it is judged by the supported
+version read from that install's own core package, never by running it (an
+older pinned `hook check-write` exits 1, which is non-blocking, so it would stop
+protecting cross-org writes). Adding the same
 definition again is a no-op; a different definition under an existing name is
 `IDENTITY_EXISTS`.
 
@@ -607,11 +612,14 @@ Refused with `IDENTITY_IN_USE` while a personal org or an engagement still
 names it (clear them first), `IDENTITY_NOT_FOUND` for an unknown name. The file
 stays at version 3.
 
-#### `repo-aegis identity require --off`
+#### `repo-aegis identity require --off | --on`
 
-Clears `requireIdentity` (writes `requireIdentity: false`, so a later
-`set-identity` does not turn it back on). `--off` is required; the first
-`set-identity` is what turns it on.
+`--off` clears `requireIdentity` (writes `requireIdentity: false`, so a later
+`set-identity` does not turn it back on); it needs a terminal and is
+human-only. `--on` sets it again; it only tightens, so it needs no terminal and
+**an agent may run it** (the hook does not refuse it). `--on` on a registry
+below version 3 is `NOTHING_TO_REQUIRE`. The first `set-identity` also turns it
+on.
 
 #### `repo-aegis engagements set-identity <engagement-id> [--person <name>] [--agent <name>] [--clear]`
 
@@ -622,7 +630,8 @@ left as it is. `--clear` removes both and cannot be combined with the others.
 The first mapping sets `schemaVersion: 3` and, unless the key is already
 present, `requireIdentity: true`.
 
-**Personal orgs:** `repo-aegis engagements set-identity --personal-org <org>
+**Personal orgs** (the form is `engagements set-identity --personal-org`, not a
+separate `personal-org` command): `repo-aegis engagements set-identity --personal-org <org>
 [--person <name>] [--agent <name>] [--clear]`. Personal orgs have no command
 group of their own (they are added with `engagements add --personal-org`), so
 this mirrors that form; it takes no `<id>`. The org must already be registered
@@ -630,9 +639,10 @@ this mirrors that form; it takes no `<id>`. The org must already be registered
 becomes `{ name, person?, agent? }` and goes back to a plain string when
 cleared; a comment on the entry is kept.
 
-Not `--clear`: the command refuses with `MULTIPLE_INSTALLS` while another
-`repo-aegis` on `PATH` is older than the running one, or has a version that
-cannot be read, because an older build refuses a version 3 registry.
+An engagement with no `githubOrgs` is refused (`ENGAGEMENT_HAS_NO_ORGS`): an
+identity would map nothing. The version guard (`MULTIPLE_INSTALLS`) sits on the
+step that raises `schemaVersion` to 3, so `set-identity` on a file that is
+already version 3 does not repeat it.
 
 All of these keep the registry's comments and other fields, are audited as
 `registry-identity-change` with the kind of change and no names, and print
@@ -1316,7 +1326,7 @@ Before the egress parse, and for **any** Bash command, the hook also refuses
 (deny, exit 2): a raw HTTP client writing to the GitHub API
 (`GITHUB_API_VIA_HTTP_CLIENT`) and `gh auth token` next to a network call
 (`GH_AUTH_TOKEN_NETWORK`); a command whose text runs `repo-aegis approve`,
-`engagements add --personal-org|--github-org`, `upstreams add`, `identity add|remove|require`, `engagements set-identity` or
+`engagements add --personal-org|--github-org`, `upstreams add`, `identity add|remove`, `identity require --off`, `engagements set-identity` or
 `init --migrate-classify|--force`, in any shape (`AGENT_RAN_HUMAN_COMMAND`); and a
 command that starts a detached session: `tmux new -d`, `tmux new-window` /
 `send-keys`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`

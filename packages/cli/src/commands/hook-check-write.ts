@@ -35,7 +35,6 @@ import {
 //   other non-zero → non-blocking error; the tool still runs (fail open),
 //                    stderr is surfaced to the user as a warning.
 const EXIT_BLOCK = 2;
-const EXIT_INTERNAL_ERROR = 1;
 
 function emitJsonAndExit(value: unknown, exitCode: number): never {
   // Claude Code forwards STDERR (not stdout) to the model when a
@@ -73,11 +72,12 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
  *   - 0 if no file_path / decision is `scan` or `scan-with-warning`,
  *   - 2 (`EXIT_BLOCK`) on `CROSS_ORG_WRITE` or `WAIVER_FILE_WRITE_REFUSED`
  *     — blocks the tool,
- *   - 1 (`EXIT_INTERNAL_ERROR`) on a registry error we cannot recover
- *     from. This FAILS OPEN: Claude Code lets the tool proceed, so an
- *     unreadable/encrypted registry never blocks every write behind the
- *     hook's own failure. The diagnostic still reaches the user via
- *     stderr; content safety remains the PostToolUse scan's job.
+ *   - 2 on an unreadable registry (`REGISTRY_ERROR`, or the encrypted-at-rest
+ *     error): the check cannot run, and exit 1 would FAIL OPEN (Claude Code
+ *     treats it as non-blocking). The message is fixed text, because the
+ *     parse error names orgs and engagement ids. A missing registry is not an
+ *     error: there is nothing to protect yet.
+ *   - 1 (`EXIT_INTERNAL_ERROR`) is kept for faults outside the registry.
  *
  * The hook NEVER reveals literal markers — but `check-write` doesn't
  * scan content at all, so this is structural rather than enforced.
@@ -133,11 +133,19 @@ export async function hookCheckWrite(): Promise<void> {
     if (err instanceof RegistryNotFoundError) {
       registry = { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
     } else if (err instanceof RegistryEncryptedError) {
-      emitJsonAndExit({ code: err.code, error: err.message }, EXIT_INTERNAL_ERROR);
+      emitJsonAndExit({ code: err.code, error: err.message }, EXIT_BLOCK);
     } else {
+      // Block, never exit 1: Claude Code treats exit 1 as non-blocking, so an unreadable registry (a schemaVersion
+      // this build cannot read, a typo) would switch the cross-org write check off. The message is fixed text:
+      // the parse error names orgs and engagement ids, which must not reach an agent's transcript.
       emitJsonAndExit(
-        { code: "REGISTRY_ERROR", error: (err as Error).message },
-        EXIT_INTERNAL_ERROR,
+        {
+          code: "REGISTRY_ERROR",
+          error:
+            "the registry cannot be read, so the cross-org write check cannot run and the write is refused. " +
+            "Run `repo-aegis status` (or `repo-aegis doctor`) in a terminal to see why.",
+        },
+        EXIT_BLOCK,
       );
     }
   }

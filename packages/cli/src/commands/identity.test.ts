@@ -9,8 +9,9 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadRegistry, type Registry } from "@de-otio/repo-aegis-core";
-import { captureOutput, withEnv } from "../_test-utils.js";
+import { addMarkerPatterns, addTopLevelPatterns, loadRegistry, renderHookScript, type Registry } from "@de-otio/repo-aegis-core";
+import { captureOutput, captureOutputAsync, withEnv, withEnvAsync } from "../_test-utils.js";
+import { init } from "./init.js";
 import { engagementsAdd, engagementsEnd, engagementsRemove } from "./engagements-mutate.js";
 import { upstreamsAdd, upstreamsRemove } from "./upstreams.js";
 import { engagementsSetIdentity, identityAdd, identityRemove, identityRequire } from "./identity.js";
@@ -168,7 +169,7 @@ describe("the TTY gate (same path as `engagements add --personal-org`)", () => {
 describe("identity add / remove / require --off", () => {
   it("the first identity writes schemaVersion 3, keeps comments, and does not set requireIdentity", () => {
     const env = setup(V2);
-    const r = run(env, () => identityAdd("me", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true }));
+    const r = run(env, () => identityAdd("me", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
     assert.equal(r.exitCode, undefined, r.stderr);
     const text = read(env);
     assert.match(text, /schemaVersion: 3/);
@@ -191,7 +192,7 @@ describe("identity add / remove / require --off", () => {
   it("adds an app identity; the same definition again is a no-op; a different one is refused", () => {
     const env = setup(V2);
     const add = (opts: { ghLogin?: string; app?: string }) =>
-      run(env, () => identityAdd("bot", { ...opts, registryPath: env.registryPath, stderrIsTTY: true, json: true }));
+      run(env, () => identityAdd("bot", { ...opts, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
     assert.equal(add({ app: "example-bot" }).exitCode, undefined);
     const once = read(env);
     const again = add({ app: "example-bot" });
@@ -218,7 +219,7 @@ describe("identity add / remove / require --off", () => {
       ["a".repeat(64), { ghLogin: "alice" }],
     ];
     for (const [name, opts] of attempts) {
-      const r = run(env, () => identityAdd(name, { ...opts, registryPath: env.registryPath, stderrIsTTY: true, json: true }));
+      const r = run(env, () => identityAdd(name, { ...opts, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
       assert.equal(r.exitCode, 2, JSON.stringify([name, opts]));
       assert.equal(JSON.parse(r.stderr).code, "USAGE");
       assert.equal(read(env), before);
@@ -229,7 +230,7 @@ describe("identity add / remove / require --off", () => {
     const env = setup(V3);
     const before = read(env);
     for (const name of ["me", "me-bot", "work", "work-bot"]) {
-      const r = run(env, () => identityRemove(name, { registryPath: env.registryPath, stderrIsTTY: true, json: true }));
+      const r = run(env, () => identityRemove(name, { registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
       assert.equal(r.exitCode, 2, name);
       assert.equal(JSON.parse(r.stderr).code, "IDENTITY_IN_USE");
       assert.equal(read(env), before);
@@ -238,21 +239,21 @@ describe("identity add / remove / require --off", () => {
 
   it("remove deletes an unreferenced identity and keeps the file at version 3; an unknown name is IDENTITY_NOT_FOUND", () => {
     const env = setup(V2);
-    run(env, () => identityAdd("spare", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true }));
-    const r = run(env, () => identityRemove("spare", { registryPath: env.registryPath, stderrIsTTY: true }));
+    run(env, () => identityAdd("spare", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
+    const r = run(env, () => identityRemove("spare", { registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
     assert.equal(r.exitCode, undefined, r.stderr);
     assert.equal(load(env).identities!.size, 0);
     assert.match(read(env), /schemaVersion: 3/);
-    const gone = run(env, () => identityRemove("spare", { registryPath: env.registryPath, stderrIsTTY: true, json: true }));
+    const gone = run(env, () => identityRemove("spare", { registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
     assert.equal(JSON.parse(gone.stderr).code, "IDENTITY_NOT_FOUND");
   });
 
   it("require --off clears requireIdentity (and needs --off); set-identity afterwards does not turn it back on", () => {
     const env = setup(V3);
-    const bare = run(env, () => identityRequire({ registryPath: env.registryPath, stderrIsTTY: true, json: true }));
+    const bare = run(env, () => identityRequire({ registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
     assert.equal(bare.exitCode, 2);
     assert.equal(load(env).requireIdentity, true);
-    const off = run(env, () => identityRequire({ off: true, registryPath: env.registryPath, stderrIsTTY: true }));
+    const off = run(env, () => identityRequire({ off: true, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
     assert.equal(off.exitCode, undefined, off.stderr);
     assert.equal(load(env).requireIdentity, false);
     assert.match(read(env), /requireIdentity: false/);
@@ -266,7 +267,7 @@ describe("identity add / remove / require --off", () => {
   it("require --off on a registry that never set it changes nothing (no version bump)", () => {
     const env = setup(V2);
     const before = read(env);
-    const r = run(env, () => identityRequire({ off: true, registryPath: env.registryPath, stderrIsTTY: true }));
+    const r = run(env, () => identityRequire({ off: true, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
     assert.equal(r.exitCode, undefined, r.stderr);
     assert.equal(read(env), before);
   });
@@ -280,8 +281,8 @@ describe("engagements set-identity", () => {
 
   it("the first set-identity bumps to v3, sets requireIdentity, maps every org of the engagement", () => {
     const env = setup(V2);
-    run(env, () => identityAdd("work", { ghLogin: "alice-work", registryPath: env.registryPath, stderrIsTTY: true }));
-    run(env, () => identityAdd("work-bot", { app: "example-work-agent", registryPath: env.registryPath, stderrIsTTY: true }));
+    run(env, () => identityAdd("work", { ghLogin: "alice-work", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
+    run(env, () => identityAdd("work-bot", { app: "example-work-agent", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
     assert.equal(load(env).requireIdentity, false);
     const r = set(env, "customer-a", { person: "work", agent: "work-bot" });
     assert.equal(r.exitCode, undefined, r.stderr);
@@ -378,58 +379,94 @@ describe("engagements set-identity", () => {
   });
 });
 
-describe("set-identity is refused while another install on PATH is older (MULTIPLE_INSTALLS)", () => {
-  function fakeInstall(dirName: string, version: string | null): string {
+describe("raising the schema version is refused while an install cannot read it (MULTIPLE_INSTALLS)", () => {
+  /** A fake install: a `repo-aegis` file, optionally a package.json and the core package it loads. */
+  function fakeInstall(dirName: string, opts: { version?: string | null; max?: number | null }): string {
     const dir = join(tmp, dirName);
     mkdirSync(dir, { recursive: true });
     const exe = join(dir, "repo-aegis");
     writeFileSync(exe, "#!/bin/sh\nexit 0\n");
     chmodSync(exe, 0o755);
-    if (version !== null) writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@de-otio/repo-aegis", version }));
+    if (opts.version !== null && opts.version !== undefined) {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@de-otio/repo-aegis", version: opts.version }));
+    }
+    if (opts.max !== null && opts.max !== undefined) {
+      const core = join(dir, "node_modules", "@de-otio", "repo-aegis-core", "dist");
+      mkdirSync(core, { recursive: true });
+      writeFileSync(join(core, "registry.js"), `export const MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION = ${opts.max};\n`);
+    }
     return dir;
   }
-  const set = (env: Env, pathEnv: string, opts: object = { person: "work" }) =>
+  /** Pin the hooks and shim of `env`'s home to the CLI of a fake install. */
+  function pinHooksTo(env: Env, installDir: string): void {
+    const cli = join(installDir, "index.js");
+    writeFileSync(cli, "// stub\n");
+    mkdirSync(join(env.home, "hooks"), { recursive: true });
+    writeFileSync(join(env.home, "hooks", "pre-push"), renderHookScript("pre-push", { node: process.execPath, cli }), { mode: 0o755 });
+  }
+  const add = (env: Env, pathEnv: string, extra: object = {}) =>
     run(env, () =>
-      engagementsSetIdentity("customer-b", {
-        registryPath: env.registryPath,
-        stderrIsTTY: true,
-        json: true,
-        pathEnv,
-        runningVersion: "0.13.0",
-        ...opts,
-      }),
+      identityAdd("me", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv, runningVersion: "0.13.0", ...extra }),
     );
+  const setId = (env: Env, pathEnv: string, opts: object = { person: "work" }) =>
+    run(env, () =>
+      engagementsSetIdentity("customer-b", { registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv, runningVersion: "0.13.0", ...opts }),
+    );
+  const code = (r: { stderr: string }): string => (JSON.parse(r.stderr) as { code: string }).code;
 
-  it("an older install refuses, and the registry is byte-identical", () => {
-    const env = setup(V3);
+  it("identity add on a v2 file: an install on PATH that reads only version 2 refuses, and the file is byte-identical", () => {
+    const env = setup(V2);
     const before = read(env);
-    const r = set(env, fakeInstall("old", "0.11.4"));
+    const r = add(env, fakeInstall("old-path", { version: "0.11.4", max: 2 }));
     assert.equal(r.exitCode, 2);
-    assert.equal(JSON.parse(r.stderr).code, "MULTIPLE_INSTALLS");
+    assert.equal(code(r), "MULTIPLE_INSTALLS");
+    assert.match(r.stderr, /fails OPEN/);
     assert.equal(read(env), before);
   });
 
-  it("an install whose version cannot be read refuses too (it cannot be shown to be current)", () => {
-    const env = setup(V3);
-    assert.equal(JSON.parse(set(env, fakeInstall("unknown", null)).stderr).code, "MULTIPLE_INSTALLS");
+  it("identity add on a v2 file: only the PINNED hook is old (nothing old on PATH): refuses", () => {
+    const env = setup(V2);
+    const before = read(env);
+    pinHooksTo(env, fakeInstall("old-pin", { version: "0.11.4", max: 2 }));
+    const r = add(env, "");
+    assert.equal(code(r), "MULTIPLE_INSTALLS");
+    assert.match(r.stderr, /pinned hook or shim/);
+    assert.equal(read(env), before);
   });
 
-  it("the boundary: an install at the same version, or a newer one, does not refuse", () => {
-    for (const [name, v] of [["same", "0.13.0"], ["newer", "0.14.0"]] as const) {
-      const env = setup(V3);
-      const r = set(env, fakeInstall(name, v));
-      assert.equal(r.exitCode, undefined, `${v}: ${r.stderr}`);
+  it("the same call goes through once the pinned install can read 3 (judged by what it reads, not its version)", () => {
+    const env = setup(V2);
+    pinHooksTo(env, fakeInstall("new-pin", { version: "0.11.4", max: 3 }));
+    const r = add(env, fakeInstall("new-path", { version: "0.1.0", max: 3 }));
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.match(read(env), /schemaVersion: 3/);
+  });
+
+  it("when the supported version cannot be read, the package version decides: older refuses, same or newer passes", () => {
+    for (const [name, version, ok] of [["fb-old", "0.9.0", false], ["fb-same", "0.13.0", true], ["fb-new", "0.14.0", true]] as const) {
+      const env = setup(V2);
+      const r = add(env, fakeInstall(name, { version }));
+      assert.equal(r.exitCode === undefined, ok, `${version}: ${r.stderr}`);
     }
   });
 
-  it("an older version compares numerically, not lexically (0.9.0 < 0.13.0)", () => {
-    const env = setup(V3);
-    assert.equal(JSON.parse(set(env, fakeInstall("nine", "0.9.0")).stderr).code, "MULTIPLE_INSTALLS");
+  it("an install with neither a readable supported version nor a package version refuses", () => {
+    const env = setup(V2);
+    assert.equal(code(add(env, fakeInstall("opaque", {}))), "MULTIPLE_INSTALLS");
   });
 
-  it("--clear needs no check (it only removes mappings)", () => {
+  it("set-identity on a file that is already v3 raises nothing, so it is not guarded", () => {
     const env = setup(V3);
-    const r = set(env, fakeInstall("old2", "0.1.0"), { clear: true, person: undefined });
+    const before = read(env);
+    // Already v3: an old install on PATH cannot read it either way, so no NEW harm: not refused here.
+    const r = setId(env, fakeInstall("old-but-already-v3", { version: "0.1.0", max: 2 }));
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.notEqual(read(env), before);
+  });
+
+  it("--clear is never guarded (it only removes mappings)", () => {
+    const env = setup(V3);
+    const r = setId(env, fakeInstall("old3", { version: "0.1.0", max: 2 }), { clear: true });
     assert.equal(r.exitCode, undefined, r.stderr);
   });
 });
@@ -563,6 +600,7 @@ describe("status and doctor see identities", () => {
     }
     const fail = ownerIdentityChecks(loadRegistry(setup(V3).registryPath));
     assert.equal(fail.length, 2);
+    for (const c of fail) assert.match(c.detail, /^2 registered owner\(s\) are still unmapped/);
     for (const c of fail) assert.equal(c.severity, undefined, "no severity means fail");
   });
 
@@ -575,4 +613,108 @@ describe("status and doctor see identities", () => {
     const v2 = ownerIdentityChecks(loadRegistry(setup(V2).registryPath));
     assert.deepEqual(v2.flatMap(c => c.names ?? []), ["customer-a-org", "plain-org"]);
   });
+});
+
+describe("identity require --on (only tightens: no terminal, agent-runnable)", () => {
+  it("sets requireIdentity on a v3 file without a terminal", () => {
+    const env = setup(V3.replace("requireIdentity: true\n", "requireIdentity: false\n"));
+    const r = run(env, () => identityRequire({ on: true, registryPath: env.registryPath, stderrIsTTY: false, json: true }));
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.equal(load(env).requireIdentity, true);
+    const again = run(env, () => identityRequire({ on: true, registryPath: env.registryPath, stderrIsTTY: false, json: true }));
+    assert.equal(JSON.parse(again.stdout).changed, false);
+  });
+
+  it("refuses on a registry below version 3 (nothing to require) and writes nothing", () => {
+    const env = setup(V2);
+    const before = read(env);
+    const r = run(env, () => identityRequire({ on: true, registryPath: env.registryPath, stderrIsTTY: false, json: true }));
+    assert.equal(JSON.parse(r.stderr).code, "NOTHING_TO_REQUIRE");
+    assert.equal(read(env), before);
+  });
+
+  it("--on and --off together is a usage error; --off still needs the terminal", () => {
+    const env = setup(V3);
+    const both = run(env, () => identityRequire({ on: true, off: true, registryPath: env.registryPath, stderrIsTTY: true, json: true }));
+    assert.equal(JSON.parse(both.stderr).code, "USAGE");
+    const off = run(env, () => identityRequire({ off: true, registryPath: env.registryPath, stderrIsTTY: false, json: true }));
+    assert.equal(JSON.parse(off.stderr).code, "IDENTITY_CHANGE_NEEDS_TTY");
+  });
+});
+
+describe("set-identity maps nothing for an engagement without githubOrgs (L3)", () => {
+  const NO_ORGS = V3.replace("    githubOrgs:\n      - customer-b-org\n", "");
+  it("is refused (and nothing is written); --clear is still allowed", () => {
+    const env = setup(NO_ORGS);
+    const before = read(env);
+    const r = run(env, () =>
+      engagementsSetIdentity("customer-b", { person: "work", registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv: "" }),
+    );
+    assert.equal(JSON.parse(r.stderr).code, "ENGAGEMENT_HAS_NO_ORGS");
+    assert.equal(read(env), before);
+    const clear = run(env, () =>
+      engagementsSetIdentity("customer-b", { clear: true, registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv: "" }),
+    );
+    assert.equal(clear.exitCode, undefined, clear.stderr);
+  });
+});
+
+describe("more A3 round trips: marker helpers and init --migrate-classify (L2)", () => {
+  const same = (env: Env, fn: () => void): void => {
+    const before = mappings(load(env));
+    fn();
+    assert.deepEqual(mappings(load(env)), before);
+    assert.match(read(env), /schemaVersion: 3/);
+    assert.match(read(env), /\{ name: mapped-org, person: me, agent: me-bot \}/);
+    assert.match(read(env), /plain-org # keep me/);
+  };
+
+  it("addMarkerPatterns (a new marker on a mapped engagement)", () => {
+    const env = setup(V3);
+    same(env, () => {
+      inHome(env, () => addMarkerPatterns("customer-a", ["another-marker"], { registryPath: env.registryPath }));
+    });
+    assert.ok(load(env).engagements[0]!.markers.includes("another-marker"));
+  });
+
+  it("addTopLevelPatterns (always_block, privateInfra, selfIdentity)", () => {
+    const env = setup(V3);
+    same(env, () => {
+      for (const field of ["always_block", "privateInfra", "selfIdentity"] as const) {
+        inHome(env, () => addTopLevelPatterns(field, ["some-pattern-here"], { registryPath: env.registryPath }));
+      }
+    });
+  });
+
+  it("init --migrate-classify adds the new owner and leaves every mapping alone", async () => {
+    const env = setup(V3);
+    writeFileSync(join(env.home, "classify.yml"), `rules:\n  - match: "github\\\\.com[:/]new-handle/"\n    class: public-eligible\n`);
+    const before = mappings(load(env));
+    await withEnvAsync("REPO_AEGIS_HOME", env.home, () =>
+      captureOutputAsync(() =>
+        init({ withHooks: false, withClaude: false, migrateClassify: true, stderrIsTTY: true, stdinIsTTY: true, readAnswer: () => "y" }),
+      ),
+    );
+    assert.deepEqual(mappings(load(env)), before);
+    assert.deepEqual(load(env).personalOrgs, ["plain-org", "mapped-org", "new-handle"]);
+    assert.match(read(env), /\{ name: mapped-org, person: me, agent: me-bot \}/);
+  });
+});
+
+describe("init --force counts identities as content (L1)", () => {
+  for (const [label, text] of [
+    ["identities only", "schemaVersion: 3\nidentities:\n  me: { kind: gh-login, login: alice }\nengagements: []\n"],
+    ["requireIdentity only", "schemaVersion: 3\nrequireIdentity: false\nengagements: []\n"],
+  ] as const) {
+    it(`${label}: refused without a terminal and byte-identical`, async () => {
+      const env = setup(text);
+      const before = readFileSync(env.registryPath);
+      const r = await withEnvAsync("REPO_AEGIS_HOME", env.home, () =>
+        captureOutputAsync(() => init({ force: true, withHooks: false, withClaude: false, stderrIsTTY: false, json: true })),
+      );
+      assert.equal(r.exitCode, 2, r.stderr);
+      assert.match(r.stderr, /OWNER_SET_EMPTY_NEEDS_TTY/);
+      assert.deepEqual(readFileSync(env.registryPath), before);
+    });
+  }
 });
