@@ -188,7 +188,8 @@ export type IdentityRefusalCode =
   | "GH_IDENTITY_WRITE_NEEDS_HUMAN"
   | "GH_IDENTITY_TOKEN_SUPPLIED"
   | "GH_IDENTITY_ENV_REDIRECT"
-  | "GH_IDENTITY_ARG_UNSAFE";
+  | "GH_IDENTITY_ARG_UNSAFE"
+  | "GH_IDENTITY_UNAVAILABLE";
 export type IdentityChoice =
   | { kind: "none"; hint?: string }
   | {
@@ -359,8 +360,8 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
       dest,
     );
   }
-  // 8. A2 arguments.
-  if (unsafeArg(args)) {
+  // 8. A2 arguments: only the agent column gets a token the agent must not see through an editor, pager or browser.
+  if (presence === "agent" && unsafeArg(args)) {
     return refuse(
       "GH_IDENTITY_ARG_UNSAFE",
       "this gh call",
@@ -415,14 +416,14 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
 
 /**
  * The §13.1 decision, rules 1 to 11 in order, the first that applies deciding. Total: a throw from an
- * argument or a callback is a refusal (`GH_IDENTITY_ARG_UNSAFE`, "could not be judged"), never an exception.
+ * argument, a registry getter or a callback is a refusal (`GH_IDENTITY_UNAVAILABLE`), never an exception.
  */
 export function chooseIdentity(input: ChooseIdentityInput): IdentityChoice {
   try {
     return choose(input);
   } catch {
     return refuse(
-      "GH_IDENTITY_ARG_UNSAFE",
+      "GH_IDENTITY_UNAVAILABLE",
       "this gh call",
       "repo-aegis could not judge its arguments or the registry safely",
       NO_APPROVAL,

@@ -412,10 +412,14 @@ describe("rule 8 (A2): unsafe arguments", () => {
     ["issue", "create", "--title", "w", "--body", "e", "--repo", "both-org/r"],
     ["issue", "create", "--repo", "both-org/r", "--", "-w"],
   ];
+  for (const args of BAD) {
+    it(`agent: gh ${args.join(" ")} is refused`, () => assert.equal(refused(chooseIdentity(input({ presence: "agent", args }))), "GH_IDENTITY_ARG_UNSAFE"));
+    it(`person: gh ${args.join(" ")} is injected, not refused`, () => {
+      const c = chooseIdentity(input({ presence: "person", args }));
+      assert.ok(c.kind === "inject" && c.column === "person", JSON.stringify(c));
+    });
+  }
   for (const presence of ["person", "agent"] as const) {
-    for (const args of BAD) {
-      it(`${presence}: gh ${args.join(" ")}`, () => assert.equal(refused(chooseIdentity(input({ presence, args }))), "GH_IDENTITY_ARG_UNSAFE"));
-    }
     for (const args of OK) {
       it(`${presence}: gh ${args.join(" ")} is injected`, () => assert.equal(chooseIdentity(input({ presence, args })).kind, "inject"));
     }
@@ -423,8 +427,8 @@ describe("rule 8 (A2): unsafe arguments", () => {
   it("applies to a mapped owner only", () => {
     assert.deepEqual(chooseIdentity(input({ args: ["pr", "view", "-w"], targets: [lit("nobody")] })), { kind: "none" });
   });
-  it("beats rule 9 even when the person has no identity to inject", () => {
-    assert.equal(refused(chooseIdentity(input({ args: ["pr", "view", "-w"], targets: [lit("agent-org")], presence: "person" }))), "GH_IDENTITY_ARG_UNSAFE");
+  it("a person on an agent-only owner with -w is none, not refused", () => {
+    assert.equal(chooseIdentity(input({ args: ["pr", "view", "-w"], targets: [lit("agent-org")], presence: "person" })).kind, "none");
   });
 });
 
@@ -542,11 +546,12 @@ describe("totality and reasons", () => {
       throw new Error("boom");
     };
     const a = chooseIdentity(input({ presence: "agent", isWrite: true, targets: [lit("person-org")], approvalFor: boom }));
-    assert.equal(a.kind, "refuse");
+    assert.ok(a.kind === "refuse" && a.code === "GH_IDENTITY_UNAVAILABLE");
     const b = chooseIdentity(input({ presence: "agent", isWrite: true, registry: reg({ requireIdentity: true }), targets: [lit("x")], registeredOwner: boom }));
-    assert.equal(b.kind, "refuse");
+    assert.ok(b.kind === "refuse" && b.code === "GH_IDENTITY_UNAVAILABLE");
     const hostile = { get identityMap(): never { return boom(); } } as unknown as Registry;
-    assert.equal(chooseIdentity(input({ registry: hostile })).kind, "refuse");
+    const h = chooseIdentity(input({ registry: hostile }));
+    assert.ok(h.kind === "refuse" && h.code === "GH_IDENTITY_UNAVAILABLE");
   });
   it("an invalid destination name is not echoed", () => {
     const evil = "x$(touch pwned)";
@@ -558,7 +563,7 @@ describe("totality and reasons", () => {
       chooseIdentity(input({ presence: "unknown" })),
       chooseIdentity(input({ redirect: "X" })),
       chooseIdentity(input({ presence: "agent", suppliedToken: true })),
-      chooseIdentity(input({ args: ["pr", "view", "-w"] })),
+      chooseIdentity(input({ presence: "agent", args: ["pr", "view", "-w"] })),
     ];
     for (const c of cases) assert.ok(c.kind === "refuse" && c.reason.includes(`[${c.code}, see doc/agent-guide.md#${c.code.toLowerCase()}]`));
   });
