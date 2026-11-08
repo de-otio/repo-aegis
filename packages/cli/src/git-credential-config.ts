@@ -271,3 +271,40 @@ export function environmentViolation(env: NodeJS.ProcessEnv): string | null {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Helpers after ours: who would be handed the token by `store`
+// ---------------------------------------------------------------------------
+
+/** A configured helper value that is `gh auth git-credential` (any path to gh): it never persists what it is handed. */
+export function isGhHelperValue(value: string): boolean {
+  return /^!?\s*(?:'[^']*gh'|"[^"]*gh"|\S*\/gh|gh)\s+auth\s+git-credential\s*$/.test(value);
+}
+
+/** What kind of helper a value is, for a message: its program name without `git-credential-`, or "an unrecognised helper". */
+export function helperKind(value: string): string {
+  const word = /^!?\s*(?:'([^']*)'|"([^"]*)"|(\S+))/.exec(value);
+  const prog = word?.[1] ?? word?.[2] ?? word?.[3];
+  if (prog === undefined) return "an unrecognised helper";
+  const base = prog.split("/").pop() ?? prog;
+  const name = base.replace(/^git-credential-/, "");
+  return /^(osxkeychain|store|cache|manager|manager-core|git-credential-manager|libsecret|wincred)$/.test(name) ? name : "an unrecognised helper";
+}
+
+/**
+ * After a push, git sends `store` to EVERY helper in the list. The first later helper that is neither repo-aegis's
+ * nor `gh auth git-credential` could persist the App token (osxkeychain, store, cache, a credential manager,
+ * libsecret, wincred, or anything unrecognised). Returns that helper's kind, or null. Only helpers after the first
+ * repo-aegis helper count.
+ */
+export function laterStoringHelper(entries: readonly ConfigEntry[], ctx: CredentialContext): string | null {
+  const list = effectiveHelpers(entries, ctx);
+  const at = list.findIndex(e => isRepoAegisHelperValue(e.value ?? ""));
+  if (at === -1) return null;
+  for (const e of list.slice(at + 1)) {
+    const v = e.value ?? "";
+    if (isRepoAegisHelperValue(v) || isGhHelperValue(v)) continue;
+    return helperKind(v);
+  }
+  return null;
+}

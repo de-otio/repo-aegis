@@ -377,6 +377,23 @@ describe("git-credential get: A5 configuration and environment", () => {
     assert.match(get(request(), deps({ env: { NO_PROXY: "example.com", GIT_TRACE_REDACT: "1", PATH: "/usr/bin" } })).stdout, /^username=/);
   });
 
+  it("a later helper that would persist the token is refused before any mint; gh's helper may follow", () => {
+    const ours = "!'/n' '/c' git-credential --home '/h'";
+    const cfg = (later: string): string =>
+      `global\tcredential.https://github.com.helper \nglobal\tcredential.https://github.com.helper ${ours}\nglobal\tcredential.https://github.com.helper ${later}`;
+    for (const later of ["osxkeychain", "store --file /tmp/x", "cache", "manager", "manager-core", "git-credential-manager", "libsecret", "wincred", "!/opt/x/bin/mystery"]) {
+      const before = calls();
+      assertRefused(get(request(), deps({ readConfig: () => entries(cfg(later)) })), "AGENT_PUSH_CREDENTIAL_STORE", later);
+      assert.equal(calls(), before, `${later}: taaad never called`);
+    }
+    for (const later of ["!/opt/homebrew/bin/gh auth git-credential", "!gh auth git-credential", ours]) {
+      assert.match(get(request(), deps({ readConfig: () => entries(cfg(later)) })).stdout, /^username=/, later);
+    }
+    // a storing helper BEFORE ours is the order problem (install and doctor), not the helper's: git never reaches us after an answer
+    const earlier = `global\tcredential.https://github.com.helper osxkeychain\nglobal\tcredential.https://github.com.helper ${ours}`;
+    assert.match(get(request(), deps({ readConfig: () => entries(earlier) })).stdout, /^username=/);
+  });
+
   it("an unreadable git configuration is refused", () => {
     assertRefused(get(request(), deps({ readConfig: () => null })), "AGENT_PUSH_CREDENTIAL_CONFIG");
   });

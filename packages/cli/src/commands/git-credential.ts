@@ -37,6 +37,7 @@ import {
 } from "@de-otio/repo-aegis-core";
 import {
   credentialConfigViolation,
+  laterStoringHelper,
   readCredentialConfig,
   type ConfigEntry,
 } from "../git-credential-config.js";
@@ -323,6 +324,16 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   const violation = credentialConfigViolation(entries, { path: `${dest.owner}/${dest.repo}` }, deps.env);
   if (violation !== null) {
     return refuse("AGENT_PUSH_CREDENTIAL_CONFIG", `${violation}, which could redirect or capture the token`, dest);
+  }
+
+  // `store` goes to every helper in the list: one that persists would save the App token.
+  const storing = laterStoringHelper(entries, { path: `${dest.owner}/${dest.repo}` });
+  if (storing !== null) {
+    return refuse(
+      "AGENT_PUSH_CREDENTIAL_STORE",
+      `the App token would be saved by a later credential helper (${storing}), because git sends \`store\` to every helper; scope that helper away from https://github.com (credential.https://github.com.helper with a reset entry) or reorder, then re-run \`repo-aegis install git-credential\``,
+      dest,
+    );
   }
 
   const taaadPath = deps.resolveTaaad(home);

@@ -7,7 +7,7 @@
 // with the person's credential. So when any owner is mapped to an agent identity, a wrong order is a failure.
 import { repoAegisHome, type Registry } from "@de-otio/repo-aegis-core";
 import { currentEnforcementPin } from "../enforcement-pin.js";
-import { scopeLabel, helperOrder, readCredentialConfig, type ConfigEntry } from "../git-credential-config.js";
+import { scopeLabel, helperOrder, laterStoringHelper, readCredentialConfig, type ConfigEntry } from "../git-credential-config.js";
 import type { DoctorCheck } from "./doctor-checks.js";
 import { helperCommand } from "./install-git-credential.js";
 
@@ -41,6 +41,18 @@ export function gitCredentialOrderChecks(registry: Registry, opts: GitCredential
   const ours = opts.helper ?? helperCommand(currentEnforcementPin(), repoAegisHome());
   const verdict = helperOrder(entries, ours);
   if (verdict.kind === "first") {
+    const storing = laterStoringHelper(entries, { path: null });
+    if (storing !== null) {
+      return [
+        {
+          code: "GIT_CREDENTIAL_HELPER_ORDER",
+          ok: false,
+          severity: "warn",
+          detail: `the repo-aegis helper is first, but a later helper (${storing}) would persist the App token, because git sends \`store\` to every helper; agent pushes are refused (AGENT_PUSH_CREDENTIAL_STORE) until it is scoped away from https://github.com`,
+          fix: `scope that helper away from https://github.com or reorder; only \`gh auth git-credential\` and the repo-aegis helper may follow`,
+        },
+      ];
+    }
     return [{ code: "GIT_CREDENTIAL_HELPER_ORDER", ok: true, detail: "the repo-aegis git credential helper is the first helper for https://github.com" }];
   }
   const detail =

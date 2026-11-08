@@ -296,6 +296,17 @@ describe("doctor: GIT_CREDENTIAL_HELPER_ORDER", () => {
     assert.match(s.detail, /different install/);
   });
 
+  it("first, but a later osxkeychain would persist the token: a warn note under the same code; gh's helper is fine", () => {
+    const reg = registry(true);
+    const lines = (later: string) => parseShowScopeList(`global\tcredential.https://github.com.helper \nglobal\tcredential.https://github.com.helper ${ours()}\nglobal\tcredential.https://github.com.helper ${later}`);
+    const c = gitCredentialOrderChecks(reg, { entries: lines("osxkeychain"), helper: ours() })[0]!;
+    assert.equal(c.code, "GIT_CREDENTIAL_HELPER_ORDER");
+    assert.equal(c.ok, false);
+    assert.equal(c.severity, "warn");
+    assert.match(c.detail, /osxkeychain/);
+    assert.equal(gitCredentialOrderChecks(reg, { entries: lines(GH), helper: ours() })[0]!.ok, true);
+  });
+
   it("an unreadable git configuration is reported as skipped, not as a pass without a trace", () => {
     const c = gitCredentialOrderChecks(registry(true), { entries: null })[0]!;
     assert.equal(c.skipped, true);
