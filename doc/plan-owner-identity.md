@@ -216,7 +216,100 @@ Each phase gets an independent security review of its code against this spec bef
 - Q2. Phase 1 makes `taaad env` and `gh auth token` unavailable to agents everywhere, including for unmapped owners, before phases 2–3 give them a replacement. Ship phase 1 alone, or together with phase 3? Recommended: the `GH_AUTH_TOKEN_NETWORK` fix alone in v0.12.0, and D7/N9 together with phase 3.
 - Q3. N8 retires `dot gh` for mapped owners. Is dot-work willing to follow (its docs and AGENTS.md proposal in the same cycle)?
 
-## 12. Security review (2026-11-08)
+## 11.1 Decisions recorded 2026-11-08
+
+- **Q1:** yes. For an owner with only a `person` identity, agents read as that person (N3). Writes still need a login-bound approval.
+- **Q2:** the hook rules D7, N9, A1 and A10 ship together with phase 3, not before it.
+- **Q3:** open. dot-work follows in its own PR after phase 3 ships.
+- **Q6:** taaad first. `taaad mint` is built (§8.4), so phase 3 includes `github-app` identities.
+
+## 13. Implementation contract for phases 3 and 4 (2026-11-08)
+
+This section fixes the interfaces, so that the work can be split between builders. All code builds on branch `feat/registry-v3-identities` (phase 2), whose `Registry` carries `identities`, `identityMap: ReadonlyMap<lowercased owner, OwnerIdentities>` and `requireIdentity`. Where this section is more specific than §4–§12, it wins.
+
+### 13.1 Core, pure (`packages/core/src/identity-choice.ts`, exported from the package index)
+
+```ts
+export type IdentityPresence = "person" | "agent" | "unknown";
+/** A1. Never reads the environment. `clear` → person; `agent` and `no-tty` → agent; `unrooted` and `undeterminable` → unknown. `skipped` (test only) → person. */
+export function identityPresence(check: TerminalCheck): IdentityPresence;
+
+export interface GhCallTarget { owner: string; repo: string | null; source: "literal" | "gh-repo-env" | "cwd" }
+/** The owners a gh argv names, for reads as well as writes: --repo/-R, a github.com URL argument, a `repos/<o>/<r>/…` or
+ *  `orgs/<o>/…` api endpoint, GH_REPO (source gh-repo-env), and the cwd's remote resolved the way rule h resolves it (source cwd).
+ *  Owners are lowercased. Pure: env, cwd remote and gh aliases come in as arguments. */
+export function ghCallTargets(args: readonly string[], ctx: { ghRepoEnv?: string; cwdRemoteOwnerRepo?: { owner: string; repo: string } }): GhCallTarget[];
+
+export type IdentityScope = "read" | "write" | "contents-write";
+export type IdentityRefusalCode =
+  | "GH_AUTH_NEEDS_HUMAN" | "GH_IDENTITY_PRESENCE_UNKNOWN" | "GH_IDENTITY_NEEDS_LITERAL_TARGET"
+  | "GH_IDENTITY_SEVERAL_OWNERS" | "GH_IDENTITY_UNMAPPED_OWNER" | "GH_IDENTITY_WRITE_NEEDS_HUMAN"
+  | "GH_IDENTITY_TOKEN_SUPPLIED" | "GH_IDENTITY_ENV_REDIRECT" | "GH_IDENTITY_ARG_UNSAFE";
+export type IdentityChoice =
+  | { kind: "none"; hint?: string }
+  | { kind: "inject"; identity: Identity; column: "person" | "agent"; owner: string; repo: string | null;
+      scope: IdentityScope; compareSuppliedToken: boolean; approvalId?: string }
+  | { kind: "refuse"; code: IdentityRefusalCode; reason: string };
+
+export interface ChooseIdentityInput {
+  args: readonly string[];          // the gh argv
+  isWrite: boolean;                 // the existing parser yields an egress intent for this call
+  targets: readonly GhCallTarget[];
+  registry: Registry;               // from the pinned home only (D8)
+  presence: IdentityPresence;
+  /** A live approval for org/repo minted for this login, never a '*' approval (A11); returns its id or null. */
+  approvalFor: (owner: string, repo: string | null, login: string) => string | null;
+  suppliedToken: boolean;           // GH_TOKEN or GITHUB_TOKEN set in the caller's environment
+  redirect: string | null;          // the name of a D9 variable or `http_unix_socket`, if present
+  registeredOwner: (owner: string) => boolean;
+}
+export function chooseIdentity(input: ChooseIdentityInput): IdentityChoice;
+```
+
+`chooseIdentity`'s rules, applied in this order (the first that applies decides):
+
+1. A10: with presence other than `person`, these are `GH_AUTH_NEEDS_HUMAN`: `gh auth` with any subcommand except `status` without `--show-token` / `-t`; `gh config set|clear-cache`; `gh alias set|import|delete`; `gh extension install|upgrade|exec`.
+2. No target → `none`.
+3. More than one distinct owner, and any of them mapped → `GH_IDENTITY_SEVERAL_OWNERS`.
+4. Owner unmapped: if `requireIdentity`, `isWrite`, presence ≠ `person` and `registeredOwner(owner)` → `GH_IDENTITY_UNMAPPED_OWNER` (Q4); otherwise `none`.
+5. Owner mapped and presence `unknown` → `GH_IDENTITY_PRESENCE_UNKNOWN`.
+6. `redirect` → `GH_IDENTITY_ENV_REDIRECT`.
+7. Presence `agent` and `suppliedToken` → `GH_IDENTITY_TOKEN_SUPPLIED`.
+8. A2 arguments: `--editor`/`-e`, `--web`/`-w`, `gh api --hostname`, a full-URL `gh api` endpoint, or a first word that is not a gh built-in group → `GH_IDENTITY_ARG_UNSAFE`.
+9. Presence `person`: a `person` identity → inject it (scope `write` if `isWrite`, else `read`; `compareSuppliedToken = suppliedToken`); no `person` identity → `none`.
+10. Presence `agent` with an `agent` identity: `isWrite` and the target's source is `cwd` → `GH_IDENTITY_NEEDS_LITERAL_TARGET`; otherwise inject the agent (scope as in 9).
+11. Presence `agent` with only a `person` identity: a read → inject the person (Q1); a write → `approvalFor(owner, repo, login)`, and with an approval inject the person with its `approvalId`, without one `GH_IDENTITY_WRITE_NEEDS_HUMAN`.
+
+The reason texts follow the existing five-part `refusal()` style and never contain a token. Tests are table tests per rule, plus seeded-random property tests (no fast-check dependency; a seeded LCG as in `process-ancestry-paren.test.ts`):
+- an injected identity is always the one the registry maps for the single target owner, in the column presence selects;
+- presence `agent` with an `agent` identity never injects a `gh-login`;
+- the column is a function of `presence` alone, whatever the approvals and the environment (A11);
+- `suppliedToken` with presence `agent` never injects.
+
+### 13.2 Hook rules (`packages/core`, egress-policy and human-commands; at the hook only)
+
+- **A1:** a segment whose command runs `gh`, `git`, `taaad` or `security` (directly, or through the wrappers the parser already unwraps) and sets any `REPO_AEGIS_*` variable, or runs under a pty wrapper, is refused whatever its intent (`EGRESS_ENV_OVERRIDE` and `EGRESS_PTY_WRAPPER`), so the `intents.length === 0` exit in `hook-guard-egress.ts` no longer comes first for these segments.
+- **A10** (as rule 1 of §13.1) and **N9 / A10:** `taaad env|agent|credential-helper|mint`; `security find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain`; an interpreter `-c` / `-e` text that imports `keyring` or names `SecItemCopyMatching` → `TOKEN_MINT_NEEDS_HUMAN`. Same speed-bump caveats as `GH_AUTH_TOKEN_NETWORK`. With a person present (the existing hook presence), these are allowed.
+- **N8:** a recognised `dot gh` call whose literal owner is mapped in the registry → `DOT_GH_OWNER_MAPPED`, decided before D2. Unmapped owners keep v0.11.4's behaviour.
+- **Q2:** these rules ship in the same release as §13.3.
+
+### 13.3 CLI `repo-aegis gh` and the shim (`packages/cli`)
+
+- `repo-aegis gh --home <pinned home> -- <gh args>`: the existing egress decision (as `egress-check` does today, with the same receipts and read-back), then `chooseIdentity` with the registry and approvals read from `--home` only (D8). Then the token source, spawning `gh`, and the D6 line plus a decision-log record that always names identity, kind, owner/repo, verb and approval id, never the token (A15).
+- **Token sources:**
+  - `gh-login`: the trusted `gh` (doctor's `resolveGh`) runs `auth token --hostname github.com --user <login>` with every token and redirect variable removed.
+  - `github-app`: the taaad pinned at `install shim` runs `mint --app <slug> --repo <owner>/<repo> --permissions <scope> --json`, with an environment of exactly `HOME`, `PATH=/usr/bin:/bin`, `TERM` and `LANG` (A4; no `TAAAD_*`, no `XDG_*`). Its JSON is checked: `installationAccount` equals the owner (N6), `repositories` is exactly the repository, and `permissions` are no wider than the scope. Anything else is `GH_IDENTITY_UNAVAILABLE`.
+  - A call with `repo: null` (an org-level target) and a `github-app` identity is `GH_IDENTITY_UNAVAILABLE` (mint needs a repository).
+- **`compareSuppliedToken`:** the parked D6 digest comparison (SHA-256, `timingSafeEqual`) → `GH_IDENTITY_TOKEN_MISMATCH`.
+- **Spawning `gh` (A2):** the allowlisted environment of §12.1 A2 exactly, plus the `GIT_CONFIG_COUNT` overrides.
+- **Faults:** any throw between choosing and spawning on a mapped owner is `GH_IDENTITY_UNAVAILABLE`, and `gh` is not run (D4). An unmapped call keeps today's warn-and-run.
+- **`install shim`:**
+  - It also pins taaad: the realpaths of the launcher, its interpreter and its package directory. If any of them is not root-owned and root-only-writable, `github-app` injection is refused with `TAAAD_AGENT_WRITABLE`, and `doctor` reports it as a failure.
+  - The shim `exec`s `repo-aegis gh` for every verb except `--version`, `help` and `completion` (D1), with no shell code after the `exec`.
+
+### 13.4 git credential helper (phase 4, `packages/cli`)
+
+As §5.6 with A5, A6, A7 and A17. It uses `chooseIdentity` with `args = ["git-push"]` semantics: `isWrite` true when the parent chain shows `git push` or `send-pack`, scope `contents-write`, else `read` (A7). Install and uninstall are added to the uninstall surface.
 
 An independent review (Fable `security-reviewer`) of the first draft found five high, six medium and seven low findings. None rejects the design. They are folded in as the amendments in §12.1, which **take precedence over any conflicting text above**. They will be merged into §4–§9 when the owner has answered the remaining questions (Q1–Q3, Q6; Q4 and Q5 are decided, §12.2). The reviewer rated these sound as written: D1, D2/§5.1, N2, D3's single trusted `gh`, D4, N6, N7, N8, N9 as labelled speed bumps, "no cache in repo-aegis", HTTPS + `x-access-token` with `AGENT_PUSH_NEEDS_APP`, the phasing, and the `GH_AUTH_TOKEN_NETWORK` fix direction. Prior findings H1–H5 and M1–M5 of the parked plan: all closed, except where the rows below reopen them (H1 → A3, H2 → A2, H3 → A4, M1 → A8).
 
