@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — identity choice for `gh` calls (phase 3 core of `doc/plan-owner-identity.md` §13.1)
+
+No egress behaviour changes: nothing calls these yet. `@de-otio/repo-aegis-core`
+exports the pure `identityPresence()`, `ghCallTargets()` and `chooseIdentity()`
+(eleven ordered rules: auth verbs, targets, several owners, unmapped owner,
+presence, redirect, supplied token, unsafe arguments, then the person or agent
+column) with seeded-random property tests.
+
 ### Added — registry schema version 3: GitHub identities per owner (phase 2 of `doc/plan-owner-identity.md`)
 
 No egress behaviour changes: nothing chooses or injects a token from the new

@@ -3552,3 +3552,28 @@ export function ghCommandWords(args: readonly string[]): { group: string; sub: s
   if (found === null) return null;
   return { group: args[found.groupIdx]!, sub: found.subIdx === undefined ? undefined : args[found.subIdx] };
 }
+
+/** Whether `word` is one of gh's built-in command groups (anything else is an alias or an extension). */
+export function isGhBuiltinGroup(word: string): boolean {
+  return GH_BUILTIN_COMMANDS.has(word);
+}
+
+/**
+ * A `gh` argv taken apart the way the egress parser takes it apart (cobra's command words, pflag's flags):
+ * the group, the subcommand, every flag occurrence (canonical `-R` / `--repo` spelling, `=` and attached
+ * values resolved) and the positionals, in order. No alias expansion. Null when there is no command word.
+ * Pure; never throws.
+ */
+export function scanGhCommand(
+  args: readonly string[],
+): { group: string; sub: string | undefined; flags: readonly { flag: string; value: string | undefined }[]; positionals: readonly string[] } | null {
+  const list = [...args];
+  const found = findGhCommand(list);
+  if (found === null) return null;
+  const group = list[found.groupIdx]!;
+  const sub = found.subIdx === undefined ? undefined : list[found.subIdx];
+  const skip = new Set<number>([found.groupIdx]);
+  if (found.subIdx !== undefined) skip.add(found.subIdx);
+  const { events, positionals } = scanGhArgs(list, skip, flagSpec(group, sub));
+  return { group, sub, flags: events, positionals };
+}
