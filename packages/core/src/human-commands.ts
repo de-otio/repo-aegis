@@ -37,6 +37,8 @@ export type HumanOnlyKind =
   | "upstream-add"
   | "init-migrate"
   | "init-force"
+  // Registry identities (doc/plan-owner-identity.md §5.1): `identity add|remove|require`, `engagements set-identity`.
+  | "identity-change"
   // The managed drop-in (doc/plan-pin-enforcement-binary.md P7): removing it, or writing its directory as root.
   | "claude-md-uninstall"
   | "managed-settings-write";
@@ -314,6 +316,11 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
   if (eng !== -1 && win.indexOf("add", eng) !== -1 && (win.includes("--personal-org") || win.includes("--github-org"))) {
     return "owner-add";
   }
+  // `engagements set-identity` (an engagement or, with --personal-org, a personal org).
+  if (eng !== -1 && win.indexOf("set-identity", eng) !== -1) return "identity-change";
+  // `identity add|remove|require`: maps owners to the GitHub identity they act as.
+  const idn = at("identity");
+  if (idn !== -1 && ["add", "remove", "require"].some(v => win.indexOf(v, idn) !== -1)) return "identity-change";
   const up = at("upstreams");
   if (up !== -1 && win.indexOf("add", up) !== -1) return "upstream-add";
   if (win.includes("init")) {
@@ -427,6 +434,13 @@ const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string; w
   "upstream-add": {
     what: "repo-aegis upstreams add",
     fix: "repo-aegis upstreams add <owner>/<repo>",
+  },
+  "identity-change": {
+    what: "repo-aegis identity add|remove|require, or repo-aegis engagements set-identity",
+    fix: "repo-aegis identity add <name> --gh-login <login>   (or --app <slug>); repo-aegis engagements set-identity <id> --person <name>",
+    why:
+      "These commands decide which GitHub account acts for an owner, so an agent that ran them could choose the identity it " +
+      "acts as, with or without a terminal attached",
   },
   "init-migrate": {
     what: "repo-aegis init --migrate-classify",

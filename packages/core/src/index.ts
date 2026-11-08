@@ -45,7 +45,7 @@ export {
   ALWAYS_BLOCK_RESERVED_ID,
   MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION,
 } from "./registry.js";
-export type { Engagement, Registry, ResolveResult } from "./registry.js";
+export type { Engagement, Registry, ResolveResult, Identity, OwnerIdentities } from "./registry.js";
 
 // ---- remote URL parser ---------------------------------------------------
 export {
@@ -527,4 +527,14 @@ export type { RepoJson, EngagementJson } from "./types.js";
 // human-readable message" helper. Sibling packages (cli, scan) own their
 // own schemas (classify rules, queries) but import this so error wording
 // is consistent across the surface.
-export { formatZodError, ORG_NAME_REGEX, OWNER_REPO_REGEX, upstreamProblem } from "./schemas.js";
+export {
+  formatZodError,
+  ORG_NAME_REGEX,
+  OWNER_REPO_REGEX,
+  upstreamProblem,
+  IDENTITY_NAME_REGEX,
+  GH_LOGIN_REGEX,
+  REGISTRY_IDENTITIES_MIN_VERSION,
+  personalOrgName,
+} from "./schemas.js";
+export type { IdentityDefinition, PersonalOrgEntry } from "./schemas.js";

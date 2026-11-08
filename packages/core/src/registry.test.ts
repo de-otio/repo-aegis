@@ -212,7 +212,7 @@ engagements:
   it("MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION is the current pinned version", () => {
     // Sanity guard: bumping this constant is intentional and should be
     // accompanied by a migration plan and updated tests.
-    assert.equal(MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, 2);
+    assert.equal(MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, 3);
   });
 
   // -- publicRegistries (egress-hygiene allowlist) --
@@ -421,10 +421,10 @@ engagements: []`,
     );
   });
 
-  it("rejects schemaVersion 3 with the existing 'newer than supported' message", () => {
+  it("rejects schemaVersion 4 with the existing 'newer than supported' message", () => {
     const path = writeYaml(
-      "v3.yaml",
-      `schemaVersion: 3
+      "v4.yaml",
+      `schemaVersion: 4
 engagements:
   - id: customer-a
     name: Customer A
@@ -435,7 +435,7 @@ engagements:
       (err: unknown) =>
         err instanceof RegistryParseError &&
         /please upgrade/i.test(err.message) &&
-        /3/.test(err.message),
+        /4/.test(err.message),
     );
   });
 });

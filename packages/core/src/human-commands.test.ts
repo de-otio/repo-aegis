@@ -136,10 +136,29 @@ const HITS: ReadonlyArray<readonly [command: string, kind: HumanOnlyKind]> = [
   ["sudo awk 'BEGIN{system(\"true\")}' /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
   ["sudo /opt/tool/bin/anything '/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-501.json'", "managed-settings-write"],
   ["cd /etc/claude-code/managed-settings.d && sudo gzip 50-repo-aegis-1000.json", "managed-settings-write"],
+  // registry identities (doc/plan-owner-identity.md §5.1)
+  ["repo-aegis identity add me --gh-login alice", "identity-change"],
+  ["repo-aegis identity add me-bot --app example-bot", "identity-change"],
+  ["repo-aegis --json identity remove me", "identity-change"],
+  ["repo-aegis identity require --off", "identity-change"],
+  ["repo-aegis engagements set-identity customer-a --person me --agent me-bot", "identity-change"],
+  ["repo-aegis engagements set-identity --personal-org example-org --person me", "identity-change"],
+  ["repo-aegis engagements set-identity customer-a --clear", "identity-change"],
+  ["bash -c 'repo-aegis identity add me --gh-login alice'", "identity-change"],
+  ["env FOO=1 repo-aegis engagements set-identity customer-a --person me", "identity-change"],
+  ["script -q /dev/null repo-aegis identity remove me", "identity-change"],
+  ["tmux new -d 'repo-aegis identity require --off'", "identity-change"],
+  ["python3 -c 'import subprocess; subprocess.run([\"repo-aegis\",\"identity\",\"add\",\"x\",\"--app\",\"y\"])'", "identity-change"],
+  ["node packages/cli/dist/index.js identity add me --gh-login alice", "identity-change"],
+  ["$(which repo-aegis) engagements set-identity customer-a --agent me-bot", "identity-change"],
 ];
 
 const MISSES: ReadonlyArray<string> = [
   "repo-aegis status",
+  "git commit -m 'document repo-aegis identity add and set-identity'",
+  "grep -rn 'identity add' doc/ # repo-aegis",
+  "repo-aegis engagements add customer-a --name 'Identity Team'",
+  "repo-aegis engagements show customer-a",
   "repo-aegis scan .",
   "repo-aegis check --remote-url x",
   "repo-aegis engagements add customer-a",
@@ -316,6 +335,14 @@ describe("commandRegions", () => {
 
 describe("humanCommandRefusal — five parts (§3.9)", () => {
   const kinds: HumanOnlyKind[] = ["approve", "owner-add", "upstream-add", "init-migrate", "init-force"];
+  it("identity-change", () => {
+    const text = humanCommandRefusal({ kind: "identity-change" });
+    assert.match(text, /refused\./);
+    assert.match(text, /which GitHub account acts for an owner/);
+    assert.match(text, /No approval covers this/);
+    assert.match(text, /A person runs it in their own terminal/);
+    assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}, see doc/agent-guide\\.md#agent_ran_human_command\\]`));
+  });
   const managedKinds: HumanOnlyKind[] = ["claude-md-uninstall", "managed-settings-write"];
   for (const kind of managedKinds) {
     it(kind, () => {
