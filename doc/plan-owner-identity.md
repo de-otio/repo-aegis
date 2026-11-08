@@ -182,6 +182,12 @@ Property tests (fast-check), over arbitrary argument vectors, environments, pres
 2. Optionally, a keychain cache keyed by (app, repository, permissions) with an expiry 5 minutes under the token's own, only if phase 3 misses the latency budget.
 3. `taaad doctor` reports the keychain ACL of each PEM item. N9 and §10 rely on PEMs being readable only by taaad's interpreter without a prompt; this item verifies that.
 
+### 8.4 Findings from building §8.1 (2026-11-08, code reading only)
+
+- `taaad mint --app <slug> --repo <owner>/<repo> --permissions read|write|contents-write --json` exists on taaad branch `feat/mint-narrowed`. It returns `{token, expiresAt, installationAccount, installationId, appId, repositories, permissions}`. It refuses a TTY, an owner that is not the installation account, and a response that names another repository or a permission (or level) beyond the request.
+- **taaad honours `TAAAD_CONFIG_DIR`**, which selects the app registry (slug → app id, installation). A4's minimal environment for the taaad spawn must drop it explicitly. On Linux `XDG_CONFIG_HOME` does the same through `platformdirs`; on macOS it is ignored.
+- **The PEM's keychain ACL confirms Q5 step 2.** taaad stores the PEM with python-keyring's macOS backend (`SecItemAdd` through ctypes, service `github-app-<slug>-pem`, account `$USER`). That gives a default ACL trusting the creating binary, the resolved Homebrew Python interpreter, not taaad. `register` then runs `security add-generic-password -U … -T <taaad launcher>`. That *adds* a trusted app; it does not replace the list, its failures are swallowed, and the launcher is a Python script, so the binary that actually runs is still the interpreter. So, unverified until `doctor` reads the real list: any script run by that interpreter can read the PEM without a prompt, and taaad's own SECURITY.md claim that `-T` scopes the item to taaad is probably wrong. `APP_PEM_ACL_WEAK` must read the item's actual trusted-application list, not infer it.
+
 ## 9. Phases and releases
 
 Nothing changes behaviour for an owner until it is mapped, except D1 (every verb through the CLI), D7 and N9 (stricter for agents) and the `GH_AUTH_TOKEN_NETWORK` fix (looser).
