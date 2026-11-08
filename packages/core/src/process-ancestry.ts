@@ -281,6 +281,20 @@ const TERMINAL_EMULATORS: ReadonlyArray<readonly [name: RegExp, label: string]> 
  */
 export type MultiplexerProbe = (kind: "tmux" | "screen", socket: string | null) => boolean;
 
+/**
+ * The first `(/…)` in a tmux server's argv (`tmux: server (/private/tmp/tmux-501/default)`), without the
+ * parentheses: the socket path. The same strings as `/\((\/[^)]+)\)/` but in linear time (code-scanning
+ * js/polynomial-redos): the regex rescans to the end of the line from every `(`. Exported for tests.
+ */
+export function parenthesisedPath(argv: string): string | null {
+  for (let i = argv.indexOf("(/"); i !== -1; i = argv.indexOf("(/", i + 1)) {
+    const close = argv.indexOf(")", i + 2);
+    if (close === -1) return null; // no `)` after this one, so none after any later `(/` either
+    if (close > i + 2) return argv.slice(i + 1, close);
+  }
+  return null;
+}
+
 /** The real executable path of a process, or null when it cannot be established. Injectable. */
 export type ExeResolver = (info: AncestorInfo) => string | null;
 
@@ -320,7 +334,7 @@ export function positiveRoot(info: AncestorInfo, ctx: RootContext): string | nul
   }
   const lowerArgv = argv.toLowerCase();
   if (name.startsWith("tmux") && (lowerArgv.startsWith("tmux: server") || name === "tmux: server")) {
-    const socket = /\((\/[^)]+)\)/.exec(argv)?.[1] ?? null;
+    const socket = parenthesisedPath(argv);
     return ctx.probe("tmux", socket) ? "tmux" : null;
   }
   if (name === "screen" && !lowerArgv.includes(" -")) return ctx.probe("screen", null) ? "screen" : null;
