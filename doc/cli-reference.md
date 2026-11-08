@@ -1110,7 +1110,8 @@ Rule h was lettered for "class `scratch` → allow" before 0.11.0; that row is
 now the unlettered "otherwise". Two more shape rules read the command text
 alone: `GITHUB_API_VIA_HTTP_CLIENT` (`curl` / `wget` writing to
 `api.github.com` or `uploads.github.com`) and `GH_AUTH_TOKEN_NETWORK` (`gh auth
-token` in a command that also makes a network call). Rule h is skipped when no
+token` in a command that also makes a network call; a `git` subcommand counts
+only if it can reach a remote, so `git tag` or `git log` does not). Rule h is skipped when no
 registry file exists or the registry declares no owners (each refusal or stderr
 note says which); an encrypted or unparseable registry does **not** skip it, and
 refuses every non-interactive egress that has a destination.

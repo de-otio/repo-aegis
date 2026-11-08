@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `GH_AUTH_TOKEN_NETWORK` refused lines with a local `git` command
+
+- `gh auth token` next to any `git` command was refused as a token handed to
+  a network call, so a status script that listed tags with `git -C <dir> tag`
+  next to `gh` reads could not run. Only git subcommands that can reach a
+  remote now count: a positive list of local built-ins (`tag`, `log`,
+  `status`, `diff`, `rev-parse`, `describe`, …) does not. `push`, `fetch`,
+  `pull`, `clone`, `ls-remote`, `remote`, `submodule`, aliases, unknown
+  subcommands and any `-c`, `--config-env` or `--exec-path` option still do.
+
 ## [0.11.3] - 2026-11-04
 
 ### Fixed — `doctor` printed `sudo: a password is required`
