@@ -553,7 +553,7 @@ function obtainToken(
       ? [{ by: "person", step: "checks which App the registry maps to this owner" }]
       : f.code === "GH_IDENTITY_UNAVAILABLE"
         ? [{ by: "person", step: "checks the identity with `repo-aegis doctor`, then re-runs the command" }]
-        : [{ by: "person", step: "installs taaad into a root-owned prefix and re-runs `repo-aegis install shim`" }];
+        : [{ by: "person", step: "installs taaad v0.6.0 or later and re-runs `repo-aegis install shim`" }];
   return { kind: "refuse", code: f.code, reason: dest => ownRefusal(f.code, "this gh call", f.why, fixes, dest) };
 }
 
