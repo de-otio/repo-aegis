@@ -9,13 +9,15 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addMarkerPatterns, addTopLevelPatterns, loadRegistry, renderHookScript, type Registry } from "@de-otio/repo-aegis-core";
+import { addMarkerPatterns, addTopLevelPatterns, loadRegistry, managedHookCommand, pinnedHookCommand, renderHookScript, type Registry } from "@de-otio/repo-aegis-core";
 import { captureOutput, captureOutputAsync, withEnv, withEnvAsync } from "../_test-utils.js";
 import { init } from "./init.js";
+import { makeFakeSystem } from "../_managed-test-utils.js";
+import { managedPaths } from "./managed-dropin.js";
 import { engagementsAdd, engagementsEnd, engagementsRemove } from "./engagements-mutate.js";
 import { upstreamsAdd, upstreamsRemove } from "./upstreams.js";
 import { engagementsSetIdentity, identityAdd, identityRemove, identityRequire } from "./identity.js";
-import { summariseIdentities } from "./status.js";
+import { summariseIdentities, identityLines, ENGAGEMENT_ONLY_LOGIN } from "./status.js";
 import { ownerIdentityChecks } from "./doctor-owner-checks.js";
 
 const V3 = `\
@@ -67,7 +69,10 @@ engagements:
 `;
 
 let tmp: string;
+/** A Claude Code home with no settings.json: the guard must never read the real `~/.claude`. */
+let NO_CLAUDE: string;
 before(() => {
+  NO_CLAUDE = join(tmpdir(), "repo-aegis-identity-no-claude-home");
   tmp = mkdtempSync(join(tmpdir(), "repo-aegis-identity-"));
 });
 after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -169,7 +174,7 @@ describe("the TTY gate (same path as `engagements add --personal-org`)", () => {
 describe("identity add / remove / require --off", () => {
   it("the first identity writes schemaVersion 3, keeps comments, and does not set requireIdentity", () => {
     const env = setup(V2);
-    const r = run(env, () => identityAdd("me", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
+    const r = run(env, () => identityAdd("me", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE }));
     assert.equal(r.exitCode, undefined, r.stderr);
     const text = read(env);
     assert.match(text, /schemaVersion: 3/);
@@ -192,7 +197,7 @@ describe("identity add / remove / require --off", () => {
   it("adds an app identity; the same definition again is a no-op; a different one is refused", () => {
     const env = setup(V2);
     const add = (opts: { ghLogin?: string; app?: string }) =>
-      run(env, () => identityAdd("bot", { ...opts, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
+      run(env, () => identityAdd("bot", { ...opts, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE, json: true }));
     assert.equal(add({ app: "example-bot" }).exitCode, undefined);
     const once = read(env);
     const again = add({ app: "example-bot" });
@@ -219,7 +224,7 @@ describe("identity add / remove / require --off", () => {
       ["a".repeat(64), { ghLogin: "alice" }],
     ];
     for (const [name, opts] of attempts) {
-      const r = run(env, () => identityAdd(name, { ...opts, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
+      const r = run(env, () => identityAdd(name, { ...opts, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE, json: true }));
       assert.equal(r.exitCode, 2, JSON.stringify([name, opts]));
       assert.equal(JSON.parse(r.stderr).code, "USAGE");
       assert.equal(read(env), before);
@@ -230,7 +235,7 @@ describe("identity add / remove / require --off", () => {
     const env = setup(V3);
     const before = read(env);
     for (const name of ["me", "me-bot", "work", "work-bot"]) {
-      const r = run(env, () => identityRemove(name, { registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
+      const r = run(env, () => identityRemove(name, { registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE, json: true }));
       assert.equal(r.exitCode, 2, name);
       assert.equal(JSON.parse(r.stderr).code, "IDENTITY_IN_USE");
       assert.equal(read(env), before);
@@ -239,26 +244,26 @@ describe("identity add / remove / require --off", () => {
 
   it("remove deletes an unreferenced identity and keeps the file at version 3; an unknown name is IDENTITY_NOT_FOUND", () => {
     const env = setup(V2);
-    run(env, () => identityAdd("spare", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
-    const r = run(env, () => identityRemove("spare", { registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
+    run(env, () => identityAdd("spare", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE }));
+    const r = run(env, () => identityRemove("spare", { registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE }));
     assert.equal(r.exitCode, undefined, r.stderr);
     assert.equal(load(env).identities!.size, 0);
     assert.match(read(env), /schemaVersion: 3/);
-    const gone = run(env, () => identityRemove("spare", { registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
+    const gone = run(env, () => identityRemove("spare", { registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE, json: true }));
     assert.equal(JSON.parse(gone.stderr).code, "IDENTITY_NOT_FOUND");
   });
 
   it("require --off clears requireIdentity (and needs --off); set-identity afterwards does not turn it back on", () => {
     const env = setup(V3);
-    const bare = run(env, () => identityRequire({ registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", json: true }));
+    const bare = run(env, () => identityRequire({ registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE, json: true }));
     assert.equal(bare.exitCode, 2);
     assert.equal(load(env).requireIdentity, true);
-    const off = run(env, () => identityRequire({ off: true, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
+    const off = run(env, () => identityRequire({ off: true, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE }));
     assert.equal(off.exitCode, undefined, off.stderr);
     assert.equal(load(env).requireIdentity, false);
     assert.match(read(env), /requireIdentity: false/);
     const set = run(env, () =>
-      engagementsSetIdentity("customer-b", { person: "work", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }),
+      engagementsSetIdentity("customer-b", { person: "work", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE }),
     );
     assert.equal(set.exitCode, undefined, set.stderr);
     assert.equal(load(env).requireIdentity, false, "a person's --off is not undone");
@@ -267,7 +272,7 @@ describe("identity add / remove / require --off", () => {
   it("require --off on a registry that never set it changes nothing (no version bump)", () => {
     const env = setup(V2);
     const before = read(env);
-    const r = run(env, () => identityRequire({ off: true, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
+    const r = run(env, () => identityRequire({ off: true, registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE }));
     assert.equal(r.exitCode, undefined, r.stderr);
     assert.equal(read(env), before);
   });
@@ -276,13 +281,13 @@ describe("identity add / remove / require --off", () => {
 describe("engagements set-identity", () => {
   const set = (env: Env, id: string | undefined, opts: object) =>
     run(env, () =>
-      engagementsSetIdentity(id, { registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv: "", ...opts }),
+      engagementsSetIdentity(id, { registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv: "", claudeHome: NO_CLAUDE, ...opts }),
     );
 
   it("the first set-identity bumps to v3, sets requireIdentity, maps every org of the engagement", () => {
     const env = setup(V2);
-    run(env, () => identityAdd("work", { ghLogin: "alice-work", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
-    run(env, () => identityAdd("work-bot", { app: "example-work-agent", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "" }));
+    run(env, () => identityAdd("work", { ghLogin: "alice-work", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE }));
+    run(env, () => identityAdd("work-bot", { app: "example-work-agent", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE }));
     assert.equal(load(env).requireIdentity, false);
     const r = set(env, "customer-a", { person: "work", agent: "work-bot" });
     assert.equal(r.exitCode, undefined, r.stderr);
@@ -406,11 +411,11 @@ describe("raising the schema version is refused while an install cannot read it 
   }
   const add = (env: Env, pathEnv: string, extra: object = {}) =>
     run(env, () =>
-      identityAdd("me", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv, runningVersion: "0.13.0", ...extra }),
+      identityAdd("me", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv, claudeHome: NO_CLAUDE, runningVersion: "0.13.0", ...extra }),
     );
   const setId = (env: Env, pathEnv: string, opts: object = { person: "work" }) =>
     run(env, () =>
-      engagementsSetIdentity("customer-b", { registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv, runningVersion: "0.13.0", ...opts }),
+      engagementsSetIdentity("customer-b", { registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv, claudeHome: NO_CLAUDE, runningVersion: "0.13.0", ...opts }),
     );
   const code = (r: { stderr: string }): string => (JSON.parse(r.stderr) as { code: string }).code;
 
@@ -462,6 +467,49 @@ describe("raising the schema version is refused while an install cannot read it 
     const r = setId(env, fakeInstall("old-but-already-v3", { version: "0.1.0", max: 2 }));
     assert.equal(r.exitCode, undefined, r.stderr);
     assert.notEqual(read(env), before);
+  });
+
+  it("identity add: the CLI pinned by Claude Code's settings.json (the one that runs check-write) is old: refuses", () => {
+    const env = setup(V2);
+    const before = read(env);
+    const cli = join(fakeInstall("old-claude-settings", { version: "0.11.4", max: 2 }), "index.js");
+    writeFileSync(cli, "// stub\n");
+    const claudeHome = join(tmp, "claude-with-old-pin");
+    mkdirSync(claudeHome, { recursive: true });
+    const command = pinnedHookCommand({ node: process.execPath, cli }, "hook check-write");
+    writeFileSync(
+      join(claudeHome, "settings.json"),
+      JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Write|Edit|MultiEdit", hooks: [{ type: "command", command }] }] } }),
+    );
+    const r = add(env, "", { claudeHome });
+    assert.equal(code(r), "MULTIPLE_INSTALLS");
+    assert.match(r.stderr, /pinned Claude Code hook/);
+    assert.equal(read(env), before);
+  });
+
+  it("identity add: the CLI pinned by the managed drop-in is old: refuses; a pin that can read 3 passes", () => {
+    for (const [name, max, refused] of [["drop-old", 2, true], ["drop-new", 3, false]] as const) {
+      const env = setup(V2);
+      const before = read(env);
+      const sys = makeFakeSystem({ platform: "linux", uid: 1000 });
+      const paths = managedPaths("linux", 1000)!;
+      const cli = join(fakeInstall(name, { version: "0.11.4", max }), "index.js");
+      writeFileSync(cli, "// stub\n");
+      const command = managedHookCommand({ node: process.execPath, cli }, "hook check-write", { uid: "1000", dropinPath: paths.file });
+      mkdirSync(sys.at(paths.dropinDir), { recursive: true });
+      writeFileSync(
+        sys.at(paths.file),
+        JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Write|Edit|MultiEdit", hooks: [{ type: "command", command }] }] } }),
+      );
+      const r = add(env, "", { managedEnv: sys.env });
+      if (refused) {
+        assert.equal(code(r), "MULTIPLE_INSTALLS");
+        assert.match(r.stderr, /pinned Claude Code hook/);
+        assert.equal(read(env), before);
+      } else {
+        assert.equal(r.exitCode, undefined, r.stderr);
+      }
+    }
   });
 
   it("--clear is never guarded (it only removes mappings)", () => {
@@ -648,12 +696,12 @@ describe("set-identity maps nothing for an engagement without githubOrgs (L3)", 
     const env = setup(NO_ORGS);
     const before = read(env);
     const r = run(env, () =>
-      engagementsSetIdentity("customer-b", { person: "work", registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv: "" }),
+      engagementsSetIdentity("customer-b", { person: "work", registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv: "", claudeHome: NO_CLAUDE }),
     );
     assert.equal(JSON.parse(r.stderr).code, "ENGAGEMENT_HAS_NO_ORGS");
     assert.equal(read(env), before);
     const clear = run(env, () =>
-      engagementsSetIdentity("customer-b", { clear: true, registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv: "" }),
+      engagementsSetIdentity("customer-b", { clear: true, registryPath: env.registryPath, stderrIsTTY: true, json: true, pathEnv: "", claudeHome: NO_CLAUDE }),
     );
     assert.equal(clear.exitCode, undefined, clear.stderr);
   });
@@ -717,4 +765,52 @@ describe("init --force counts identities as content (L1)", () => {
       assert.deepEqual(readFileSync(env.registryPath), before);
     });
   }
+});
+
+describe("Enterprise Managed User logins stay out of text output unless a personal org uses them", () => {
+  const EMU = `schemaVersion: 3
+identities:
+  emu-eng: { kind: gh-login, login: emuhandle_zzcorp }
+  emu-own: { kind: gh-login, login: ownhandle_yyshort }
+  emu-idle: { kind: gh-login, login: idlehandle_xxidle }
+  bot: { kind: github-app, app: example-bot }
+personalOrgs:
+  - { name: mine, person: emu-own, agent: bot }
+engagements:
+  - { id: customer-a, name: Customer A, markers: [m], githubOrgs: [customer-a-org], person: emu-eng, agent: bot }
+`;
+  const sum = () => summariseIdentities(loadRegistry(setup(EMU).registryPath));
+
+  it("the EMU login is accepted by `identity add`", () => {
+    const env = setup(V2);
+    const r = run(env, () => identityAdd("emu", { ghLogin: "emuhandle_zzcorp", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE }));
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.equal(load(env).identities!.get("emu")!.name, "emu");
+  });
+
+  it("text output contains no part of an engagement-only (or unreferenced) login", () => {
+    const text = identityLines(sum()).join("\n");
+    for (const part of ["emuhandle", "zzcorp", "idlehandle", "xxidle", "emuhandle_zzcorp"]) {
+      assert.ok(!text.includes(part), `text must not contain ${part}: ${text}`);
+    }
+    assert.ok(text.includes(ENGAGEMENT_ONLY_LOGIN));
+    assert.match(text, /emu-eng: gh-login <engagement-only login>/);
+  });
+
+  it("a login used by a personal org is still printed; app slugs are not logins", () => {
+    const text = identityLines(sum()).join("\n");
+    assert.match(text, /emu-own: gh-login ownhandle_yyshort/);
+    assert.match(text, /bot: github-app example-bot/);
+  });
+
+  it("the JSON summary carries every login", () => {
+    const logins = sum().identities.flatMap(i => (i.kind === "gh-login" ? [i.login] : []));
+    assert.deepEqual(logins.sort(), ["emuhandle_zzcorp", "idlehandle_xxidle", "ownhandle_yyshort"]);
+  });
+
+  it("doctor text carries no login either (the finding names neither login nor owner)", () => {
+    const checks = ownerIdentityChecks(loadRegistry(setup(EMU).registryPath));
+    const text = JSON.stringify(checks.map(c => [c.detail, c.fix]));
+    for (const part of ["emuhandle", "zzcorp", "ownhandle", "idlehandle"]) assert.ok(!text.includes(part), part);
+  });
 });

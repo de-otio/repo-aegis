@@ -207,7 +207,7 @@ engagements:
   affected: it is mapped.
 - **Shapes** (fail closed): an identity name and an app slug match
   `^[a-z0-9][a-z0-9-]{0,62}$`; a login matches
-  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`. Neither may start with `-`, so a value
+  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:_[A-Za-z0-9]{1,20})?$` (the optional `_shortcode` is the Enterprise Managed User form `handle_shortcode`). None may start with `-` or `_`, so a value
   can never be read as an option later.
 - **Validation** is at parse time and names the path: every reference
   resolves, the kinds match the column, an unknown key inside `identities` or a
@@ -230,8 +230,9 @@ engagements:
   so the cross-org write check **fails open** on that install. Upgrade every
   install first. Every command that raises the version (the first `identity
   add`) checks for that and refuses (`MULTIPLE_INSTALLS`) while a `repo-aegis`
-  on `PATH`, or one that an installed git hook or the `gh` shim is pinned to,
-  cannot read version 3. "Cannot read" is judged by the supported version
+  on `PATH`, or one that an installed git hook, the `gh` shim or a Claude Code
+  hook (the managed drop-in or `settings.json`: the pin that runs `hook
+  check-write`) is pinned to, cannot read version 3. "Cannot read" is judged by the supported version
   read from that install's own core package, never by running it; if that is
   unreadable the package version is compared, and an install whose version is
   unreadable is refused.

@@ -142,11 +142,19 @@ export function summariseIdentities(reg: Registry): IdentitySummary {
   return { identities, mappings, requireIdentity: reg.requireIdentity === true };
 }
 
-function identityLines(sum: IdentitySummary | null): string[] {
+/** What text output prints in place of a login that only engagements use. */
+export const ENGAGEMENT_ONLY_LOGIN = "<engagement-only login>";
+
+export function identityLines(sum: IdentitySummary | null): string[] {
   if (sum === null || (sum.identities.length === 0 && sum.mappings.length === 0)) return [];
   const lines = [`  identities:${sum.requireIdentity ? " (requireIdentity)" : ""}`];
+  // An Enterprise Managed User login carries a shortcode that can identify a customer. Text prints a login only
+  // when a personal org (the operator's own) uses the identity; engagement-only and unreferenced ones are
+  // redacted. --json carries every login.
+  const personalNames = new Set(sum.mappings.filter(m => m.kind === "personal-org").flatMap(m => [m.person, m.agent]));
   for (const i of sum.identities) {
-    lines.push(`    ${i.name}: ${i.kind} ${i.kind === "gh-login" ? i.login : i.app}`);
+    const shown = i.kind === "gh-login" ? (personalNames.has(i.name) ? i.login : ENGAGEMENT_ONLY_LOGIN) : i.app;
+    lines.push(`    ${i.name}: ${i.kind} ${shown}`);
   }
   for (const m of sum.mappings) {
     const cols = [m.person !== undefined && `person=${m.person}`, m.agent !== undefined && `agent=${m.agent}`].filter(Boolean);

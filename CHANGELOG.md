@@ -19,7 +19,7 @@ data yet.
   fails closed and names the path: every reference must resolve, `agent` must
   name a `github-app` and `person` a `gh-login`, unknown keys are rejected,
   names and slugs match `^[a-z0-9][a-z0-9-]{0,62}$`, logins
-  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`, and using any of it below version 3
+  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:_[A-Za-z0-9]{1,20})?$` (an Enterprise Managed User `handle_shortcode` is accepted), and using any of it below version 3
   is an error naming the version. Identity names are checked on the raw YAML
   keys (a `__proto__` key is an error, not silently dropped). From version 3 an
   engagement may carry only its known keys (`id`, `name`, `started`, `ended`,
@@ -48,12 +48,16 @@ data yet.
   refuses an engagement with no `githubOrgs` (it would map nothing).
 - Every path that RAISES the schema version (the first `identity add`) refuses
   with `MULTIPLE_INSTALLS` while a `repo-aegis` on `PATH`, or one that an
-  installed git hook or the `gh` shim is pinned to, cannot read version 3. That
+  installed git hook, the `gh` shim, or a Claude Code hook (the managed drop-in or
+  `settings.json`, which runs `hook check-write`) is pinned to, cannot read version 3. That
   is judged by the supported version read from the install's own core package
   (never by running it); when it cannot be read the package version is
   compared, and an install whose version cannot be read is refused.
 - `status` lists identities and mappings (names, kinds, logins, slugs; an
-  engagement by id, never by its orgs). `doctor` reports
+  engagement by id, never by its orgs). Text prints a login only when a personal
+  org uses the identity: an Enterprise Managed User shortcode can identify a
+  customer, so engagement-only and unreferenced logins print as
+  `<engagement-only login>`; `--json` carries them all. `doctor` reports
   `OWNER_IDENTITY_UNMAPPED` per registered owner with no identity entry: a
   warning, a failure when `requireIdentity` is set (the text says how many
   owners are still unmapped; owners are named only in `--json`).

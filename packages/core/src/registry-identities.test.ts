@@ -187,12 +187,20 @@ describe("registry v3: validation fails closed and names the path", () => {
       parseRegistryText(id("0a", "{ kind: gh-login, login: alice }"));
     });
     it("login: leading hyphen, empty and 40 characters are rejected; 39 (and one char) are accepted", () => {
-      for (const bad of ["-alice", "al_ice", "a".repeat(40), '""']) {
+      for (const bad of ["-alice", "al.ice", "a".repeat(40), '""']) {
         assert.match(parseError(id("me", `{ kind: gh-login, login: ${bad} }`)), /identities\.me\.login/, bad);
       }
       parseRegistryText(id("me", `{ kind: gh-login, login: ${"A".repeat(39)} }`));
       parseRegistryText(id("me", "{ kind: gh-login, login: a }"));
       parseRegistryText(id("me", "{ kind: gh-login, login: alice-work }"));
+    });
+    it("Enterprise Managed User logins (handle_shortcode) are accepted, kept tight", () => {
+      for (const ok of ["alice_ab12", "alice-work_corp1", "a_b", `a_${"z".repeat(20)}`, `${"A".repeat(39)}_x`]) {
+        parseRegistryText(id("me", `{ kind: gh-login, login: ${ok} }`));
+      }
+      for (const bad of ["_alice", "alice_", "alice__ab", "alice_a_b", "alice_ab-c", `a_${"z".repeat(21)}`, `${"a".repeat(40)}_x`, "-alice_ab", "alice_-ab"]) {
+        assert.match(parseError(id("me", `{ kind: gh-login, login: ${bad} }`)), /identities\.me\.login/, bad);
+      }
     });
     it("app slug: leading hyphen, uppercase and 64 characters are rejected; 63 is accepted", () => {
       for (const bad of ["-bot", "Bot", "a".repeat(64)]) {

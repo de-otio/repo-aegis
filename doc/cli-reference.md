@@ -186,7 +186,7 @@ the JSON also carries `identity`:
 "personal-org" | "engagement", person?, agent? }], requireIdentity }`, and text
 mode prints an `identities:` block. It holds names, kinds, logins and app
 slugs only, never anything secret. An engagement is named by its id and never
-by its orgs; a personal org is named by the org.
+by its orgs; a personal org is named by the org. A login is printed in text only when a personal org uses its identity; an engagement-only or unreferenced one prints as `<engagement-only login>` (an Enterprise Managed User shortcode can identify a customer). `--json` carries every login.
 
 #### `visibilityProbe` — why "unknown" is never the whole answer
 
@@ -598,8 +598,8 @@ Defines an identity: `--gh-login` makes a `gh-login` identity (a person),
 `--app` a `github-app` identity (an agent). Exactly one is required. Names and
 slugs are lower-cased and validated against the schema's shapes; a login is
 kept as typed. The first identity writes `schemaVersion: 3`, and is refused
-(`MULTIPLE_INSTALLS`) while a `repo-aegis` on `PATH`, or one an installed hook
-or the shim is pinned to, cannot read version 3: it is judged by the supported
+(`MULTIPLE_INSTALLS`) while a `repo-aegis` on `PATH`, or one an installed hook,
+the shim or a Claude Code hook (managed drop-in or `settings.json`) is pinned to, cannot read version 3: it is judged by the supported
 version read from that install's own core package, never by running it (an
 older pinned `hook check-write` exits 1, which is non-blocking, so it would stop
 protecting cross-org writes). Adding the same

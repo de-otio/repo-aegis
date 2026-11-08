@@ -142,8 +142,12 @@ const registryHostSchema = z
  * program (§12.1 A16).
  */
 export const IDENTITY_NAME_REGEX = /^[a-z0-9][a-z0-9-]{0,62}$/;
-/** A GitHub login (case-insensitive on GitHub, kept as typed). Never starts with `-` (§12.1 A16). */
-export const GH_LOGIN_REGEX = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+/**
+ * A GitHub login (case-insensitive on GitHub, kept as typed). Never starts with `-` or `_` (§12.1 A16). One
+ * optional `_shortcode` suffix is allowed: the Enterprise Managed User form `handle_shortcode`. The shortcode
+ * can identify a customer, so `status` and `doctor` text never print the login of an engagement-only identity.
+ */
+export const GH_LOGIN_REGEX = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:_[A-Za-z0-9]{1,20})?$/;
 
 const identityNameSchema = z.string().regex(IDENTITY_NAME_REGEX, {
   message: "identity name must match ^[a-z0-9][a-z0-9-]{0,62}$ (lowercase, digits, hyphens; no leading hyphen)",
@@ -155,7 +159,7 @@ const identityDefinitionSchema = z.discriminatedUnion(
     z.strictObject({
       kind: z.literal("gh-login"),
       login: z.string({ message: "'login' must be a string" }).regex(GH_LOGIN_REGEX, {
-        message: "login must match ^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$ (no leading hyphen, at most 39 characters)",
+        message: `login must match ${GH_LOGIN_REGEX.source} (a GitHub login, or an Enterprise Managed User login handle_shortcode; no leading hyphen or underscore)`,
       }),
     }),
     z.strictObject({

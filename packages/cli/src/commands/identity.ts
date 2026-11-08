@@ -129,7 +129,7 @@ export function identityAdd(name: string | undefined, opts: IdentityAddOptions):
   let def: Record<string, string>;
   if (opts.ghLogin !== undefined) {
     const login = opts.ghLogin.trim();
-    if (!GH_LOGIN_REGEX.test(login)) usage("login must match ^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$ (no leading hyphen)");
+    if (!GH_LOGIN_REGEX.test(login)) usage(`login must match ${GH_LOGIN_REGEX.source} (no leading hyphen or underscore)`);
     def = { kind: "gh-login", login };
   } else {
     const app = (opts.app ?? "").trim().toLowerCase();

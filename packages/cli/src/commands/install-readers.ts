@@ -15,6 +15,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, repoAegisHome } from "@de-otio/repo-aegis-core";
+import { readSettingsFile, defaultClaudeHome } from "./install-claude-md.js";
+import { pinsInSettings, readDropInSettings } from "./doctor-managed-checks.js";
+import { resolveManagedEnv, type ManagedEnv } from "./managed-privileged.js";
 import {
   canonical,
   pinnedCliPaths,
@@ -31,6 +34,30 @@ export interface InstallGuardOptions {
   home?: string;
   /** TEST-ONLY seam: the running version used by the fallback comparison. */
   runningVersion?: string;
+  /** TEST-ONLY seam: the Claude Code home whose `settings.json` is read (default `~/.claude`). */
+  claudeHome?: string;
+  /** TEST-ONLY seam: the managed-settings environment whose drop-in is read (default: the real one). */
+  managedEnv?: ManagedEnv;
+}
+
+/**
+ * The CLIs the Claude Code hooks are pinned to: the managed drop-in's and `settings.json`'s commands. This is
+ * the pin that runs `hook check-write`, the one that fails OPEN on a version it cannot read. Best-effort: a
+ * missing or unparseable file has no pins.
+ */
+function claudeHookCliPaths(opts: InstallGuardOptions): string[] {
+  const out: string[] = [];
+  try {
+    out.push(...pinsInSettings(readDropInSettings(opts.managedEnv ?? resolveManagedEnv())).map(p => p.cli));
+  } catch {
+    /* no drop-in, or unreadable */
+  }
+  try {
+    out.push(...pinsInSettings(readSettingsFile(join(opts.claudeHome ?? defaultClaudeHome(), "settings.json"))).map(p => p.cli));
+  } catch {
+    /* no settings file, or unreadable */
+  }
+  return out;
 }
 
 /** The `MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION` of the core package that `entry` loads, read as text; null if unreadable. */
@@ -54,7 +81,7 @@ export function maxSchemaVersionOf(entry: string): number | null {
 }
 
 export interface UnreadingInstall {
-  where: "PATH" | "pinned hook or shim";
+  where: "PATH" | "pinned hook or shim" | "pinned Claude Code hook";
   path: string;
   version: string | null;
 }
@@ -65,6 +92,7 @@ export function installsUnableToRead(required: number, opts: InstallGuardOptions
   const candidates: Array<{ where: UnreadingInstall["where"]; path: string; real: string }> = [
     ...repoAegisOnPath(opts.pathEnv ?? process.env["PATH"]).map(f => ({ where: "PATH" as const, path: f.path, real: f.real })),
     ...pinnedCliPaths(opts.home ?? repoAegisHome()).map(p => ({ where: "pinned hook or shim" as const, path: p, real: canonical(p) })),
+    ...claudeHookCliPaths(opts).map(p => ({ where: "pinned Claude Code hook" as const, path: p, real: canonical(p) })),
   ];
   const seen = new Set<string>();
   const bad: UnreadingInstall[] = [];
