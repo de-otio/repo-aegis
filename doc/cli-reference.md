@@ -1396,11 +1396,63 @@ harness supplies one, outranks any text.
 
 Writes `<home>/bin/gh` (the only `tool` today), a wrapper to put first on
 `PATH`. It locates the real `gh` by scanning `PATH` past its own directory
-— never a hard-coded path, never itself — passes every non-publishing
-invocation through untouched, and for the publishing verbs runs
-`repo-aegis egress-check` first. Idempotent: a second run reports
+— never a hard-coded path, never itself — passes `--version`, `help` and
+`completion` through untouched, and `exec`s `repo-aegis gh --home <home> -- "$@"`
+(see [`repo-aegis gh`](#repo-aegis-gh---home-home----gh-args)) for every other
+invocation, publishing or not: no shell code runs after the `exec`, so nothing in
+the shim can see a token. With the pinned node or CLI gone, such a call is refused
+(exit 2), reads included. Idempotent: a second run reports
 `already installed`. A file at that path that repo-aegis did not write
 is refused with `SHIM_PATH_OCCUPIED` unless `--force` is passed.
+
+It also **pins taaad**, the tool that mints GitHub App tokens: the first `taaad`
+on `PATH`, as the realpaths of its launcher, of the interpreter named by its
+shebang and of its package directory (the venv root), written into the shim next
+to the pinned node and CLI (not into the agent-writable `state/` directory). The
+command says whether all three are owned by root and writable by root only; if
+not, App identities are refused at run time (`TAAAD_AGENT_WRITABLE`) and `doctor`
+reports the same. `--json` carries a `taaad` object (`pinned`, the paths,
+`rootOwned`, `problem`).
+
+### `repo-aegis gh --home <home> -- <gh args>`
+
+What the shim runs; not meant to be typed. In order:
+
+1. the egress decision, exactly as `egress-check` makes it (same refusals, exit 2;
+   same receipts and body read-back), from the same code;
+2. the identity decision (`chooseIdentity`), from the registry **and the
+   approvals under `--home` only**: `REPO_AEGIS_HOME`, `REPO_AEGIS_REGISTRY` and
+   the other `REPO_AEGIS_*` variables of the caller are ignored. Presence comes from
+   `checkTerminal()` (a TTY and a process chain with a positive root): `REPO_AEGIS_EGRESS_HUMAN`
+   and approvals do not count;
+3. refuse (exit 2, the structured reason on stderr, `gh` not run); or run the real `gh`
+   with the caller's environment unchanged (an unmapped owner, a call that names none,
+   or a person at a terminal for an owner with only an agent identity, with a hint); or
+   **inject**: a token for the chosen identity goes to the trusted `gh` as `GH_TOKEN` in
+   that child's environment, and nowhere else.
+
+Token sources: a `gh-login` identity runs `gh auth token --hostname github.com --user <login>`
+with the trusted `gh` and every token and redirect variable removed; a `github-app` identity
+runs the pinned `taaad mint --app <slug> --repo <owner>/<repo> --permissions read|write|contents-write --json`
+with an environment of exactly `HOME`, `PATH=/usr/bin:/bin`, `TERM` and `LANG`, and accepts the
+answer only when `installationAccount` is the owner, `repositories` is exactly the repository
+and the permissions are no wider than the scope. A supplied `GH_TOKEN` / `GITHUB_TOKEN` is never
+used for a mapped owner with no person present; with one, it must be the mapped account's token
+(SHA-256, `timingSafeEqual`).
+
+The injected `gh` gets an allowlisted environment: `HOME`, a PATH the caller cannot extend,
+`TERM`, `LANG` / `LC_*`, `TMPDIR`, `GH_REPO` when set, `GH_TOKEN`, and fixed `GH_PAGER=`,
+`GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `GH_NO_EXTENSION_UPDATE_NOTIFIER=1`,
+`GIT_TERMINAL_PROMPT=0` and `GIT_CONFIG_COUNT` overrides (`core.fsmonitor=false`,
+`core.hooksPath=/dev/null`, `credential.helper=`, `core.sshCommand=ssh`). Pagers, editors, proxies,
+`BASH_ENV`, `SHELLOPTS` and the caller's `GIT_CONFIG_*` do not reach it. An injecting call prints
+`repo-aegis: as <identity> (<kind>) for <owner>/<repo>` on stderr and appends a record (identity,
+kind, owner/repo, verb, approval id; never the token) to `<home>/state/gh-decisions.jsonl`
+whatever the audit log's setting; refusals are recorded too.
+
+Any fault between choosing and spawning on a mapped owner is `GH_IDENTITY_UNAVAILABLE` and `gh`
+does not run (never a call as the active account). On an unmapped call a fault warns and `gh` runs
+unchanged. Exit status is `gh`'s own.
 
 Installing is not enabling: the shim only guards once `<home>/bin`
 precedes the real `gh` on `PATH`, which this command prints (also as
@@ -1457,6 +1509,14 @@ shim, the git pre-push hook — for rule g and nothing else: the shape rules,
 rule h (`UNREGISTERED_OWNER_EGRESS`), the cross-org boundary and the payload
 scan still apply. Default TTL 15 minutes; `--ttl 2h`, `90s`, `1d`; never more
 than 24 hours.
+
+**The account.** For an `<org>/<repo>` or `<org>/*` approval on an owner whose registry entry maps a
+`person` identity (a `gh-login`), the approval records that login, and minting prints it (`as <login>`,
+and in `--json` as `approval.login`; `--list` shows it). That login is what lets an agent **write as that
+account** to an owner with no `agent` App (`GH_IDENTITY_WRITE_NEEDS_HUMAN` otherwise); only an approval
+that carries exactly that account, for that owner and repository (or `<owner>/*`), covers it. An approval
+minted before accounts were recorded, one for another account, a ref-limited one and a `*` approval never
+do: `*` records no account.
 
 **Scope.** Since 0.11.0 a `*` approval is not a global wildcard. It covers a
 destination only when the owner is in `personalOrgs`, plus destination-less

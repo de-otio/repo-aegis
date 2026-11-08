@@ -487,17 +487,27 @@ on `PATH`. The shim:
 
 1. locates the real `gh` by scanning `PATH` past its own directory (never a
    hard-coded path; never itself);
-2. **passes every non-egress invocation through untouched**, `exec`'d, with
-   argv intact — `view`, `list`, `status`, `api` GET, `auth`, `checks`,
-   completion, `--version`;
-3. for egress verbs, calls `repo-aegis egress-check --cwd "$PWD" -- "$@"`,
-   which runs `decideEgress` with `humanPresent` from `isatty(2)` and
-   `capabilities.ask = false` (a shell has no prompt to offer), and refuses
-   with the structured reason on `deny`;
-4. on allow, `exec`s the real `gh`; for `pr create|edit` with a body file, it
-   instead **runs `gh`, waits, then reads the live body back**
-   (`gh pr view <n> --json body`) and diffs it against the file, emitting
+2. passes `--version`, `help` and `completion` through untouched, `exec`'d;
+3. for **every other invocation** (since the identity work,
+   `doc/plan-owner-identity.md` D1; before it only the publishing groups) refuses if the
+   pinned enforcement binary is gone, then `exec`s
+   `<pinned node> <pinned cli> gh --home <pinned home> -- "$@"`. No shell code runs after the
+   `exec`, so no token ever passes through the shim;
+4. `repo-aegis gh` makes the same decision `egress-check` makes (`decideEgress` with
+   `humanPresent` from `isatty(2)` and `capabilities.ask = false`, a shell has no prompt to
+   offer; the same function, `evaluateEgress`) and refuses with the structured reason on
+   `deny`. It then chooses the GitHub identity for the call's owner from the registry and
+   approvals under the pinned home (`chooseIdentity`, presence from `checkTerminal()`), and
+   spawns the real `gh`: with the caller's environment unchanged when no identity applies, or
+   with an allowlisted environment plus `GH_TOKEN` when one does (see
+   [cli-reference.md](../cli-reference.md#repo-aegis-gh---home-home----gh-args)). It runs
+   `gh` and waits (it no longer `exec`s it), prints the receipt keyed on `gh`'s exit code, and
+   for `pr create|edit` with a body file **reads the live body back**
+   (`gh pr view <n> --json body`, as the same identity) and diffs it against the file, emitting
    `PUBLISHED_BODY_MISMATCH` with byte counts — never content — on difference.
+
+A fault in the identity step on an owner that has a mapping is a refusal (`GH_IDENTITY_UNAVAILABLE`),
+not a fall back to the active account; on an owner with none, a warning and `gh` as before.
 
 Step 4 is the design's one deliberate network call inside an enforcement path.
 The verb has already published, so the call cannot block anything; a wrong body

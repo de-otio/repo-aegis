@@ -165,9 +165,9 @@ document.
 ## Registry schema version 3: GitHub identities per owner
 
 Schema version 3 records **which GitHub identity belongs to which owner**
-(`doc/plan-owner-identity.md`). This release only stores and validates the
-mapping, and shows it in `status` and `doctor`. Nothing chooses or injects a
-token from it yet, so no `gh` or `git` behaviour changes.
+(`doc/plan-owner-identity.md`). The `gh` shim uses it: for an owner with an entry, the
+call runs as the identity the registry names, in the column that who is present selects
+(see "Identities in practice" below). Owners with no entry are unchanged.
 
 ```yaml
 # ~/.config/repo-aegis/engagements.yaml
@@ -248,6 +248,44 @@ set-identity` (a personal org is `engagements set-identity --personal-org <org>`
 command text (`AGENT_RAN_HUMAN_COMMAND`). See
 [cli-reference.md](cli-reference.md#identities-schema-version-3).
 
+### Identities in practice
+
+With `repo-aegis install shim` done and `<home>/bin` first on `PATH`, every `gh` call goes
+through `repo-aegis gh`. For a call whose owner is mapped (the owner comes from `--repo` / `-R`, a
+URL, a `repos/<owner>/<repo>/…` endpoint, `GH_REPO` or the working directory's remote):
+
+- **A person at a terminal** runs as the owner's `person` identity (their `gh` account). An owner
+  with only an `agent` identity runs as the active account, with a hint.
+- **No person present** (an agent) runs as the owner's `agent` identity, a GitHub App: a token is
+  minted for exactly that repository, with permissions limited to the verb (reads: metadata and
+  contents, plus pull requests and issues; writes: what the App was granted on that repository).
+  An agent write needs `--repo <owner>/<repo>`: a repository taken only from the working directory is
+  refused (`GH_IDENTITY_NEEDS_LITERAL_TARGET`).
+- **An owner with only a `person` identity**: an agent's reads run as that person; an agent's
+  writes need a live approval minted for that person's login (`repo-aegis approve <owner>/<repo>`
+  records it), else `GH_IDENTITY_WRITE_NEEDS_HUMAN`.
+- A token you already hold in `GH_TOKEN` / `GITHUB_TOKEN` is not used for a mapped owner:
+  refused for an agent, compared with the mapped account's token for a person.
+- If the identity cannot be used (no token, taaad failing, an untrusted `gh`), the call is refused
+  (`GH_IDENTITY_UNAVAILABLE`, `GH_BINARY_UNTRUSTED`); it never silently runs as whichever account is
+  active.
+
+Every injecting call prints `repo-aegis: as <identity> (<kind>) for <owner>/<repo>` and appends
+a record (never the token) to `<home>/state/gh-decisions.jsonl`.
+
+**The root-owned taaad requirement.** App tokens are minted by taaad, the only holder of the App
+private keys; `install shim` pins its launcher, the interpreter its shebang names and its package
+directory. A taaad any agent can write is a taaad that can hand the agent every token, so `github-app`
+identities are used **only when all three, and every directory above them, are owned by root and writable
+by nobody else** (`TAAAD_AGENT_WRITABLE` otherwise, a `doctor` failure while a `github-app` identity
+is mapped, a warning before). The supported install is a root-owned prefix, for example
+`sudo pipx install --global taaad` (under `/opt/pipx`, on `PATH` through `/usr/local/bin`), with any
+user-level copy removed; then re-run `repo-aegis install shim`. On Apple Silicon a Homebrew Python is
+user-owned, so a venv whose interpreter resolves into `/opt/homebrew` fails this test; use a root-owned
+interpreter. `gh-login` identities do not need taaad. repo-aegis runs `gh` for the call from
+a trusted location only (the same vetting `doctor` applies: not under your home directory, the
+current directory or a temp directory; not group- or world-writable).
+
 ### Git pushes as the agent's App (the credential helper)
 
 For an owner mapped to an `agent` identity (a `github-app`), an agent's HTTPS
@@ -260,7 +298,7 @@ global git config for `https://github.com` and sets
 
 - With a person present the helper prints nothing and your own helpers answer as before; the same for an owner with no `agent` identity.
 - An agent's push over SSH to such an owner is refused by the pre-push hook (`AGENT_PUSH_NEEDS_APP`): push over HTTPS.
-- The helper needs the pinned taaad. Until `install shim` records the pin, the helper looks for it in `<home>/state/taaad-pin.json` (`{"launcher": "/absolute/path/to/taaad"}`); with none it refuses (`GH_BINARY_UNTRUSTED`).
+- The helper needs the pinned taaad: the one `install shim` recorded in the shim at `<home>/bin/gh`, and only while it is root-owned (see "Identities in practice"). With none it refuses (`GH_BINARY_UNTRUSTED`).
 - Helper order matters: a reset entry, a system-scope helper such as `osxkeychain`, or `gh auth setup-git` can put another helper first, and that one answers with your credential. The install checks this and refuses with instructions rather than guess; `doctor` fails with `GIT_CREDENTIAL_HELPER_ORDER` when an owner has an agent identity and the order is wrong.
 - Settings that could redirect or capture the token make the helper refuse (`AGENT_PUSH_CREDENTIAL_CONFIG`): a credential helper in the repository's own config, `http.proxy`, `http.sslVerify=false`, `http.sslCAInfo`, `http.extraHeader` or `http.sslBackend` outside system scope, and trace, proxy or TLS variables in the environment. A global proxy or CA bundle you rely on therefore needs to go in the system config, or be given up for agent pushes.
 
