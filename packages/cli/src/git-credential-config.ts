@@ -22,7 +22,10 @@ export interface ConfigEntry {
 
 /** What git is about to authenticate: always https://github.com. `path` is null when not known (a probe). */
 export interface CredentialContext {
+  /** The path as git sent it (case and `.git` kept): git's own pattern comparison is case-sensitive on exactly this. */
   path: string | null;
+  /** The normalised form (lower-case, no `.git`); a pattern applying to either path counts, the cautious reading. */
+  altPath?: string | null;
 }
 
 /**
@@ -114,8 +117,17 @@ export function patternApplies(pattern: string, ctx: CredentialContext): boolean
   if (path !== undefined && path !== "/") {
     if (ctx.path === null) return true;
     const want = path.replace(/\/+$/, "").replace(/^\//, "");
-    const have = ctx.path.replace(/^\//, "");
-    return have === want || have.startsWith(`${want}/`);
+    const applies = (candidate: string): boolean => {
+      const have = candidate.replace(/^\//, "");
+      return have === want || have.startsWith(`${want}/`);
+    };
+    // Raw first (git's rule), then the normalised form, and the pattern's own normalised form against it.
+    const norm = (t: string): string => t.toLowerCase().replace(/\.git$/, "");
+    const alt = ctx.altPath ?? null;
+    if (applies(ctx.path)) return true;
+    if (alt !== null && applies(alt)) return true;
+    const wantNorm = norm(want);
+    return [ctx.path, alt].some(c => c !== null && (norm(c.replace(/^\//, "")) === wantNorm || norm(c.replace(/^\//, "")).startsWith(`${wantNorm}/`)));
   }
   return true;
 }

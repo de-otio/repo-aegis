@@ -177,35 +177,74 @@ function subcommandOf(argv: readonly string[]): string | null {
   return null;
 }
 
-/** What the parent chain says about who asked: a push, another remote operation, no remote helper at all, or unreadable. */
-export type Parent = "push" | "remote" | "direct" | "unreadable";
+/** What the parent chain says about who asked. `sub` is the nearest `git`'s subcommand when it could be read. */
+export type Parent =
+  | { kind: "push"; sub: string }
+  | { kind: "remote"; sub: string | null }
+  | { kind: "direct" }
+  | { kind: "unreadable" };
+
+/** Subcommands that only read: the only ones for which an agent may fall through to the person's own credential. */
+export const KNOWN_READ_SUBCOMMANDS: ReadonlySet<string> = new Set(["fetch", "pull", "clone", "ls-remote", "archive", "remote", "submodule"]);
+
+const SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh"]);
+
+/** `owner/repo` of a path or URL path, lower-cased, without `.git`; null when it is not that shape. */
+function normalisedPath(path: string): string | null {
+  const or = ownerRepoOf(path);
+  return or === null ? null : `${or.owner}/${or.repo}`.toLowerCase();
+}
 
 /**
- * A7. The helper answers only a request that comes from `git-remote-https`, which git spawns for push, fetch,
- * pull, clone and ls-remote. Anything else asking (`git credential fill` run by hand, `git credential-<x> get`, a
- * direct invocation) is `direct`: it would hand a token to whoever typed the command. Above the remote helper, the
- * nearest `git`'s subcommand decides: `push` and `send-pack` are writes; any other subcommand, or one that cannot
- * be read from the few argv words kept (an alias), is a read, which only mints the narrower token.
- * `unreadable` when no chain could be read at all, or the remote helper has no readable `git` above it.
+ * A7, hardened. The helper answers only a request that git's HTTPS remote helper made, and "the chain contains a
+ * process called git-remote-https" is forgeable (`cp /bin/sh /tmp/git-remote-https`), so the shape is checked:
+ *
+ *   helper <- [one shell, if git did not exec the helper directly] <- git-remote-https <- git <push|fetch|…>
+ *
+ * The remote helper must be the helper's parent or grandparent, with nothing but a plain shell between; its
+ * argv must be `[git-remote-https, <remote>, https://github.com/<path>]` with that path equal to the request's
+ * (case and `.git` aside); and no process between the helper and that git may be a `git credential…` command.
+ * Anything else is `direct`. Above the remote helper, the nearest `git`'s subcommand decides: `push` and
+ * `send-pack` are writes, any other subcommand, or one that cannot be read from the few argv words kept (an
+ * alias), is a read. `unreadable` when no chain could be read, or no `git` can be found above the remote helper.
+ *
+ * Still a heuristic: a same-user process can set its own name and argv, and the process list is not a security
+ * boundary (doc/configuration.md).
  */
-export function parentFromAncestry(chain: AncestryChain | readonly AncestorInfo[] | null): Parent {
-  if (chain === null) return "unreadable";
+export function parentFromAncestry(chain: AncestryChain | readonly AncestorInfo[] | null, requestPath: string | null): Parent {
+  if (chain === null) return { kind: "unreadable" };
   const ancestors: readonly AncestorInfo[] = Array.isArray(chain) ? chain : (chain as AncestryChain).ancestors;
+  if (ancestors.length === 0) return { kind: "unreadable" };
   const isRemote = (a: AncestorInfo): boolean => {
     const n = basename(a.comm);
     return n === "git-remote-https" || n === "git-remote-http" || (a.argv[0] !== undefined && /^git-remote-https?$/.test(basename(a.argv[0])));
   };
   const at = ancestors.findIndex(isRemote);
-  if (at === -1) return ancestors.length === 0 ? "unreadable" : "direct";
+  if (at === -1 || at > 1) return { kind: "direct" };
+  for (const between of ancestors.slice(0, at)) {
+    if (!SHELLS.has(basename(between.comm)) || (between.argv[0] !== undefined && !SHELLS.has(basename(between.argv[0]).replace(/^-/, "")))) {
+      return { kind: "direct" };
+    }
+  }
+  const remote = ancestors[at]!;
+  if (remote.argv.length < 3) return { kind: "direct" };
+  const url = /^https:\/\/github\.com(?::443)?(\/.+)$/i.exec(remote.argv[2]!);
+  if (url === null) return { kind: "direct" };
+  const urlPath = normalisedPath(url[1]!);
+  if (urlPath === null) return { kind: "direct" };
+  // A request path that is not owner/repo is refused later, as a configuration problem; only a real one is compared.
+  const requested = requestPath === null ? null : normalisedPath(requestPath);
+  if (requested !== null && requested !== urlPath) return { kind: "direct" };
   for (const a of ancestors.slice(at + 1)) {
     const name = basename(a.comm);
     const arg0 = a.argv[0] !== undefined ? basename(a.argv[0]) : "";
     if (name === "git" || arg0 === "git") {
       const sub = subcommandOf(a.argv);
-      return sub === "push" || sub === "send-pack" ? "push" : "remote";
+      if (sub === "credential" || (sub !== null && sub.startsWith("credential-"))) return { kind: "direct" };
+      return sub === "push" || sub === "send-pack" ? { kind: "push", sub } : { kind: "remote", sub };
     }
   }
-  return "unreadable";
+  return { kind: "unreadable" };
 }
 
 // ---------------------------------------------------------------------------
@@ -260,17 +299,17 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   // A7: only git-remote-https may be answered. Checked for every github.com request from a non-person, mapped or not.
   let parent: Parent;
   try {
-    parent = parentFromAncestry(deps.ancestry());
+    parent = parentFromAncestry(deps.ancestry(), request.firstPath);
   } catch {
-    parent = "unreadable";
+    parent = { kind: "unreadable" };
   }
-  if (parent === "direct") {
+  if (parent.kind === "direct") {
     return refuse("AGENT_CREDENTIAL_DIRECT_FILL", "the request does not come from git's HTTPS remote helper (for example `git credential fill` was run directly), so no credential is given");
   }
-  if (parent === "unreadable") {
+  if (parent.kind === "unreadable") {
     return refuse("AGENT_PUSH_CHAIN_UNREADABLE", "repo-aegis could not read the process list to confirm that git's HTTPS remote helper asked, so no credential is given");
   }
-  const chain = parent === "push";
+  const chain = parent.kind === "push";
   if (request.mixed) {
     return refuse("AGENT_PUSH_CREDENTIAL_PATH", "the request names more than one protocol or host, so repo-aegis cannot tell where the credential would go");
   }
@@ -310,24 +349,34 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
 
   if (choice.kind === "none") return NOTHING;
   if (choice.kind === "refuse") return refuseText(choice.code, choice.reason);
-  // An agent that may only read as the person (N3): the next helper answers.
-  if (choice.column === "person") return NOTHING;
+  // An agent that may only read as the person (N3): the next helper answers, but only for a subcommand known to
+  // read. An alias or an unreadable subcommand could be a push, and a push as the person needs a login-bound approval.
+  if (choice.column === "person") {
+    if (parent.kind === "remote" && parent.sub !== null && KNOWN_READ_SUBCOMMANDS.has(parent.sub)) return NOTHING;
+    return refuse(
+      "GH_IDENTITY_WRITE_NEEDS_HUMAN",
+      "this would run as a person's GitHub account, and the git subcommand is not one known to only read (an alias, or one that cannot be read from the process list), so it may be a push",
+      dest,
+    );
+  }
 
   if (choice.identity.kind !== "github-app") {
     return refuse("GH_IDENTITY_UNAVAILABLE", "the agent identity of this owner is not a GitHub App", dest);
   }
+  // git compares URL patterns against the path as sent (case and .git kept); the normalised form counts too.
+  const matchCtx = { path: (request.firstPath ?? "").replace(/^\/+/, ""), altPath: `${dest.owner}/${dest.repo}`.toLowerCase() };
   // A5: configuration and environment that could redirect or capture the token. Checked before any mint.
   const entries = deps.readConfig(deps.cwd, deps.env);
   if (entries === null) {
     return refuse("AGENT_PUSH_CREDENTIAL_CONFIG", "git's configuration could not be read", dest);
   }
-  const violation = credentialConfigViolation(entries, { path: `${dest.owner}/${dest.repo}` }, deps.env);
+  const violation = credentialConfigViolation(entries, matchCtx, deps.env);
   if (violation !== null) {
     return refuse("AGENT_PUSH_CREDENTIAL_CONFIG", `${violation}, which could redirect or capture the token`, dest);
   }
 
   // `store` goes to every helper in the list: one that persists would save the App token.
-  const storing = laterStoringHelper(entries, { path: `${dest.owner}/${dest.repo}` });
+  const storing = laterStoringHelper(entries, matchCtx);
   if (storing !== null) {
     return refuse(
       "AGENT_PUSH_CREDENTIAL_STORE",

@@ -74,6 +74,7 @@ function stubTaaad(dir: string): string {
 
 function setup(): void {
   n++;
+  lastPath = "o/r.git";
   home = join(tmp, `home${n}`);
   mkdirSync(join(home, "state"), { recursive: true });
   writeFileSync(join(home, "engagements.yaml"), REGISTRY);
@@ -86,19 +87,21 @@ beforeEach(setup);
 const calls = (): number => (existsSync(join(stubDir, "calls")) ? readFileSync(join(stubDir, "calls"), "utf8").split("\n").length - 1 : 0);
 const argv = (): string => readFileSync(join(stubDir, "argv"), "utf8").trim();
 
-const remoteChain = (sub: string[]): AncestorInfo[] => [
-  { pid: 10, ppid: 9, comm: "git-remote-https", argv: ["git-remote-https", "origin", "https://github.com/o/r.git"] },
+/** The path of the latest `request()`: the synthetic git-remote-https carries it in its URL, as the real one does. */
+let lastPath = "o/r.git";
+const remoteChain = (sub: string[], path: string = lastPath): AncestorInfo[] => [
+  { pid: 10, ppid: 9, comm: "git-remote-https", argv: ["git-remote-https", "origin", `https://github.com/${path}`] },
   { pid: 9, ppid: 8, comm: "git", argv: ["git", ...sub] },
   { pid: 8, ppid: 1, comm: "zsh", argv: ["zsh"] },
 ];
-const PUSH = remoteChain(["push", "origin", "main"]);
+const pushChain = (): AncestorInfo[] => remoteChain(["push", "origin", "main"]);
 
 function deps(over: Partial<GitCredentialDeps> = {}, presence: IdentityPresence = "agent"): GitCredentialDeps {
   return {
     env: {},
     cwd: tmp,
     presence: () => presence,
-    ancestry: () => PUSH,
+    ancestry: pushChain,
     readConfig: () => [],
     loadRegistry: h => loadRegistry(join(h, "engagements.yaml")),
     resolveTaaad: () => taaad,
@@ -107,7 +110,7 @@ function deps(over: Partial<GitCredentialDeps> = {}, presence: IdentityPresence 
   };
 }
 
-const request = (path = "o/r.git", extra = ""): string => `protocol=https\nhost=github.com\npath=${path}\n${extra}\n`;
+const request = (path = "o/r.git", extra = ""): string => ((lastPath = path), `protocol=https\nhost=github.com\npath=${path}\n${extra}\n`);
 const get = (stdin: string, d: GitCredentialDeps = deps()): { stdout: string; stderr: string } => runGitCredential("get", stdin, home, d);
 const QUIT = "quit=true\n";
 
@@ -304,7 +307,7 @@ describe("git-credential get: the parent chain (A7, review finding)", () => {
     assertRefused(get(request(), deps({ ancestry: () => ({ ancestors: [], complete: false }) })), "AGENT_PUSH_CHAIN_UNREADABLE");
     assertRefused(get(request(), deps({ ancestry: () => { throw new Error("no ps"); } })), "AGENT_PUSH_CHAIN_UNREADABLE");
     assertRefused(
-      get(request(), deps({ ancestry: () => [{ pid: 10, ppid: 1, comm: "git-remote-https", argv: ["git-remote-https"] }] })),
+      get(request(), deps({ ancestry: () => [{ pid: 10, ppid: 1, comm: "git-remote-https", argv: ["git-remote-https", "origin", "https://github.com/o/r.git"] }] })),
       "AGENT_PUSH_CHAIN_UNREADABLE",
     );
     assert.equal(calls(), 0);
@@ -316,10 +319,66 @@ describe("git-credential get: the parent chain (A7, review finding)", () => {
   });
 
   it("parentFromAncestry classifies", () => {
-    assert.equal(parentFromAncestry(PUSH), "push");
-    assert.equal(parentFromAncestry(remoteChain(["fetch"])), "remote");
-    assert.equal(parentFromAncestry(null), "unreadable");
-    assert.equal(parentFromAncestry([{ pid: 1, ppid: 0, comm: "zsh", argv: [] }]), "direct");
+    assert.deepEqual(parentFromAncestry(pushChain(), "o/r.git"), { kind: "push", sub: "push" });
+    assert.deepEqual(parentFromAncestry(remoteChain(["fetch"]), "o/r.git"), { kind: "remote", sub: "fetch" });
+    assert.deepEqual(parentFromAncestry(null, null), { kind: "unreadable" });
+    assert.deepEqual(parentFromAncestry([{ pid: 1, ppid: 0, comm: "zsh", argv: [] }], null), { kind: "direct" });
+  });
+});
+
+describe("git-credential get: the chain's shape (M3)", () => {
+  const sh: AncestorInfo = { pid: 11, ppid: 10, comm: "sh", argv: ["sh", "-c", "x get"] };
+  const direct = (chain: AncestorInfo[], label: string): void => {
+    assertRefused(get(request(), deps({ ancestry: () => chain })), "AGENT_CREDENTIAL_DIRECT_FILL", label);
+  };
+  const [remote, gitProc, shell] = remoteChain(["push", "origin", "main"]) as [AncestorInfo, AncestorInfo, AncestorInfo];
+
+  it("a shell between the helper and git-remote-https (git did not exec the helper directly) is fine", () => {
+    assert.match(get(request(), deps({ ancestry: () => [sh, remote, gitProc, shell] })).stdout, /^username=/);
+  });
+
+  it("a forged git-remote-https (a copy of sh as a hook) running `git credential fill`: refused, taaad never called", () => {
+    const forged: AncestorInfo = { pid: 10, ppid: 8, comm: "git-remote-https", argv: ["/tmp/git-remote-https", "/tmp/hook"] };
+    const fill: AncestorInfo = { pid: 12, ppid: 10, comm: "git", argv: ["git", "credential", "fill"] };
+    direct([fill, forged, shell], "credential fill under a forged remote helper");
+    // even with a perfect-looking argv, a `git credential` between is refused
+    direct([fill, { ...remote }, gitProc, shell], "git credential between");
+    direct([{ pid: 12, ppid: 10, comm: "git", argv: ["git", "credential-osxkeychain", "get"] }, remote, gitProc], "credential-<x> between");
+    assert.equal(calls(), 0);
+  });
+
+  it("the remote helper must be the parent or grandparent, with only a shell between", () => {
+    direct([sh, sh, remote, gitProc], "two shells");
+    direct([{ pid: 11, ppid: 10, comm: "python3", argv: ["python3", "x.py"] }, remote, gitProc], "an interpreter between");
+    direct([gitProc, remote], "remote helper above git");
+  });
+
+  it("its argv must be [git-remote-https, <remote>, https://github.com/<path>] with the request's path", () => {
+    direct([{ ...remote, argv: ["git-remote-https", "origin"] }, gitProc], "no url");
+    direct([{ ...remote, argv: ["git-remote-https"] }, gitProc], "bare");
+    direct([{ ...remote, argv: ["git-remote-https", "origin", "https://example.com/o/r.git"] }, gitProc], "another host");
+    direct([{ ...remote, argv: ["git-remote-https", "origin", "http://github.com/o/r.git"] }, gitProc], "not https");
+    direct([{ ...remote, argv: ["git-remote-https", "origin", "https://github.com/o/other.git"] }, gitProc], "another repository");
+    assert.match(get(request(), deps({ ancestry: () => [{ ...remote, argv: ["git-remote-https", "origin", "https://github.com/O/R"] }, gitProc] })).stdout, /^username=/, "case and .git do not matter");
+  });
+
+  it("a `git credential…` above the remote helper is refused too", () => {
+    direct([remote, { pid: 9, ppid: 8, comm: "git", argv: ["git", "credential", "fill"] }, shell], "credential above");
+  });
+});
+
+describe("git-credential get: person column falls through only for known reads (L1)", () => {
+  it("fetch, pull, clone, ls-remote, archive, remote, submodule fall through for an owner with only a person identity", () => {
+    for (const sub of ["fetch", "pull", "clone", "ls-remote", "archive", "remote", "submodule"]) {
+      assert.deepEqual(get(request("p/r.git"), deps({ ancestry: () => remoteChain([sub]) })), { stdout: "", stderr: "" }, sub);
+    }
+    assert.equal(calls(), 0);
+  });
+
+  it("an alias, push, send-pack or an unreadable subcommand: quit=true GH_IDENTITY_WRITE_NEEDS_HUMAN", () => {
+    for (const argv of [["pp", "origin"], ["push"], ["send-pack"], ["-C", "/a", "-c", "x=y", "-c"]]) {
+      assertRefused(get(request("p/r.git"), deps({ ancestry: () => remoteChain(argv) })), "GH_IDENTITY_WRITE_NEEDS_HUMAN", argv.join(" "));
+    }
   });
 });
 
@@ -393,6 +452,29 @@ describe("git-credential get: A5 configuration and environment", () => {
     // a storing helper BEFORE ours is the order problem (install and doctor), not the helper's: git never reaches us after an answer
     const earlier = `global\tcredential.https://github.com.helper osxkeychain\nglobal\tcredential.https://github.com.helper ${ours}`;
     assert.match(get(request(), deps({ readConfig: () => entries(earlier) })).stdout, /^username=/);
+  });
+
+  it("M2: a URL pattern with mixed case and .git, as git compares it, is seen whichever way the request spells the path", () => {
+    const pat = "https://github.com/O/Svc.git";
+    const reset = "global\tcredential.https://github.com.helper \n";
+    const ours = "!'/n' '/c' git-credential --home '/h'";
+    const base = `${reset}global\tcredential.https://github.com.helper ${ours}\n`;
+    const cases: [string, string, string][] = [
+      ["local helper", `local\tcredential.${pat}.helper !evil`, "AGENT_PUSH_CREDENTIAL_CONFIG"],
+      ["extraheader", `local\thttp.${pat}.extraheader X: y`, "AGENT_PUSH_CREDENTIAL_CONFIG"],
+      ["proxy", `global\thttp.${pat}.proxy http://proxy.example:3128`, "AGENT_PUSH_CREDENTIAL_CONFIG"],
+      ["later storing helper", `global\tcredential.${pat}.helper osxkeychain`, "AGENT_PUSH_CREDENTIAL_STORE"],
+    ];
+    for (const requestPath of ["O/Svc.git", "o/svc", "O/Svc", "o/svc.git"]) {
+      for (const [label, line, code] of cases) {
+        const before = calls();
+        assertRefused(get(request(requestPath), deps({ readConfig: () => entries(base + line) })), code, `${label} for ${requestPath}`);
+        assert.equal(calls(), before, `${label}: taaad never called`);
+      }
+    }
+    // a pattern for another repository does not apply
+    writeFileSync(join(stubDir, "out.json"), jsonFor({ repositories: ["svc"] }));
+    assert.match(get(request("o/svc.git"), deps({ readConfig: () => entries(`${base}local\tcredential.https://github.com/o/other.helper !evil`) })).stdout, /^username=/);
   });
 
   it("an unreadable git configuration is refused", () => {
