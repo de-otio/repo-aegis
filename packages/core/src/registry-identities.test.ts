@@ -233,10 +233,13 @@ describe("registry v3: validation fails closed and names the path", () => {
       it(`requireIdentity with schemaVersion ${v} names the version`, () => {
         assert.match(parseError(v3("requireIdentity: false", v)), new RegExp(`requireIdentity: .*schemaVersion ${v}`));
       });
-      it(`an engagement's person/agent with schemaVersion ${v} names the version`, () => {
-        for (const col of ["person", "agent"]) {
-          const text = `schemaVersion: ${v}\nengagements:\n  - { id: e, name: E, markers: [], ${col}: x }\n`;
-          assert.match(parseError(text), new RegExp(`engagements\\[0\\]\\.${col}: .*schemaVersion ${v}`));
+      it(`an engagement's person/agent with schemaVersion ${v} names the version (the reference itself is valid)`, () => {
+        // `me` and `me-bot` are defined with the right kinds, so the only thing wrong with the engagement's key is the version.
+        for (const [col, name] of [["person", "me"], ["agent", "me-bot"]] as const) {
+          const text = `schemaVersion: ${v}\n${IDENTITIES}\nengagements:\n  - { id: e, name: E, markers: [], ${col}: ${name} }\n`;
+          const msg = parseError(text);
+          assert.match(msg, new RegExp(`engagements\\[0\\]\\.${col}: [^;]*schemaVersion ${v}`));
+          assert.doesNotMatch(msg, /not defined|must refer to/, "the reference resolves; only the gate fires for it");
         }
       });
     }
@@ -246,5 +249,118 @@ describe("registry v3: validation fails closed and names the path", () => {
     it("plain-string personalOrgs stay valid at schemaVersion 2", () => {
       parseRegistryText(V2);
     });
+  });
+});
+
+describe("registry v3: a mistyped key is an error, not a silent no-op (M1)", () => {
+  const eng = (extra: string): string => `schemaVersion: 3\n${IDENTITIES}\nengagements:\n  - { id: e, name: E, markers: [], githubOrgs: [o], ${extra} }\n`;
+  it("engagement typos: agnet, persn, and any other unknown key", () => {
+    for (const key of ["agnet: work-bot", "persn: work", "agent2: work-bot", "color: red"]) {
+      assert.match(parseError(eng(key)), /engagements\[0\]: unknown key "\w+" in a schemaVersion 3 engagement/, key);
+    }
+  });
+  it("known engagement keys all pass in v3", () => {
+    parseRegistryText(
+      `schemaVersion: 3\n${IDENTITIES}\nengagements:\n  - { id: e, name: E, started: 2026-01-01, ended: null, reposActive: [r], markers: [], notes: n, githubOrgs: [o], person: work, agent: work-bot }\n`,
+    );
+  });
+  it("engagements stay passthrough below version 3 (an old file's extra key is not newly rejected)", () => {
+    parseRegistryText("schemaVersion: 2\nengagements:\n  - { id: e, name: E, markers: [], color: red }\n");
+  });
+  it("top-level near-misses: requireIdentiy, identites, personalOrg, persnalOrgs", () => {
+    for (const [key, near] of [["requireIdentiy: true", "requireIdentity"], ["identites: {}", "identities"], ["personalOrg: []", "personalOrgs"], ["persnalOrgs: []", "personalOrgs"]] as const) {
+      const msg = parseError(`schemaVersion: 3\n${key}\nengagements: []\n`);
+      assert.match(msg, new RegExp(`unknown top-level key "\\w+" looks like a misspelling of "${near}"`), key);
+    }
+  });
+  it("a far-away unknown top-level key stays allowed (passthrough), and the near-miss rule is v3 only", () => {
+    parseRegistryText("schemaVersion: 3\nsomethingElseEntirely: 1\nengagements: []\n");
+    parseRegistryText("schemaVersion: 2\nrequireIdentiy: true\nengagements: []\n");
+  });
+});
+
+describe("registry v3: identity keys are checked raw (L4)", () => {
+  it("__proto__ is rejected, not silently dropped", () => {
+    assert.match(
+      parseError("schemaVersion: 3\nidentities:\n  __proto__: { kind: gh-login, login: alice }\nengagements: []\n"),
+      /identities\.__proto__: identity name must match/,
+    );
+  });
+  it("other regex-failing keys are rejected raw as well, while `constructor` is a legal name that works as a Map key", () => {
+    assert.match(parseError("schemaVersion: 3\nidentities:\n  _x: { kind: gh-login, login: alice }\nengagements: []\n"), /identities\._x/);
+    const reg = parseRegistryText("schemaVersion: 3\nidentities:\n  constructor: { kind: gh-login, login: alice }\nengagements: []\n");
+    assert.equal(reg.identities!.get("constructor")!.name, "constructor");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2: identities are ADDITIVE. Stripping them from a v3 registry must leave exactly the parse of the v2 one.
+// ---------------------------------------------------------------------------
+
+type Parsed = ReturnType<typeof parseRegistryText>;
+
+/** The parse with every identity-related field removed (and the version, which the v3 file raises). */
+function stripIdentities(reg: Parsed): unknown {
+  const { identities: _i, identityMap: _m, requireIdentity: _r, schemaVersion: _s, ...rest } = reg;
+  void _i; void _m; void _r; void _s;
+  return {
+    ...rest,
+    engagements: reg.engagements.map(({ person: _p, agent: _a, ...e }) => {
+      void _p; void _a;
+      return e;
+    }),
+  };
+}
+
+describe("registry v3: identities are additive (M2)", () => {
+  it("the V3 fixture, stripped, deep-equals the parse of the equivalent V2", () => {
+    assert.deepEqual(stripIdentities(parseRegistryText(V3)), stripIdentities(parseRegistryText(V2)));
+  });
+
+  it("holds over seeded random small v2 registries with random identity decoration", () => {
+    // Seeded LCG (numerical recipes constants): the same 200 registries on every run.
+    let state = 0x2f6e2b1;
+    const next = (n: number): number => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      return state % n;
+    };
+    let decorated = 0;
+    for (let round = 0; round < 200; round++) {
+      let orgCounter = 0;
+      const org = (): string => `org-${round}-${orgCounter++}`;
+      const personal = Array.from({ length: next(4) }, org);
+      const engagements = Array.from({ length: next(4) }, (_, i) => ({
+        id: `eng-${i}`,
+        name: `Engagement ${i}`,
+        markers: Array.from({ length: next(3) }, (_, k) => `marker-${round}-${i}-${k}`),
+        ...(next(2) === 0 ? {} : { githubOrgs: Array.from({ length: 1 + next(2) }, org) }),
+      }));
+      const v2 = { schemaVersion: 2, personalOrgs: personal, engagements };
+      const identities = {
+        p1: { kind: "gh-login", login: "alice" },
+        p2: { kind: "gh-login", login: "alice-work" },
+        a1: { kind: "github-app", app: "example-bot" },
+      };
+      const pick = (kind: "person" | "agent"): string | undefined =>
+        next(3) === 0 ? undefined : kind === "person" ? (next(2) === 0 ? "p1" : "p2") : "a1";
+      const v3 = {
+        schemaVersion: 3,
+        identities,
+        ...(next(2) === 0 ? { requireIdentity: next(2) === 0 } : {}),
+        personalOrgs: personal.map(name => {
+          const person = pick("person");
+          const agent = pick("agent");
+          return person === undefined && agent === undefined && next(2) === 0 ? name : { name, ...(person && { person }), ...(agent && { agent }) };
+        }),
+        engagements: engagements.map(e => ({ ...e, ...(pick("person") && { person: pick("person") }), ...(pick("agent") && { agent: pick("agent") }) })),
+      };
+      const a = parseRegistryText(JSON.stringify(v2));
+      const b = parseRegistryText(JSON.stringify(v3));
+      if (b.identityMap!.size > 0) decorated++;
+      assert.deepEqual(stripIdentities(b), stripIdentities(a), `round ${round}`);
+      assert.deepEqual([...registeredOwners(b)].sort(), [...registeredOwners(a)].sort(), `owners, round ${round}`);
+      assert.deepEqual(approvalScopeOf(b).personalOrgs, approvalScopeOf(a).personalOrgs, `scope, round ${round}`);
+    }
+    assert.ok(decorated > 50, `the generator must actually decorate registries (decorated ${decorated})`);
   });
 });

@@ -215,6 +215,30 @@ export function personalOrgName(entry: PersonalOrgEntry): string {
   return typeof entry === "string" ? entry : entry.name;
 }
 
+/** Keys an engagement may carry (schemaVersion 3 rejects any other). */
+const KNOWN_ENGAGEMENT_KEYS: ReadonlySet<string> = new Set([
+  "id", "name", "started", "ended", "reposActive", "markers", "notes", "githubOrgs", "person", "agent",
+]);
+
+/** Top-level keys the registry reads. Unknown top-level keys stay allowed, except near-misses of these (v3). */
+const KNOWN_TOP_LEVEL_KEYS: readonly string[] = [
+  "schemaVersion", "always_block", "personalOrgs", "allowedUpstreams", "publicRegistries", "privateInfra",
+  "selfIdentity", "alwaysBlockExemptPaths", "engagements", "identities", "requireIdentity",
+];
+
+/** Levenshtein distance, for catching a mistyped key (`agnet`, `identites`) that passthrough would swallow. */
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length]!;
+}
+
 const engagementSchema = z
   .object({
     id: z
@@ -421,6 +445,32 @@ export const registryFileSchema = z
         if (eng.person !== undefined) needs(["engagements", i, "person"], "an engagement's 'person'");
         if (eng.agent !== undefined) needs(["engagements", i, "agent"], "an engagement's 'agent'");
       });
+    }
+    // 0a. From version 3 a mistyped key must not pass silently: a misspelt `agent:` or `requireIdentity:` would
+    // otherwise be kept by passthrough and quietly leave an owner unmapped or the requirement off.
+    if (schemaVersion >= REGISTRY_IDENTITIES_MIN_VERSION) {
+      data.engagements.forEach((eng, i) => {
+        for (const key of Object.keys(eng)) {
+          if (!KNOWN_ENGAGEMENT_KEYS.has(key)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["engagements", i],
+              message: `unknown key "${key}" in a schemaVersion ${schemaVersion} engagement (known: ${[...KNOWN_ENGAGEMENT_KEYS].join(", ")})`,
+            });
+          }
+        }
+      });
+      for (const key of Object.keys(data)) {
+        if (KNOWN_TOP_LEVEL_KEYS.includes(key)) continue;
+        const near = KNOWN_TOP_LEVEL_KEYS.find(k => editDistance(key.toLowerCase(), k.toLowerCase()) <= 2);
+        if (near !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [key],
+            message: `unknown top-level key "${key}" looks like a misspelling of "${near}"`,
+          });
+        }
+      }
     }
     // 0b. identity names (record keys are not validated by the record schema) and references.
     for (const name of identities.keys()) {

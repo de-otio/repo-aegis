@@ -151,11 +151,24 @@ const HITS: ReadonlyArray<readonly [command: string, kind: HumanOnlyKind]> = [
   ["python3 -c 'import subprocess; subprocess.run([\"repo-aegis\",\"identity\",\"add\",\"x\",\"--app\",\"y\"])'", "identity-change"],
   ["node packages/cli/dist/index.js identity add me --gh-login alice", "identity-change"],
   ["$(which repo-aegis) engagements set-identity customer-a --agent me-bot", "identity-change"],
+  // the `identity` word alone, and `set-identity` anywhere after the program word (subcommand fed by a pipe or a vector)
+  ["echo add me --app b | xargs script -q /dev/null repo-aegis identity", "identity-change"],
+  ["printf 'add me --gh-login alice' | xargs repo-aegis identity", "identity-change"],
+  ["alias ra=repo-aegis; ra identity add me --gh-login alice", "identity-change"],
+  ["cat <<EOF | bash\nrepo-aegis identity remove me\nEOF", "identity-change"],
+  [`python3 -c 'import pty; pty.spawn(["repo-aegis","identity","add","me","--gh-login","alice"])'`, "identity-change"],
+  [`python3 -c 'import pty; pty.spawn(["repo-aegis","identity"] + ["require","--off"])'`, "identity-change"],
+  ["repo-aegis --home /x set-identity customer-a --person me", "identity-change"],
+  ["xargs repo-aegis engagements set-identity < args.txt", "identity-change"],
+  ["repo-aegis identity require --off --on", "identity-change"],
 ];
 
 const MISSES: ReadonlyArray<string> = [
   "repo-aegis status",
   "git commit -m 'document repo-aegis identity add and set-identity'",
+  // `identity require --on` only tightens, so an agent may run it
+  "repo-aegis identity require --on",
+  "repo-aegis --json identity require --on",
   "grep -rn 'identity add' doc/ # repo-aegis",
   "repo-aegis engagements add customer-a --name 'Identity Team'",
   "repo-aegis engagements show customer-a",

@@ -13,6 +13,7 @@ import {
   registryFileSchema,
   formatZodError,
   personalOrgName,
+  IDENTITY_NAME_REGEX,
   type IdentityDefinition,
 } from "./schemas.js";
 
@@ -192,6 +193,22 @@ export function parseRegistryText(text: string, path: string = "<in-memory>"): R
   // "Required" — and several tests pin on this wording.
   if (!("engagements" in parsed)) {
     throw new RegistryParseError(path, new Error("missing 'engagements:' top-level key"));
+  }
+
+  // Identity names are checked on the RAW keys: zod's record parsing never sees a `__proto__` key (it is
+  // dropped), so a name that fails the shape would otherwise pass unnoticed.
+  const rawIdentities = (parsed as Record<string, unknown>)["identities"];
+  if (rawIdentities !== null && typeof rawIdentities === "object" && !Array.isArray(rawIdentities)) {
+    for (const key of Object.keys(rawIdentities)) {
+      if (!IDENTITY_NAME_REGEX.test(key)) {
+        throw new RegistryParseError(
+          path,
+          new Error(
+            `identities.${key}: identity name must match ^[a-z0-9][a-z0-9-]{0,62}$ (lowercase, digits, hyphens; no leading hyphen)`,
+          ),
+        );
+      }
+    }
   }
 
   let validated;

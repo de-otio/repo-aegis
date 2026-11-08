@@ -316,11 +316,15 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
   if (eng !== -1 && win.indexOf("add", eng) !== -1 && (win.includes("--personal-org") || win.includes("--github-org"))) {
     return "owner-add";
   }
-  // `engagements set-identity` (an engagement or, with --personal-org, a personal org).
-  if (eng !== -1 && win.indexOf("set-identity", eng) !== -1) return "identity-change";
-  // `identity add|remove|require`: maps owners to the GitHub identity they act as.
+  // `set-identity` anywhere after the program word, and the `identity` command word alone: whatever
+  // follows it (a subcommand fed by a pipe or a heredoc, a quoted argument vector) is read as human-only.
+  // The one exception is `identity require --on`, which only tightens.
+  if (win.includes("set-identity")) return "identity-change";
   const idn = at("identity");
-  if (idn !== -1 && ["add", "remove", "require"].some(v => win.indexOf(v, idn) !== -1)) return "identity-change";
+  if (idn !== -1) {
+    const sub = win.slice(idn + 1).find(w => !w.startsWith("-"));
+    if (!(sub === "require" && win.includes("--on") && !win.includes("--off"))) return "identity-change";
+  }
   const up = at("upstreams");
   if (up !== -1 && win.indexOf("add", up) !== -1) return "upstream-add";
   if (win.includes("init")) {
@@ -436,7 +440,7 @@ const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string; w
     fix: "repo-aegis upstreams add <owner>/<repo>",
   },
   "identity-change": {
-    what: "repo-aegis identity add|remove|require, or repo-aegis engagements set-identity",
+    what: "repo-aegis identity (add, remove, require --off), or repo-aegis engagements set-identity",
     fix: "repo-aegis identity add <name> --gh-login <login>   (or --app <slug>); repo-aegis engagements set-identity <id> --person <name>",
     why:
       "These commands decide which GitHub account acts for an owner, so an agent that ran them could choose the identity it " +
