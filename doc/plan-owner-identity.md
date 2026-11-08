@@ -223,6 +223,27 @@ Each phase gets an independent security review of its code against this spec bef
 - **Q3:** open. dot-work follows in its own PR after phase 3 ships.
 - **Q6:** taaad first. `taaad mint` is built (§8.4), so phase 3 includes `github-app` identities.
 
+## 2.1 Threat model, restated by the owner (2026-11-08, supersedes the in-scope list of §2)
+
+"It should not attempt to be perfect, but to prevent honest mistakes", and it must not become too complex to use and configure. So:
+
+- **In scope:**
+  - the wrong account or identity;
+  - a forgotten `--repo` or `--as`;
+  - a copied command carrying a token;
+  - an agent that types the obvious one-liner that reads a token (`gh auth token`, `git credential fill`, `taaad env`).
+- **Out of scope (accepted limits, §10):** an agent that sets out to defeat the guard, in or out of the sandbox.
+- **Rule for future review findings:** a finding that only defeats a deliberate bypass is documented as a limit, not fixed with more configuration, `sudo` or extra install steps.
+
+Hardening already built and cheap to keep stays, for example the env allowlist, the `quit=true` refusals and the parent-chain check. No new setup steps are added for it.
+
+## 10.1 Accepted limits added after the final review (2026-11-08)
+
+- **The repo-aegis home is writable from the sandbox.** The registry, approvals and shim can be written with plain Bash from inside the Claude Code sandbox (the hook guards only Write and Edit). So an agent could, deliberately, forge a login-bound approval or edit the shim. No sandbox write-deny or extra install step is added for this (owner decision, §2.1). `doctor`'s existing checks (`SHIM_STALE`, `REGISTRY_AGENT_WRITABLE`) catch some of it after the fact.
+- **The parent-chain check is a heuristic.** The credential helper's check that a call comes from a real `git push` can be forged by a same-user process, even inside the sandbox. The worst case is one narrowed one-hour App token for one repository the App already covers. Stricter chain checks and hook refusals of `git credential fill` and of direct calls to the internal entry points make the accidental route fail. The real fix is issue #154 (an unforgeable presence signal).
+- **A17 works per request, not per invocation.** Each `get` is a fresh process, so the helper cannot remember an earlier path. Every request is judged on its own owner.
+- **Unknown top-level registry keys still pass (§5.1).** Only keys within edit distance 2 of a known key are rejected; other unknown top-level keys pass, for forward compatibility (the `selfIdentity` precedent).
+
 ## 13. Implementation contract for phases 3 and 4 (2026-11-08)
 
 This section fixes the interfaces, so that the work can be split between builders. All code builds on branch `feat/registry-v3-identities` (phase 2), whose `Registry` carries `identities`, `identityMap: ReadonlyMap<lowercased owner, OwnerIdentities>` and `requireIdentity`. Where this section is more specific than §4–§12, it wins.
