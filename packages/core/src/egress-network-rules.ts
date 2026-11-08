@@ -185,7 +185,15 @@ function isNetworkCommand(c: SimpleCommand): boolean {
 
 /** `--show-token`, `--show-token=…`, `-t`, `-t=…` or a short-flag group holding `t` on `gh auth status`: it prints the credential. */
 function showsToken(args: readonly string[]): boolean {
-  return args.some(a => a === "--show-token" || a.startsWith("--show-token=") || /^-[A-Za-z]*t[A-Za-z]*(?:=.*)?$/.test(a));
+  return args.some(a => a === "--show-token" || a.startsWith("--show-token=") || shortGroupHasT(a));
+}
+
+/** `-t`, `-ht`, `-t=…`: a short-flag group (letters only up to an optional `=`) containing `t`. Linear, no regex backtracking. */
+function shortGroupHasT(a: string): boolean {
+  if (a.length < 2 || a[0] !== "-" || a[1] === "-") return false;
+  const eq = a.indexOf("=");
+  const group = eq === -1 ? a.slice(1) : a.slice(1, eq);
+  return group.length > 0 && /^[A-Za-z]+$/.test(group) && group.includes("t");
 }
 
 /** `git credential fill|get|approve`, `git credential-<helper> get`, `git-credential-<helper> get`: a stored token is printed or fed to a helper. */

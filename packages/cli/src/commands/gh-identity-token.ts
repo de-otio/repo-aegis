@@ -15,7 +15,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
-import { userInfo } from "node:os";
 import { delimiter, dirname } from "node:path";
 import type { IdentityScope } from "@de-otio/repo-aegis-core";
 import { untrustedDirReason } from "./doctor-owner-checks.js";

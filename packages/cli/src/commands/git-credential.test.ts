@@ -15,7 +15,7 @@ import { loadRegistry, type AncestorInfo, type IdentityPresence } from "@de-otio
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { hermeticGitEnv, scrubGitEnv } from "../_test-utils.js";
 import { parseShowScopeList } from "../git-credential-config.js";
-import { gitCredentialGet, parentFromAncestry, runGitCredential, type GitCredentialDeps } from "./git-credential.js";
+import { parentFromAncestry, runGitCredential, type GitCredentialDeps } from "./git-credential.js";
 import { mintAppToken, resolvePinnedTaaad } from "./taaad-mint.js";
 import { renderShimScript } from "./shim-script.js";
 

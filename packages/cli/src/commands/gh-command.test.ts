@@ -11,7 +11,7 @@
 // refusals, pass-through, the refusal of an untrusted binary.
 //
 // Placeholders only: alice, bob, example-org, person-only-org, example-bot, other-org.
-import { describe, it, before, after, beforeEach } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -145,7 +145,7 @@ function makeWorld(registry: string = REGISTRY): World {
   writeFileSync(join(stubs, "mint.json"), mintJson());
   writeFileSync(join(stubs, "mint.read.json"), mintJson({ permissions: { metadata: "read", contents: "read", pull_requests: "read" } }));
   for (const name of ["pager", "editor"]) writeStub(join(root, "never", name), NEVER_STUB);
-  writeStub(join(root, "fakebin", "bash"), NEVER_STUB.replace('"$D/../never.log"', '"$D/../never.log"'));
+  writeStub(join(root, "fakebin", "bash"), NEVER_STUB);
   const repo = join(root, "svc");
   mkdirSync(repo, { recursive: true });
   const git = (...a: string[]): void => void spawnSync("git", a, { cwd: repo, stdio: "ignore" });
