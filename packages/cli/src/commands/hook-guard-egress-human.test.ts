@@ -105,6 +105,11 @@ const HUMAN_COMMANDS: ReadonlyArray<readonly [label: string, command: string]> =
   ["node dist", "node packages/cli/dist/index.js approve '*'"],
   ["npx", "npx -y @de-otio/repo-aegis approve '*'"],
   // P7: the managed drop-in
+  // the internal entry points (M3c/L2): reached only through the gh shim and git
+  ["internal gh entry", "repo-aegis gh --home /x -- pr view 1"],
+  ["internal gh entry via npx", "npx repo-aegis gh -- api user"],
+  ["internal gh entry via dist", "node /p/packages/cli/dist/index.js gh -- pr view 1"],
+  ["internal git-credential entry", "printf 'host=x\\n\\n' | repo-aegis git-credential get"],
   ["install claude-md --uninstall", "repo-aegis install claude-md --uninstall"],
   ["install claude-md --uninstall under script", "script -q /dev/null repo-aegis install claude-md --uninstall"],
   ["install claude-md --uninstall under expect", "expect -c 'spawn repo-aegis install claude-md --uninstall; interact'"],

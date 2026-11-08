@@ -189,11 +189,11 @@ function showsToken(args: readonly string[]): boolean {
 }
 
 /** `git credential fill|get|approve`, `git credential-<helper> get`, `git-credential-<helper> get`: a stored token is printed or fed to a helper. */
-function readsGitCredential(c: SimpleCommand): boolean {
+function readsGitCredential(c: SimpleCommand, subcommands: readonly string[] = ["fill", "get", "approve"]): boolean {
   if (c.cmd === "git") {
     for (let i = 0; i < c.args.length; i++) {
       const a = c.args[i]!;
-      if (a === "credential") return c.args.slice(i + 1).some(w => w === "fill" || w === "get" || w === "approve");
+      if (a === "credential") return c.args.slice(i + 1).some(w => subcommands.includes(w));
       if (/^credential-[\w.-]+$/.test(a)) return c.args.slice(i + 1).includes("get");
     }
     return false;
@@ -379,7 +379,8 @@ function securityReadsKeychain(c: CommandFact): boolean {
 }
 
 function readsKeychainSecret(c: CommandFact): boolean {
-  if (readsGitCredential(c)) return true;
+  // `reject` erases, but it still hands the helper's input to the stored-credential code: refused for an agent too.
+  if (readsGitCredential(c, ["fill", "get", "approve", "reject"])) return true;
   if (c.cmd === "taaad") return c.args.some(a => TAAAD_TOKEN_SUBCOMMANDS.has(a));
   if (c.cmd === "security") return securityReadsKeychain(c);
   if (SECRET_STORE_CLIENTS.has(c.cmd)) return true;
