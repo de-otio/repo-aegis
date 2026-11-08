@@ -102,6 +102,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "egress-readback",
       "engagements",
       "hook",
+      "identity",
       "init",
       "install",
       "markers",
@@ -229,7 +230,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "engagements",
     flags: [],
-    subcommands: ["add", "end", "list", "remove", "show"],
+    subcommands: ["add", "end", "list", "remove", "set-identity", "show"],
   },
   { path: "engagements list", flags: ["--all"], subcommands: [] },
   {
@@ -246,6 +247,13 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "engagements end", flags: ["--purge"], subcommands: [] },
   { path: "engagements show", flags: [], subcommands: [] },
   { path: "engagements remove", flags: ["--hard"], subcommands: [] },
+  { path: "engagements set-identity", flags: ["--agent", "--clear", "--person", "--personal-org"], subcommands: [] },
+
+  // ---- identity ----
+  { path: "identity", flags: [], subcommands: ["add", "remove", "require"] },
+  { path: "identity add", flags: ["--app", "--gh-login"], subcommands: [] },
+  { path: "identity remove", flags: [], subcommands: [] },
+  { path: "identity require", flags: ["--off"], subcommands: [] },
 
   // ---- upstreams ----
   {

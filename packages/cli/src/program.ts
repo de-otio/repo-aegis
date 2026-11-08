@@ -179,6 +179,51 @@ export async function buildProgram(): Promise<Command> {
     .option("--hard", "required: physically delete the entry. Use `engagements end --purge` for soft removal.")
     .action((id: string, opts, cmd) => engagementsRemove(id, withGlobals(opts, cmd)));
 
+  engagements
+    .command("set-identity [id]")
+    .description(
+      "map an engagement's orgs (or, with --personal-org, one personal org) to GitHub identities: --person is a gh-login identity, --agent a github-app identity. The first one sets requireIdentity. Needs a terminal; an agent must not run it.",
+    )
+    .option("--personal-org <org>", "target a personal org instead of an engagement <id>")
+    .option("--person <name>", "identity name acting when a person is present (kind gh-login)")
+    .option("--agent <name>", "identity name acting when no person is present (kind github-app)")
+    .option("--clear", "remove both identities from the target")
+    .action(async (id: string | undefined, opts, cmd) => {
+      const { engagementsSetIdentity } = await import("./commands/identity.js");
+      engagementsSetIdentity(id, withGlobals(opts, cmd));
+    });
+
+  // Registry schemaVersion 3: named GitHub identities. Every mutator needs a terminal and is human-only.
+  const identity = program
+    .command("identity")
+    .description(
+      "manage the registry's GitHub identities (schemaVersion 3). Every subcommand needs a terminal; an agent must not run them.",
+    );
+  identity
+    .command("add <name>")
+    .description("define identity <name> as a GitHub login (a person) or a GitHub App slug (an agent). Needs a terminal.")
+    .option("--gh-login <login>", "a gh account login (kind gh-login)")
+    .option("--app <slug>", "a GitHub App slug (kind github-app)")
+    .action(async (name: string, opts, cmd) => {
+      const { identityAdd } = await import("./commands/identity.js");
+      identityAdd(name, withGlobals(opts, cmd));
+    });
+  identity
+    .command("remove <name>")
+    .description("remove identity <name>; refused while an owner or engagement still references it. Needs a terminal.")
+    .action(async (name: string, opts, cmd) => {
+      const { identityRemove } = await import("./commands/identity.js");
+      identityRemove(name, withGlobals(opts, cmd));
+    });
+  identity
+    .command("require")
+    .description("turn requireIdentity off (the first set-identity turns it on). Needs a terminal.")
+    .option("--off", "clear requireIdentity")
+    .action(async (opts, cmd) => {
+      const { identityRequire } = await import("./commands/identity.js");
+      identityRequire(withGlobals(opts, cmd));
+    });
+
   // Forks: `allowedUpstreams` lifts rule h (refusal of egress to an unregistered
   // owner) for PRs, issues and comments to one exact owner/repo. `add` widens
   // what an agent may publish to, so it is human-only, like `approve`.

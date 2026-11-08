@@ -162,6 +162,75 @@ else here; the host placements (`private-infra`, `always-block`,
 `schemaVersion` bump** — see the compatibility note at the end of this
 document.
 
+## Registry schema version 3: GitHub identities per owner
+
+Schema version 3 records **which GitHub identity belongs to which owner**
+(`doc/plan-owner-identity.md`). This release only stores and validates the
+mapping, and shows it in `status` and `doctor`. Nothing chooses or injects a
+token from it yet, so no `gh` or `git` behaviour changes.
+
+```yaml
+# ~/.config/repo-aegis/engagements.yaml
+schemaVersion: 3
+identities:
+  me:        { kind: gh-login,   login: alice }
+  me-bot:    { kind: github-app, app: example-bot }      # a GitHub App slug
+  work:      { kind: gh-login,   login: alice-work }
+  work-bot:  { kind: github-app, app: example-work-agent }
+requireIdentity: true
+personalOrgs:
+  - example-org                                 # a plain string: unmapped, as in version 2
+  - { name: other-org, person: me, agent: me-bot }
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [customer-a-marker]
+    githubOrgs: [customer-a-org]
+    person: work                                # applies to every org of the engagement
+    agent: work-bot
+```
+
+- **`identities`** maps a name to `{ kind: gh-login, login }` (a person's
+  `gh` account) or `{ kind: github-app, app }` (a GitHub App slug).
+- **`person`** (who acts when a person is at the keyboard) must name a
+  `gh-login` identity; **`agent`** (who acts when none is) must name a
+  `github-app` identity. A `personalOrgs` entry is a plain string or
+  `{ name, person?, agent? }`; an engagement may carry `person` / `agent`,
+  which apply to all its `githubOrgs`.
+- **`requireIdentity`** is set to `true` by the first `engagements
+  set-identity` and cleared only by `identity require --off`. It makes
+  `doctor` report `OWNER_IDENTITY_UNMAPPED` as a failure instead of a warning.
+  In a later phase it will also make an agent write to a registered owner with
+  no identity entry refuse. An owner with only a `person` identity is not
+  affected: it is mapped.
+- **Shapes** (fail closed): an identity name and an app slug match
+  `^[a-z0-9][a-z0-9-]{0,62}$`; a login matches
+  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`. Neither may start with `-`, so a value
+  can never be read as an option later.
+- **Validation** is at parse time and names the path: every reference
+  resolves, the kinds match the column, an unknown key inside `identities` or a
+  `personalOrgs` object is an error, and an owner still appears in only one
+  place (the duplicate and personal/engagement disjointness rules apply to
+  object entries too).
+- **Version gate.** `identities`, an object-form `personalOrgs` entry, an
+  engagement's `person` / `agent` and `requireIdentity` need
+  `schemaVersion: 3`; with a lower version the registry is rejected, naming
+  the version. A build that predates version 3 refuses the file as newer than
+  it supports, and then rule h refuses every non-interactive egress, so
+  upgrade every install on `PATH` first. `engagements set-identity` checks
+  for that and refuses while another `repo-aegis` on `PATH` is older.
+- **Written only on adoption.** The file stays at its version until the first
+  identity is defined (`identity add`) or mapped. It is never lowered.
+- **Parsed shape.** `Registry.personalOrgs` stays a list of names. The
+  mapping is a separate `identityMap` keyed by lower-cased owner, so every
+  existing consumer reads what it always read.
+
+Changing any of this is an owner-registry change: a person at a terminal
+runs `repo-aegis identity add|remove|require --off` or `repo-aegis engagements
+set-identity` (`IDENTITY_CHANGE_NEEDS_TTY`), and the agent hook refuses the
+command text (`AGENT_RAN_HUMAN_COMMAND`). See
+[cli-reference.md](cli-reference.md#identities-schema-version-3).
+
 ## Reviewed-benign waivers (`waivers:`)
 
 `.repo-aegis.yml` also carries a `waivers:` list — the auditable

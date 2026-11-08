@@ -16,6 +16,7 @@ import {
   type HookState,
   type HookName,
   type HookScriptState,
+  type Registry,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { resolveVisibility } from "../visibility.js";
@@ -101,6 +102,59 @@ function hooksStatusLines(hooks: HookState): string[] {
   }
 }
 
+/** What `status` shows of the registry's GitHub identities: names, kinds, logins and slugs. Nothing secret. */
+export interface IdentitySummary {
+  identities: Array<{ name: string; kind: "gh-login" | "github-app"; login?: string; app?: string }>;
+  mappings: Array<{ target: string; kind: "personal-org" | "engagement"; person?: string; agent?: string }>;
+  requireIdentity: boolean;
+}
+
+/**
+ * Engagements are named by id (already shown by `status`), never by their orgs: org names of a customer's
+ * engagement would otherwise enter a transcript. Personal orgs are the operator's own and are named.
+ */
+export function summariseIdentities(reg: Registry): IdentitySummary {
+  const identities = [...(reg.identities ?? new Map()).values()].map(i =>
+    i.kind === "gh-login"
+      ? { name: i.name, kind: i.kind, login: i.login }
+      : { name: i.name, kind: i.kind, app: i.app },
+  );
+  const mappings: IdentitySummary["mappings"] = [];
+  for (const [owner, ids] of reg.identityMap ?? new Map()) {
+    const eng = reg.engagements.find(e => (e.githubOrgs ?? []).some(o => o.toLowerCase() === owner));
+    if (eng !== undefined) continue; // reported once per engagement, below
+    mappings.push({
+      target: owner,
+      kind: "personal-org",
+      ...(ids.person !== undefined && { person: ids.person.name }),
+      ...(ids.agent !== undefined && { agent: ids.agent.name }),
+    });
+  }
+  for (const e of reg.engagements) {
+    if (e.person === undefined && e.agent === undefined) continue;
+    mappings.push({
+      target: e.id,
+      kind: "engagement",
+      ...(e.person !== undefined && { person: e.person }),
+      ...(e.agent !== undefined && { agent: e.agent }),
+    });
+  }
+  return { identities, mappings, requireIdentity: reg.requireIdentity === true };
+}
+
+function identityLines(sum: IdentitySummary | null): string[] {
+  if (sum === null || (sum.identities.length === 0 && sum.mappings.length === 0)) return [];
+  const lines = [`  identities:${sum.requireIdentity ? " (requireIdentity)" : ""}`];
+  for (const i of sum.identities) {
+    lines.push(`    ${i.name}: ${i.kind} ${i.kind === "gh-login" ? i.login : i.app}`);
+  }
+  for (const m of sum.mappings) {
+    const cols = [m.person !== undefined && `person=${m.person}`, m.agent !== undefined && `agent=${m.agent}`].filter(Boolean);
+    lines.push(`    ${m.kind} ${m.target}: ${cols.join(", ")}`);
+  }
+  return lines;
+}
+
 export function status(opts: OutputOptions & { cwd?: string }): void {
   // `--cwd` is documented as applying to every subcommand uniformly (design
   // README, "Universal CLI flags"). This previously ignored it and reported
@@ -114,8 +168,10 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
     markerCount: number;
   }[] = [];
   let alwaysBlockCount = 0;
+  let identitySummary: IdentitySummary | null = null;
   try {
     const reg = loadRegistry();
+    identitySummary = summariseIdentities(reg);
     registryEngagements = reg.engagements.map(e => ({
       id: e.id,
       name: e.name,
@@ -227,6 +283,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
     zeroMarkerEngagements,
     warnings: denySet.warnings,
     hooks,
+    ...(identitySummary !== null && { identity: identitySummary }),
   };
 
   if (opts.json) {
@@ -235,6 +292,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   }
   if (!repo.isGitRepo) {
     emitText("repo-aegis status: not inside a git repository");
+    for (const line of identityLines(identitySummary)) emitText(line);
     return;
   }
   emitText(`repo-aegis status: ${repo.cwd}`);
@@ -261,6 +319,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   emitText(`  blocked:  ${denying.length === 0 ? "(none — marker dir empty)" : denying.join(", ")}`);
   emitText(`  patterns: ${denySet.patterns.length} active (+ ${alwaysBlockCount} always-block)`);
   emitText(`  regex:    ${getRegexBackend()}`);
+  for (const line of identityLines(identitySummary)) emitText(line);
   for (const line of hooksStatusLines(hooks)) emitText(line);
   for (let i = 0; i < visibilityWarnings.length; i++) {
     // First line is the finding, any follow-up is its continuation.

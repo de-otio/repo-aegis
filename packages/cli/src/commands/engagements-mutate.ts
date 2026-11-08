@@ -20,6 +20,7 @@ import {
   commitRegistry,
   withRegistryLock,
   RegistryCliError,
+  personalOrgItemName,
   type Doc,
 } from "./registry-mutate.js";
 
@@ -83,7 +84,7 @@ function backdated13MonthsIso(): string {
   return d.toISOString().slice(0, 10);
 }
 
-function findEngagementNode(doc: Doc, id: string): YAMLMap | null {
+export function findEngagementNode(doc: Doc, id: string): YAMLMap | null {
   const seq = doc.get("engagements") as YAMLSeq | null;
   if (!seq || !seq.items) return null;
   for (const item of seq.items) {
@@ -162,7 +163,7 @@ function readSchemaVersion(doc: Doc): number {
  * warning so multi-machine users (laptop + workstation) are aware that
  * older repo-aegis builds will refuse the file until upgraded.
  */
-function ensureSchemaVersion(doc: Doc, required: number): boolean {
+export function ensureSchemaVersion(doc: Doc, required: number): boolean {
   const current = readSchemaVersion(doc);
   if (current >= required) return false;
   doc.set("schemaVersion", required);
@@ -188,9 +189,8 @@ function appendPersonalOrgs(
   }
   const existing = new Set<string>();
   for (const item of seq.items ?? []) {
-    if (typeof item === "string") existing.add(item);
-    else if (item instanceof Scalar && typeof item.value === "string")
-      existing.add(item.value);
+    const name = personalOrgItemName(item);
+    if (name !== null) existing.add(name);
   }
   const added: string[] = [];
   const skipped: string[] = [];

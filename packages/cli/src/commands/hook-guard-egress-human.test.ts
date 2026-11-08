@@ -70,6 +70,11 @@ const HUMAN_COMMANDS: ReadonlyArray<readonly [label: string, command: string]> =
   ["upstreams add", "repo-aegis upstreams add upstream-org/lib"],
   ["init --migrate-classify", "repo-aegis init --migrate-classify"],
   ["init --force", "repo-aegis init --force"],
+  ["identity add", "repo-aegis identity add me --gh-login alice"],
+  ["identity remove", "repo-aegis identity remove me"],
+  ["identity require --off", "repo-aegis identity require --off"],
+  ["engagements set-identity", "repo-aegis engagements set-identity customer-a --person me"],
+  ["set-identity for a personal org", "repo-aegis engagements set-identity --personal-org acme --agent me-bot"],
   // wrappers and shells
   ["sudo", "sudo -u someone repo-aegis approve '*'"],
   ["env", "env FOO=1 repo-aegis approve '*'"],

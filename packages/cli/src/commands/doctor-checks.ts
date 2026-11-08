@@ -26,6 +26,8 @@ export type DoctorCheckCode =
   | "GH_CONFIG_REDIRECT"
   | "REGISTRY_AGENT_WRITABLE"
   | "REGISTRY_UNREADABLE"
+  // Owner identities (doc/plan-owner-identity.md §5.1, §12.2 Q4).
+  | "OWNER_IDENTITY_UNMAPPED"
   // The enforcement pin (doc/plan-pin-enforcement-binary.md).
   | "ENFORCEMENT_UNPINNED"
   | "ENFORCEMENT_PIN_MISSING"

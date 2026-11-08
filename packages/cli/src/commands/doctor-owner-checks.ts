@@ -120,6 +120,32 @@ export function registryStateChecks(
   return [];
 }
 
+/**
+ * `OWNER_IDENTITY_UNMAPPED`: one finding per registered owner that has no identity entry (no `person` and no
+ * `agent`). A warning, because an unmapped owner keeps passing through unchanged (N11); a FAILURE when the
+ * registry sets `requireIdentity`, because then an agent write to it is refused. The owner is named in `fix`
+ * and `names` only, never in `detail` (owners can be customer names).
+ */
+export function ownerIdentityChecks(registry: Registry): DoctorCheck[] {
+  const mapped = registry.identityMap ?? new Map();
+  const required = registry.requireIdentity === true;
+  return [...registeredOwners(registry)]
+    .filter(owner => !mapped.has(owner))
+    .sort()
+    .map(owner => ({
+      code: "OWNER_IDENTITY_UNMAPPED" as const,
+      ok: false,
+      ...(required ? {} : { severity: "warn" as const }),
+      names: [owner],
+      detail: required
+        ? "a registered owner has no identity entry, and requireIdentity is set, so an agent write to it is refused"
+        : "a registered owner has no identity entry, so no GitHub identity is recorded for it",
+      fix:
+        "map the owner to an identity (it is listed in --json): repo-aegis identity add <name> --gh-login <login>, then " +
+        `repo-aegis engagements set-identity (<engagement-id> | --personal-org <org>) --person <name>   (${PERSON_RUNS_THIS})`,
+    }));
+}
+
 // ---------------------------------------------------------------------------
 // Locating and running `gh`
 // ---------------------------------------------------------------------------

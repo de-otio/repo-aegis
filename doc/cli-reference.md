@@ -180,6 +180,14 @@ installed and active for pattern validation, or `"in-process"`
 otherwise. See the design doc's locked-decisions row "Regex backend
 (validation)" for what the field means.
 
+When the registry defines identities or maps owners to them (schemaVersion 3),
+the JSON also carries `identity`:
+`{ identities: [{ name, kind, login | app }], mappings: [{ target, kind:
+"personal-org" | "engagement", person?, agent? }], requireIdentity }`, and text
+mode prints an `identities:` block. It holds names, kinds, logins and app
+slugs only, never anything secret. An engagement is named by its id and never
+by its orgs; a personal org is named by the org.
+
 #### `visibilityProbe` — why "unknown" is never the whole answer
 
 GitHub visibility drives the egress-hygiene gate, so a probe that
@@ -568,6 +576,69 @@ person or `repo-aegis approve <owner>/<repo>`.
 JSON: `{ "action": "upstreams-add", "upstream", "added" }`,
 `{ "action": "upstreams-remove", "upstream", "removed" }`,
 `{ "action": "upstreams-list", "upstreams" }`.
+
+### Identities (schema version 3)
+
+`identity add|remove|require` and `engagements set-identity` record which
+GitHub identity belongs to which owner (see
+[configuration.md](configuration.md#registry-schema-version-3-github-identities-per-owner)).
+This release stores and shows the mapping only; no command chooses or injects
+a token from it.
+
+**Every command here needs a person at a terminal**, checked the same way as
+`engagements add --personal-org`: otherwise it exits 2 with
+`IDENTITY_CHANGE_NEEDS_TTY` (no environment variable or approval lifts it) and
+writes nothing. The agent hook also refuses any Bash command whose text runs
+one (`AGENT_RAN_HUMAN_COMMAND`). The gate runs before validation, so an invalid
+argument is no oracle for an agent.
+
+#### `repo-aegis identity add <name> --gh-login <login> | --app <slug>`
+
+Defines an identity: `--gh-login` makes a `gh-login` identity (a person),
+`--app` a `github-app` identity (an agent). Exactly one is required. Names and
+slugs are lower-cased and validated against the schema's shapes; a login is
+kept as typed. The first identity writes `schemaVersion: 3`. Adding the same
+definition again is a no-op; a different definition under an existing name is
+`IDENTITY_EXISTS`.
+
+#### `repo-aegis identity remove <name>`
+
+Refused with `IDENTITY_IN_USE` while a personal org or an engagement still
+names it (clear them first), `IDENTITY_NOT_FOUND` for an unknown name. The file
+stays at version 3.
+
+#### `repo-aegis identity require --off`
+
+Clears `requireIdentity` (writes `requireIdentity: false`, so a later
+`set-identity` does not turn it back on). `--off` is required; the first
+`set-identity` is what turns it on.
+
+#### `repo-aegis engagements set-identity <engagement-id> [--person <name>] [--agent <name>] [--clear]`
+
+Maps all of an engagement's `githubOrgs` to identities. `--person` must name a
+`gh-login` identity and `--agent` a `github-app` identity
+(`IDENTITY_KIND_MISMATCH`, `IDENTITY_NOT_FOUND`); a column that is not given is
+left as it is. `--clear` removes both and cannot be combined with the others.
+The first mapping sets `schemaVersion: 3` and, unless the key is already
+present, `requireIdentity: true`.
+
+**Personal orgs:** `repo-aegis engagements set-identity --personal-org <org>
+[--person <name>] [--agent <name>] [--clear]`. Personal orgs have no command
+group of their own (they are added with `engagements add --personal-org`), so
+this mirrors that form; it takes no `<id>`. The org must already be registered
+(`PERSONAL_ORG_NOT_FOUND`): this command never adds an owner. A plain entry
+becomes `{ name, person?, agent? }` and goes back to a plain string when
+cleared; a comment on the entry is kept.
+
+Not `--clear`: the command refuses with `MULTIPLE_INSTALLS` while another
+`repo-aegis` on `PATH` is older than the running one, or has a version that
+cannot be read, because an older build refuses a version 3 registry.
+
+All of these keep the registry's comments and other fields, are audited as
+`registry-identity-change` with the kind of change and no names, and print
+JSON with `--json`. The other registry commands (`engagements add|end|remove`,
+`upstreams add|remove`) leave identities and object-form personal orgs as they
+found them.
 
 ---
 
@@ -1245,8 +1316,8 @@ Before the egress parse, and for **any** Bash command, the hook also refuses
 (deny, exit 2): a raw HTTP client writing to the GitHub API
 (`GITHUB_API_VIA_HTTP_CLIENT`) and `gh auth token` next to a network call
 (`GH_AUTH_TOKEN_NETWORK`); a command whose text runs `repo-aegis approve`,
-`engagements add --personal-org|--github-org`, `upstreams add` or `init
---migrate-classify|--force`, in any shape (`AGENT_RAN_HUMAN_COMMAND`); and a
+`engagements add --personal-org|--github-org`, `upstreams add`, `identity add|remove|require`, `engagements set-identity` or
+`init --migrate-classify|--force`, in any shape (`AGENT_RAN_HUMAN_COMMAND`); and a
 command that starts a detached session: `tmux new -d`, `tmux new-window` /
 `send-keys`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`
 (`AGENT_DETACHED_SESSION`). These are text-level speed bumps: a program word
@@ -1422,6 +1493,7 @@ now reports, unless `--no-egress-checks`:
 | `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
 | `REGISTRY_UNREADABLE` (**fail**) | the registry exists but is encrypted at rest or does not parse, so rule h refuses every non-interactive egress that has a destination | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal), or repair the file |
 | `OWNERS_UNDECLARED` (**fail**) | the registry loads but declares no owners, so rule h is inert | `repo-aegis engagements add --personal-org <login>` (a person, at a terminal) |
+| `OWNER_IDENTITY_UNMAPPED` (warn; **fail** when `requireIdentity` is set) | a registered owner has no identity entry (no `person` and no `agent`); one finding per owner, the owner is named only in `--json` (registered owners can be customer names) | `repo-aegis identity add`, then `repo-aegis engagements set-identity` (a person, at a terminal) |
 | `GH_LOGIN_UNREGISTERED` | a logged-in `gh` account's login is not a registered owner | `--personal-org <login>` (a person, at a terminal) |
 | `GH_MEMBER_ORG_UNREGISTERED` | an organisation a logged-in `gh` account belongs to is not registered | `--personal-org` or `--github-org`, or leave it and let rule h refuse it |
 | `REGISTERED_ORG_NOT_MEMBER` (info) | a registered owner is no checked account's login or organisation (normal for archived engagements) | none required |

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — registry schema version 3: GitHub identities per owner (phase 2 of `doc/plan-owner-identity.md`)
+
+No egress behaviour changes: nothing chooses or injects a token from the new
+data yet.
+
+- The registry accepts `schemaVersion: 3` with a top-level `identities` map
+  (`{ kind: gh-login, login }` or `{ kind: github-app, app }`), `personalOrgs`
+  entries that are a string or `{ name, person?, agent? }`, an engagement's
+  `person` / `agent` (for all its `githubOrgs`) and `requireIdentity`. Parsing
+  fails closed and names the path: every reference must resolve, `agent` must
+  name a `github-app` and `person` a `gh-login`, unknown keys are rejected,
+  names and slugs match `^[a-z0-9][a-z0-9-]{0,62}$`, logins
+  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`, and using any of it below version 3
+  is an error naming the version. A build without this release refuses the
+  file as newer than it supports.
+- `Registry.personalOrgs` stays a list of names; the mapping is a separate
+  `identityMap` (lower-cased owner to `{ person?, agent? }`), so
+  `registeredOwners()`, `approvalScopeOf()` and the deny set read what they
+  always read.
+- New human-only commands (each needs a terminal, `IDENTITY_CHANGE_NEEDS_TTY`,
+  and the agent hook refuses them as `AGENT_RAN_HUMAN_COMMAND`):
+  `repo-aegis identity add <name> --gh-login <login> | --app <slug>`,
+  `identity remove <name>` (refused while referenced), `identity require --off`,
+  and `engagements set-identity <id> | --personal-org <org> [--person] [--agent]
+  [--clear]`. The registry is written as version 3 only when the first identity
+  or mapping is set; the first `set-identity` also sets `requireIdentity: true`.
+  `set-identity` refuses while another `repo-aegis` on `PATH` is older
+  (`MULTIPLE_INSTALLS`).
+- `status` lists identities and mappings (names, kinds, logins, slugs; an
+  engagement by id, never by its orgs). `doctor` reports
+  `OWNER_IDENTITY_UNMAPPED` per registered owner with no identity entry: a
+  warning, a failure when `requireIdentity` is set.
+
+### Fixed
+
+- The registry mutators that scan `personalOrgs` for an existing org (`engagements
+  add --personal-org`, `init --migrate-classify`) and the owner-set-empty gate
+  now see object-form entries, so an entry with identities is neither added
+  twice nor invisible to the check that stops the last owner being removed
+  without a terminal.
+
 ## [0.11.4] - 2026-11-08
 
 ### Fixed — `GH_AUTH_TOKEN_NETWORK` refused lines with a local `git` command

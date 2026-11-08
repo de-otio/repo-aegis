@@ -143,7 +143,9 @@ export type EmptyingCommand =
   | { kind: "upstreams-add"; target: string }
   | { kind: "upstreams-remove"; target: string }
   | { kind: "init-force" }
-  | { kind: "init-migrate" };
+  | { kind: "init-migrate" }
+  // Identity edits never change the owner set; the kind exists so they can share `commitRegistry`.
+  | { kind: "identity-change" };
 
 function describeEmptying(cmd: EmptyingCommand): string {
   switch (cmd.kind) {
@@ -161,6 +163,8 @@ function describeEmptying(cmd: EmptyingCommand): string {
       return "init --force";
     case "init-migrate":
       return "init --migrate-classify";
+    case "identity-change":
+      return "identity change";
   }
 }
 

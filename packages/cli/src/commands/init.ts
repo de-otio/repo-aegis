@@ -36,6 +36,7 @@ import { confirmOnTerminal, isHumanTerminal } from "../require-terminal.js";
 import {
   RegistryCliError,
   assertValidRegistryText,
+  personalOrgItemName,
   writeRegistryText,
 } from "./registry-mutate.js";
 
@@ -412,9 +413,8 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
       }
       const personalSet = new Set<string>();
       for (const item of personalOrgsSeq.items ?? []) {
-        if (typeof item === "string") personalSet.add(item);
-        else if (item instanceof Scalar && typeof item.value === "string")
-          personalSet.add(item.value);
+        const name = personalOrgItemName(item);
+        if (name !== null) personalSet.add(name);
       }
       for (const org of personalOrgsToAdd) {
         if (!personalSet.has(org)) {

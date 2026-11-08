@@ -19,6 +19,7 @@
 // package.json next to the entry file, never from running it.
 import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parsePinFromScript, repoAegisHome, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import type { DoctorCheck } from "./doctor-checks.js";
@@ -215,4 +216,38 @@ export function enforcementPinChecks(
 ): DoctorCheck[] {
   const scripts = installedScripts(env["REPO_AEGIS_HOME"] ?? repoAegisHome());
   return [unpinnedCheck(scripts, unpinnedClaudeHooks(claudeHome)), pinMissingCheck(scripts), multipleInstallsCheck(env["PATH"], pin)];
+}
+
+/** A `repo-aegis` reachable on PATH and the version of its package, or null when that cannot be read. */
+export interface InstallOnPath {
+  path: string;
+  version: string | null;
+}
+
+/** The version of the repo-aegis that is running this code, or null when its package.json cannot be found. */
+export function runningInstallVersion(): string | null {
+  return versionOf(fileURLToPath(import.meta.url));
+}
+
+/** `a < b` for dotted numeric versions (a prerelease suffix is ignored); unparseable parts count as 0. */
+export function versionIsOlder(a: string, b: string): boolean {
+  const parts = (v: string): number[] => v.split("-")[0]!.split(".").map(p => Number.parseInt(p, 10) || 0);
+  const pa = parts(a);
+  const pb = parts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d < 0;
+  }
+  return false;
+}
+
+/**
+ * Installs on `pathValue` that are older than `running`, or whose version cannot be read (an install that cannot
+ * be shown to be current might be older). The MULTIPLE_INSTALLS detection, reused by `set-identity`: an older
+ * build refuses a schemaVersion 3 registry outright, and rule h then refuses every non-interactive egress.
+ */
+export function olderInstallsOnPath(pathValue: string | undefined, running: string): InstallOnPath[] {
+  return repoAegisOnPath(pathValue)
+    .map(f => ({ path: f.path, version: versionOf(f.real) }))
+    .filter(f => f.version === null || versionIsOlder(f.version, running));
 }
