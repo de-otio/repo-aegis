@@ -3477,27 +3477,70 @@ export interface SimpleCommand {
 }
 
 /**
+ * A {@link SimpleCommand} with the facts the identity hook rules (plan-owner-identity §13.2, A1) need: the
+ * `REPO_AEGIS_*` variables in force on it (its own prefix or `env` assignments, an enclosing command's, and an
+ * earlier `export` / bare assignment on the line), and the terminal wrapper it runs under. Names only, never values.
+ */
+export interface CommandFact extends SimpleCommand {
+  /** `REPO_AEGIS_*` variable names set for this command, deduplicated. */
+  repoAegisEnv: string[];
+  /** Set when the segment runs under a terminal-providing wrapper (the label the egress parser would use). */
+  ptyWrapper?: string;
+  /** With `ptyWrapper` or text fed on stdin (a heredoc, a here-string): the arguments and that text, so a mention inside is visible. */
+  text?: string;
+}
+
+const REPO_AEGIS_ENV_PREFIX = "REPO_AEGIS_";
+
+function repoAegisNames(names: Iterable<string>): string[] {
+  return [...new Set([...names].filter(n => n.startsWith(REPO_AEGIS_ENV_PREFIX)))];
+}
+
+/**
  * Every command a shell line runs, in order, including those inside `sh -c '…'` (with its `$@` / `$1`
  * arguments substituted), `eval`, `$(…)`, backticks, and the text a shell is fed on stdin (a heredoc, a
  * here-string, or what `echo` / `printf` / `cat <<EOF` pipes into it), to the parser's nesting depth.
  * Redirections, assignments and wrappers are removed. It makes no judgement about egress. Pure; never throws.
  */
 export function simpleCommands(command: string, depth = 0, budget: { bytes: number } = { bytes: 0 }): SimpleCommand[] {
-  const out: SimpleCommand[] = [];
-  if (typeof command !== "string" || command.length === 0 || depth > MAX_NEST_DEPTH) return out;
+  return commandFacts(command, depth, budget).map(({ cmd, args }) => ({ cmd, args }));
+}
+
+/** {@link simpleCommands} plus the per-command environment and wrapper facts. Pure; never throws. */
+export function commandFacts(command: string, depth = 0, budget: { bytes: number } = { bytes: 0 }): CommandFact[] {
+  const out: CommandFact[] = [];
+  walkCommands(command, depth, budget, new Set(), new Map(), out);
+  return out;
+}
+
+/** Returns the `REPO_AEGIS_*` names set for the rest of the line by this text (so an `eval`'s caller can carry them on). */
+function walkCommands(
+  command: string,
+  depth: number,
+  budget: { bytes: number },
+  inherited: ReadonlySet<string>,
+  wrapperNames: Map<string, string>,
+  out: CommandFact[],
+): string[] {
+  if (typeof command !== "string" || command.length === 0 || depth > MAX_NEST_DEPTH) return [];
   // Every nested text counts against one budget for the whole line (issue #151, F1); past it, nested text
   // is not read. The egress parse fails closed on the same line, so what this misses is still refused.
   if (depth > 0) {
     budget.bytes += command.length;
-    if (budget.bytes > PARSE_EXPANSION_BUDGET) return out;
+    if (budget.bytes > PARSE_EXPANSION_BUDGET) return [];
   }
+  /** Variables set by earlier segments of this line (an `export`, a bare assignment). */
+  let running: string[] = [];
   try {
     const segments = tokenise(command);
+    const wrapperBySegment = segments.map(seg => segmentPtyWrapper(seg, wrapperNames));
     segments.forEach((seg, idx) => {
       const rawTokens = seg.funcDef ? seg.tokens.slice(1) : seg.tokens;
       const tokens = stripRedirections(rawTokens);
-      const resolved = resolveCommand(tokens);
-      for (const w of tokens) for (const inner of substitutionTexts(w)) out.push(...simpleCommands(inner, depth + 1, budget));
+      const assigns: Assignment[] = [];
+      const resolved = resolveCommand(tokens, assigns);
+      const segEnv = new Set<string>([...inherited, ...running, ...repoAegisNames(assigns.map(a => a.name))]);
+      for (const w of tokens) for (const inner of substitutionTexts(w)) walkCommands(inner, depth + 1, budget, segEnv, wrapperNames, out);
       if (resolved.nestedText !== undefined) {
         const args = resolved.nestedArgs ?? [];
         let text = resolved.nestedText;
@@ -3509,26 +3552,44 @@ export function simpleCommands(command: string, depth = 0, budget: { bytes: numb
             text = `${resolved.nestedText}\n${args.slice(1).map(quoteWord).join(" ")}`;
           }
         }
-        out.push(...simpleCommands(text, depth + 1, budget));
+        const left = walkCommands(text, depth + 1, budget, segEnv, wrapperNames, out);
+        // `eval` runs in this shell: what it exports is seen by the segments after it.
+        if (resolved.isEval) running = [...running, ...left];
         return;
       }
-      if (resolved.start >= resolved.tokens.length) return;
+      if (resolved.start >= resolved.tokens.length) {
+        // `REPO_AEGIS_X=1` on its own: set for the rest of the line.
+        running = [...running, ...repoAegisNames(assigns.map(a => a.name))];
+        return;
+      }
       const cmd = baseName(resolved.tokens[resolved.start]!);
       const args = resolved.tokens.slice(resolved.start + 1);
-      out.push({ cmd, args });
+      running = [
+        ...running,
+        ...repoAegisNames([...exportedOverrideLabels(cmd, args), ...shellAssignedOverrideLabels(rawTokens, cmd, args)]),
+      ];
+      const wrapper = wrapperBySegment[idx];
+      const stdinTexts = [...seg.heredocs, ...hereStrings(rawTokens)];
+      out.push({
+        cmd,
+        args,
+        repoAegisEnv: [...segEnv],
+        ...(wrapper !== null && wrapper !== undefined && { ptyWrapper: wrapper }),
+        ...((wrapper != null || stdinTexts.length > 0) && { text: [...args, ...stdinTexts].join("\n") }),
+      });
       // Text fed to a shell on stdin is a program.
       if (SHELL_INTERPRETERS.has(cmd)) {
         const texts = [...seg.heredocs, ...hereStrings(rawTokens)];
         if (texts.length === 0 && seg.joinedBy === "|" && readsCommandsFromStdin(args) && idx > 0) {
           texts.push(...pipedText(segments[idx - 1]!));
         }
-        for (const t of texts) out.push(...simpleCommands(t, depth + 1, budget));
+        for (const t of texts) walkCommands(t, depth + 1, budget, segEnv, wrapperNames, out);
       }
     });
   } catch {
     /* total: a line that cannot be taken apart contributes what was read before the problem */
   }
-  return out;
+  return running;
 }
 
 /** What the segment before a `| sh` feeds it: its heredocs and here-strings, and the words of `echo` / `printf`. */

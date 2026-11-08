@@ -15,6 +15,35 @@ exports the pure `identityPresence()`, `ghCallTargets()` and `chooseIdentity()`
 presence, redirect, supplied token, unsafe arguments, then the person or agent
 column) with seeded-random property tests.
 
+### Changed — stricter for agents: identity hook rules (`doc/plan-owner-identity.md` §13.2)
+
+New refusals in the agent hook (`hook guard-egress`). They apply to Bash commands
+an agent runs; none is lifted by an approval. This is a breaking change for
+non-terminal automation that runs `gh auth token`, `taaad mint` and the like
+through the hook: with no person present they are now refused.
+
+- **A1** — any command that runs `gh`, `git`, `taaad` or `security` with a
+  `REPO_AEGIS_*` variable set (prefix, `env`, `sudo env`, `sh -c`, `eval`, `$(…)`,
+  heredoc-fed shell, or an earlier `export`) is `EGRESS_ENV_OVERRIDE`, and under a
+  pty wrapper `EGRESS_PTY_WRAPPER`, whatever the command publishes. These checks
+  now run before the "no egress intent" exit, so a read such as
+  `REPO_AEGIS_EGRESS_HUMAN=1 gh pr view` is refused too. A person present does not
+  lift them.
+- **A10** — with no person present, `gh auth` with anything but a plain `status`,
+  `gh config set|clear-cache`, `gh alias set|import|delete` and
+  `gh extension install|upgrade|exec` are `GH_AUTH_NEEDS_HUMAN`. `gh auth token`
+  alone (no network call) used to pass the hook.
+- **N9** — with no person present, `taaad env|agent|credential-helper|mint`,
+  `security find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain`
+  and a `python*` / `node` / `perl` / `ruby` / `osascript` `-c` / `-e` text that
+  mentions `keyring` or `SecItemCopyMatching` are `TOKEN_MINT_NEEDS_HUMAN`. Speed
+  bumps, not proofs; the keychain ACLs are the control.
+- **N8** — a recognised `dot gh` write whose literal owner has an identity mapped
+  in the registry is `DOT_GH_OWNER_MAPPED` (re-issue the same arguments to plain
+  `gh`), decided before `DOT_GH_WRITE_NEEDS_BOT`. Unmapped owners are unchanged.
+- `refusal` codes are documented in `doc/agent-guide.md`; the shape rules in
+  `doc/design/egress-guard.md`.
+
 ### Added — registry schema version 3: GitHub identities per owner (phase 2 of `doc/plan-owner-identity.md`)
 
 No egress behaviour changes: nothing chooses or injects a token from the new
