@@ -41,6 +41,8 @@ export type HumanOnlyKind =
   | "identity-change"
   // The managed drop-in (doc/plan-pin-enforcement-binary.md P7): removing it, or writing its directory as root.
   | "claude-md-uninstall"
+  // The internal entry points `repo-aegis gh` and `repo-aegis git-credential` (doc/plan-owner-identity.md §13.3).
+  | "internal-entry"
   | "managed-settings-write";
 
 export interface HumanOnlyHit {
@@ -306,7 +308,28 @@ function followingWords(words: readonly string[], from: number): string[] {
   return out;
 }
 
+/**
+ * `repo-aegis gh …` and `repo-aegis git-credential …` are internal entry points: the `gh` shim and git reach them,
+ * and an agent calling them directly would choose the identity and token source itself. True when the first
+ * subcommand word (after global flags and their values) is one of them.
+ */
+function isInternalEntry(win: readonly string[]): boolean {
+  let prev = "";
+  for (const w of win) {
+    if (w.startsWith("-")) {
+      prev = w;
+      continue;
+    }
+    if (w === "gh" || w === "git-credential") return true;
+    // a value of the flag before it (`--home /x gh`); anything else is the real subcommand, and it is not one of ours
+    if (!(prev.startsWith("-") && !prev.includes("="))) return false;
+    prev = w;
+  }
+  return false;
+}
+
 function classify(win: readonly string[]): HumanOnlyKind | null {
+  if (isInternalEntry(win)) return "internal-entry";
   // `approve --revoke <id|all>` only removes approvals: it tightens, so an agent may run it (and revoke
   // never mints). `--list` stays refused: its output names org scopes, which can be customer names.
   const revokeOnly = win.includes("--revoke") && !win.includes("--list");
@@ -460,6 +483,13 @@ const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string; w
     why:
       "This command removes the root-owned managed-settings drop-in that keeps repo-aegis's hooks out of an agent's reach, so an " +
       "agent that ran it would be taking the protection off itself, with or without a terminal attached",
+  },
+  "internal-entry": {
+    what: "repo-aegis gh or repo-aegis git-credential",
+    fix: "gh <the same arguments> (the gh shim reaches repo-aegis itself); git push and fetch reach the credential helper themselves",
+    why:
+      "These are internal entry points that the gh shim and git call, and an agent that called them directly would choose the " +
+      "identity and token source itself instead of going through the checked path",
   },
   "managed-settings-write": {
     what: "sudo on a command line that names the Claude Code managed-settings directory (reading it needs no sudo)",

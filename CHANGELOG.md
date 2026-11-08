@@ -82,6 +82,14 @@ through the hook: with no person present they are now refused.
   - The write hook refuses an agent's Edit or Write to gh's `config.yml` and
     `hosts.yml` in `$GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh` and `~/.config/gh`
     (`GH_CONFIG_WRITE_REFUSED`).
+- **Internal entry points and credential-helper reads** (stricter for agents):
+  `repo-aegis gh …` and `repo-aegis git-credential …`, in any program-word form
+  (`repo-aegis`, `npx repo-aegis`, `node …/dist/index.js`, a pinned path, behind
+  `env`/`sudo`/`sh -c`/an alias), are `AGENT_RAN_HUMAN_COMMAND`: the `gh` shim and
+  git reach them, not an agent. (The shim's own `exec` is not Bash text the hook
+  sees, so it is unaffected.) `git credential fill|approve|reject` and the helper
+  `get` forms are `TOKEN_MINT_NEEDS_HUMAN` with no person present wherever they sit
+  on the line, whatever else it runs.
 - `refusal` codes are documented in `doc/agent-guide.md`; the shape rules in
   `doc/design/egress-guard.md`.
 
