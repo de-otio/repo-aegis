@@ -12,6 +12,7 @@ import { refusal, type RefusalFix } from "./refusal.js";
 import {
   analyseApiEndpoint,
   isGhBuiltinGroup,
+  isGraphqlEndpoint,
   parseRepoRef,
   scanGhCommand,
 } from "./egress-intent.js";
@@ -53,14 +54,6 @@ export interface GhCallTarget {
 
 const BARE_NAME = /^[A-Za-z0-9_.-]+$/;
 
-/** `owner/repo` (or a URL, or `HOST/owner/repo`), or a bare owner as `intentRepoTargets` accepts it; null otherwise. */
-function parseTarget(ref: string): { owner: string; repo: string | null } | null {
-  const parsed = parseRepoRef(ref);
-  if (parsed !== null) return { owner: parsed.org, repo: parsed.repo };
-  if (BARE_NAME.test(ref) && ref !== "." && ref !== "..") return { owner: ref.toLowerCase(), repo: null };
-  return null;
-}
-
 /** The value of the last occurrence of any of `names` (pflag: the last occurrence of a string flag wins). */
 function lastFlagValue(flags: readonly { flag: string; value: string | undefined }[], ...names: string[]): string | undefined {
   let out: string | undefined;
@@ -69,26 +62,94 @@ function lastFlagValue(flags: readonly { flag: string; value: string | undefined
 }
 
 const HAS_URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+const GITHUB_HOSTS: ReadonlySet<string> = new Set(["github.com", "www.github.com"]);
+const NAME_SEG = /^[A-Za-z0-9_.-]+$/;
 
 /**
- * The owners a gh argv names, for reads as well as writes. In gh's own precedence: `--repo`/`-R` (or a
- * github.com URL argument, a `repos/<o>/<r>/…` or `orgs/<o>/…` api endpoint, `--org`/`-o` of the commands that
- * take one, `repo view <o>/<r>`-style positionals) are literal; with none of those GH_REPO (source
- * `gh-repo-env`); with neither the cwd's remote (source `cwd`), resolved by the caller the way rule h does.
- *
- * A literal that cannot be read (`--repo '$X'`, an opaque api endpoint, an unparsable GH_REPO) yields NO
- * target for its source and no fallback to a lower source: the egress rules refuse such a write, and a read
- * must not be sent as another owner's identity. Aliases are not expanded: an alias is not a built-in group,
- * which `chooseIdentity` refuses when it would inject. Owners are lowercased. Pure; never throws.
+ * The host a repository reference names, lowercased: a URL's hostname, an scp-style `user@host:path`'s host, the
+ * first segment of `HOST/owner/repo`. Null when the reference names no host (`owner/repo`, a bare owner). `"?"`
+ * for a URL that cannot be read, which is foreign by construction.
  */
-export function ghCallTargets(
+function refHost(ref: string): string | null {
+  const t = ref.trim();
+  if (HAS_URL_SCHEME.test(t)) {
+    try {
+      const h = new URL(t).hostname.toLowerCase();
+      return h === "" ? "?" : h;
+    } catch {
+      return "?";
+    }
+  }
+  const scp = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(t);
+  if (scp !== null) return scp[1]!.toLowerCase();
+  const parts = t.split("/").filter(Boolean);
+  return parts.length === 3 ? parts[0]!.toLowerCase() : null;
+}
+
+/** The owner segment of a reference on another host, for judging whether it is one of ours; null when unreadable. */
+function foreignOwnerOf(ref: string): string | null {
+  const t = ref.trim();
+  let parts: string[];
+  if (HAS_URL_SCHEME.test(t)) {
+    try {
+      parts = new URL(t).pathname.split("/").filter(Boolean);
+    } catch {
+      return null;
+    }
+  } else {
+    const scp = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(t);
+    parts = scp !== null ? scp[2]!.split("/").filter(Boolean) : t.split("/").filter(Boolean).slice(1);
+  }
+  const o = parts[0];
+  return o !== undefined && NAME_SEG.test(o) ? o.toLowerCase() : null;
+}
+
+/** `owner/repo` (or a github.com URL), or a bare owner as `intentRepoTargets` accepts it; null otherwise. */
+function parseTarget(ref: string): { owner: string; repo: string | null } | null {
+  const parsed = parseRepoRef(ref);
+  if (parsed !== null) return { owner: parsed.org, repo: parsed.repo };
+  if (BARE_NAME.test(ref) && ref !== "." && ref !== "..") return { owner: ref.toLowerCase(), repo: null };
+  return null;
+}
+
+/** The value of the last `--name value` / `--name=value` in the raw argv, before `--` (for flags the parser's table lacks). */
+function rawLongFlag(args: readonly string[], name: string): string | undefined {
+  let out: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") break;
+    if (a === name && args[i + 1] !== undefined) out = args[i + 1];
+    else if (a.startsWith(`${name}=`)) out = a.slice(name.length + 1);
+  }
+  return out;
+}
+
+export interface GhCallInfo {
+  targets: GhCallTarget[];
+  /** Some reference (URL, `HOST/o/r`, scp-style, `api --hostname`, GH_REPO) names a host other than github.com / www.github.com. */
+  foreignHost: boolean;
+  /** The owners such foreign references name (lowercased), so the caller can tell whether one of OUR owners is involved. */
+  foreignOwners: string[];
+}
+
+// Groups whose commands name no owner: with no literal there is no base repository to fall back to (M2).
+const OWNERLESS_GROUPS: ReadonlySet<string> = new Set([
+  "gist", "ssh-key", "gpg-key", "org", "status", "auth", "codespace", "extension", "alias", "config",
+]);
+
+/**
+ * {@link ghCallTargets}, plus whether the call names a host other than github.com. Pure; never throws.
+ */
+export function ghCallInfo(
   args: readonly string[],
-  ctx: { ghRepoEnv?: string; cwdRemoteOwnerRepo?: { owner: string; repo: string } },
-): GhCallTarget[] {
+  ctx: { ghRepoEnv?: string; cwdRemoteOwnerRepo?: { owner: string; repo: string }; isWrite?: boolean },
+): GhCallInfo {
+  const out: GhCallTarget[] = [];
+  const foreignOwners: string[] = [];
+  let foreignHost = false;
   try {
     const scan = scanGhCommand(args);
-    if (scan === null) return [];
-    const out: GhCallTarget[] = [];
+    if (scan === null) return { targets: [], foreignHost, foreignOwners };
     const seen = new Set<string>();
     const add = (t: { owner: string; repo: string | null }, source: GhCallTarget["source"]): void => {
       const owner = t.owner.toLowerCase();
@@ -98,11 +159,22 @@ export function ghCallTargets(
       seen.add(key);
       out.push({ owner, repo, source });
     };
+    /** Take a reference: a foreign host yields no target and sets the flag. True when the reference was a foreign one. */
+    const takeRef = (ref: string, source: GhCallTarget["source"]): void => {
+      const host = refHost(ref);
+      if (host !== null && !GITHUB_HOSTS.has(host)) {
+        foreignHost = true;
+        const o = foreignOwnerOf(ref);
+        if (o !== null) foreignOwners.push(o);
+        return;
+      }
+      const t = parseTarget(ref);
+      if (t !== null) add(t, source);
+    };
     let literal = false;
     const literalRef = (ref: string): void => {
       literal = true;
-      const t = parseTarget(ref);
-      if (t !== null) add(t, "literal");
+      takeRef(ref, "literal");
     };
 
     const repoFlag = lastFlagValue(scan.flags, "--repo", "-R");
@@ -110,39 +182,71 @@ export function ghCallTargets(
 
     const key = `${scan.group} ${scan.sub ?? ""}`;
     let baseForPlaceholder = false;
+    let ownerless = OWNERLESS_GROUPS.has(scan.group);
     if (scan.group === "api") {
+      const host = lastFlagValue(scan.flags, "--hostname");
+      if (scan.flags.some(f => f.flag === "--hostname") && (host === undefined || !GITHUB_HOSTS.has(host.toLowerCase()))) foreignHost = true;
       const endpoint = scan.positionals[0];
       if (endpoint !== undefined) {
-        const t = analyseApiEndpoint(endpoint);
-        if (t.kind === "named") {
+        const eh = HAS_URL_SCHEME.test(endpoint) ? refHost(endpoint) : null;
+        if (eh !== null && !/^(?:api\.|uploads\.)?github\.com$/.test(eh) && eh !== "www.github.com") {
+          foreignHost = true;
           literal = true;
-          add({ owner: t.org, repo: t.repo }, "literal");
-        } else if (t.kind === "opaque") {
-          literal = true;
-        } else if (t.kind === "cwd") {
-          baseForPlaceholder = true;
+          try {
+            const parts = new URL(endpoint).pathname.replace(/^\/api\/v3\//i, "/").split("/").filter(Boolean);
+            const o = parts[0]?.toLowerCase() === "repos" || parts[0]?.toLowerCase() === "orgs" ? parts[1] : undefined;
+            if (o !== undefined && NAME_SEG.test(o)) foreignOwners.push(o.toLowerCase());
+          } catch {
+            /* unreadable: still foreign */
+          }
+        } else {
+          const t = analyseApiEndpoint(endpoint);
+          if (t.kind === "named") {
+            literal = true;
+            add({ owner: t.org, repo: t.repo }, "literal");
+          } else if (t.kind === "opaque") {
+            literal = true;
+          } else if (t.kind === "cwd") {
+            baseForPlaceholder = repoFlag === undefined; // L1: an explicit --repo replaces the base
+          } else if (isGraphqlEndpoint(endpoint)) {
+            // The egress parser classifies the operation: only a graphql WRITE keeps the base (an agent write
+            // with only a cwd base is then refused); a graphql read names no owner, so no base, no injection.
+            ownerless = ctx.isWrite !== true;
+          } else {
+            ownerless = true; // user/*, notifications, search/*, gists, …: no owner, no base (M2)
+          }
         }
       }
     } else {
       for (const p of scan.positionals) {
         if (HAS_URL_SCHEME.test(p)) {
-          const t = parseRepoRef(p);
-          if (t !== null) {
-            literal = true;
-            add({ owner: t.org, repo: t.repo }, "literal");
-          }
+          literal = true;
+          takeRef(p, "literal");
         }
       }
       // `gh repo view|clone|edit|… <owner>/<repo>`, and the destination of `gh issue transfer <n> <owner>/<repo>`.
       const refIdx = scan.group === "repo" ? 0 : key === "issue transfer" ? 1 : -1;
       const ref = refIdx >= 0 ? scan.positionals[refIdx] : undefined;
       if (ref !== undefined && !HAS_URL_SCHEME.test(ref)) {
-        const t = parseRepoRef(ref);
-        if (t !== null) {
+        if (key === "repo list") {
+          literal = true; // `gh repo list <owner>`: an owner-only target
+          takeRef(ref, "literal");
+        } else if (refHost(ref) !== null || parseRepoRef(ref) !== null) {
           literal = true;
-          add({ owner: t.org, repo: t.repo }, "literal");
+          takeRef(ref, "literal");
         }
       }
+      if (scan.group === "search") {
+        const owner = rawLongFlag(args, "--owner");
+        if (owner !== undefined) {
+          literal = true;
+          const t = parseTarget(owner);
+          if (t !== null) add({ owner: t.owner, repo: null }, "literal");
+        } else if (repoFlag === undefined) {
+          ownerless = true;
+        }
+      }
+      if (key === "repo list" && ref === undefined) ownerless = true; // the authenticated account's own repositories
       if (key === "secret set" || key === "secret delete" || key === "variable set" || key === "variable delete" || key === "repo fork") {
         const org = lastFlagValue(scan.flags, "--org", ...(scan.group === "repo" ? [] : ["-o"]));
         if (org !== undefined) {
@@ -159,19 +263,35 @@ export function ghCallTargets(
 
     // Targets that are in ADDITION to the base repository, so the base is judged too.
     const keepsBase = (key === "issue transfer" || key === "issue develop") && repoFlag === undefined;
-    const needsBase = !literal || baseForPlaceholder || keepsBase;
+    const needsBase = (!literal && !ownerless) || baseForPlaceholder || keepsBase;
     if (needsBase) {
-      if (ctx.ghRepoEnv !== undefined && ctx.ghRepoEnv !== "") {
-        const t = parseTarget(ctx.ghRepoEnv);
-        if (t !== null) add(t, "gh-repo-env");
-      } else if (ctx.cwdRemoteOwnerRepo !== undefined) {
+      if (ctx.ghRepoEnv !== undefined && ctx.ghRepoEnv !== "") takeRef(ctx.ghRepoEnv, "gh-repo-env");
+      else if (ctx.cwdRemoteOwnerRepo !== undefined) {
         add({ owner: ctx.cwdRemoteOwnerRepo.owner, repo: ctx.cwdRemoteOwnerRepo.repo }, "cwd");
       }
     }
-    return out;
+    return { targets: out, foreignHost, foreignOwners };
   } catch {
-    return [];
+    return { targets: [], foreignHost: false, foreignOwners: [] };
   }
+}
+
+/**
+ * The owners a gh argv names, for reads as well as writes. In gh's own precedence: `--repo`/`-R` (or a github.com
+ * URL argument, a `repos/<o>/<r>/…` or `orgs/<o>/…` api endpoint, `--org`/`-o` of the commands that take one,
+ * `repo view <o>/<r>`-style positionals, `repo list <owner>`, `search … --owner <o>`) are literal; with none of
+ * those GH_REPO (source `gh-repo-env`); with neither the cwd's remote (source `cwd`), resolved by the caller the
+ * way rule h does. Commands that name no owner (`api user`, `gist`, `auth`, a bare `search`, …) get no base.
+ *
+ * A reference on another host (anything but github.com / www.github.com) yields NO target; see
+ * {@link ghCallInfo} for the flag. A literal that cannot be read yields no target and no fallback to a lower
+ * source. `ctx.isWrite` (the egress parser's verdict) decides graphql: a write keeps the base, a read gets none. Aliases are not expanded. Owners are lowercased. Pure; never throws.
+ */
+export function ghCallTargets(
+  args: readonly string[],
+  ctx: { ghRepoEnv?: string; cwdRemoteOwnerRepo?: { owner: string; repo: string }; isWrite?: boolean },
+): GhCallTarget[] {
+  return ghCallInfo(args, ctx).targets;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +304,7 @@ export type IdentityRefusalCode =
   | "GH_IDENTITY_PRESENCE_UNKNOWN"
   | "GH_IDENTITY_NEEDS_LITERAL_TARGET"
   | "GH_IDENTITY_SEVERAL_OWNERS"
+  | "GH_IDENTITY_SEVERAL_REPOS"
   | "GH_IDENTITY_UNMAPPED_OWNER"
   | "GH_IDENTITY_WRITE_NEEDS_HUMAN"
   | "GH_IDENTITY_TOKEN_SUPPLIED"
@@ -215,6 +336,8 @@ export interface ChooseIdentityInput {
   suppliedToken: boolean; // GH_TOKEN or GITHUB_TOKEN set in the caller's environment
   redirect: string | null; // the name of a D9 variable or `http_unix_socket`, if present
   registeredOwner: (owner: string) => boolean;
+  /** The caller resolved a host other than github.com that `args` do not show (e.g. a GH_REPO of `HOST/o/r`; see `ghCallInfo`). */
+  foreignHost?: boolean;
 }
 
 const TERMINAL_FIX: RefusalFix = { by: "person" };
@@ -244,6 +367,8 @@ function authVerbRefusal(args: readonly string[]): IdentityChoice | null {
   const scan = scanGhCommand(args);
   if (scan === null) return null;
   const { group, sub } = scan;
+  // `--help` prints usage and runs nothing.
+  if (scan.flags.some(f => f.flag === "--help" && (f.value === undefined || f.value === "true"))) return null;
   let hit = false;
   if (group === "auth") {
     if (sub !== undefined) {
@@ -262,11 +387,16 @@ function authVerbRefusal(args: readonly string[]): IdentityChoice | null {
   );
 }
 
+/** A first word that is not a gh built-in group: an alias or an extension, which can expand to anything (L6). */
+function nonBuiltinFirstWord(args: readonly string[]): boolean {
+  const scan = scanGhCommand(args);
+  return scan !== null && !isGhBuiltinGroup(scan.group);
+}
+
 /** A2 (rule 8): arguments that could redirect an injected token. Null when none. */
 function unsafeArg(args: readonly string[]): boolean {
   const scan = scanGhCommand(args);
   if (scan === null) return false;
-  if (!isGhBuiltinGroup(scan.group)) return true;
   if (scan.flags.some(f => f.flag === "--editor" || f.flag === "-e" || f.flag === "--web" || f.flag === "-w")) return true;
   if (scan.group === "api") {
     if (scan.flags.some(f => f.flag === "--hostname")) return true;
@@ -281,12 +411,35 @@ function entryOf(registry: Registry, owner: string): OwnerIdentities | undefined
   return e !== undefined && (e.person !== undefined || e.agent !== undefined) ? e : undefined;
 }
 
+function unsafeArgRefusal(dest: { owner: string; repo: string | null } | undefined): IdentityChoice {
+  return refuse(
+    "GH_IDENTITY_ARG_UNSAFE",
+    "this gh call",
+    "its arguments (an editor or browser option, another host or a full-URL endpoint, or a command that is not a built-in gh group) could hand a token to another program or host",
+    NO_APPROVAL,
+    [{ by: "agent", command: "the same call on github.com only, without --editor/-e, --web/-w or --hostname, using a built-in gh command" }],
+    dest,
+  );
+}
+
 function choose(input: ChooseIdentityInput): IdentityChoice {
   const { args, isWrite, targets, registry, presence } = input;
   // 1. A10.
   if (presence !== "person") {
     const r = authVerbRefusal(args);
     if (r !== null) return r;
+  }
+  // L6: for an agent, an alias or extension may expand to `auth token`, so it is judged even with no target.
+  if (presence === "agent" && nonBuiltinFirstWord(args)) return unsafeArgRefusal(undefined);
+  // M1: a reference on another host. A token for github.com must not be chosen for it, whichever column.
+  const info = ghCallInfo(args, {});
+  if (info.foreignHost || input.foreignHost === true) {
+    const anyMapped = (registry.identityMap?.size ?? 0) > 0;
+    const touchesMapped =
+      targets.some(t => entryOf(registry, t.owner.toLowerCase()) !== undefined) ||
+      info.foreignOwners.some(o => entryOf(registry, o) !== undefined) ||
+      (input.foreignHost === true && anyMapped);
+    if (touchesMapped) return unsafeArgRefusal(undefined);
   }
   // 2. No target.
   if (targets.length === 0) return { kind: "none" };
@@ -304,8 +457,8 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
   }
   const owner = owners[0]!;
   const mine = targets.filter(t => t.owner.toLowerCase() === owner);
-  const repos = new Set(mine.map(t => t.repo));
-  const repo = repos.size === 1 ? [...repos][0]! : null;
+  const repos = new Set(mine.map(t => (t.repo === null ? null : t.repo.toLowerCase())));
+  const repo = repos.size === 1 ? mine[0]!.repo : null;
   const dest = { owner, repo };
   const entry = entryOf(registry, owner);
 
@@ -327,6 +480,17 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
     return { kind: "none" };
   }
 
+  // L3: a write that names several repositories of one mapped owner has no single repository to mint for.
+  if (isWrite && repos.size > 1) {
+    return refuse(
+      "GH_IDENTITY_SEVERAL_REPOS",
+      "a gh write",
+      "it names several repositories of one owner, and a token is chosen for exactly one repository",
+      NO_APPROVAL,
+      [{ by: "agent", command: "one gh call per repository, each naming it with --repo <owner>/<repo>" }],
+      { owner, repo: null },
+    );
+  }
   // 5. Presence unknown.
   if (presence === "unknown") {
     return refuse(
@@ -361,16 +525,7 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
     );
   }
   // 8. A2 arguments: only the agent column gets a token the agent must not see through an editor, pager or browser.
-  if (presence === "agent" && unsafeArg(args)) {
-    return refuse(
-      "GH_IDENTITY_ARG_UNSAFE",
-      "this gh call",
-      "its arguments (an editor or browser option, an api host or full-URL endpoint, or a command that is not a built-in gh group) could hand the injected token to another program or host",
-      NO_APPROVAL,
-      [{ by: "agent", command: "the same call without --editor/-e, --web/-w, --hostname or a full-URL endpoint, using a built-in gh command" }],
-      dest,
-    );
-  }
+  if (presence === "agent" && unsafeArg(args)) return unsafeArgRefusal(dest);
 
   const scope: IdentityScope = isWrite ? "write" : "read";
   // 9. A person is present.
@@ -383,6 +538,16 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
   // Presence is `agent` from here.
   // 10. An agent identity exists.
   if (entry.agent !== undefined) {
+    if (entry.agent.kind !== "github-app") {
+      return refuse(
+        "GH_IDENTITY_UNAVAILABLE",
+        "this gh call",
+        "the registry's agent identity for this owner is not a GitHub App, so no narrowed token can be minted for it",
+        NO_APPROVAL,
+        [{ by: "person", step: "checks the registry with `repo-aegis status`" }],
+        dest,
+      );
+    }
     if (isWrite && mine.some(t => t.source === "cwd")) {
       return refuse(
         "GH_IDENTITY_NEEDS_LITERAL_TARGET",

@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   chooseIdentity,
+  ghCallInfo,
   ghCallTargets,
   identityPresence,
   type ChooseIdentityInput,
@@ -126,8 +127,43 @@ describe("ghCallTargets", () => {
     ]);
     assert.deepEqual(T(["api", "repos/{owner}/{repo}/issues"], { ghRepoEnv: "e/f" }), [{ owner: "e", repo: "f", source: "gh-repo-env" }]);
   });
-  it("gh api with an endpoint that names no repository falls back to the base", () => {
-    assert.deepEqual(T(["api", "user"], { cwdRemoteOwnerRepo: { owner: "c", repo: "d" } }), [{ owner: "c", repo: "d", source: "cwd" }]);
+  it("M2: gh api endpoints that name no owner get no base", () => {
+    const ctx = { cwdRemoteOwnerRepo: { owner: "c", repo: "d" }, ghRepoEnv: "e/f" };
+    for (const ep of ["user", "user/repos", "notifications", "search/issues?q=x", "gists", "rate_limit"]) {
+      assert.deepEqual(T(["api", ep], ctx), [], ep);
+    }
+  });
+  it("graphql: a write keeps the base, a read (or unknown) gets none", () => {
+    const base = { cwdRemoteOwnerRepo: { owner: "c", repo: "d" } };
+    assert.deepEqual(T(["api", "graphql", "-f", "query=x"], { ...base, isWrite: true }), [{ owner: "c", repo: "d", source: "cwd" }]);
+    assert.deepEqual(T(["api", "graphql", "-f", "query=x"], { ...base, ghRepoEnv: "e/f", isWrite: true }), [{ owner: "e", repo: "f", source: "gh-repo-env" }]);
+    assert.deepEqual(T(["api", "graphql", "-f", "query=x"], { ...base, isWrite: false }), []);
+    assert.deepEqual(T(["api", "graphql", "-f", "query=x"], base), []);
+  });
+  it("graphql write with only a cwd base is refused for an agent with an agent identity; a read is not injected", () => {
+    const args = ["api", "graphql", "-f", "query=x"];
+    const base = { cwdRemoteOwnerRepo: { owner: "both-org", repo: "r" } };
+    const w = chooseIdentity(input({ args, presence: "agent", isWrite: true, targets: ghCallTargets(args, { ...base, isWrite: true }) }));
+    assert.equal(refused(w), "GH_IDENTITY_NEEDS_LITERAL_TARGET");
+    const r = chooseIdentity(input({ args, presence: "agent", isWrite: false, targets: ghCallTargets(args, { ...base, isWrite: false }) }));
+    assert.deepEqual(r, { kind: "none" });
+  });
+  it("M2: owner-less groups get no base", () => {
+    const ctx = { cwdRemoteOwnerRepo: { owner: "c", repo: "d" }, ghRepoEnv: "e/f" };
+    for (const a of [["gist", "list"], ["ssh-key", "list"], ["gpg-key", "list"], ["org", "list"], ["status"], ["auth", "status"], ["codespace", "list"], ["extension", "list"], ["alias", "list"], ["config", "get", "x"], ["search", "repos", "foo"], ["repo", "list"]]) {
+      assert.deepEqual(T(a, ctx), [], a.join(" "));
+    }
+  });
+  it("M2: gh repo list <owner> and gh search --owner <o> are owner-only literals", () => {
+    const ctx = { cwdRemoteOwnerRepo: { owner: "c", repo: "d" } };
+    assert.deepEqual(T(["repo", "list", "O"], ctx), [{ owner: "o", repo: null, source: "literal" }]);
+    assert.deepEqual(T(["search", "repos", "foo", "--owner", "O"], ctx), [{ owner: "o", repo: null, source: "literal" }]);
+    assert.deepEqual(T(["search", "repos", "foo", "--owner=O"], ctx), [{ owner: "o", repo: null, source: "literal" }]);
+    assert.deepEqual(T(["search", "issues", "foo", "--repo", "o/r"], ctx), [{ owner: "o", repo: "r", source: "literal" }]);
+  });
+  it("L1: {owner}/{repo} placeholders use the base only when no --repo was given", () => {
+    const ctx = { cwdRemoteOwnerRepo: { owner: "c", repo: "d" } };
+    assert.deepEqual(T(["api", "repos/{owner}/{repo}/issues", "-R", "o/r"], ctx), [{ owner: "o", repo: "r", source: "literal" }]);
   });
   it("an opaque api endpoint yields no target and no fallback", () => {
     assert.deepEqual(T(["api", "repos/$X/r/issues"], { cwdRemoteOwnerRepo: { owner: "c", repo: "d" } }), []);
@@ -181,6 +217,42 @@ describe("ghCallTargets", () => {
   });
   it("duplicates collapse", () => {
     assert.deepEqual(T(["pr", "view", "https://github.com/a/x/pull/1", "https://github.com/A/X/pull/2"]).length, 1);
+  });
+  it("M1: a reference on another host yields no target and sets the foreign flag", () => {
+    const ctx = { cwdRemoteOwnerRepo: { owner: "c", repo: "d" } };
+    const FOREIGN: string[][] = [
+      ["issue", "list", "--repo", "evil.example.com/mapped/r"],
+      ["pr", "view", "https://evil.example.com/mapped/r/pull/1"],
+      ["repo", "view", "git@evil.example.com:mapped/r"],
+      ["issue", "list", "--repo", "tenant.ghe.com/mapped/r"],
+      ["issue", "list", "--repo", "localhost/mapped/r"],
+      ["issue", "list", "--repo", "EVIL.example.com/mapped/r"],
+      ["issue", "list", "-R", "ssh://git@evil.example.com/mapped/r"],
+      ["pr", "view", "https://github.com@evil.example.com/mapped/r/pull/1"],
+      ["pr", "view", "https://github.com.evil.example.com/mapped/r/pull/1"],
+      ["api", "https://evil.example.com/repos/mapped/r/issues"],
+    ];
+    for (const a of FOREIGN) {
+      const info = ghCallInfo(a, ctx);
+      assert.deepEqual(info.targets, [], a.join(" "));
+      assert.equal(info.foreignHost, true, a.join(" "));
+    }
+    const h = ghCallInfo(["api", "--hostname", "evil.example.com", "repos/mapped/r/issues"], ctx);
+    assert.equal(h.foreignHost, true, "--hostname with a foreign host sets the flag");
+    assert.ok(ghCallInfo(["issue", "list", "--repo", "evil.example.com/mapped/r"], ctx).foreignOwners.includes("mapped"));
+    assert.ok(ghCallInfo(["pr", "view", "https://evil.example.com/mapped/r/pull/1"], ctx).foreignOwners.includes("mapped"));
+    assert.ok(ghCallInfo(["issue", "list", "--repo", "localhost/mapped/r"], ctx).foreignOwners.includes("mapped"));
+    assert.ok(ghCallInfo(["repo", "view", "git@evil.example.com:mapped/r"], ctx).foreignOwners.includes("mapped"));
+  });
+  it("M1: github.com and www.github.com are not foreign (any case); GH_REPO with a foreign host is", () => {
+    for (const a of [["issue", "list", "--repo", "github.com/o/r"], ["issue", "list", "--repo", "WWW.GitHub.com/o/r"], ["pr", "view", "https://github.com/o/r/pull/1"], ["repo", "view", "git@github.com:o/r"]]) {
+      const info = ghCallInfo(a, {});
+      assert.equal(info.foreignHost, false, a.join(" "));
+      assert.deepEqual(info.targets, [{ owner: "o", repo: "r", source: "literal" }], a.join(" "));
+    }
+    const env = ghCallInfo(["issue", "list"], { ghRepoEnv: "evil.example.com/o/r" });
+    assert.equal(env.foreignHost, true);
+    assert.deepEqual(env.targets, []);
   });
   it("never throws on odd input", () => {
     for (const args of [[""], ["--"], ["-"], ["--repo"], ["-R"], ["api"], ["api", ""], ["\u0000", "‮"]]) {
@@ -397,9 +469,6 @@ describe("rule 8 (A2): unsafe arguments", () => {
     ["pr", "create", "-we"],
     ["issue", "create", "--web"],
     ["issue", "create", "-w"],
-    ["api", "--hostname", "example.com", "repos/both-org/r"],
-    ["api", "--hostname=example.com", "repos/both-org/r"],
-    ["api", "https://example.com/repos/both-org/r"],
     ["api", "https://api.github.com/repos/both-org/r"],
     ["co", "5"],
     ["--repo", "both-org/r", "co", "5"],
@@ -412,11 +481,27 @@ describe("rule 8 (A2): unsafe arguments", () => {
     ["issue", "create", "--title", "w", "--body", "e", "--repo", "both-org/r"],
     ["issue", "create", "--repo", "both-org/r", "--", "-w"],
   ];
+  const FOREIGN: string[][] = [
+    ["api", "--hostname", "example.com", "repos/both-org/r"],
+    ["api", "--hostname=example.com", "repos/both-org/r"],
+    ["api", "https://example.com/repos/both-org/r"],
+  ];
+  for (const args of FOREIGN) {
+    for (const presence of ["person", "agent"] as const) {
+      it(`M1: ${presence}: gh ${args.join(" ")} is refused (a github.com token must not go to another host)`, () => {
+        assert.equal(refused(chooseIdentity(input({ presence, args }))), "GH_IDENTITY_ARG_UNSAFE");
+      });
+    }
+  }
   for (const args of BAD) {
     it(`agent: gh ${args.join(" ")} is refused`, () => assert.equal(refused(chooseIdentity(input({ presence: "agent", args }))), "GH_IDENTITY_ARG_UNSAFE"));
     it(`person: gh ${args.join(" ")} is injected, not refused`, () => {
       const c = chooseIdentity(input({ presence: "person", args }));
       assert.ok(c.kind === "inject" && c.column === "person", JSON.stringify(c));
+    });
+    it(`agent: gh ${args.join(" ")} is refused even with no target (L6/rule 8)`, () => {
+      if (!["co", "gh-extension-thing"].includes(args.find(a => !a.startsWith("-")) ?? "")) return;
+      assert.equal(refused(chooseIdentity(input({ presence: "agent", args, targets: [] }))), "GH_IDENTITY_ARG_UNSAFE");
     });
   }
   for (const presence of ["person", "agent"] as const) {
@@ -481,9 +566,15 @@ describe("rule 10: agent presence with an agent identity", () => {
   });
   it("a write with a literal and a cwd target of the owner is refused too", () => {
     assert.equal(
-      refused(chooseIdentity(input({ presence: "agent", isWrite: true, targets: [lit("both-org", "a"), cwdT("both-org", "b")] }))),
+      refused(chooseIdentity(input({ presence: "agent", isWrite: true, targets: [lit("both-org", "a"), cwdT("both-org", "a")] }))),
       "GH_IDENTITY_NEEDS_LITERAL_TARGET",
     );
+  });
+  it("L2: an agent identity that is not a github-app is GH_IDENTITY_UNAVAILABLE, never injected", () => {
+    const registry = reg({ identityMap: new Map([["bad-org", { person: ME, agent: { name: "oops", kind: "gh-login", login: "mallory" } as Identity }]]) });
+    for (const isWrite of [true, false]) {
+      assert.equal(refused(chooseIdentity(input({ registry, presence: "agent", isWrite, targets: [lit("bad-org")] }))), "GH_IDENTITY_UNAVAILABLE");
+    }
   });
   it("a cwd READ keeps working (A3: reads keep the hint)", () => {
     const c = chooseIdentity(input({ presence: "agent", isWrite: false, targets: [cwdT("both-org")] }));
@@ -537,6 +628,76 @@ describe("rule 11: agent presence, only a person identity", () => {
   it("the reason says a '*' approval does not help and names no token", () => {
     const c = chooseIdentity(input({ presence: "agent", isWrite: true, targets: PERSON_ONLY }));
     assert.ok(c.kind === "refuse" && c.reason.includes("'*'") && c.reason.includes("GH_IDENTITY_WRITE_NEEDS_HUMAN"));
+  });
+});
+
+describe("L3: several repositories of one owner", () => {
+  const two = [lit("both-org", "a"), lit("both-org", "b")];
+  it("a write is GH_IDENTITY_SEVERAL_REPOS for every presence that gets this far, and for person-only owners", () => {
+    for (const presence of ["person", "agent"] as const) {
+      for (const owner of ["both-org", "person-org", "agent-org"]) {
+        const t = [lit(owner, "a"), lit(owner, "b")];
+        assert.equal(refused(chooseIdentity(input({ presence, isWrite: true, targets: t }))), "GH_IDENTITY_SEVERAL_REPOS");
+      }
+    }
+  });
+  it("a read keeps repo null", () => {
+    const c = chooseIdentity(input({ presence: "agent", isWrite: false, targets: two }));
+    assert.ok(c.kind === "inject" && c.repo === null);
+  });
+  it("the same repository twice is one repository", () => {
+    const c = chooseIdentity(input({ presence: "agent", isWrite: true, targets: [lit("both-org", "a"), lit("both-org", "A")] }));
+    assert.equal(c.kind, "inject");
+  });
+  it("an unmapped owner is not affected", () => {
+    assert.deepEqual(chooseIdentity(input({ isWrite: true, targets: [lit("nobody", "a"), lit("nobody", "b")] })), { kind: "none" });
+  });
+});
+
+describe("M1 and L6 at chooseIdentity", () => {
+  const FOREIGN_ARGS: string[][] = [
+    ["issue", "list", "--repo", "evil.example.com/both-org/r"],
+    ["pr", "view", "https://evil.example.com/both-org/r/pull/1"],
+    ["repo", "view", "git@evil.example.com:both-org/r"],
+    ["issue", "list", "--repo", "tenant.ghe.com/both-org/r"],
+    ["issue", "list", "--repo", "localhost/both-org/r"],
+  ];
+  for (const args of FOREIGN_ARGS) {
+    for (const presence of ["person", "agent"] as const) {
+      it(`${presence}: gh ${args.join(" ")} is GH_IDENTITY_ARG_UNSAFE even though no target was found`, () => {
+        assert.equal(refused(chooseIdentity(input({ presence, args, targets: ghCallTargets(args, {}) }))), "GH_IDENTITY_ARG_UNSAFE");
+      });
+    }
+  }
+  it("a foreign host naming only unmapped owners is passed through", () => {
+    assert.deepEqual(chooseIdentity(input({ args: ["issue", "list", "--repo", "evil.example.com/nobody/r"], targets: [] })), { kind: "none" });
+  });
+  it("a foreign reference next to a mapped target refuses", () => {
+    const args = ["pr", "view", "https://evil.example.com/nobody/r/pull/1", "--repo", "both-org/r"];
+    assert.equal(refused(chooseIdentity(input({ args, targets: ghCallTargets(args, {}) }))), "GH_IDENTITY_ARG_UNSAFE");
+  });
+  it("the caller's foreignHost (GH_REPO with a host) refuses when the registry maps any owner", () => {
+    assert.equal(refused(chooseIdentity(input({ foreignHost: true, targets: [] }))), "GH_IDENTITY_ARG_UNSAFE");
+    assert.deepEqual(chooseIdentity(input({ foreignHost: true, targets: [], registry: { engagements: [], alwaysBlock: [] } })), { kind: "none" });
+  });
+  it("L6: an agent's alias/extension first word is refused with no target; a person's is not", () => {
+    for (const args of [["co", "5"], ["my-extension"], ["--repo", "o/r", "co"]]) {
+      assert.equal(refused(chooseIdentity(input({ presence: "agent", args, targets: [] }))), "GH_IDENTITY_ARG_UNSAFE");
+      assert.deepEqual(chooseIdentity(input({ presence: "person", args, targets: [] })), { kind: "none" });
+      assert.deepEqual(chooseIdentity(input({ presence: "unknown", args, targets: [] })), { kind: "none" });
+    }
+  });
+  it("L6 comes after rule 1", () => {
+    assert.equal(refused(chooseIdentity(input({ presence: "agent", args: ["auth", "token"], targets: [] }))), "GH_AUTH_NEEDS_HUMAN");
+  });
+});
+
+describe("L4: help is not a rule-1 hit", () => {
+  for (const args of [["auth"], ["auth", "--help"], ["auth", "token", "--help"], ["config", "set", "--help"], ["alias", "set", "--help"], ["extension", "install", "--help"]]) {
+    it(`gh ${args.join(" ")}`, () => assert.deepEqual(chooseIdentity(input({ presence: "agent", args, targets: [] })), { kind: "none" }));
+  }
+  it("--help does not excuse `--show-token` being a different command's word", () => {
+    assert.equal(refused(chooseIdentity(input({ presence: "agent", args: ["auth", "token"], targets: [] }))), "GH_AUTH_NEEDS_HUMAN");
   });
 });
 
