@@ -1413,6 +1413,37 @@ file carries a header line); a foreign file at the shim path is left in
 place and reported (`changed: false`, with the reason). The top-level
 `uninstall` applies the same rule.
 
+### `repo-aegis install git-credential [--uninstall]`
+
+Makes the repo-aegis credential helper the **first** helper git runs for
+`https://github.com` and sets `credential.https://github.com.useHttpPath=true`
+(so the helper sees `<owner>/<repo>`), both in the **global** git config. Needs
+a person at a terminal (`GIT_CREDENTIAL_NEEDS_TTY`), for `--uninstall` too:
+removing the helper would hand an agent's pushes to the person's own credential.
+
+The helper line is `!'<pinned node>' '<pinned cli>' git-credential --home '<pinned home>'`. "First" is checked, not assumed:
+
+- it is inserted after the last empty reset entry (`helper =`) of `credential.https://github.com.helper` in the global config, before that key's first entry when there is no reset, or appended when the key is absent;
+- the result is simulated first. If another helper would still answer first (a system-scope one such as `osxkeychain`, or a global generic one with no reset in front), the install **refuses and changes nothing**, with the command that fixes it (`git config --global --add credential.https://github.com.helper ""`, which makes git forget the helpers before it for github.com; re-add the ones you still want after the repo-aegis line);
+- afterwards the real config is read back, and a wrong order is rolled back;
+- re-running it repairs an order that `gh auth setup-git` or an upgrade broke, and replaces a line whose pin moved.
+
+`--uninstall` removes exactly what was added: the helper line (by exact value) and, when this install set it, `useHttpPath` (restoring its previous value). What was added is recorded in `<home>/state/git-credential-install.json`; with no ledger nothing is removed. After an install and an uninstall the global config is byte-identical to before (tested). The top-level `repo-aegis uninstall` runs this step; without a terminal it reports the step as failed and leaves the config alone. `doctor` reports `GIT_CREDENTIAL_HELPER_ORDER` (a failure when an owner is mapped to an agent identity and the order is wrong).
+
+### `repo-aegis git-credential --home <pinned home> <get|store|erase>`
+
+The git credential helper itself; git runs it, you do not (`install git-credential` configures it). It reads the credential protocol on stdin.
+
+- `store` and `erase`: ignored, exit 0.
+- `get` for `protocol=https`, `host=github.com` (any case, also `github.com:443`) with a path `<owner>/<repo>[.git]`:
+  - **a person present** (`identityPresence`: a terminal that is a person's): prints nothing, so the next helper answers as it would without repo-aegis;
+  - **no person present** (an agent, or no terminal): `chooseIdentity` decides from the registry in `--home` only. An unmapped owner, or an owner with only a `person` identity (agents read as the person), prints nothing. An owner with an `agent` identity gets `username=x-access-token` and `password=<token>`, minted by the pinned taaad as `mint --app <slug> --repo <owner>/<repo> --permissions <scope> --json` with an environment of exactly `HOME`, `PATH=/usr/bin:/bin`, `TERM` and `LANG`, and checked (installation account equals the owner, the repositories are exactly the one, the permissions are no wider than the scope). A URL with an embedded username still yields `x-access-token`.
+  - the scope is `contents-write` when the nearest `git` above `git-remote-https` is `push` or `send-pack`, and `read` for any other remote operation (fetch, pull, clone, ls-remote, an alias).
+- **Every refusal** prints exactly `quit=true` on stdout (git then stops asking and does not prompt), the refusal with its code on stderr, and exits 0. Falling through on a refusal would give the agent the person's credential. The refusals: no `git-remote-https` in the process chain, such as `git credential fill` run by hand (`AGENT_CREDENTIAL_DIRECT_FILL`), or an unreadable chain (`AGENT_PUSH_CHAIN_UNREADABLE`); a configuration or environment that could redirect or capture the token (`AGENT_PUSH_CREDENTIAL_CONFIG`); a second, different path in one request (`AGENT_PUSH_CREDENTIAL_PATH`); an unreadable registry, taaad failing or the App not installed on the repository (`GH_IDENTITY_UNAVAILABLE`); an installation of another account (`GH_IDENTITY_INSTALLATION_MISMATCH`); no pinned taaad (`GH_BINARY_UNTRUSTED`); and the `chooseIdentity` refusals (`GH_IDENTITY_PRESENCE_UNKNOWN`, `GH_IDENTITY_WRITE_NEEDS_HUMAN`, …).
+- The token is written to stdout only: never to stderr, the audit log (which records identity, owner, repository and scope) or any argument vector.
+
+The pre-push hook adds `AGENT_PUSH_NEEDS_APP`: with no person present, an owner mapped to an agent identity and an SSH push URL (`git@…`, `ssh://…`, or an `~/.ssh/config` alias for github.com) is refused with the HTTPS form; over HTTPS the helper order is re-checked (`GIT_CREDENTIAL_HELPER_ORDER`). The existing destination checks run first and are unchanged.
+
 ### `repo-aegis approve <org>/<repo> | <org>/* | * [--ref <ref>] [--ttl <duration>] [--note <text>]`, `approve --list`, `approve --revoke <id|all>`
 
 The human's side of rule g. Minting **requires a TTY on stderr that is a
@@ -1503,6 +1534,7 @@ now reports, unless `--no-egress-checks`:
 | `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
 | `REGISTRY_UNREADABLE` (**fail**) | the registry exists but is encrypted at rest or does not parse, so rule h refuses every non-interactive egress that has a destination | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal), or repair the file |
 | `OWNERS_UNDECLARED` (**fail**) | the registry loads but declares no owners, so rule h is inert | `repo-aegis engagements add --personal-org <login>` (a person, at a terminal) |
+| `GIT_CREDENTIAL_HELPER_ORDER` (**fail**, only when some owner is mapped to an `agent` identity) | the repo-aegis git credential helper is not installed, is from another install (a moved CLI or Node), or another helper answers first for `https://github.com` (a reset entry, a system-scope helper, `gh auth setup-git`); an agent's HTTPS push there would be authenticated as the person | a person runs `repo-aegis install git-credential` from a terminal |
 | `OWNER_IDENTITY_UNMAPPED` (warn; **fail** when `requireIdentity` is set) | a registered owner has no identity entry (no `person` and no `agent`); one finding per owner, the owner is named only in `--json` (registered owners can be customer names) | `repo-aegis identity add`, then `repo-aegis engagements set-identity` (a person, at a terminal) |
 | `GH_LOGIN_UNREGISTERED` | a logged-in `gh` account's login is not a registered owner | `--personal-org <login>` (a person, at a terminal) |
 | `GH_MEMBER_ORG_UNREGISTERED` | an organisation a logged-in `gh` account belongs to is not registered | `--personal-org` or `--github-org`, or leave it and let rule h refuse it |

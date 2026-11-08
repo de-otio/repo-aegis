@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — git credential helper and the pre-push rule (phase 4 of `doc/plan-owner-identity.md` §5.6, §13.4)
+
+- `repo-aegis git-credential --home <home> <get|store|erase>`: a git credential helper. For an agent's HTTPS push to an owner with an `agent` identity it returns `x-access-token` and a token narrowed to that repository (`contents: write` for a push, read for a fetch), minted by the pinned taaad; with a person present, an unmapped owner or a person-only owner it prints nothing and the next helper answers. Every refusal prints exactly `quit=true` with the code on stderr: a request that does not come from `git-remote-https` (`git credential fill` run by hand: `AGENT_CREDENTIAL_DIRECT_FILL`), an unreadable process chain (`AGENT_PUSH_CHAIN_UNREADABLE`), repository-local credential helpers, proxies, TLS and trace settings (`AGENT_PUSH_CREDENTIAL_CONFIG`), a second differing path (`AGENT_PUSH_CREDENTIAL_PATH`), taaad failing or the App not installed.
+- `repo-aegis install git-credential [--uninstall]` (needs a terminal): makes the helper the first one git runs for github.com in the global config, after any reset entry, refusing with instructions when a system-scope or global helper would still answer first; sets `credential.useHttpPath`. `--uninstall` removes exactly what it added (ledger in `<home>/state`); the global config is byte-identical after a round trip. `repo-aegis uninstall` runs it.
+- Pre-push: with no person present, an owner mapped to an agent identity and an SSH push URL (`git@…`, `ssh://…`, an ssh-config alias) is refused with `AGENT_PUSH_NEEDS_APP` and the HTTPS form; over HTTPS the helper order is re-checked (`GIT_CREDENTIAL_HELPER_ORDER`).
+- `doctor`: `GIT_CREDENTIAL_HELPER_ORDER`, a failure when an owner is mapped to an agent identity and the helper is missing, stale or not first.
+- Until `install shim` pins taaad, the helper reads the taaad path from `<home>/state/taaad-pin.json`; with none it refuses (`GH_BINARY_UNTRUSTED`).
+
 ### Added — identity choice for `gh` calls (phase 3 core of `doc/plan-owner-identity.md` §13.1)
 
 No egress behaviour changes: nothing calls these yet. `@de-otio/repo-aegis-core`
