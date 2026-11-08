@@ -15,7 +15,7 @@
 // is a speed bump, not a proof (an interpreter's `-c` text or a script can still do both); the plan names it
 // so nobody assumes coverage. The functions are pure, total and return a ready-made five-part refusal.
 
-import { ghCommandWords, simpleCommands, type SimpleCommand } from "./egress-intent.js";
+import { commandFacts, ghCommandWords, simpleCommands, type CommandFact, type SimpleCommand } from "./egress-intent.js";
 import { refusal } from "./refusal.js";
 
 export type NetworkRuleCode = "GITHUB_API_VIA_HTTP_CLIENT" | "GH_AUTH_TOKEN_NETWORK";
@@ -248,4 +248,206 @@ export function checkNetworkRules(command: string): NetworkRuleHit | null {
     };
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Identity hook rules (doc/plan-owner-identity.md §13.2: A1, A10, N9)
+// ---------------------------------------------------------------------------
+//
+// Shape rules over the command text, like the R6 rules above, but they run on EVERY agent command, egress
+// or not (the `intents.length === 0` exit in the hook no longer comes first for them):
+//
+//   - A1: a command that runs `gh`, `git`, `taaad` or `security` with a `REPO_AEGIS_*` variable set
+//     (EGRESS_ENV_OVERRIDE), or under a terminal-providing wrapper (EGRESS_PTY_WRAPPER). No presence, approval
+//     or environment variable lifts it: text is how an agent steers the next layer's idea of "a person".
+//   - A10: `gh auth <anything but a plain status>`, `gh config set|clear-cache`, `gh alias set|import|delete`,
+//     `gh extension install|upgrade|exec` (GH_AUTH_NEEDS_HUMAN): they read or change which account gh acts as.
+//   - N9: `taaad env|agent|credential-helper|mint`, the keychain readers of `security`, and an interpreter
+//     one-liner that imports `keyring` or names `SecItemCopyMatching` (TOKEN_MINT_NEEDS_HUMAN).
+//
+// A10 and N9 are lifted when a person is present; A1 never is. A10 and N9 are speed bumps, not proofs (a
+// script file, an obfuscated string or another interpreter still gets through); the keychain ACLs are the
+// control. Pure, total, no registry.
+
+export type IdentityHookRuleCode = "EGRESS_ENV_OVERRIDE" | "EGRESS_PTY_WRAPPER" | "GH_AUTH_NEEDS_HUMAN" | "TOKEN_MINT_NEEDS_HUMAN";
+
+export interface IdentityHookHit {
+  code: IdentityHookRuleCode;
+  reason: string;
+  /** True when a person at the keyboard lifts the rule (A10, N9). A1 hits are never lifted. */
+  personLifts: boolean;
+}
+
+/** Programs whose run under a `REPO_AEGIS_*` variable or a terminal wrapper A1 refuses. */
+const A1_PROGRAMS: ReadonlySet<string> = new Set(["gh", "git", "taaad", "security"]);
+
+/** Whether `word` (a path or bare name) is one of the A1 programs. */
+function isA1Program(word: string): boolean {
+  const base = word.slice(word.lastIndexOf("/") + 1);
+  return A1_PROGRAMS.has(base);
+}
+
+/** Whether a free text (a wrapper's arguments, a heredoc) names an A1 program as a word. */
+function mentionsA1Program(text: string): boolean {
+  return text.split(/[^A-Za-z0-9_./~-]+/).some(w => w !== "" && isA1Program(w));
+}
+
+function a1Env(c: CommandFact): boolean {
+  if (c.repoAegisEnv.length === 0) return false;
+  if (isA1Program(c.cmd)) return true;
+  // `dot gh …` runs gh with the caller's environment.
+  return c.cmd === "dot" && c.args.includes("gh");
+}
+
+/** `gh auth …` other than a plain `status`, `gh config set|clear-cache`, `gh alias set|import|delete`, `gh extension install|upgrade|exec`. */
+export function ghVerbChangesIdentityState(args: readonly string[]): boolean {
+  const words = ghCommandWords(args);
+  if (words === null) return false;
+  const { group, sub } = words;
+  switch (group) {
+    case "auth":
+      if (sub === "status") return args.some(a => a === "--show-token" || /^-[A-Za-z]*t[A-Za-z]*$/.test(a));
+      return true;
+    case "config":
+      return sub === "set" || sub === "clear-cache";
+    case "alias":
+      return sub === "set" || sub === "import" || sub === "delete";
+    case "extension":
+    case "extensions":
+    case "ext":
+      return sub === "install" || sub === "upgrade" || sub === "exec";
+    default:
+      return false;
+  }
+}
+
+const TAAAD_TOKEN_SUBCOMMANDS: ReadonlySet<string> = new Set(["env", "agent", "credential-helper", "mint"]);
+const SECURITY_KEYCHAIN_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "find-generic-password", "find-internet-password", "dump-keychain", "export", "unlock-keychain",
+]);
+const KEYCHAIN_INTERPRETER_RE = /^(?:python[\d.]*|node(?:js)?|perl|ruby|osascript)$/;
+const KEYCHAIN_TEXT_RE = /\bkeyring\b|SecItemCopyMatching/;
+
+/** The program text an interpreter would run: the value of `-c` / `-e` / `-m` style options, text-like words, and stdin texts. */
+function interpreterTexts(c: CommandFact): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < c.args.length; i++) {
+    const a = c.args[i]!;
+    if (/^-[A-Za-z]*[ceEpm]$/.test(a) || a === "--eval" || a === "--print") {
+      if (c.args[i + 1] !== undefined) out.push(c.args[i + 1]!);
+    } else if (/^--(?:eval|print)=/.test(a) || /^-[ceEp].+/.test(a)) {
+      out.push(a);
+    } else if (/[\s;(]/.test(a)) {
+      out.push(a);
+    }
+  }
+  if (c.text !== undefined) out.push(c.text);
+  return out;
+}
+
+function readsKeychainSecret(c: CommandFact): boolean {
+  if (c.cmd === "taaad") return c.args.some(a => TAAAD_TOKEN_SUBCOMMANDS.has(a));
+  if (c.cmd === "security") return c.args.some(a => SECURITY_KEYCHAIN_SUBCOMMANDS.has(a));
+  if (KEYCHAIN_INTERPRETER_RE.test(c.cmd)) return interpreterTexts(c).some(t => KEYCHAIN_TEXT_RE.test(t));
+  return false;
+}
+
+function a1Reason(code: "EGRESS_ENV_OVERRIDE" | "EGRESS_PTY_WRAPPER", what: string): string {
+  if (code === "EGRESS_ENV_OVERRIDE") {
+    return refusal({
+      code,
+      what,
+      why:
+        "The command sets a REPO_AEGIS_* variable for a program that acts as an account (gh, git, taaad or security), " +
+        "which can make repo-aegis read a different registry or treat the caller as a person, whatever the command " +
+        "publishes",
+      approval: "No approval covers this",
+      fixes: [{ by: "agent", command: `${what} …`, note: "with no REPO_AEGIS_* assignment or export" }],
+    });
+  }
+  return refusal({
+    code,
+    what,
+    why:
+      "Running gh, git, taaad or security under a terminal wrapper gives it a terminal, and repo-aegis treats a " +
+      "terminal as a person, so the wrapper could stand in for the human whose presence changes what is allowed",
+    approval: "No approval covers this",
+    fixes: [
+      { by: "agent", command: `${what} run directly`, note: "without script, unbuffer, expect, tmux, screen, socat, ssh -t or a pty module" },
+      { by: "person", when: "If it needs a person", step: "runs it from their own terminal" },
+    ],
+  });
+}
+
+function ghAuthReason(): string {
+  return refusal({
+    code: "GH_AUTH_NEEDS_HUMAN",
+    what: "gh auth, config, alias or extension change",
+    why:
+      "These gh commands read a token or change which account, alias or extension gh runs as, and with no person " +
+      "present repo-aegis cannot tell whose credential would be read or replaced",
+    approval: "No approval covers this",
+    fixes: [
+      { by: "agent", when: "To act on a repository", command: "gh <verb> --repo <owner>/<repo> …", note: "plain gh; repo-aegis chooses the identity" },
+      { by: "person", when: "If the account setup itself must change", step: "runs the command from their own terminal" },
+    ],
+  });
+}
+
+function tokenMintReason(): string {
+  return refusal({
+    code: "TOKEN_MINT_NEEDS_HUMAN",
+    what: "reading or minting a credential (taaad, security or a keychain call)",
+    why:
+      "These commands hand out an App token or read a stored secret, and with no person present repo-aegis cannot " +
+      "tell who receives it",
+    approval: "No approval covers this",
+    fixes: [
+      { by: "agent", when: "To act on a repository", command: "gh <verb> --repo <owner>/<repo> …", note: "plain gh; repo-aegis chooses the identity" },
+      { by: "person", when: "If a credential must be read or minted", step: "runs the command from their own terminal" },
+    ],
+  });
+}
+
+/**
+ * Every identity hook rule the command line trips, in the order A1 (never lifted), A10, N9 (lifted when a
+ * person is present). Empty for almost every command. Pure; never throws.
+ */
+export function checkIdentityHookRules(command: string): IdentityHookHit[] {
+  const hits: IdentityHookHit[] = [];
+  let facts: CommandFact[];
+  try {
+    facts = commandFacts(command);
+  } catch {
+    return hits;
+  }
+  for (const c of facts) {
+    if (c.ptyWrapper !== undefined && (isA1Program(c.cmd) || mentionsA1Program(c.text ?? "") || mentionsA1Program(c.args.join(" ")))) {
+      hits.push({ code: "EGRESS_PTY_WRAPPER", reason: a1Reason("EGRESS_PTY_WRAPPER", `${c.ptyWrapper} around gh/git/taaad/security`), personLifts: false });
+    }
+  }
+  for (const c of facts) {
+    if (a1Env(c)) {
+      hits.push({ code: "EGRESS_ENV_OVERRIDE", reason: a1Reason("EGRESS_ENV_OVERRIDE", `${c.cmd} with a REPO_AEGIS_* variable`), personLifts: false });
+    }
+  }
+  if (facts.some(c => c.cmd === "gh" && ghVerbChangesIdentityState(c.args))) {
+    hits.push({ code: "GH_AUTH_NEEDS_HUMAN", reason: ghAuthReason(), personLifts: true });
+  }
+  if (facts.some(readsKeychainSecret)) {
+    hits.push({ code: "TOKEN_MINT_NEEDS_HUMAN", reason: tokenMintReason(), personLifts: true });
+  }
+  return hits;
+}
+
+/**
+ * The refusal to apply, or null: the first A1 hit, else the first A10 / N9 hit unless `humanPresent()` says a
+ * person is there. `humanPresent` is called at most once, and only when a liftable rule is the only hit.
+ */
+export function decideIdentityHookRules(command: string, humanPresent: () => boolean): IdentityHookHit | null {
+  const hits = checkIdentityHookRules(command);
+  const always = hits.find(h => !h.personLifts);
+  if (always !== undefined) return always;
+  if (hits.length === 0) return null;
+  return humanPresent() ? null : hits[0]!;
 }

@@ -50,6 +50,7 @@ import {
   classifyApiEndpoint,
   graphqlOperationKind,
   intentRepoTargets,
+  parseApiEndpoint,
   type EgressIntent,
   type EgressVerb,
   type GraphqlOperationKind,
@@ -101,6 +102,7 @@ export type EgressCode =
   | "EGRESS_AFTER_STATE_CHANGE"
   | "GH_PR_CREATE_IMPLICIT_TARGET"
   | "DOT_GH_WRITE_NEEDS_BOT"
+  | "DOT_GH_OWNER_MAPPED"
   | "CROSS_ORG_EGRESS"
   | "PAYLOAD_MARKER_HIT"
   | "UNREGISTERED_OWNER_EGRESS"
@@ -122,6 +124,7 @@ export const SHAPE_RULE_CODES: ReadonlySet<EgressCode> = new Set<EgressCode>([
   "EGRESS_AFTER_STATE_CHANGE",
   "GH_PR_CREATE_IMPLICIT_TARGET",
   "DOT_GH_WRITE_NEEDS_BOT",
+  "DOT_GH_OWNER_MAPPED",
 ]);
 
 export interface Destination {
@@ -1351,6 +1354,31 @@ const DOT_GH_WRITE_NEEDS_BOT_REASON = [
   "If the bot lacks the permission (it has no issues, secrets, Actions or workflow-file access), stop and report it to your human; do not switch to --as owner or plain gh. [DOT_GH_WRITE_NEEDS_BOT]",
 ].join("\n");
 
+/** The owners a `gh` intent names literally: `--repo` / `-R` / `GH_REPO`, a URL or `o/r` positional, and a `repos/<o>/<r>/…` endpoint. */
+function literalGhOwners(intent: EgressIntent): string[] {
+  const owners = intentRepoTargets(intent).map(t => t.org);
+  if (intent.apiEndpoint !== undefined) {
+    const api = parseApiEndpoint(intent.apiEndpoint);
+    if (api !== null) owners.push(api.org);
+  }
+  return owners.map(o => o.toLowerCase());
+}
+
+/**
+ * N8 (doc/plan-owner-identity.md §13.2): the refusal for a recognised `dot gh` call whose literal owner has an
+ * identity mapped in the registry. Two choosers for one owner would disagree, so the pinned one wins. Static:
+ * neither the arguments nor the owner are echoed.
+ */
+const DOT_GH_OWNER_MAPPED_REASON = refusal({
+  code: "DOT_GH_OWNER_MAPPED",
+  what: "dot gh on an owner with a mapped identity",
+  why:
+    "This owner has a GitHub identity mapped in the registry, so repo-aegis chooses the account for plain gh, and dot gh " +
+    "would choose a second, different one",
+  approval: "No approval covers this",
+  fixes: [{ by: "agent", command: "gh <the same arguments>", note: "plain gh, not dot gh" }],
+});
+
 function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecision {
   const verb = describeVerb(intent.verb);
   const deny = (code: EgressCode, reason: string, destination?: Destination): EgressDecision => ({
@@ -1360,6 +1388,16 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     ...(destination && { destination }),
     intent,
   });
+
+  // ---- N8: `dot gh` on an owner with a mapped identity is retired ----------------
+  // Before D2 (whose fix, `--as bot`, would not help here). Not lifted by presence or approval; an owner with no
+  // identity entry keeps the earlier behaviour (D2 below). Only a literal owner counts.
+  if (intent.wrapper?.kind === "dot-gh") {
+    const mapped = opts.registry.identityMap;
+    if (mapped !== undefined && mapped.size > 0 && literalGhOwners(intent).some(o => mapped.has(o))) {
+      return deny("DOT_GH_OWNER_MAPPED", DOT_GH_OWNER_MAPPED_REASON);
+    }
+  }
 
   // ---- D2: a `dot gh` write with no person present must run as the bot -------
   // Every intent is a write (reads yield none), so the wrapper is all the classification needed. First, because the

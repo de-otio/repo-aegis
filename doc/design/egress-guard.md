@@ -217,6 +217,34 @@ subcommand that can reach a remote counts: a positive list of local built-ins
 `-c` / `--config-env` / `--exec-path` option does. They are speed bumps, not
 proofs: an interpreter's `-c` text can still do either.
 
+The identity rules of `doc/plan-owner-identity.md` §13.2 are shape rules of the
+same kind (command text only, no registry except N8, no approval lifts any),
+and they run on every agent command, ahead of the "no egress intent" exit:
+
+- **A1** — a command that runs `gh`, `git`, `taaad` or `security` (directly, or
+  through `env`, `sudo`, `sh -c`, `eval`, substitutions or a heredoc-fed shell)
+  with any `REPO_AEGIS_*` variable set (a prefix assignment, an `env` argument,
+  or an earlier `export` / assignment in the same command) is
+  `EGRESS_ENV_OVERRIDE`; under a pty wrapper it is `EGRESS_PTY_WRAPPER`.
+  Whatever the command does, and with a person present too: text is how an agent
+  would make the next layer believe a person is there.
+- **A10** — with no person present, `gh auth` with anything but a plain
+  `status` (`status --show-token` / `-t` included), `gh config set|clear-cache`,
+  `gh alias set|import|delete` and `gh extension install|upgrade|exec` are
+  `GH_AUTH_NEEDS_HUMAN`. `gh` global flags before the group are read the way gh
+  reads them.
+- **N9** — with no person present, `taaad env|agent|credential-helper|mint`,
+  `security find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain`
+  (absolute paths count) and a `python*`, `node`, `perl`, `ruby` or `osascript`
+  `-c` / `-e` text, or heredoc, that mentions `keyring` or `SecItemCopyMatching`
+  are `TOKEN_MINT_NEEDS_HUMAN`. Speed bumps like `GH_AUTH_TOKEN_NETWORK`: a
+  script file or another interpreter still gets through; the keychain ACLs are
+  the control.
+- **N8** — a recognised `dot gh` write whose literal owner (`--repo` / `-R` /
+  `GH_REPO`, a URL, a `repos/<o>/<r>` endpoint) has an identity mapped in a v3
+  registry is `DOT_GH_OWNER_MAPPED`, decided before D2; a person present or an
+  approval does not lift it. An owner with no identity entry keeps D2 as above.
+
 Reasons name the destination (`<org>/<repo>`, visibility, class) and the
 ref/PR — that is the receipt-before-the-fact a human sees when asked. They
 never include payload content.

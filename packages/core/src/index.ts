@@ -291,8 +291,13 @@ export {
   isGraphqlEndpoint,
   graphqlOperationKind,
 } from "./egress-intent.js";
-export { checkNetworkRules } from "./egress-network-rules.js";
-export type { NetworkRuleCode, NetworkRuleHit } from "./egress-network-rules.js";
+export {
+  checkNetworkRules,
+  checkIdentityHookRules,
+  decideIdentityHookRules,
+  ghVerbChangesIdentityState,
+} from "./egress-network-rules.js";
+export type { NetworkRuleCode, NetworkRuleHit, IdentityHookRuleCode, IdentityHookHit } from "./egress-network-rules.js";
 export type {
   ApiEndpointClass,
   ApiEndpointTarget,
