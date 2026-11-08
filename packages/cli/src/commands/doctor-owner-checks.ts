@@ -146,10 +146,10 @@ export function ownerIdentityChecks(registry: Registry): DoctorCheck[] {
 }
 
 /**
- * `TAAAD_AGENT_WRITABLE` (doc/plan-owner-identity.md A4, D4): the taaad that `repo-aegis gh` mints App tokens
- * through must be pinned by `install shim` and owned by root, with every path the pin names writable by
- * root only; else github-app injection is refused. A FAILURE when any github-app identity is mapped, a
- * warning otherwise (nothing depends on it yet). The pin is always reported (paths of tools, never owners).
+ * `TAAAD_AGENT_WRITABLE` (doc/plan-owner-identity.md A4, as amended by §2.1 / Q5): the taaad that
+ * `repo-aegis gh` mints App tokens through must be pinned by `install shim` (a FAILURE when a github-app
+ * identity is mapped and nothing is pinned: no token can be minted). Whether it is root-owned is a WARNING
+ * only. The pin is always reported (paths of tools, never owners).
  * Nothing is returned when no github-app identity is mapped and nothing is pinned: there is nothing to say.
  */
 export function taaadChecks(registry: Registry, home: string = repoAegisHome()): DoctorCheck[] {
@@ -157,7 +157,6 @@ export function taaadChecks(registry: Registry, home: string = repoAegisHome()):
     e => e.person?.kind === "github-app" || e.agent?.kind === "github-app",
   );
   const pin = readPinnedTaaad(home);
-  const severity = appMapped ? {} : { severity: "warn" as const };
   const fix =
     "install taaad into a root-owned prefix (for example `sudo pipx install --global taaad`), remove any user-level copy, " +
     "then re-run `repo-aegis install shim`";
@@ -177,14 +176,16 @@ export function taaadChecks(registry: Registry, home: string = repoAegisHome()):
   if (problem === null) {
     return [{ code: "TAAAD_AGENT_WRITABLE", ok: true, detail: `taaad is pinned and root-owned (${where})` }];
   }
+  // Always a warning, never a refusal (owner decision 2026-11-08, plan §2.1 / Q5): App identities keep working;
+  // the weakness only matters against an agent that deliberately edits taaad's code.
   return [
     {
       code: "TAAAD_AGENT_WRITABLE",
       ok: false,
-      ...severity,
+      severity: "warn",
       detail:
         `taaad is pinned (${where}) but is not root-only-writable: ${problem}. ` +
-        (appMapped ? "github-app injection is refused until this is fixed" : "github-app injection would be refused"),
+        "App identities still work; an agent that edits taaad's code could capture the tokens it mints",
       fix,
     },
   ];

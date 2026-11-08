@@ -503,7 +503,7 @@ describe("the taaad spawn", () => {
     assert.deepEqual(extra, [], "no other variable");
   });
 
-  it("resolvePinnedTaaad reads the pin from the shim `install shim` wrote, and only when it is root-only-writable", () => {
+  it("resolvePinnedTaaad reads the pin from the shim `install shim` wrote, root-owned or not (a doctor warning only)", () => {
     const aegis = join(tmp, "pin-home");
     mkdirSync(join(aegis, "bin"), { recursive: true });
     assert.equal(resolvePinnedTaaad(aegis, "permissive"), null, "no shim, no pin");
@@ -513,7 +513,7 @@ describe("the taaad spawn", () => {
     assert.equal(resolvePinnedTaaad(aegis, "permissive"), null, "a shim that pins no taaad");
     writeFileSync(join(aegis, "bin", "gh"), renderShimScript(cliPin, { home: aegis, taaad: pin }));
     assert.equal(resolvePinnedTaaad(aegis, "permissive"), taaad);
-    assert.equal(resolvePinnedTaaad(aegis), null, "the stub is not root-owned, so the real policy refuses it");
+    assert.equal(resolvePinnedTaaad(aegis), taaad, "a taaad that is not root-owned is still used (plan §2.1, Q5)");
     // The state directory is no longer a source of pins: an agent-writable file there decides nothing.
     writeFileSync(join(aegis, "bin", "gh"), renderShimScript(cliPin, { home: aegis, taaad: null }));
     mkdirSync(join(aegis, "state"), { recursive: true });

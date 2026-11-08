@@ -555,11 +555,11 @@ describe("repo-aegis gh: refusals never run gh", () => {
     assert.deepEqual(mainCalls(r), []);
   });
 
-  it("D4/A4: a taaad that is not root-only-writable is TAAAD_AGENT_WRITABLE under the real policy, and nothing runs", () => {
+  it("under the real policy an untrusted gh is still refused before any mint (a non-root-owned taaad no longer is: plan §2.1, Q5)", () => {
     const w = makeWorld();
     const r = run(w, WRITE, { presence: "agent", trust: "default" });
-    // The stub gh is in a temp directory, so the gh check may come first; either way no token is minted and gh does not run.
-    assert.ok(["TAAAD_AGENT_WRITABLE", "GH_BINARY_UNTRUSTED"].includes(refusalCode(r) ?? ""), r.err);
+    // The stub gh is in a temp directory, so the trusted-gh check refuses; no token is minted and gh does not run.
+    assert.equal(refusalCode(r), "GH_BINARY_UNTRUSTED", r.err);
     assert.deepEqual(r.taaadArgv, []);
     assert.deepEqual(mainCalls(r), []);
   });

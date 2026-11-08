@@ -273,16 +273,18 @@ URL, a `repos/<owner>/<repo>/…` endpoint, `GH_REPO` or the working directory's
 Every injecting call prints `repo-aegis: as <identity> (<kind>) for <owner>/<repo>` and appends
 a record (never the token) to `<home>/state/gh-decisions.jsonl`.
 
-**The root-owned taaad requirement.** App tokens are minted by taaad, the only holder of the App
-private keys; `install shim` pins its launcher, the interpreter its shebang names and its package
-directory. A taaad any agent can write is a taaad that can hand the agent every token, so `github-app`
-identities are used **only when all three, and every directory above them, are owned by root and writable
-by nobody else** (`TAAAD_AGENT_WRITABLE` otherwise, a `doctor` failure while a `github-app` identity
-is mapped, a warning before). The supported install is a root-owned prefix, for example
-`sudo pipx install --global taaad` (under `/opt/pipx`, on `PATH` through `/usr/local/bin`), with any
-user-level copy removed; then re-run `repo-aegis install shim`. On Apple Silicon a Homebrew Python is
-user-owned, so a venv whose interpreter resolves into `/opt/homebrew` fails this test; use a root-owned
-interpreter. `gh-login` identities do not need taaad. repo-aegis runs `gh` for the call from
+**taaad and root ownership.** App tokens are minted by taaad, the only holder of the App private
+keys; `install shim` pins its launcher, the interpreter its shebang names and its package directory.
+A taaad installed under your home directory works (the usual `pipx install`). `doctor` reports a
+**warning**, `TAAAD_AGENT_WRITABLE`, when any of the three, or a directory above them, is not owned by
+root, because an agent that deliberately edited taaad's code could capture the tokens it mints.
+repo-aegis guards against honest mistakes, not a determined agent, so this is not a refusal. If you
+want the extra protection, install taaad into a root-owned prefix, for example
+`sudo pipx install --global taaad` (under `/opt/pipx`, on `PATH` through `/usr/local/bin`), remove the
+user-level copy, and re-run `repo-aegis install shim`. On Apple Silicon a Homebrew Python is user-owned,
+so a venv whose interpreter resolves into `/opt/homebrew` keeps the warning. A missing pin (no taaad
+on `PATH` at `install shim`) does refuse App identities, since nothing can mint. `gh-login` identities
+do not need taaad. repo-aegis runs `gh` for the call from
 a trusted location only (the same vetting `doctor` applies: not under your home directory, the
 current directory or a temp directory; not group- or world-writable).
 

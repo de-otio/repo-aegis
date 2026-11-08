@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute } from "node:path";
 import type { IdentityScope } from "@de-otio/repo-aegis-core";
-import { readPinnedTaaad, taaadTrustProblem } from "./taaad-pin.js";
+import { readPinnedTaaad } from "./taaad-pin.js";
 
 export interface MintParams {
   /** Absolute path of the pinned taaad launcher. */
@@ -178,20 +178,22 @@ export function mintAppToken(p: MintParams): MintedToken {
     },
   );
   if (r.error !== undefined) throw new MintError("unavailable", "taaad could not be run");
+  // taaad's documented refusal codes (agreed with taaad for its presence-prompt release): 3 = the prompt
+  // budget is spent, 4 = the person cancelled or denied the prompt. Any other non-zero is a generic failure.
+  if (r.status === 3) throw new MintError("unavailable", "taaad's presence-prompt limit is reached; wait a few minutes and retry");
+  if (r.status === 4) throw new MintError("unavailable", "your human declined taaad's presence prompt; stop and ask them before retrying");
   if (r.status !== 0) throw new MintError("unavailable", "taaad exited with a failure and minted nothing");
   if (typeof r.stdout !== "string" || r.stdout.trim() === "") throw new MintError("unavailable", "taaad printed nothing");
   return validateMintOutput(r.stdout, p);
 }
 
 /**
- * The launcher of the taaad that `install shim` pinned, or null when none is known or it may not mint: the pin
- * is read from the shim (`readPinnedTaaad`), and the launcher, its interpreter and package directory must all be
- * root-owned and writable by root only (D4, A4). `trust: "permissive"` skips that last test; it is a test seam
- * (stubs are not root-owned) and no caller outside tests passes it.
+ * The launcher of the taaad that `install shim` pinned, or null when none is known: the pin is read from the
+ * shim (`readPinnedTaaad`). Whether taaad is root-owned is a `doctor` warning (TAAAD_AGENT_WRITABLE), not a
+ * condition here (doc/plan-owner-identity.md §2.1, Q5). `trust` is kept for call-site compatibility and ignored.
  */
-export function resolvePinnedTaaad(home: string, trust: "default" | "permissive" = "default"): string | null {
+export function resolvePinnedTaaad(home: string, _trust: "default" | "permissive" = "default"): string | null {
   const pin = readPinnedTaaad(home);
   if (pin === null || !isAbsolute(pin.launcher)) return null;
-  if (trust === "default" && taaadTrustProblem(pin) !== null) return null;
   return pin.launcher;
 }

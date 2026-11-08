@@ -1410,8 +1410,7 @@ on `PATH`, as the realpaths of its launcher, of the interpreter named by its
 shebang and of its package directory (the venv root), written into the shim next
 to the pinned node and CLI (not into the agent-writable `state/` directory). The
 command says whether all three are owned by root and writable by root only; if
-not, App identities are refused at run time (`TAAAD_AGENT_WRITABLE`) and `doctor`
-reports the same. `--json` carries a `taaad` object (`pinned`, the paths,
+not, `doctor` warns (`TAAAD_AGENT_WRITABLE`); App identities still work. `--json` carries a `taaad` object (`pinned`, the paths,
 `rootOwned`, `problem`).
 
 ### `repo-aegis gh --home <home> -- <gh args>`

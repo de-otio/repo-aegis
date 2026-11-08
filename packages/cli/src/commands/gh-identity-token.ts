@@ -20,7 +20,7 @@ import { delimiter, dirname } from "node:path";
 import type { IdentityScope } from "@de-otio/repo-aegis-core";
 import { untrustedDirReason } from "./doctor-owner-checks.js";
 import { accountHome, mintAppToken as mintPinned, MintError } from "./taaad-mint.js";
-import { taaadTrustProblem, type TaaadPin } from "./taaad-pin.js";
+import type { TaaadPin } from "./taaad-pin.js";
 
 const CHILD_TIMEOUT_MS = 20_000;
 const CHILD_MAX_BUFFER = 1024 * 1024;
@@ -174,10 +174,8 @@ export function mintAppToken(input: MintInput): MintResult {
       why: "no taaad is pinned: install taaad into a root-owned prefix, then re-run `repo-aegis install shim`",
     });
   }
-  if ((input.trust ?? "default") === "default") {
-    const problem = taaadTrustProblem(input.pin);
-    if (problem !== null) return fail({ code: "TAAAD_AGENT_WRITABLE", why: `${problem}, so an App token it mints could be captured` });
-  }
+  // A taaad that is not root-only-writable is a `doctor` warning (TAAAD_AGENT_WRITABLE), not a refusal: it
+  // only matters against an agent that deliberately edits taaad's code (doc/plan-owner-identity.md §2.1, Q5).
   try {
     const minted = mintPinned({
       taaadPath: input.pin.launcher,

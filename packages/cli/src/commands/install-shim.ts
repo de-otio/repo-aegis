@@ -252,8 +252,8 @@ export function installShim(tool: string | undefined, opts: InstallShimOptions):
   if (taaad === null) {
     emitText("No taaad was found on PATH, so github-app identities are unavailable until you install it and re-run this command.");
   } else if (taaadProblem !== null) {
-    emitText(`taaad is pinned (${taaad.launcher}) but github-app identities will be refused (TAAAD_AGENT_WRITABLE): ${taaadProblem}.`);
-    emitText("Install taaad into a root-owned prefix (see doc/configuration.md, \"identities in practice\"), then re-run this command.");
+    emitText(`taaad is pinned (${taaad.launcher}). Note (TAAAD_AGENT_WRITABLE, a warning): ${taaadProblem}.`);
+    emitText("App identities work as is; for extra protection, install taaad into a root-owned prefix (see doc/configuration.md, \"identities in practice\").");
   } else {
     emitText(`taaad pinned: ${taaad.launcher} (root-owned).`);
   }
