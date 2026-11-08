@@ -217,6 +217,45 @@ subcommand that can reach a remote counts: a positive list of local built-ins
 `-c` / `--config-env` / `--exec-path` option does. They are speed bumps, not
 proofs: an interpreter's `-c` text can still do either.
 
+The identity rules of `doc/plan-owner-identity.md` §13.2 are shape rules of the
+same kind (command text only, no registry except N8, no approval lifts any),
+and they run on every agent command, ahead of the "no egress intent" exit:
+
+- **A1** — a command that runs `gh`, `git`, `taaad` or `security` (directly, or
+  through `env`, `sudo`, `sh -c`, `eval`, substitutions or a heredoc-fed shell)
+  with any `REPO_AEGIS_*` variable set (a prefix assignment, an `env` argument,
+  or an earlier `export` / assignment in the same command) is
+  `EGRESS_ENV_OVERRIDE`; under a pty wrapper it is `EGRESS_PTY_WRAPPER`.
+  Whatever the command does, and with a person present too: text is how an agent
+  would make the next layer believe a person is there.
+- **A10** — with no person present, `gh auth` with anything but a plain
+  `status` (`status --show-token` / `-t` included), `gh config set|clear-cache`,
+  `gh alias set|import|delete` and `gh extension install|upgrade|exec` are
+  `GH_AUTH_NEEDS_HUMAN`. `gh` global flags before the group are read the way gh
+  reads them.
+- **N9** — with no person present, `taaad env|agent|credential-helper|mint`,
+  `security find-generic-password|find-internet-password|dump-keychain|export|unlock-keychain`
+  (absolute paths count) and a `python*`, `node`, `perl`, `ruby` or `osascript`
+  `-c` / `-e` text, or heredoc, that mentions `keyring` or `SecItemCopyMatching`
+  are `TOKEN_MINT_NEEDS_HUMAN`. Speed bumps like `GH_AUTH_TOKEN_NETWORK`: a
+  script file or another interpreter still gets through; the keychain ACLs are
+  the control.
+- **Review follow-ups.** `git credential fill|get|approve` and the
+  `git[ -]credential-<helper> get` forms are N9 and are token reads for
+  `GH_AUTH_TOKEN_NETWORK`; a segment that leaves a `REPO_AEGIS_*` name set in the
+  shell (a bare assignment, `export`, `declare -x`, `readonly`, `read`) is A1,
+  because the agent's shell persists across calls, and `REPO_AEGIS_EGRESS_HUMAN`
+  no longer counts under an agent host above a TTY; N9 adds the `keyring` and
+  `secret-tool` CLIs, `security -i` and stdin text, and interpreter or piped
+  text naming a keychain route; A10 reads `--show-token=…` and a gh reached
+  through `G=gh; $G`, an alias or `$(which gh)`. The write hook refuses an
+  agent's Edit or Write to gh's `config.yml` and `hosts.yml`
+  (`GH_CONFIG_WRITE_REFUSED`).
+- **N8** — a recognised `dot gh` write whose literal owner (`--repo` / `-R` /
+  `GH_REPO`, a URL, a `repos/<o>/<r>` endpoint) has an identity mapped in a v3
+  registry is `DOT_GH_OWNER_MAPPED`, decided before D2; a person present or an
+  approval does not lift it. An owner with no identity entry keeps D2 as above.
+
 Reasons name the destination (`<org>/<repo>`, visibility, class) and the
 ref/PR — that is the receipt-before-the-fact a human sees when asked. They
 never include payload content.
@@ -448,17 +487,27 @@ on `PATH`. The shim:
 
 1. locates the real `gh` by scanning `PATH` past its own directory (never a
    hard-coded path; never itself);
-2. **passes every non-egress invocation through untouched**, `exec`'d, with
-   argv intact — `view`, `list`, `status`, `api` GET, `auth`, `checks`,
-   completion, `--version`;
-3. for egress verbs, calls `repo-aegis egress-check --cwd "$PWD" -- "$@"`,
-   which runs `decideEgress` with `humanPresent` from `isatty(2)` and
-   `capabilities.ask = false` (a shell has no prompt to offer), and refuses
-   with the structured reason on `deny`;
-4. on allow, `exec`s the real `gh`; for `pr create|edit` with a body file, it
-   instead **runs `gh`, waits, then reads the live body back**
-   (`gh pr view <n> --json body`) and diffs it against the file, emitting
+2. passes `--version`, `help` and `completion` through untouched, `exec`'d;
+3. for **every other invocation** (since the identity work,
+   `doc/plan-owner-identity.md` D1; before it only the publishing groups) refuses if the
+   pinned enforcement binary is gone, then `exec`s
+   `<pinned node> <pinned cli> gh --home <pinned home> -- "$@"`. No shell code runs after the
+   `exec`, so no token ever passes through the shim;
+4. `repo-aegis gh` makes the same decision `egress-check` makes (`decideEgress` with
+   `humanPresent` from `isatty(2)` and `capabilities.ask = false`, a shell has no prompt to
+   offer; the same function, `evaluateEgress`) and refuses with the structured reason on
+   `deny`. It then chooses the GitHub identity for the call's owner from the registry and
+   approvals under the pinned home (`chooseIdentity`, presence from `checkTerminal()`), and
+   spawns the real `gh`: with the caller's environment unchanged when no identity applies, or
+   with an allowlisted environment plus `GH_TOKEN` when one does (see
+   [cli-reference.md](../cli-reference.md#repo-aegis-gh---home-home----gh-args)). It runs
+   `gh` and waits (it no longer `exec`s it), prints the receipt keyed on `gh`'s exit code, and
+   for `pr create|edit` with a body file **reads the live body back**
+   (`gh pr view <n> --json body`, as the same identity) and diffs it against the file, emitting
    `PUBLISHED_BODY_MISMATCH` with byte counts — never content — on difference.
+
+A fault in the identity step on an owner that has a mapping is a refusal (`GH_IDENTITY_UNAVAILABLE`),
+not a fall back to the active account; on an owner with none, a warning and `gh` as before.
 
 Step 4 is the design's one deliberate network call inside an enforcement path.
 The verb has already published, so the call cannot block anything; a wrong body

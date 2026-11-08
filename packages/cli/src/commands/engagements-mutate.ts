@@ -10,9 +10,11 @@ import {
   RegistryNotFoundError,
   ALWAYS_BLOCK_RESERVED_ID,
   ORG_NAME_REGEX,
+  REGISTRY_IDENTITIES_MIN_VERSION,
   appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { installsUnableToRead, unreadableInstallsMessage, type InstallGuardOptions } from "./install-readers.js";
 import { requireTerminalForOwnerAdd, recordOwnerAdd } from "../owner-add-gate.js";
 import {
   loadDoc,
@@ -20,6 +22,7 @@ import {
   commitRegistry,
   withRegistryLock,
   RegistryCliError,
+  personalOrgItemName,
   type Doc,
 } from "./registry-mutate.js";
 
@@ -83,7 +86,7 @@ function backdated13MonthsIso(): string {
   return d.toISOString().slice(0, 10);
 }
 
-function findEngagementNode(doc: Doc, id: string): YAMLMap | null {
+export function findEngagementNode(doc: Doc, id: string): YAMLMap | null {
   const seq = doc.get("engagements") as YAMLSeq | null;
   if (!seq || !seq.items) return null;
   for (const item of seq.items) {
@@ -162,9 +165,15 @@ function readSchemaVersion(doc: Doc): number {
  * warning so multi-machine users (laptop + workstation) are aware that
  * older repo-aegis builds will refuse the file until upgraded.
  */
-function ensureSchemaVersion(doc: Doc, required: number): boolean {
+export function ensureSchemaVersion(doc: Doc, required: number, installs: InstallGuardOptions = {}): boolean {
   const current = readSchemaVersion(doc);
   if (current >= required) return false;
+  // Raising past what an installed older build can read: refuse before anything is written. Only versions
+  // from 3 on carry the guard (a bump to 2 predates it and is covered by its own warning).
+  if (required >= REGISTRY_IDENTITIES_MIN_VERSION) {
+    const bad = installsUnableToRead(required, installs);
+    if (bad.length > 0) throw new RegistryCliError("MULTIPLE_INSTALLS", unreadableInstallsMessage(required, bad));
+  }
   doc.set("schemaVersion", required);
   return true;
 }
@@ -188,9 +197,8 @@ function appendPersonalOrgs(
   }
   const existing = new Set<string>();
   for (const item of seq.items ?? []) {
-    if (typeof item === "string") existing.add(item);
-    else if (item instanceof Scalar && typeof item.value === "string")
-      existing.add(item.value);
+    const name = personalOrgItemName(item);
+    if (name !== null) existing.add(name);
   }
   const added: string[] = [];
   const skipped: string[] = [];

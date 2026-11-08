@@ -36,6 +36,7 @@
 import {
   appendAuditRecord,
   checkNetworkRules,
+  decideIdentityHookRules,
   decideEgress,
   recordWorkingTree,
   describeVerb,
@@ -395,6 +396,20 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     // re-parents a pty to init, where no gate sees an agent above it: refused in any command, egress or not.
     const detached = findDetachedStart(command);
     if (detached !== null) denyDetachedStart(detached);
+
+    // Identity hook rules (plan-owner-identity §13.2): a REPO_AEGIS_* variable or a terminal wrapper on a command
+    // that runs gh, git, taaad or security (A1, never lifted), and, with no person present, the gh and keychain
+    // routes to a token (A10, N9). Before the egress parse and its early exit: they apply whatever the command
+    // publishes. After the two more specific refusals above, so those keep their codes. Presence is read only
+    // when a person-liftable rule is the sole hit.
+    const identityHit = decideIdentityHookRules(command, currentHumanPresent);
+    if (identityHit !== null) {
+      process.stderr.write(
+        JSON.stringify({ code: identityHit.code, error: identityHit.reason, details: { verb: "(identity rule)" } }, null, 2) + "\n",
+      );
+      writeDecisionJson("deny", identityHit.reason);
+      process.exit(EXIT_BLOCK);
+    }
 
     const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit

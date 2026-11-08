@@ -49,7 +49,19 @@ export interface ApproveOptions extends OutputOptions {
 function describe(a: EgressApproval, now: Date): string {
   const left = Math.max(0, Math.round((Date.parse(a.expiresAt) - now.getTime()) / 60_000));
   const scope = `${a.org}/${a.repo}${a.ref !== undefined ? ` (ref ${a.ref})` : ""}`;
-  return `${a.id}  ${scope}  by ${a.by}  expires ${a.expiresAt} (${left} min left)`;
+  const as = a.login !== undefined ? `  as ${a.login}` : "";
+  return `${a.id}  ${scope}${as}  by ${a.by}  expires ${a.expiresAt} (${left} min left)`;
+}
+
+/** The login of `owner`'s mapped `person` identity (a `gh-login`), or undefined: no registry, no mapping, or an app. */
+function mappedPersonLogin(owner: string, registryPath: string | undefined): string | undefined {
+  try {
+    const registry = registryPath === undefined ? loadRegistry() : loadRegistry(registryPath);
+    const person = registry.identityMap?.get(owner.toLowerCase())?.person;
+    return person !== undefined && person.kind === "gh-login" ? person.login : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -171,8 +183,12 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
     ttlMs = t;
   }
 
+  // N3, A11: for an owner whose registry entry maps a `person` identity (a gh login), the approval records that
+  // login, so an agent write as that account is covered by THIS approval and no other. `*` never carries one.
+  const login = parsed.org === "*" ? undefined : mappedPersonLogin(parsed.org, opts.registryPath);
   const approval = mintApproval({
     target: parsed,
+    ...(login !== undefined && { login }),
     ...(opts.ref !== undefined && { ref: opts.ref }),
     ttlMs,
     ...(opts.note !== undefined && { note: opts.note }),
@@ -188,6 +204,7 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
         scope: `${approval.org}/${approval.repo}`,
         ...(approval.ref !== undefined && { ref: approval.ref }),
         expiresAt: approval.expiresAt,
+        ...(approval.login !== undefined && { login: approval.login }),
       },
     });
   } catch {
@@ -199,6 +216,12 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
     emitJson({ action: "approve", approval, ...(warnings.length > 0 && { warnings }) });
   } else {
     emitText(`repo-aegis approve: ${describe(approval, now)}`);
+    if (approval.login !== undefined) {
+      emitText(
+        `  bound to the GitHub account ${approval.login}: an agent may write there as that account under this approval, ` +
+          `and only this one (an approval without an account, or for another, does not cover it)`,
+      );
+    }
     for (const w of warnings) emitText(`  warning: ${w}`);
     emitText(
       "  every egress layer now treats a matching publish from a non-interactive shell as human-approved " +

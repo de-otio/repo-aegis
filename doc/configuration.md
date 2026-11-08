@@ -162,6 +162,150 @@ else here; the host placements (`private-infra`, `always-block`,
 `schemaVersion` bump** — see the compatibility note at the end of this
 document.
 
+## Registry schema version 3: GitHub identities per owner
+
+Schema version 3 records **which GitHub identity belongs to which owner**
+(`doc/plan-owner-identity.md`). The `gh` shim uses it: for an owner with an entry, the
+call runs as the identity the registry names, in the column that who is present selects
+(see "Identities in practice" below). Owners with no entry are unchanged.
+
+```yaml
+# ~/.config/repo-aegis/engagements.yaml
+schemaVersion: 3
+identities:
+  me:        { kind: gh-login,   login: alice }
+  me-bot:    { kind: github-app, app: example-bot }      # a GitHub App slug
+  work:      { kind: gh-login,   login: alice-work }
+  work-bot:  { kind: github-app, app: example-work-agent }
+requireIdentity: true
+personalOrgs:
+  - example-org                                 # a plain string: unmapped, as in version 2
+  - { name: other-org, person: me, agent: me-bot }
+engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [customer-a-marker]
+    githubOrgs: [customer-a-org]
+    person: work                                # applies to every org of the engagement
+    agent: work-bot
+```
+
+- **`identities`** maps a name to `{ kind: gh-login, login }` (a person's
+  `gh` account) or `{ kind: github-app, app }` (a GitHub App slug).
+- **`person`** (who acts when a person is at the keyboard) must name a
+  `gh-login` identity; **`agent`** (who acts when none is) must name a
+  `github-app` identity. A `personalOrgs` entry is a plain string or
+  `{ name, person?, agent? }`; an engagement may carry `person` / `agent`,
+  which apply to all its `githubOrgs`.
+- **`requireIdentity`** is set to `true` by the first `engagements
+  set-identity` and cleared by `identity require --off` (a person, at a
+  terminal). `identity require --on` sets it again; it only tightens, so it
+  needs no terminal and an agent may run it. It makes
+  `doctor` report `OWNER_IDENTITY_UNMAPPED` as a failure instead of a warning.
+  In a later phase it will also make an agent write to a registered owner with
+  no identity entry refuse. An owner with only a `person` identity is not
+  affected: it is mapped.
+- **Shapes** (fail closed): an identity name and an app slug match
+  `^[a-z0-9][a-z0-9-]{0,62}$`; a login matches
+  `^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:_[A-Za-z0-9]{1,20})?$` (the optional `_shortcode` is the Enterprise Managed User form `handle_shortcode`). None may start with `-` or `_`, so a value
+  can never be read as an option later.
+- **Validation** is at parse time and names the path: every reference
+  resolves, the kinds match the column, an unknown key inside `identities` or a
+  `personalOrgs` object is an error, and an owner still appears in only one
+  place (the duplicate and personal/engagement disjointness rules apply to
+  object entries too). Identity names are checked on the raw YAML keys, so a
+  `__proto__` key is an error.
+- **Typos are errors from version 3.** An engagement may carry only `id`,
+  `name`, `started`, `ended`, `reposActive`, `markers`, `notes`, `githubOrgs`,
+  `person` and `agent`. A top-level key within edit distance 2 of a known one
+  (`identites`, `requireIdentiy`) is rejected; other unknown top-level keys
+  are still passed through, as in every version. Below version 3 nothing new
+  is rejected.
+- **Version gate.** `identities`, an object-form `personalOrgs` entry, an
+  engagement's `person` / `agent` and `requireIdentity` need
+  `schemaVersion: 3`; with a lower version the registry is rejected, naming
+  the version. A build that predates version 3 refuses the file as newer than
+  it supports: rule h then refuses every non-interactive egress, and an older
+  pinned `hook check-write` exits 1, which Claude Code treats as non-blocking,
+  so the cross-org write check **fails open** on that install. Upgrade every
+  install first. Every command that raises the version (the first `identity
+  add`) checks for that and refuses (`MULTIPLE_INSTALLS`) while a `repo-aegis`
+  on `PATH`, or one that an installed git hook, the `gh` shim or a Claude Code
+  hook (the managed drop-in or `settings.json`: the pin that runs `hook
+  check-write`) is pinned to, cannot read version 3. "Cannot read" is judged by the supported version
+  read from that install's own core package, never by running it; if that is
+  unreadable the package version is compared, and an install whose version is
+  unreadable is refused.
+- **Written only on adoption.** The file stays at its version until the first
+  identity is defined (`identity add`) or mapped. It is never lowered.
+- **Parsed shape.** `Registry.personalOrgs` stays a list of names. The
+  mapping is a separate `identityMap` keyed by lower-cased owner, so every
+  existing consumer reads what it always read.
+
+Changing any of this is an owner-registry change: a person at a terminal
+runs `repo-aegis identity add|remove|require --off` or `repo-aegis engagements
+set-identity` (a personal org is `engagements set-identity --personal-org <org>`) (`IDENTITY_CHANGE_NEEDS_TTY`), and the agent hook refuses the
+command text (`AGENT_RAN_HUMAN_COMMAND`). See
+[cli-reference.md](cli-reference.md#identities-schema-version-3).
+
+### Identities in practice
+
+With `repo-aegis install shim` done and `<home>/bin` first on `PATH`, every `gh` call goes
+through `repo-aegis gh`. For a call whose owner is mapped (the owner comes from `--repo` / `-R`, a
+URL, a `repos/<owner>/<repo>/…` endpoint, `GH_REPO` or the working directory's remote):
+
+- **A person at a terminal** runs as the owner's `person` identity (their `gh` account). An owner
+  with only an `agent` identity runs as the active account, with a hint.
+- **No person present** (an agent) runs as the owner's `agent` identity, a GitHub App: a token is
+  minted for exactly that repository, with permissions limited to the verb (reads: metadata and
+  contents, plus pull requests and issues; writes: what the App was granted on that repository).
+  An agent write needs `--repo <owner>/<repo>`: a repository taken only from the working directory is
+  refused (`GH_IDENTITY_NEEDS_LITERAL_TARGET`).
+- **An owner with only a `person` identity**: an agent's reads run as that person; an agent's
+  writes need a live approval minted for that person's login (`repo-aegis approve <owner>/<repo>`
+  records it), else `GH_IDENTITY_WRITE_NEEDS_HUMAN`.
+- A token you already hold in `GH_TOKEN` / `GITHUB_TOKEN` is not used for a mapped owner:
+  refused for an agent, compared with the mapped account's token for a person.
+- If the identity cannot be used (no token, taaad failing, an untrusted `gh`), the call is refused
+  (`GH_IDENTITY_UNAVAILABLE`, `GH_BINARY_UNTRUSTED`); it never silently runs as whichever account is
+  active.
+
+Every injecting call prints `repo-aegis: as <identity> (<kind>) for <owner>/<repo>` and appends
+a record (never the token) to `<home>/state/gh-decisions.jsonl`.
+
+**taaad and root ownership.** App tokens are minted by taaad, the only holder of the App private
+keys; `install shim` pins its launcher, the interpreter its shebang names and its package directory.
+A taaad installed under your home directory works (the usual `pipx install`). `doctor` reports a
+**warning**, `TAAAD_AGENT_WRITABLE`, when any of the three, or a directory above them, is not owned by
+root, because an agent that deliberately edited taaad's code could capture the tokens it mints.
+repo-aegis guards against honest mistakes, not a determined agent, so this is not a refusal. If you
+want the extra protection, install taaad into a root-owned prefix, for example
+`sudo pipx install --global taaad` (under `/opt/pipx`, on `PATH` through `/usr/local/bin`), remove the
+user-level copy, and re-run `repo-aegis install shim`. On Apple Silicon a Homebrew Python is user-owned,
+so a venv whose interpreter resolves into `/opt/homebrew` keeps the warning. A missing pin (no taaad
+on `PATH` at `install shim`) does refuse App identities, since nothing can mint. `gh-login` identities
+do not need taaad. repo-aegis runs `gh` for the call from
+a trusted location only (the same vetting `doctor` applies: not under your home directory, the
+current directory or a temp directory; not group- or world-writable).
+
+### Git pushes as the agent's App (the credential helper)
+
+For an owner mapped to an `agent` identity (a `github-app`), an agent's HTTPS
+push can carry a token narrowed to that one repository. `repo-aegis install
+git-credential` (a person, at a terminal) puts the repo-aegis helper first in the
+global git config for `https://github.com` and sets
+`credential.https://github.com.useHttpPath=true`; what it added is recorded in
+`<home>/state/git-credential-install.json` and `--uninstall` removes exactly that
+(see [cli-reference.md](cli-reference.md#repo-aegis-install-git-credential---uninstall)).
+
+- With a person present the helper prints nothing and your own helpers answer as before; the same for an owner with no `agent` identity.
+- An agent's push over SSH to such an owner is refused by the pre-push hook (`AGENT_PUSH_NEEDS_APP`): push over HTTPS.
+- The helper needs the pinned taaad: the one `install shim` recorded in the shim at `<home>/bin/gh`, and only while it is root-owned (see "Identities in practice"). With none it refuses (`GH_BINARY_UNTRUSTED`).
+- Helper order matters: a reset entry, a system-scope helper such as `osxkeychain`, or `gh auth setup-git` can put another helper first, and that one answers with your credential. The install checks this and refuses with instructions rather than guess; `doctor` fails with `GIT_CREDENTIAL_HELPER_ORDER` when an owner has an agent identity and the order is wrong.
+- **Accepted limit: the process chain is a heuristic, even inside the sandbox.** The helper answers only a request made by git's HTTPS remote helper: `git-remote-https` must be its parent or grandparent (a plain shell may sit between), its argv must be `[git-remote-https, <remote>, https://github.com/<path>]` with the request's path (case and `.git` aside), and no `git credential…` command may sit between. That stops `git credential fill` run by hand and a renamed copy of `sh` posing as the remote helper with a bare name. It does not stop a same-user process that sets its own name and argv to match all of that: the process list is not a security boundary (the same limit as presence detection, `process-ancestry.ts`). The narrowing of the token to one repository and one scope is what bounds the harm.
+- HTTPS pushes to an owner that has only a `person` identity are refused (`GH_IDENTITY_WRITE_NEEDS_HUMAN`) even when a login-bound approval exists: the helper has no approval to consult, and falls through to the person's own helper only for a subcommand known to read (`fetch`, `pull`, `clone`, `ls-remote`, `archive`, `remote`, `submodule`; an alias or an unreadable subcommand is refused). SSH pushes to such an owner are not touched by the helper and go through the pre-push rules as before.
+- Settings that could redirect or capture the token make the helper refuse (`AGENT_PUSH_CREDENTIAL_CONFIG`): a credential helper in the repository's own config, `http.proxy`, `http.sslVerify=false`, `http.sslCAInfo`, `http.extraHeader` or `http.sslBackend` outside system scope, and trace, proxy or TLS variables in the environment. A global proxy or CA bundle you rely on therefore needs to go in the system config, or be given up for agent pushes.
+
 ## Reviewed-benign waivers (`waivers:`)
 
 `.repo-aegis.yml` also carries a `waivers:` list — the auditable

@@ -101,7 +101,10 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "egress-check",
       "egress-readback",
       "engagements",
+      "gh",
+      "git-credential",
       "hook",
+      "identity",
       "init",
       "install",
       "markers",
@@ -149,6 +152,8 @@ const EXPECTED_SHAPE: CommandShape[] = [
     subcommands: [],
   },
   { path: "egress-check", flags: [], subcommands: [] },
+  { path: "gh", flags: [], subcommands: [] },
+  { path: "gh", flags: [], subcommands: [] },
   {
     path: "egress-readback",
     flags: ["--body-file", "--gh", "--pr", "--repo", "--timeout-ms"],
@@ -229,7 +234,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "engagements",
     flags: [],
-    subcommands: ["add", "end", "list", "remove", "show"],
+    subcommands: ["add", "end", "list", "remove", "set-identity", "show"],
   },
   { path: "engagements list", flags: ["--all"], subcommands: [] },
   {
@@ -246,6 +251,13 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "engagements end", flags: ["--purge"], subcommands: [] },
   { path: "engagements show", flags: [], subcommands: [] },
   { path: "engagements remove", flags: ["--hard"], subcommands: [] },
+  { path: "engagements set-identity", flags: ["--agent", "--clear", "--person", "--personal-org"], subcommands: [] },
+
+  // ---- identity ----
+  { path: "identity", flags: [], subcommands: ["add", "remove", "require"] },
+  { path: "identity add", flags: ["--app", "--gh-login"], subcommands: [] },
+  { path: "identity remove", flags: [], subcommands: [] },
+  { path: "identity require", flags: ["--off", "--on"], subcommands: [] },
 
   // ---- upstreams ----
   {
@@ -271,9 +283,11 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "install",
     flags: [],
-    subcommands: ["ci", "claude-md", "gitignore", "hooks", "shim"],
+    subcommands: ["ci", "claude-md", "git-credential", "gitignore", "hooks", "shim"],
   },
   { path: "install shim", flags: ["--force", "--uninstall"], subcommands: [] },
+  { path: "install git-credential", flags: ["--uninstall"], subcommands: [] },
+  { path: "git-credential", flags: [], subcommands: [] },
   {
     path: "install hooks",
     flags: ["--force", "--global", "--local", "--uninstall", "--unset-local"],

@@ -45,7 +45,7 @@ export {
   ALWAYS_BLOCK_RESERVED_ID,
   MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION,
 } from "./registry.js";
-export type { Engagement, Registry, ResolveResult } from "./registry.js";
+export type { Engagement, Registry, ResolveResult, Identity, OwnerIdentities } from "./registry.js";
 
 // ---- remote URL parser ---------------------------------------------------
 export {
@@ -290,9 +290,17 @@ export {
   intentRepoTargets,
   isGraphqlEndpoint,
   graphqlOperationKind,
+  isGhBuiltinGroup,
 } from "./egress-intent.js";
-export { checkNetworkRules } from "./egress-network-rules.js";
-export type { NetworkRuleCode, NetworkRuleHit } from "./egress-network-rules.js";
+export { isGhConfigFile, ghConfigDirs, GH_CONFIG_FILES } from "./gh-config-paths.js";
+export type { GhConfigPathContext } from "./gh-config-paths.js";
+export {
+  checkNetworkRules,
+  checkIdentityHookRules,
+  decideIdentityHookRules,
+  ghVerbChangesIdentityState,
+} from "./egress-network-rules.js";
+export type { NetworkRuleCode, NetworkRuleHit, IdentityHookRuleCode, IdentityHookHit } from "./egress-network-rules.js";
 export type {
   ApiEndpointClass,
   ApiEndpointTarget,
@@ -305,6 +313,8 @@ export type {
   SegmentJoin,
 } from "./egress-intent.js";
 export { egressParseOptions, loadGhAliases, loadGitAliases, parseGitAliasEntries, ghConfigDir } from "./gh-env.js";
+export { ghBaseRepo } from "./gh-base-repo.js";
+export type { GhBaseRepo } from "./gh-base-repo.js";
 export {
   decideEgress,
   resolveDestinationOffline,
@@ -427,6 +437,7 @@ export {
   mintApproval,
   revokeApprovals,
   findApproval,
+  findLoginApproval,
   findUncoveringStarApproval,
   approvalScopeOf,
   starApprovalCovers,
@@ -527,4 +538,26 @@ export type { RepoJson, EngagementJson } from "./types.js";
 // human-readable message" helper. Sibling packages (cli, scan) own their
 // own schemas (classify rules, queries) but import this so error wording
 // is consistent across the surface.
-export { formatZodError, ORG_NAME_REGEX, OWNER_REPO_REGEX, upstreamProblem } from "./schemas.js";
+export {
+  formatZodError,
+  ORG_NAME_REGEX,
+  OWNER_REPO_REGEX,
+  upstreamProblem,
+  IDENTITY_NAME_REGEX,
+  GH_LOGIN_REGEX,
+  REGISTRY_IDENTITIES_MIN_VERSION,
+  personalOrgName,
+} from "./schemas.js";
+export type { IdentityDefinition, PersonalOrgEntry } from "./schemas.js";
+
+// Which GitHub identity a `gh` call runs as (doc/plan-owner-identity.md §13.1). Pure; nothing calls it yet.
+export { identityPresence, ghCallTargets, ghCallInfo, chooseIdentity } from "./identity-choice.js";
+export type {
+  IdentityPresence,
+  GhCallTarget,
+  GhCallInfo,
+  IdentityScope,
+  IdentityRefusalCode,
+  IdentityChoice,
+  ChooseIdentityInput,
+} from "./identity-choice.js";

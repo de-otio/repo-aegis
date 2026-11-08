@@ -30,7 +30,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, basename, join } from "node:path";
-import { parseDocument } from "yaml";
+import { parseDocument, isMap, Scalar } from "yaml";
 import {
   withLockSync,
   parseRegistryText,
@@ -44,6 +44,22 @@ import { isHumanTerminal, type RequireTerminalOptions } from "../require-termina
 import { ownerSetEmptyRefusal, OWNER_SET_EMPTY_NEEDS_TTY, type EmptyingCommand } from "../owner-add-gate.js";
 
 export type Doc = ReturnType<typeof parseDocument>;
+
+/**
+ * The org name of one `personalOrgs` item of a YAML document: a plain string, or the `name` of a
+ * schemaVersion 3 object entry; null for anything else. Every mutator that scans `personalOrgs` for an
+ * existing org goes through this, so an object entry is never invisible to it.
+ */
+export function personalOrgItemName(item: unknown): string | null {
+  if (typeof item === "string") return item;
+  if (item instanceof Scalar) return typeof item.value === "string" ? item.value : null;
+  if (isMap(item)) {
+    const n = item.get("name");
+    if (typeof n === "string") return n;
+    if (n instanceof Scalar && typeof n.value === "string") return n.value;
+  }
+  return null;
+}
 
 /** A mutator failure with a CLI error payload. Thrown inside the lock, mapped by `withRegistryLock`. */
 export class RegistryCliError extends Error {
@@ -135,7 +151,15 @@ export function registeredOwnerSet(doc: Doc): Set<string> {
     .map(e => ({ id: "", name: "", markers: [], githubOrgs: strings(e["githubOrgs"]) }));
   return registeredOwners({
     alwaysBlock: [],
-    personalOrgs: strings(root["personalOrgs"]),
+    // schemaVersion 3 object entries ({ name, … }) are owners too: dropping them would count a registry whose
+    // personal orgs all carry identities as owner-less, and let the last of them be removed without a terminal.
+    personalOrgs: (Array.isArray(root["personalOrgs"]) ? root["personalOrgs"] : []).flatMap((x: unknown) =>
+      typeof x === "string"
+        ? [x]
+        : x !== null && typeof x === "object" && typeof (x as Record<string, unknown>)["name"] === "string"
+          ? [(x as Record<string, string>)["name"]!]
+          : [],
+    ),
     engagements,
   });
 }

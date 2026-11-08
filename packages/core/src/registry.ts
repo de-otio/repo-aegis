@@ -9,7 +9,22 @@ import {
   RegistryParseError,
   RegistryEncryptedError,
 } from "./exceptions.js";
-import { registryFileSchema, formatZodError } from "./schemas.js";
+import {
+  registryFileSchema,
+  formatZodError,
+  personalOrgName,
+  IDENTITY_NAME_REGEX,
+  type IdentityDefinition,
+} from "./schemas.js";
+
+/** A resolved GitHub identity: its registry name plus its kind-specific fields. */
+export type Identity = IdentityDefinition & { readonly name: string };
+
+/** The identities that apply to one owner: the `person` column and the `agent` column. */
+export interface OwnerIdentities {
+  readonly person?: Identity;
+  readonly agent?: Identity;
+}
 
 export interface Engagement {
   id: string;
@@ -27,6 +42,9 @@ export interface Engagement {
    * engagements and disjointness with {@link Registry.personalOrgs}.
    */
   githubOrgs?: string[];
+  /** Identity names (schemaVersion 3) for every org in `githubOrgs`. */
+  person?: string;
+  agent?: string;
 }
 
 export interface Registry {
@@ -89,6 +107,21 @@ export interface Registry {
    * don't have to specify; loadRegistry always populates it.
    */
   schemaVersion?: number;
+  /**
+   * The registry's `identities` by name (schemaVersion 3). Always populated by
+   * `loadRegistry` (empty when absent). Nothing chooses or injects a token from
+   * them yet.
+   */
+  identities?: ReadonlyMap<string, Identity>;
+  /**
+   * Identities per owner, keyed by the LOWER-CASED owner (a `personalOrgs`
+   * object entry's name, or each of a mapped engagement's `githubOrgs`).
+   * Owners with no identity are absent. Separate from {@link Registry.personalOrgs}
+   * (which stays a list of names) so no existing consumer changes shape.
+   */
+  identityMap?: ReadonlyMap<string, OwnerIdentities>;
+  /** Set by the first `set-identity`: an agent write to an owner with no identity entry is refused (§12.2 Q4). */
+  requireIdentity?: boolean;
 }
 
 export const ALWAYS_BLOCK_RESERVED_ID = "_always";
@@ -101,6 +134,9 @@ export const ALWAYS_BLOCK_RESERVED_ID = "_always";
  *   engagement's `githubOrgs` undefined.
  * - v2 (Phase 1 onboarding): adds `personalOrgs` and
  *   `engagements[*].githubOrgs` for org-keyed JIT classification.
+ * - v3 (owner identities): adds `identities`, object-form `personalOrgs`
+ *   entries, an engagement's `person`/`agent`, and `requireIdentity`. Written
+ *   only when the first identity is set; an older build refuses it by version.
  *
  * Reader policy:
  *   - missing field => treat as version 1 (legacy);
@@ -108,7 +144,7 @@ export const ALWAYS_BLOCK_RESERVED_ID = "_always";
  *   - version  > MAX => refuse with "upgrade required".
  * Writers must never lower the version.
  */
-export const MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION = 2;
+export const MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION = 3;
 
 export function loadRegistry(path: string = registryPath()): Registry {
   // If the plaintext registry is absent but a sibling `<path>.age`
@@ -159,6 +195,22 @@ export function parseRegistryText(text: string, path: string = "<in-memory>"): R
     throw new RegistryParseError(path, new Error("missing 'engagements:' top-level key"));
   }
 
+  // Identity names are checked on the RAW keys: zod's record parsing never sees a `__proto__` key (it is
+  // dropped), so a name that fails the shape would otherwise pass unnoticed.
+  const rawIdentities = (parsed as Record<string, unknown>)["identities"];
+  if (rawIdentities !== null && typeof rawIdentities === "object" && !Array.isArray(rawIdentities)) {
+    for (const key of Object.keys(rawIdentities)) {
+      if (!IDENTITY_NAME_REGEX.test(key)) {
+        throw new RegistryParseError(
+          path,
+          new Error(
+            `identities.${key}: identity name must match ^[a-z0-9][a-z0-9-]{0,62}$ (lowercase, digits, hyphens; no leading hyphen)`,
+          ),
+        );
+      }
+    }
+  }
+
   let validated;
   try {
     validated = registryFileSchema.parse(parsed);
@@ -197,12 +249,34 @@ export function parseRegistryText(text: string, path: string = "<in-memory>"): R
     markers: e.markers,
     ...(e.notes !== undefined && { notes: e.notes }),
     ...(e.githubOrgs !== undefined && { githubOrgs: e.githubOrgs }),
+    ...(e.person !== undefined && { person: e.person }),
+    ...(e.agent !== undefined && { agent: e.agent }),
   }));
+
+  const identities = new Map<string, Identity>(
+    Object.entries(validated.identities ?? {}).map(([name, def]) => [name, { ...def, name }]),
+  );
+  const identityMap = new Map<string, OwnerIdentities>();
+  const mapOwner = (owner: string, personName: string | undefined, agentName: string | undefined): void => {
+    const person = personName === undefined ? undefined : identities.get(personName);
+    const agent = agentName === undefined ? undefined : identities.get(agentName);
+    if (person === undefined && agent === undefined) return;
+    identityMap.set(owner.toLowerCase(), {
+      ...(person !== undefined && { person }),
+      ...(agent !== undefined && { agent }),
+    });
+  };
+  for (const entry of validated.personalOrgs ?? []) {
+    if (typeof entry !== "string") mapOwner(entry.name, entry.person, entry.agent);
+  }
+  for (const e of validated.engagements) {
+    for (const org of e.githubOrgs ?? []) mapOwner(org, e.person, e.agent);
+  }
 
   return {
     engagements,
     alwaysBlock: validated.always_block ?? [],
-    personalOrgs: validated.personalOrgs ?? [],
+    personalOrgs: (validated.personalOrgs ?? []).map(personalOrgName),
     allowedUpstreams: validated.allowedUpstreams ?? [],
     // Lower-cased at the boundary: `URL.host` is always lower-case, and
     // `isHostAllowed` compares by exact equality.
@@ -215,6 +289,9 @@ export function parseRegistryText(text: string, path: string = "<in-memory>"): R
       alwaysBlockExemptPaths: validated.alwaysBlockExemptPaths,
     }),
     schemaVersion,
+    identities,
+    identityMap,
+    requireIdentity: validated.requireIdentity ?? false,
   };
 }
 

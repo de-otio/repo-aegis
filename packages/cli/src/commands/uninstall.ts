@@ -9,6 +9,7 @@
 //   - install claude-md --uninstall
 //   - install ci --uninstall      (per-repo workflow file)
 //   - install shim --uninstall    (the `gh` PATH shim)
+//   - install git-credential --uninstall  (the global git credential helper; needs a terminal)
 //
 // And, opt-in:
 //   - --purge-repos: sweep `repo-aegis.*` git config keys out of every
@@ -36,6 +37,7 @@ import { installGitignore } from "./install-gitignore.js";
 import { installClaudeMd } from "./install-claude-md.js";
 import { installCi } from "./install-ci.js";
 import { installShim, shimPathFor } from "./install-shim.js";
+import { gitCredentialInstalled, installGitCredential } from "./install-git-credential.js";
 import { uninstallSweepRepos } from "./uninstall-sweep-repos.js";
 
 interface UninstallOptions extends OutputOptions {
@@ -155,6 +157,9 @@ export function uninstall(opts: UninstallOptions): void {
     runStepSilent("install-shim --uninstall", reports, () =>
       installShim(undefined, { uninstall: true, silent: true, json: false }),
     );
+    // Machine-level too, and the one step that needs a person: removing the helper hands an agent's pushes to the
+    // person's own credential. Without a terminal it is reported as not done, never skipped silently.
+    runStep("install-git-credential --uninstall", reports, () => installGitCredential({ uninstall: true, silent: true, json: false }));
   } else {
     reports.push({ step: "install-hooks --uninstall", ok: true, details: { dryRun: true } });
     reports.push({ step: "install-gitignore --uninstall", ok: true, details: { dryRun: true } });
@@ -165,6 +170,11 @@ export function uninstall(opts: UninstallOptions): void {
       step: "install-shim --uninstall",
       ok: true,
       details: { dryRun: true, wouldRemove: existsSync(shimPath) ? shimPath : null },
+    });
+    reports.push({
+      step: "install-git-credential --uninstall",
+      ok: true,
+      details: { dryRun: true, wouldRemove: gitCredentialInstalled() ? "the git credential helper (global git config)" : null },
     });
   }
 

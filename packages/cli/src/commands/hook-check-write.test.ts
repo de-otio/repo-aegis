@@ -4,7 +4,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBuilt, runCli } from "../_subprocess-utils.js";
 
@@ -433,6 +433,38 @@ engagements:
   });
 });
 
+describe("hook check-write: L6 — refuses writes to gh's config files", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  // Path checks only: nothing here is ever written. The default directory is under the real home of the test
+  // process, which is where the hook (a subprocess with the same HOME) looks.
+  const ghDir = join(homedir(), ".config", "gh");
+
+  it("refuses hosts.yml and config.yml with GH_CONFIG_WRITE_REFUSED", () => {
+    const env = setupAegisHome("ck-gh-config");
+    writeRegistry(env.aegisHome, `schemaVersion: 2\nengagements: []\n`);
+    const repo = makeGitRepo(tmp, "ck-gh-config-repo", { class: "public-eligible" });
+    for (const file of [join(ghDir, "hosts.yml"), join(ghDir, "config.yml"), "~/.config/gh/hosts.yml"]) {
+      const r = runCli(env.aegisHome, repo, ["hook", "check-write"], {
+        input: JSON.stringify({ tool_name: "Write", tool_input: { file_path: file }, cwd: repo }),
+      });
+      assert.equal(r.code, 2, `${file}: expected refuse; got ${r.code} ${r.stderr}`);
+      assert.equal((r.json as { code: string }).code, "GH_CONFIG_WRITE_REFUSED", file);
+      assert.match(r.stderr, /No approval covers this/);
+    }
+  });
+
+  it("allows a neighbouring file and a same-named file elsewhere", () => {
+    const env = setupAegisHome("ck-gh-config-ok");
+    writeRegistry(env.aegisHome, `schemaVersion: 2\nengagements: []\n`);
+    const repo = makeGitRepo(tmp, "ck-gh-config-ok-repo", { class: "public-eligible" });
+    for (const file of [join(ghDir, "state.yml"), join(repo, "hosts.yml"), join(repo, "config.yml")]) {
+      const r = runCli(env.aegisHome, repo, ["hook", "check-write"], {
+        input: JSON.stringify({ tool_name: "Write", tool_input: { file_path: file }, cwd: repo }),
+      });
+      assert.equal(r.code, 0, `${file}: expected allow; got ${r.code} ${r.stderr}`);
+    }
+  });
+});
+
 describe("hook check-write: CONTROL 1 — refuses writes to .repo-aegis.yml", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
   // The threat this exists to close: a coding agent blocked by a `check`
   // finding writes a waiver into .repo-aegis.yml and retries, which is
@@ -508,5 +540,37 @@ engagements:
       input: JSON.stringify({ tool_input: { file_path: file } }),
     });
     assert.equal(r.code, 2, `expected refuse; got ${r.code} ${r.stderr}`);
+  });
+});
+
+describe("hook check-write: an unreadable registry blocks (exit 2), never fails open", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  const payload = (): string => JSON.stringify({ tool_input: { file_path: join(tmp, "loose.txt") }, cwd: tmp });
+
+  it("a registry that does not validate: exit 2, REGISTRY_ERROR, and no org or engagement name in the output", () => {
+    const env = setupAegisHome("ck-bad-registry");
+    // Duplicate org: the zod message would name it, and the engagement ids.
+    writeRegistry(
+      env.aegisHome,
+      "schemaVersion: 2\npersonalOrgs: [secret-org-name, secret-org-name]\nengagements:\n  - { id: secret-engagement-id, name: N, markers: [] }\n",
+    );
+    const r = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], { input: payload() });
+    assert.equal(r.code, 2, r.stderr);
+    const out = `${r.stdout}${r.stderr}`;
+    assert.match(out, /REGISTRY_ERROR/);
+    assert.doesNotMatch(out, /secret-org-name|secret-engagement-id/);
+  });
+
+  it("a registry of a schemaVersion this build cannot read: exit 2", () => {
+    const env = setupAegisHome("ck-newer-registry");
+    writeRegistry(env.aegisHome, "schemaVersion: 99\nengagements: []\n");
+    const r = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], { input: payload() });
+    assert.equal(r.code, 2, r.stderr);
+    assert.match(`${r.stdout}${r.stderr}`, /REGISTRY_ERROR/);
+  });
+
+  it("a missing registry still passes (nothing to protect yet)", () => {
+    const env = setupAegisHome("ck-no-registry");
+    const r = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], { input: payload() });
+    assert.equal(r.code, 0, r.stderr);
   });
 });

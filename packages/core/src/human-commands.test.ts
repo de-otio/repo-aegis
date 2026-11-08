@@ -136,10 +136,71 @@ const HITS: ReadonlyArray<readonly [command: string, kind: HumanOnlyKind]> = [
   ["sudo awk 'BEGIN{system(\"true\")}' /etc/claude-code/managed-settings.d/x.json", "managed-settings-write"],
   ["sudo /opt/tool/bin/anything '/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-501.json'", "managed-settings-write"],
   ["cd /etc/claude-code/managed-settings.d && sudo gzip 50-repo-aegis-1000.json", "managed-settings-write"],
+  // registry identities (doc/plan-owner-identity.md §5.1)
+  ["repo-aegis identity add me --gh-login alice", "identity-change"],
+  ["repo-aegis identity add me-bot --app example-bot", "identity-change"],
+  ["repo-aegis --json identity remove me", "identity-change"],
+  ["repo-aegis identity require --off", "identity-change"],
+  ["repo-aegis engagements set-identity customer-a --person me --agent me-bot", "identity-change"],
+  ["repo-aegis engagements set-identity --personal-org example-org --person me", "identity-change"],
+  ["repo-aegis engagements set-identity customer-a --clear", "identity-change"],
+  ["bash -c 'repo-aegis identity add me --gh-login alice'", "identity-change"],
+  ["env FOO=1 repo-aegis engagements set-identity customer-a --person me", "identity-change"],
+  ["script -q /dev/null repo-aegis identity remove me", "identity-change"],
+  ["tmux new -d 'repo-aegis identity require --off'", "identity-change"],
+  ["python3 -c 'import subprocess; subprocess.run([\"repo-aegis\",\"identity\",\"add\",\"x\",\"--app\",\"y\"])'", "identity-change"],
+  ["node packages/cli/dist/index.js identity add me --gh-login alice", "identity-change"],
+  ["$(which repo-aegis) engagements set-identity customer-a --agent me-bot", "identity-change"],
+  // the `identity` word alone, and `set-identity` anywhere after the program word (subcommand fed by a pipe or a vector)
+  ["echo add me --app b | xargs script -q /dev/null repo-aegis identity", "identity-change"],
+  ["printf 'add me --gh-login alice' | xargs repo-aegis identity", "identity-change"],
+  ["alias ra=repo-aegis; ra identity add me --gh-login alice", "identity-change"],
+  ["cat <<EOF | bash\nrepo-aegis identity remove me\nEOF", "identity-change"],
+  [`python3 -c 'import pty; pty.spawn(["repo-aegis","identity","add","me","--gh-login","alice"])'`, "identity-change"],
+  [`python3 -c 'import pty; pty.spawn(["repo-aegis","identity"] + ["require","--off"])'`, "identity-change"],
+  ["repo-aegis --home /x set-identity customer-a --person me", "identity-change"],
+  ["xargs repo-aegis engagements set-identity < args.txt", "identity-change"],
+  ["repo-aegis identity require --off --on", "identity-change"],
+  // the internal entry points, reached only through the gh shim and git (M3c/L2)
+  ["repo-aegis gh -- pr view 1", "internal-entry"],
+  ["repo-aegis gh --home /x -- pr create --repo o/r", "internal-entry"],
+  ["repo-aegis --json gh -- api user", "internal-entry"],
+  ["repo-aegis --home /x gh -- issue list", "internal-entry"],
+  ["npx repo-aegis gh -- pr view 1", "internal-entry"],
+  ["npx -y @de-otio/repo-aegis gh -- pr view 1", "internal-entry"],
+  ["node /p/packages/cli/dist/index.js gh -- pr view 1", "internal-entry"],
+  ["/opt/homebrew/bin/repo-aegis gh -- pr view 1", "internal-entry"],
+  ["/usr/local/lib/node_modules/@de-otio/repo-aegis/dist/index.js gh -- pr view 1", "internal-entry"],
+  ["sudo -u me repo-aegis gh -- pr view 1", "internal-entry"],
+  ["env FOO=1 repo-aegis gh -- pr view 1", "internal-entry"],
+  ["bash -c 'repo-aegis gh -- pr view 1'", "internal-entry"],
+  ["echo $(repo-aegis gh -- api user)", "internal-entry"],
+  ["ls && repo-aegis gh -- pr view 1", "internal-entry"],
+  ["RA=repo-aegis; $RA gh -- pr view 1", "internal-entry"],
+  ["alias ra=repo-aegis; ra gh -- pr view 1", "internal-entry"],
+  ["script -q /dev/null repo-aegis gh -- pr view 1", "internal-entry"],
+  ["repo-aegis git-credential get", "internal-entry"],
+  ["repo-aegis git-credential --home /x get", "internal-entry"],
+  ["printf 'host=x\\n\\n' | repo-aegis git-credential get", "internal-entry"],
+  ["repo-aegis git-credential get <<EOF\nhost=x\nEOF", "internal-entry"],
+  ["npx repo-aegis git-credential get", "internal-entry"],
+  ["node /p/dist/index.js git-credential get", "internal-entry"],
 ];
 
 const MISSES: ReadonlyArray<string> = [
   "repo-aegis status",
+  "repo-aegis doctor",
+  "repo-aegis install git-credential",
+  "repo-aegis check --path docs/gh-notes.md",
+  "git commit -m 'repo-aegis gh -- pr view'",
+  "echo gh git-credential",
+  "git commit -m 'document repo-aegis identity add and set-identity'",
+  // `identity require --on` only tightens, so an agent may run it
+  "repo-aegis identity require --on",
+  "repo-aegis --json identity require --on",
+  "grep -rn 'identity add' doc/ # repo-aegis",
+  "repo-aegis engagements add customer-a --name 'Identity Team'",
+  "repo-aegis engagements show customer-a",
   "repo-aegis scan .",
   "repo-aegis check --remote-url x",
   "repo-aegis engagements add customer-a",
@@ -316,6 +377,14 @@ describe("commandRegions", () => {
 
 describe("humanCommandRefusal — five parts (§3.9)", () => {
   const kinds: HumanOnlyKind[] = ["approve", "owner-add", "upstream-add", "init-migrate", "init-force"];
+  it("identity-change", () => {
+    const text = humanCommandRefusal({ kind: "identity-change" });
+    assert.match(text, /refused\./);
+    assert.match(text, /which GitHub account acts for an owner/);
+    assert.match(text, /No approval covers this/);
+    assert.match(text, /A person runs it in their own terminal/);
+    assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}, see doc/agent-guide\\.md#agent_ran_human_command\\]`));
+  });
   const managedKinds: HumanOnlyKind[] = ["claude-md-uninstall", "managed-settings-write"];
   for (const kind of managedKinds) {
     it(kind, () => {

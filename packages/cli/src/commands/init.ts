@@ -36,6 +36,7 @@ import { confirmOnTerminal, isHumanTerminal } from "../require-terminal.js";
 import {
   RegistryCliError,
   assertValidRegistryText,
+  personalOrgItemName,
   writeRegistryText,
 } from "./registry-mutate.js";
 
@@ -217,6 +218,9 @@ function registryDeclaresContent(text: string): boolean {
     nonEmpty(r["always_block"]) ||
     nonEmpty(r["personalOrgs"]) ||
     nonEmpty(r["allowedUpstreams"]) ||
+    // schemaVersion 3: identities and the requirement are as much the operator's as the owners they map.
+    nonEmpty(r["identities"] !== null && typeof r["identities"] === "object" ? Object.keys(r["identities"] as object) : undefined) ||
+    r["requireIdentity"] !== undefined ||
     nonEmpty(r["engagements"]) ||
     nonEmpty(r["selfIdentity"]) ||
     nonEmpty(r["privateInfra"]) ||
@@ -412,9 +416,8 @@ function runMigrateClassify(opts: InitOptions): MigrationResult {
       }
       const personalSet = new Set<string>();
       for (const item of personalOrgsSeq.items ?? []) {
-        if (typeof item === "string") personalSet.add(item);
-        else if (item instanceof Scalar && typeof item.value === "string")
-          personalSet.add(item.value);
+        const name = personalOrgItemName(item);
+        if (name !== null) personalSet.add(name);
       }
       for (const org of personalOrgsToAdd) {
         if (!personalSet.has(org)) {

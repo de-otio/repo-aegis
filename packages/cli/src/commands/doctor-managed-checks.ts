@@ -47,8 +47,12 @@ export interface ManagedDoctorContext extends HeartbeatContext {
 
 /** The (node, cli) pairs the hook commands of a drop-in text are pinned to. */
 function pinsIn(text: string): EnforcementPin[] {
+  return pinsInSettings(parseObject(text) as SettingsJson | null);
+}
+
+/** The (node, cli) pairs the hook commands of a parsed settings object (drop-in or `settings.json`) are pinned to. */
+export function pinsInSettings(settings: SettingsJson | null): EnforcementPin[] {
   const out: EnforcementPin[] = [];
-  const settings = parseObject(text) as SettingsJson | null;
   const re = /; then exec ('(?:[^']|'\\'')*') ('(?:[^']|'\\'')*') hook /;
   for (const entries of Object.values(settings?.hooks ?? {})) {
     for (const entry of entries ?? []) {

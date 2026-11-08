@@ -179,6 +179,52 @@ export async function buildProgram(): Promise<Command> {
     .option("--hard", "required: physically delete the entry. Use `engagements end --purge` for soft removal.")
     .action((id: string, opts, cmd) => engagementsRemove(id, withGlobals(opts, cmd)));
 
+  engagements
+    .command("set-identity [id]")
+    .description(
+      "map an engagement's orgs (or, with --personal-org, one personal org) to GitHub identities: --person is a gh-login identity, --agent a github-app identity. The first one sets requireIdentity. Needs a terminal; an agent must not run it.",
+    )
+    .option("--personal-org <org>", "target a personal org instead of an engagement <id>")
+    .option("--person <name>", "identity name acting when a person is present (kind gh-login)")
+    .option("--agent <name>", "identity name acting when no person is present (kind github-app)")
+    .option("--clear", "remove both identities from the target")
+    .action(async (id: string | undefined, opts, cmd) => {
+      const { engagementsSetIdentity } = await import("./commands/identity.js");
+      engagementsSetIdentity(id, withGlobals(opts, cmd));
+    });
+
+  // Registry schemaVersion 3: named GitHub identities. Every mutator needs a terminal and is human-only.
+  const identity = program
+    .command("identity")
+    .description(
+      "manage the registry's GitHub identities (schemaVersion 3). Every subcommand needs a terminal; an agent must not run them.",
+    );
+  identity
+    .command("add <name>")
+    .description("define identity <name> as a GitHub login (a person) or a GitHub App slug (an agent). Needs a terminal.")
+    .option("--gh-login <login>", "a gh account login (kind gh-login)")
+    .option("--app <slug>", "a GitHub App slug (kind github-app)")
+    .action(async (name: string, opts, cmd) => {
+      const { identityAdd } = await import("./commands/identity.js");
+      identityAdd(name, withGlobals(opts, cmd));
+    });
+  identity
+    .command("remove <name>")
+    .description("remove identity <name>; refused while an owner or engagement still references it. Needs a terminal.")
+    .action(async (name: string, opts, cmd) => {
+      const { identityRemove } = await import("./commands/identity.js");
+      identityRemove(name, withGlobals(opts, cmd));
+    });
+  identity
+    .command("require")
+    .description("turn requireIdentity on or off (the first set-identity turns it on). --off needs a terminal; --on only tightens and needs none.")
+    .option("--off", "clear requireIdentity (needs a terminal)")
+    .option("--on", "set requireIdentity (no terminal needed)")
+    .action(async (opts, cmd) => {
+      const { identityRequire } = await import("./commands/identity.js");
+      identityRequire(withGlobals(opts, cmd));
+    });
+
   // Forks: `allowedUpstreams` lifts rule h (refusal of egress to an unregistered
   // owner) for PRs, issues and comments to one exact owner/repo. `add` widens
   // what an agent may publish to, so it is human-only, like `approve`.
@@ -363,12 +409,41 @@ export async function buildProgram(): Promise<Command> {
   // that publishes through `gh` (doc/design/egress-guard.md §3).
   install
     .command("shim [tool]")
-    .description("write <home>/bin/<tool> (default: gh), a wrapper that runs `repo-aegis egress-check` before any publishing verb and passes reads through untouched; put that directory first on PATH")
+    .description("write <home>/bin/<tool> (default: gh), a wrapper that hands every gh call (but --version, help, completion) to `repo-aegis gh`, which decides egress and the GitHub identity; also pins taaad; put that directory first on PATH")
     .option("--uninstall", "remove the shim (idempotent)")
     .option("--force", "overwrite a file at the shim path that repo-aegis did not write")
     .action(async (tool: string | undefined, opts, cmd) => {
       const { installShim } = await import("./commands/install-shim.js");
       installShim(tool, withGlobals(opts, cmd));
+    });
+
+  install
+    .command("git-credential")
+    .description("make the repo-aegis credential helper the first git helper for https://github.com (global config; needs a terminal), so an agent's HTTPS push gets a token narrowed to one repository; sets credential.useHttpPath")
+    .option("--uninstall", "remove exactly what this command added (recorded in <home>/state/git-credential-install.json)")
+    .action(async (opts, cmd) => {
+      const { installGitCredential } = await import("./commands/install-git-credential.js");
+      installGitCredential(withGlobals(opts, cmd));
+    });
+
+  // The git credential helper (doc/plan-owner-identity.md §5.6). Reads the credential protocol on stdin; prints only
+  // protocol lines on stdout; always exits 0 (git ignores a non-zero helper and asks the next one).
+  program
+    .command("git-credential <action>")
+    .description("git credential helper: `get` answers an agent's push to an owner with an agent identity; every refusal prints quit=true; store and erase are ignored (git calls this; configure it with `install git-credential`)")
+    .action(async (action: string, opts, cmd) => {
+      const { runGitCredential } = await import("./commands/git-credential.js");
+      const { readFileSync } = await import("node:fs");
+      let stdin = "";
+      try {
+        stdin = readFileSync(0, "utf8");
+      } catch {
+        /* no stdin: the empty request is not for github.com */
+      }
+      const merged = withGlobals(opts, cmd) as { home?: string };
+      const result = runGitCredential(action, stdin, merged.home ?? "");
+      if (result.stderr !== "") process.stderr.write(result.stderr);
+      process.stdout.write(result.stdout);
     });
 
   program
@@ -378,6 +453,16 @@ export async function buildProgram(): Promise<Command> {
     .action(async (args: string[], opts, cmd) => {
       const { egressCheck } = await import("./commands/egress-check.js");
       egressCheck(args, withGlobals(opts, cmd));
+    });
+
+  // What the shim `exec`s for every `gh` call but --version, help and completion (doc/plan-owner-identity.md D1).
+  program
+    .command("gh")
+    .description("run `gh` for the shim: the egress decision, then the GitHub identity the registry maps to the call's owner, then the real gh; use `--home <pinned home> -- <gh args>`")
+    .argument("[args...]", "the gh arguments, verbatim (use `--` before them)")
+    .action(async (args: string[], opts, cmd) => {
+      const { ghCommand } = await import("./commands/gh-command.js");
+      ghCommand(args, withGlobals(opts, cmd));
     });
 
   program
