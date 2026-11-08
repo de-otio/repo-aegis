@@ -15,6 +15,7 @@ import {
   type Registry,
 } from "@de-otio/repo-aegis-core";
 import { decideHookAction, type HookDecision } from "./hook-policy.js";
+import { parseHookWriteFields, readHookStdin, WRITE_HOOK_INPUT_MAX_BYTES } from "./hook-input.js";
 
 interface HookOptions {
   /** When true, do not exit non-zero on hits — return as if clean. Useful
@@ -22,72 +23,16 @@ interface HookOptions {
   advisory?: boolean;
 }
 
-/**
- * Read all of stdin to a string. The Claude Code PostToolUse hook contract
- * sends a JSON tool-result payload on stdin. Sizes are typically a few
- * hundred bytes; we cap at 1 MiB to avoid an unbounded buffer.
- */
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  const MAX = 1024 * 1024;
-  for await (const chunk of process.stdin) {
-    const b = typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer);
-    total += b.length;
-    if (total > MAX) {
-      // Hook payload is unexpectedly large; ignore the rest. Hooks must
-      // be silent on non-fatal anomalies — failing here would surface
-      // as an "agent saw an error" event in the tool result, which is
-      // exactly the wrong place for noise.
-      break;
-    }
-    chunks.push(b);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
+// The payload's fields (hook-input.ts, parseHookWriteFields): `filePath`, the file the agent just
+// wrote/edited, and `cwd`, the session's working directory (the launcher boundary; see the cwd-source
+// discussion in doc/bugs/repo-aegis-check-write-flake.md). A payload past 1 MiB is read from its start
+// (#156): the file itself is scanned from disk, so only its path is needed.
 
-/**
- * Parse the Claude Code PostToolUse JSON payload into the fields the
- * hook needs:
- *
- *   - `filePath`: the file the agent just wrote/edited
- *     (`tool_input.file_path`; older shapes use `tool_input.path`).
- *   - `cwd`: the session's working directory, sent by Claude Code as a
- *     top-level field — the launcher boundary the policy compares
- *     against. Prefer it over `process.cwd()` (the hook's spawn cwd,
- *     which can be an unrelated tree); see the cwd-source discussion in
- *     doc/bugs/repo-aegis-check-write-flake.md.
- *
- * A missing/unparseable field => `undefined` for that field.
- */
-function parseHookInput(json: string): { filePath?: string; cwd?: string } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
-    return {};
-  }
-  if (!parsed || typeof parsed !== "object") return {};
-  const root = parsed as Record<string, unknown>;
-  const out: { filePath?: string; cwd?: string } = {};
-
-  const ti = root["tool_input"];
-  if (ti && typeof ti === "object") {
-    const tiObj = ti as Record<string, unknown>;
-    for (const k of ["file_path", "path"]) {
-      const v = tiObj[k];
-      if (typeof v === "string" && v.length > 0) {
-        out.filePath = v;
-        break;
-      }
-    }
-  }
-
-  const cwd = root["cwd"];
-  if (typeof cwd === "string" && cwd.length > 0) out.cwd = cwd;
-
-  return out;
-}
+/** What the agent is told when a cut-off payload did not show which file was written. */
+const NOT_SCANNED_REASON =
+  "repo-aegis: this write's hook payload is larger than 1 MiB and the file path could not be read from its " +
+  "start, so the file that was written has NOT been scanned for markers. Tell your human which file you wrote; " +
+  "they can scan it with `repo-aegis check --path <file>`. See doc/agent-guide.md#hook_input_too_large.";
 
 function emitJsonAndExit(value: unknown, exitCode: number): never {
   // Claude Code's hook contract forwards stderr (not stdout) to the agent
@@ -133,10 +78,13 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
  * The hook NEVER reveals literal markers. `--verbose` is not honoured.
  */
 export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> {
-  const stdinText = await readStdin();
-  const { filePath, cwd } = parseHookInput(stdinText);
+  const input = await readHookStdin(WRITE_HOOK_INPUT_MAX_BYTES);
+  const { filePath, cwd } = parseHookWriteFields(input.text);
 
-  if (!filePath) process.exit(0);
+  if (!filePath) {
+    if (input.truncated) emitJsonAndExit({ code: "HOOK_INPUT_TOO_LARGE", error: NOT_SCANNED_REASON }, 2);
+    process.exit(0);
+  }
   if (!existsSync(filePath)) process.exit(0);
 
   let registry: Registry;

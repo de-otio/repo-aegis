@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Write hooks no longer let a payload past 1 MiB through unchecked (#156).
+  `hook check-write` and `hook scan-after-write` cut the payload at 1 MiB and
+  then failed to parse the prefix, so the path policy and the marker scan were
+  both skipped and the hooks exited 0. They now read the file path from the
+  payload's start with a JSON lexer (a key inside another string's content is
+  never taken for one). The path is all the policy needs, and the scan reads
+  the file from disk. If the path is not in the prefix, `check-write` refuses
+  with `HOOK_INPUT_TOO_LARGE` and `scan-after-write` reports that the file was
+  not scanned.
+- `hook scan-bash-output` had the same flaw past its 8 MiB cap, so a large
+  output was not scanned at all, despite its comment. It now scans the text it
+  read.
 - The `gh` alias config is read through one file descriptor, so the size cap
   and the read see the same file, and a FIFO at the path cannot hang the
   guard (code scanning: file-system race).

@@ -9,70 +9,24 @@ import {
   type Registry,
 } from "@de-otio/repo-aegis-core";
 import { decideHookAction, type HookDecision } from "./hook-policy.js";
+import {
+  parseHookWriteFields,
+  readHookStdin,
+  WRITE_HOOK_INPUT_MAX_BYTES,
+  WRITE_HOOK_INPUT_TOO_LARGE_REASON,
+} from "./hook-input.js";
 
-/**
- * Read all of stdin to a string. The Claude Code PreToolUse hook
- * contract sends a JSON tool-call payload on stdin (no `tool_response`
- * block — the tool hasn't run yet). We cap at 1 MiB to avoid an
- * unbounded buffer.
- */
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  const MAX = 1024 * 1024;
-  for await (const chunk of process.stdin) {
-    const b = typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer);
-    total += b.length;
-    if (total > MAX) break;
-    chunks.push(b);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-/**
- * Parse the Claude Code PreToolUse JSON payload into the two fields the
- * policy needs:
- *
- *   - `filePath`: the path the agent is *about to* write/edit
- *     (`tool_input.file_path`; older shapes use `tool_input.path`).
- *   - `cwd`: the session's working directory, sent by Claude Code as a
- *     top-level field. This is the launcher boundary the policy compares
- *     against — NOT `process.cwd()`, which is whatever directory Claude
- *     Code happened to spawn this hook process in (often an unrelated
- *     tree: `/tmp`, `$HOME`, a sibling repo). Reading the spawn cwd was
- *     the cause of the spurious `CROSS_ORG_WRITE` blocks documented in
- *     doc/bugs/repo-aegis-check-write-flake.md (Bug B).
- *
- * A missing/unparseable field => `undefined` for that field.
- */
-function parseHookInput(json: string): { filePath?: string; cwd?: string } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
-    return {};
-  }
-  if (!parsed || typeof parsed !== "object") return {};
-  const root = parsed as Record<string, unknown>;
-  const out: { filePath?: string; cwd?: string } = {};
-
-  const ti = root["tool_input"];
-  if (ti && typeof ti === "object") {
-    const tiObj = ti as Record<string, unknown>;
-    for (const k of ["file_path", "path"]) {
-      const v = tiObj[k];
-      if (typeof v === "string" && v.length > 0) {
-        out.filePath = v;
-        break;
-      }
-    }
-  }
-
-  const cwd = root["cwd"];
-  if (typeof cwd === "string" && cwd.length > 0) out.cwd = cwd;
-
-  return out;
-}
+// The payload's two fields the policy needs (hook-input.ts, parseHookWriteFields):
+//   - `filePath`: the path the agent is *about to* write/edit
+//     (`tool_input.file_path`; older shapes use `tool_input.path`).
+//   - `cwd`: the session's working directory, sent by Claude Code as a
+//     top-level field. This is the launcher boundary the policy compares
+//     against — NOT `process.cwd()`, which is whatever directory Claude
+//     Code happened to spawn this hook process in (often an unrelated
+//     tree: `/tmp`, `$HOME`, a sibling repo). Reading the spawn cwd was
+//     the cause of the spurious `CROSS_ORG_WRITE` blocks documented in
+//     doc/bugs/repo-aegis-check-write-flake.md (Bug B).
+// A payload past 1 MiB is read from its start (#156); one whose path is not there is refused, not allowed.
 
 // Claude Code PreToolUse exit-code contract:
 //   0              → allow (normal permission flow),
@@ -143,10 +97,15 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
  * by an agent writing the file directly.
  */
 export async function hookCheckWrite(): Promise<void> {
-  const stdinText = await readStdin();
-  const { filePath, cwd } = parseHookInput(stdinText);
+  const input = await readHookStdin(WRITE_HOOK_INPUT_MAX_BYTES);
+  const { filePath, cwd } = parseHookWriteFields(input.text);
 
-  if (!filePath) process.exit(0);
+  if (!filePath) {
+    if (input.truncated) {
+      emitJsonAndExit({ code: "HOOK_INPUT_TOO_LARGE", error: WRITE_HOOK_INPUT_TOO_LARGE_REASON }, EXIT_BLOCK);
+    }
+    process.exit(0);
+  }
 
   if (basename(filePath) === OVERRIDE_FILENAME) {
     emitJsonAndExit(
