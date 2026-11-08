@@ -101,6 +101,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "egress-check",
       "egress-readback",
       "engagements",
+      "gh",
       "hook",
       "identity",
       "init",
@@ -150,6 +151,8 @@ const EXPECTED_SHAPE: CommandShape[] = [
     subcommands: [],
   },
   { path: "egress-check", flags: [], subcommands: [] },
+  { path: "gh", flags: [], subcommands: [] },
+  { path: "gh", flags: [], subcommands: [] },
   {
     path: "egress-readback",
     flags: ["--body-file", "--gh", "--pr", "--repo", "--timeout-ms"],

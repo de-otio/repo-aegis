@@ -348,7 +348,7 @@ describe("doctor — R8/R9/R11 end to end", () => {
     registerGuard(w);
     const shimDir = join(w.aegisHome, "bin");
     mkdirSync(shimDir, { recursive: true });
-    writeFileSync(join(shimDir, "gh"), renderShimScript(currentEnforcementPin()), { mode: 0o755 });
+    writeFileSync(join(shimDir, "gh"), renderShimScript(currentEnforcementPin(), { home: w.aegisHome, taaad: null }), { mode: 0o755 });
     chmodSync(join(shimDir, "gh"), 0o755);
 
     const res = withWorld(w, () =>
@@ -380,7 +380,7 @@ describe("doctor — R8/R9/R11 end to end", () => {
     rmSync(w.repo, { recursive: true, force: true }); // no repo findings either
     const shimDir = join(w.aegisHome, "bin");
     mkdirSync(shimDir, { recursive: true });
-    writeFileSync(join(shimDir, "gh"), renderShimScript(currentEnforcementPin()), { mode: 0o755 });
+    writeFileSync(join(shimDir, "gh"), renderShimScript(currentEnforcementPin(), { home: w.aegisHome, taaad: null }), { mode: 0o755 });
     chmodSync(join(shimDir, "gh"), 0o755);
     writeFileSync(join(w.userHome, ".zshenv"), "export GH_REPO=x/y\n");
     const res = withWorld(w, () =>

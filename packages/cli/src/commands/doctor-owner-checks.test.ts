@@ -501,7 +501,7 @@ function makeWorld(name: string, registryYaml: string | null, stubPath: string):
   for (const d of [aegisHome, userHome, claudeHome, scanRoot]) mkdirSync(d, { recursive: true });
   // The shim is installed and first on PATH, as `doctor` wants; it must be skipped when looking for the real gh.
   mkdirSync(join(aegisHome, "bin"), { recursive: true });
-  writeFileSync(join(aegisHome, "bin", "gh"), renderShimScript(currentEnforcementPin()), { mode: 0o755 });
+  writeFileSync(join(aegisHome, "bin", "gh"), renderShimScript(currentEnforcementPin(), { home: aegisHome, taaad: null }), { mode: 0o755 });
   chmodSync(join(aegisHome, "bin", "gh"), 0o755);
   const registryFile = join(aegisHome, "engagements.yaml");
   if (registryYaml !== null) writeFileSync(registryFile, registryYaml);
@@ -695,7 +695,7 @@ function shimDirFor(base: string): { home: string; bin: string } {
   const home = join(base, "aegis");
   const bin = join(home, "bin");
   mkdirSync(bin, { recursive: true });
-  writeFileSync(join(bin, "gh"), renderShimScript(currentEnforcementPin()), { mode: 0o755 });
+  writeFileSync(join(bin, "gh"), renderShimScript(currentEnforcementPin(), { home, taaad: null }), { mode: 0o755 });
   chmodSync(join(bin, "gh"), 0o755);
   return { home, bin };
 }

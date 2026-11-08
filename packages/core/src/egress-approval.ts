@@ -55,6 +55,12 @@ export interface EgressApproval {
   by: string;
   /** Free text from the operator; never printed by the guard. */
   note?: string;
+  /**
+   * The GitHub login of the destination owner's mapped `person` identity at mint time
+   * (doc/plan-owner-identity.md N3, A11). Present only on an `<org>/<repo>` or `<org>/*` approval for an owner
+   * that has one; a `*` approval never carries one. It is what lets an agent write as that person's account.
+   */
+  login?: string;
 }
 
 export interface ApprovalStore {
@@ -125,7 +131,8 @@ function isApproval(v: unknown): v is EgressApproval {
     typeof a["repo"] === "string" &&
     (a["ref"] === undefined || typeof a["ref"] === "string") &&
     typeof a["createdAt"] === "string" &&
-    typeof a["by"] === "string"
+    typeof a["by"] === "string" &&
+    (a["login"] === undefined || typeof a["login"] === "string")
   );
 }
 
@@ -170,6 +177,8 @@ export interface MintOptions {
   path?: string;
   now?: Date;
   by?: string;
+  /** Recorded only when the target is not `*` (A11). */
+  login?: string;
 }
 
 /**
@@ -190,6 +199,7 @@ export function mintApproval(opts: MintOptions): EgressApproval {
     expiresAt: new Date(now.getTime() + ttl).toISOString(),
     by: opts.by ?? safeUser(),
     ...(opts.note !== undefined && opts.note !== "" && { note: opts.note }),
+    ...(opts.login !== undefined && opts.login !== "" && opts.target.org !== "*" && { login: opts.login }),
   };
   const store = readApprovalStore(path);
   store.approvals = [...store.approvals.filter(a => isLive(a, now)), approval];
@@ -348,6 +358,37 @@ export function findUncoveringStarApproval(
       if (a.org !== "*") continue;
       if (a.ref !== undefined && (wanted === undefined || a.ref !== wanted)) continue;
       return { approval: a, gap: upstream ? "upstream" : "not-personal" };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The live approval that lets an agent WRITE as the GitHub account `login` to `destination`
+ * (doc/plan-owner-identity.md N3, A11), or null. Stricter than {@link findApproval}: only an `<org>/<repo>` or
+ * `<org>/*` approval can match (never `*`), it must carry exactly this login (case-insensitively), and an
+ * approval restricted to one ref does not match (a `gh` write names no ref). An approval minted before logins
+ * were recorded carries none and matches nothing. Never throws.
+ */
+export function findLoginApproval(
+  destination: { org: string; repo: string },
+  login: string,
+  path: string = approvalsPath(),
+  now: Date = new Date(),
+): EgressApproval | null {
+  try {
+    if (!existsSync(path) || login === "") return null;
+    if (safeDestination(destination.org, destination.repo) === null) return null;
+    const org = destination.org.toLowerCase();
+    const repo = destination.repo.toLowerCase();
+    for (const a of listApprovals(path, now)) {
+      if (a.org === "*" || a.org !== org) continue;
+      if (a.repo !== "*" && a.repo !== repo) continue;
+      if (a.ref !== undefined) continue;
+      if (a.login === undefined || a.login.toLowerCase() !== login.toLowerCase()) continue;
+      return a;
     }
     return null;
   } catch {

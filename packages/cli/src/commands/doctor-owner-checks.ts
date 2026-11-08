@@ -59,6 +59,9 @@ import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { registeredOwners, repoAegisHome, type Registry } from "@de-otio/repo-aegis-core";
 import { PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
+import { parseTaaadPinFromScript, SHIM_HEADER_LINE } from "./shim-script.js";
+import { taaadTrustProblem } from "./taaad-pin.js";
+import { readFileSync } from "node:fs";
 import { confirmOnTerminal, isHumanTerminal } from "../require-terminal.js";
 
 const HOST = "github.com";
@@ -142,6 +145,58 @@ export function ownerIdentityChecks(registry: Registry): DoctorCheck[] {
         "map the owner to an identity (it is listed in --json): repo-aegis identity add <name> --gh-login <login>, then " +
         `repo-aegis engagements set-identity (<engagement-id> | --personal-org <org>) --person <name>   (${PERSON_RUNS_THIS})`,
     }));
+}
+
+/**
+ * `TAAAD_AGENT_WRITABLE` (doc/plan-owner-identity.md A4, D4): the taaad that `repo-aegis gh` mints App tokens
+ * through must be pinned by `install shim` and owned by root, with every path the pin names writable by
+ * root only; else github-app injection is refused. A FAILURE when any github-app identity is mapped, a
+ * warning otherwise (nothing depends on it yet). The pin is always reported (paths of tools, never owners).
+ * Nothing is returned when no github-app identity is mapped and nothing is pinned: there is nothing to say.
+ */
+export function taaadChecks(registry: Registry, home: string = repoAegisHome()): DoctorCheck[] {
+  const appMapped = [...(registry.identityMap?.values() ?? [])].some(
+    e => e.person?.kind === "github-app" || e.agent?.kind === "github-app",
+  );
+  let text: string | null = null;
+  try {
+    const t = readFileSync(join(home, "bin", "gh"), "utf8");
+    text = t.includes(SHIM_HEADER_LINE) ? t : null;
+  } catch {
+    text = null;
+  }
+  const pin = text === null ? null : parseTaaadPinFromScript(text);
+  const severity = appMapped ? {} : { severity: "warn" as const };
+  const fix =
+    "install taaad into a root-owned prefix (for example `sudo pipx install --global taaad`), remove any user-level copy, " +
+    "then re-run `repo-aegis install shim`";
+  if (pin === null) {
+    if (!appMapped) return [];
+    return [
+      {
+        code: "TAAAD_AGENT_WRITABLE",
+        ok: false,
+        detail: "a github-app identity is mapped but no taaad is pinned by the `gh` shim, so no App token can be minted and calls for that owner are refused",
+        fix,
+      },
+    ];
+  }
+  const problem = taaadTrustProblem(pin);
+  const where = `launcher ${pin.launcher}, interpreter ${pin.interpreter}, package directory ${pin.packageDir}`;
+  if (problem === null) {
+    return [{ code: "TAAAD_AGENT_WRITABLE", ok: true, detail: `taaad is pinned and root-owned (${where})` }];
+  }
+  return [
+    {
+      code: "TAAAD_AGENT_WRITABLE",
+      ok: false,
+      ...severity,
+      detail:
+        `taaad is pinned (${where}) but is not root-only-writable: ${problem}. ` +
+        (appMapped ? "github-app injection is refused until this is fixed" : "github-app injection would be refused"),
+      fix,
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -348,9 +403,15 @@ function untrusted(detail: string): DoctorCheck {
 }
 
 /** Choose the gh doctor may talk to, or say why none. */
-function resolveGh(env: NodeJS.ProcessEnv, policy: "default" | "permissive", skipDirectoryChecks = false): GhResolution {
-  // (a) Another gh ahead of the shim: whatever agents run is not what we would spawn.
-  if (checkShim(env).some(c => c.code === "SHIM_NOT_FIRST" && !c.ok)) {
+function resolveGh(
+  env: NodeJS.ProcessEnv,
+  policy: "default" | "permissive",
+  skipDirectoryChecks = false,
+  requireShimFirst = true,
+): GhResolution {
+  // (a) Another gh ahead of the shim: whatever agents run is not what we would spawn. (`repo-aegis gh` is
+  // already running BEHIND the shim, so it does not ask: it only needs a gh it may hand a token.)
+  if (requireShimFirst && checkShim(env).some(c => c.code === "SHIM_NOT_FIRST" && !c.ok)) {
     return { kind: "skip", reason: "another `gh` precedes the repo-aegis shim on PATH, so doctor cannot tell which gh would run", extra: [] };
   }
   const onPath = findRealGh(env);
@@ -394,12 +455,26 @@ function resolveGh(env: NodeJS.ProcessEnv, policy: "default" | "permissive", ski
   return { kind: "ok", path: real, extra };
 }
 
+/**
+ * The `gh` that `repo-aegis gh` may hand a token (doc/plan-owner-identity.md D3): the same vetting as `doctor`
+ * (absolute PATH entries only, a directory neither under HOME, the cwd nor a temp directory nor writable by
+ * others, a file that is really a gh), without the "is the shim first on PATH" question. `policy: "permissive"`
+ * is a test seam (stubs live in temp directories); there is no environment variable for it.
+ */
+export function resolveTrustedGh(
+  env: NodeJS.ProcessEnv,
+  policy: "default" | "permissive" = "default",
+): { kind: "ok"; path: string } | { kind: "skip"; reason: string } {
+  const res = resolveGh(env, policy, false, false);
+  return res.kind === "ok" ? { kind: "ok", path: res.path } : { kind: "skip", reason: res.reason };
+}
+
 /** Variables that would make a child `gh` act as an account other than the one we mean. */
 /**
  * Environment variables that make gh talk to a server or account the person did
  * not pick at the terminal. Names only are ever reported, never values.
  */
-const GH_REDIRECT_ENV = [
+export const GH_REDIRECT_ENV = [
   "GH_CONFIG_DIR",
   "GH_HOST",
   "GH_TOKEN",

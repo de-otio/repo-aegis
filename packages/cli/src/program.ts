@@ -409,7 +409,7 @@ export async function buildProgram(): Promise<Command> {
   // that publishes through `gh` (doc/design/egress-guard.md §3).
   install
     .command("shim [tool]")
-    .description("write <home>/bin/<tool> (default: gh), a wrapper that runs `repo-aegis egress-check` before any publishing verb and passes reads through untouched; put that directory first on PATH")
+    .description("write <home>/bin/<tool> (default: gh), a wrapper that hands every gh call (but --version, help, completion) to `repo-aegis gh`, which decides egress and the GitHub identity; also pins taaad; put that directory first on PATH")
     .option("--uninstall", "remove the shim (idempotent)")
     .option("--force", "overwrite a file at the shim path that repo-aegis did not write")
     .action(async (tool: string | undefined, opts, cmd) => {
@@ -424,6 +424,16 @@ export async function buildProgram(): Promise<Command> {
     .action(async (args: string[], opts, cmd) => {
       const { egressCheck } = await import("./commands/egress-check.js");
       egressCheck(args, withGlobals(opts, cmd));
+    });
+
+  // What the shim `exec`s for every `gh` call but --version, help and completion (doc/plan-owner-identity.md D1).
+  program
+    .command("gh")
+    .description("run `gh` for the shim: the egress decision, then the GitHub identity the registry maps to the call's owner, then the real gh; use `--home <pinned home> -- <gh args>`")
+    .argument("[args...]", "the gh arguments, verbatim (use `--` before them)")
+    .action(async (args: string[], opts, cmd) => {
+      const { ghCommand } = await import("./commands/gh-command.js");
+      ghCommand(args, withGlobals(opts, cmd));
     });
 
   program

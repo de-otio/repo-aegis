@@ -28,6 +28,8 @@ export type DoctorCheckCode =
   | "REGISTRY_UNREADABLE"
   // Owner identities (doc/plan-owner-identity.md §5.1, §12.2 Q4).
   | "OWNER_IDENTITY_UNMAPPED"
+  // The taaad that mints App tokens must be root-owned (doc/plan-owner-identity.md A4, §13.3).
+  | "TAAAD_AGENT_WRITABLE"
   // The enforcement pin (doc/plan-pin-enforcement-binary.md).
   | "ENFORCEMENT_UNPINNED"
   | "ENFORCEMENT_PIN_MISSING"

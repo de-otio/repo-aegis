@@ -290,6 +290,7 @@ export {
   intentRepoTargets,
   isGraphqlEndpoint,
   graphqlOperationKind,
+  isGhBuiltinGroup,
 } from "./egress-intent.js";
 export {
   checkNetworkRules,
@@ -310,6 +311,8 @@ export type {
   SegmentJoin,
 } from "./egress-intent.js";
 export { egressParseOptions, loadGhAliases, loadGitAliases, parseGitAliasEntries, ghConfigDir } from "./gh-env.js";
+export { ghBaseRepo } from "./gh-base-repo.js";
+export type { GhBaseRepo } from "./gh-base-repo.js";
 export {
   decideEgress,
   resolveDestinationOffline,
@@ -432,6 +435,7 @@ export {
   mintApproval,
   revokeApprovals,
   findApproval,
+  findLoginApproval,
   findUncoveringStarApproval,
   approvalScopeOf,
   starApprovalCovers,

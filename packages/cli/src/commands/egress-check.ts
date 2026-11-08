@@ -132,14 +132,34 @@ function readbackFor(intents: EgressIntent[]): { bodyFile: string; verb: string 
   return null;
 }
 
-export function egressCheck(args: string[], opts: EgressCheckOptions): void {
-  const cwd = opts.cwd ?? process.cwd();
+/** The JSON an allow verdict carries (what the shim reads: `receipt`, `failedReceipt`, `readback`, `bodyFile`). */
+export type AllowVerdict = Record<string, unknown> & {
+  receipt?: string;
+  failedReceipt?: string;
+  readback?: { bodyFile: string; verb: string };
+};
+
+/** The outcome of the egress decision, before anyone exits or prints a verdict. */
+export type EgressEvaluation =
+  /** A policy refusal: `stderrLine` is the structured JSON line, exit status 2. */
+  | { kind: "deny"; stderrLine: string }
+  /** A fault in the guard itself: exit status 1 for `egress-check`, warn-and-proceed for the shim. */
+  | { kind: "fault"; message: string }
+  | { kind: "allow"; verdict: AllowVerdict; intents: EgressIntent[] };
+
+/**
+ * The egress decision for a `gh` argv, with no process exit and no printing of the verdict: the one
+ * implementation behind `egress-check` (the old shim) and `repo-aegis gh` (the new one), so the refusals,
+ * receipts and read-back cannot drift apart. Reads the caller's `process.env` for `GH_REPO` and aliases,
+ * and `REPO_AEGIS_HOME` for the registry and the approvals (the `gh` command pins both before calling it).
+ */
+export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
   let intents: EgressIntent[];
   try {
     // The shim's own environment is the real `gh`'s: its GH_REPO and aliases.
     intents = parseEgressIntents(buildGhCommand(args), egressParseOptions(process.env, cwd));
   } catch (err) {
-    return internalError(`could not parse the gh command line: ${(err as Error).message}`);
+    return { kind: "fault", message: `could not parse the gh command line: ${(err as Error).message}` };
   }
 
   const { registry, registryState } = loadRegistryOrEmpty();
@@ -162,26 +182,27 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
       capabilities: { ask: false },
     });
   } catch (err) {
-    return internalError(`egress policy failed: ${(err as Error).message}`);
+    return { kind: "fault", message: `egress policy failed: ${(err as Error).message}` };
   }
 
   if (decision.action === "deny" || decision.action === "ask") {
     const shown = decision.destination && destinationJson(decision.destination);
-    process.stderr.write(
-      JSON.stringify({
-        code: decision.code,
-        error: decision.reason,
-        details: {
-          verb: describeVerb(decision.intent.verb),
-          // D4: say whether rule h judged (`applied`) or was skipped, and why.
-          // As in the hook: not when a person is present, and not for a shape
-          // rule (a–d), which never reached rule h.
-          ...(!humanPresent && !SHAPE_RULE_CODES.has(decision.code) && { ruleH }),
-          ...(shown && { destination: shown }),
-        },
-      }) + "\n",
-    );
-    process.exit(2);
+    return {
+      kind: "deny",
+      stderrLine:
+        JSON.stringify({
+          code: decision.code,
+          error: decision.reason,
+          details: {
+            verb: describeVerb(decision.intent.verb),
+            // D4: say whether rule h judged (`applied`) or was skipped, and why.
+            // As in the hook: not when a person is present, and not for a shape
+            // rule (a–d), which never reached rule h.
+            ...(!humanPresent && !SHAPE_RULE_CODES.has(decision.code) && { ruleH }),
+            ...(shown && { destination: shown }),
+          },
+        }) + "\n",
+    };
   }
 
   // Allowed. Resolve the destination for the receipt and the JSON verdict —
@@ -216,7 +237,7 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   const readback = readbackFor(intents);
   // §5: the one line the model will not skim past — but a receipt must never
   // claim a publish that did not happen, and at this point nothing has run.
-  // So the two possible lines travel in the verdict, and the shim prints
+  // So the two possible lines travel in the verdict, and the caller prints
   // exactly one of them AFTER the real `gh` has returned, keyed on its exit
   // code. (Until v0.9.2 this command printed `PUBLISHED →` here, before
   // `gh` ran: a `gh release create` that failed with HTTP 422 still got a
@@ -227,21 +248,36 @@ export function egressCheck(args: string[], opts: EgressCheckOptions): void {
       ? undefined
       : `${describeVerb(first.verb)}${first.refspec !== undefined ? ` ${first.refspec}` : ""}`;
   const destJson = destination ? destinationJson(destination) : undefined;
-  emitJson({
-    action: "allow",
-    // Only for a command with egress intents: a plain read stays `{action}`.
-    ...(intents.length > 0 && !humanPresent && { ruleH }),
-    ...(destJson && { destination: destJson }),
-    ...(decision.action === "allow" &&
-      decision.approval !== undefined && {
-        approval: { id: decision.approval.id, expiresAt: decision.approval.expiresAt },
+  return {
+    kind: "allow",
+    intents,
+    verdict: {
+      action: "allow",
+      // Only for a command with egress intents: a plain read stays `{action}`.
+      ...(intents.length > 0 && !humanPresent && { ruleH }),
+      ...(destJson && { destination: destJson }),
+      ...(decision.action === "allow" &&
+        decision.approval !== undefined && {
+          approval: { id: decision.approval.id, expiresAt: decision.approval.expiresAt },
+        }),
+      ...(readback && { readback }),
+      ...(detail !== undefined && {
+        receipt: formatReceipt(destination, detail),
+        failedReceipt: `EGRESS FAILED → ${describeDestinationForReceipt(destination)}: ${detail}`,
       }),
-    ...(readback && { readback }),
-    ...(detail !== undefined && {
-      receipt: formatReceipt(destination, detail),
-      failedReceipt: `EGRESS FAILED → ${describeDestinationForReceipt(destination)}: ${detail}`,
-    }),
-  });
+    },
+  };
+}
+
+export function egressCheck(args: string[], opts: EgressCheckOptions): void {
+  const cwd = opts.cwd ?? process.cwd();
+  const result = evaluateEgress(args, cwd);
+  if (result.kind === "fault") return internalError(result.message);
+  if (result.kind === "deny") {
+    process.stderr.write(result.stderrLine);
+    process.exit(2);
+  }
+  emitJson(result.verdict);
 }
 
 /** Exit 1: a fault in the guard, which the shim treats as "proceed". */
@@ -261,6 +297,8 @@ export interface EgressReadbackOptions extends OutputOptions {
   repo?: string;
   gh?: string;
   timeoutMs?: number;
+  /** The environment the read-back `gh` runs in. Default: the caller's. `repo-aegis gh` passes the call's own. */
+  env?: NodeJS.ProcessEnv;
 }
 
 const PR_URL_RE = /https?:\/\/[^\s/]*github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/pull\/(\d+)/;
@@ -314,14 +352,16 @@ function normaliseBody(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
 }
 
-/** Exit 0 and say why: the read-back is best-effort and never fails a publish. */
-function unavailable(reason: string): never {
-  process.stderr.write(JSON.stringify({ code: "READBACK_UNAVAILABLE", reason }) + "\n");
-  process.exit(0);
-}
+/** What the read-back found. `mismatch` is the one result worth failing on. */
+export type ReadbackResult =
+  | { kind: "unavailable"; reason: string }
+  | { kind: "ok"; bytes: number }
+  | { kind: "mismatch"; payload: string };
 
-export function egressReadback(opts: EgressReadbackOptions): void {
+/** The read-back without any exit or printing: see {@link egressReadback}. */
+export function readbackResult(opts: EgressReadbackOptions): ReadbackResult {
   const cwd = opts.cwd ?? process.cwd();
+  const unavailable = (reason: string): ReadbackResult => ({ kind: "unavailable", reason });
 
   if (opts.bodyFile === undefined) return unavailable("no --body-file given");
   let fileBody: string;
@@ -348,6 +388,7 @@ export function egressReadback(opts: EgressReadbackOptions): void {
         cwd,
         encoding: "utf8",
         timeout: opts.timeoutMs ?? 10_000,
+        ...(opts.env !== undefined && { env: opts.env }),
         // Piped, never inherited: gh's stderr names the org/repo it failed
         // on, and this command's whole contract is that only byte counts and
         // a destination we resolved ourselves are ever printed.
@@ -362,22 +403,34 @@ export function egressReadback(opts: EgressReadbackOptions): void {
   const publishedBytes = Buffer.byteLength(publishedBody, "utf8");
   const fileBytes = Buffer.byteLength(fileBody, "utf8");
 
-  if (publishedBody === fileBody) {
-    emitJson({ ok: true, bytes: fileBytes });
-    return;
-  }
+  if (publishedBody === fileBody) return { kind: "ok", bytes: fileBytes };
 
   // Byte counts only. Printing either body — or a diff of them — would put
   // the very content the destination's deny set exists to keep out into a
   // terminal, a tool result and possibly a CI log.
-  process.stderr.write(
-    JSON.stringify({
-      code: "PUBLISHED_BODY_MISMATCH",
-      error:
-        `the published PR body is not the file that was passed to gh. The bytes are already public; ` +
-        `compare them yourself and edit or close the PR.`,
-      details: { publishedBytes, fileBytes, pr: Number(ref.number), repo },
-    }) + "\n",
-  );
+  return {
+    kind: "mismatch",
+    payload:
+      JSON.stringify({
+        code: "PUBLISHED_BODY_MISMATCH",
+        error:
+          `the published PR body is not the file that was passed to gh. The bytes are already public; ` +
+          `compare them yourself and edit or close the PR.`,
+        details: { publishedBytes, fileBytes, pr: Number(ref.number), repo },
+      }) + "\n",
+  };
+}
+
+export function egressReadback(opts: EgressReadbackOptions): void {
+  const r = readbackResult(opts);
+  if (r.kind === "unavailable") {
+    process.stderr.write(JSON.stringify({ code: "READBACK_UNAVAILABLE", reason: r.reason }) + "\n");
+    process.exit(0);
+  }
+  if (r.kind === "ok") {
+    emitJson({ ok: true, bytes: r.bytes });
+    return;
+  }
+  process.stderr.write(r.payload);
   process.exit(1);
 }
