@@ -47,6 +47,7 @@ import { currentEnforcementPin } from "../enforcement-pin.js";
 import { checkLabel, isFailure, isReportable, PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
 import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
+import { gitCredentialOrderChecks } from "./doctor-git-credential-checks.js";
 import { ghOwnerChecks, ownerIdentityChecks, registryStateChecks, taaadChecks, type DoctorRegistryState, type GhCheckOptions } from "./doctor-owner-checks.js";
 import { checkPrePushHook, checkShellStartupOverrides, checkSshGithubRedirect } from "./doctor-env-checks.js";
 import { enforcementPinChecks } from "./doctor-pin-checks.js";
@@ -258,6 +259,7 @@ function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
   if (reg.state === "loaded" && reg.registry !== null) {
     checks.push(...ownerIdentityChecks(reg.registry));
     checks.push(...taaadChecks(reg.registry));
+    checks.push(...gitCredentialOrderChecks(reg.registry));
     checks.push(...ghOwnerChecks(reg.registry, process.env, opts.ghOptions));
   }
   checks.push(checkShellStartupOverrides(opts.homeDir), checkSshGithubRedirect(opts.sshDir));

@@ -10,7 +10,9 @@
 // not writable by group or others. The check is LIVE (made on each call and each `doctor` run), not a
 // flag recorded at install: a flag an agent could outlive is worth less than an `lstat`.
 import { closeSync, constants, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { parseTaaadPinFromScript, SHIM_HEADER_LINE } from "./shim-script.js";
 
 export interface TaaadPin {
   /** Realpath of the `taaad` launcher script or binary. */
@@ -177,4 +179,18 @@ export function taaadTrustProblem(pin: TaaadPin): string | null {
     if ((st.mode & 0o022) !== 0) return `the taaad package directory: ${dir} is writable by group or others`;
   }
   return null;
+}
+
+/**
+ * The taaad pinned by `install shim`, read from the shim it wrote at `<home>/bin/gh` (the same file, and the
+ * same trust, as the pinned node and CLI: it is NOT kept in the state directory). Null when there is no shim of
+ * ours, or it pins none.
+ */
+export function readPinnedTaaad(home: string): TaaadPin | null {
+  try {
+    const text = readFileSync(join(home, "bin", "gh"), "utf8");
+    return text.includes(SHIM_HEADER_LINE) ? parseTaaadPinFromScript(text) : null;
+  } catch {
+    return null;
+  }
 }

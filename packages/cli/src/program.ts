@@ -417,6 +417,35 @@ export async function buildProgram(): Promise<Command> {
       installShim(tool, withGlobals(opts, cmd));
     });
 
+  install
+    .command("git-credential")
+    .description("make the repo-aegis credential helper the first git helper for https://github.com (global config; needs a terminal), so an agent's HTTPS push gets a token narrowed to one repository; sets credential.useHttpPath")
+    .option("--uninstall", "remove exactly what this command added (recorded in <home>/state/git-credential-install.json)")
+    .action(async (opts, cmd) => {
+      const { installGitCredential } = await import("./commands/install-git-credential.js");
+      installGitCredential(withGlobals(opts, cmd));
+    });
+
+  // The git credential helper (doc/plan-owner-identity.md §5.6). Reads the credential protocol on stdin; prints only
+  // protocol lines on stdout; always exits 0 (git ignores a non-zero helper and asks the next one).
+  program
+    .command("git-credential <action>")
+    .description("git credential helper: `get` answers an agent's push to an owner with an agent identity; every refusal prints quit=true; store and erase are ignored (git calls this; configure it with `install git-credential`)")
+    .action(async (action: string, opts, cmd) => {
+      const { runGitCredential } = await import("./commands/git-credential.js");
+      const { readFileSync } = await import("node:fs");
+      let stdin = "";
+      try {
+        stdin = readFileSync(0, "utf8");
+      } catch {
+        /* no stdin: the empty request is not for github.com */
+      }
+      const merged = withGlobals(opts, cmd) as { home?: string };
+      const result = runGitCredential(action, stdin, merged.home ?? "");
+      if (result.stderr !== "") process.stderr.write(result.stderr);
+      process.stdout.write(result.stdout);
+    });
+
   program
     .command("egress-check")
     .description("decide allow/deny for a `gh` invocation about to run (called by the shim): exit 0 allow, 2 deny with a structured reason on stderr; never rewrites the command")

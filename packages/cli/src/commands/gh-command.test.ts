@@ -21,7 +21,7 @@ import { approvalsPath, mintApproval, type TerminalCheck } from "@de-otio/repo-a
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { scrubGitEnv } from "../_test-utils.js";
 import { runGhCommand, decisionLogPath, findPlainGh, type GhCommandDeps } from "./gh-command.js";
-import { permissionsWithin, validateMint } from "./gh-identity-token.js";
+import { MintError, validateMintOutput } from "./taaad-mint.js";
 import type { TaaadPin } from "./taaad-pin.js";
 
 // ---------------------------------------------------------------------------
@@ -914,40 +914,50 @@ describe("I16: the token never appears except in the gh child's environment", ()
 // The pure checks on taaad's answer
 // ---------------------------------------------------------------------------
 
-describe("validateMint / permissionsWithin", () => {
+describe("validateMintOutput (the shared check on taaad's answer)", () => {
   const target = { owner: "example-org", repo: "svc" };
+  const ok = (raw: string, scope: "read" | "write" | "contents-write" = "write"): boolean => {
+    try {
+      validateMintOutput(raw, { ...target, scope });
+      return true;
+    } catch (err) {
+      assert.ok(err instanceof MintError);
+      return false;
+    }
+  };
 
   it("accepts an exact answer, and the owner/repo form of the repository", () => {
-    assert.equal(validateMint(mintJson(), target, "write").ok, true);
-    assert.equal(validateMint(mintJson({ repositories: ["example-org/svc"] }), target, "write").ok, true);
-    assert.equal(validateMint(mintJson({ repositories: ["SVC"] }), target, "write").ok, true);
+    assert.equal(ok(mintJson()), true);
+    assert.equal(ok(mintJson({ repositories: ["example-org/svc"] })), true);
+    assert.equal(ok(mintJson({ repositories: ["SVC"] })), true);
   });
 
   it("refuses a repository list that is not exactly the one repository, and a missing one", () => {
     for (const repositories of [[], ["svc", "x"], ["x"], "svc", null, undefined, [3]]) {
-      assert.equal(validateMint(mintJson({ repositories }), target, "write").ok, false, JSON.stringify(repositories));
+      assert.equal(ok(mintJson({ repositories })), false, JSON.stringify(repositories));
     }
   });
 
   it("scopes: read allows only read levels of metadata, contents, pull_requests, issues; contents-write only metadata and contents; write never admin", () => {
-    assert.equal(permissionsWithin("read", { metadata: "read", contents: "read", pull_requests: "read", issues: "read" }), true);
-    assert.equal(permissionsWithin("read", { contents: "write" }), false);
-    assert.equal(permissionsWithin("read", { actions: "read" }), false);
-    assert.equal(permissionsWithin("contents-write", { metadata: "read", contents: "write" }), true);
-    assert.equal(permissionsWithin("contents-write", { metadata: "write" }), false);
-    assert.equal(permissionsWithin("contents-write", { pull_requests: "read" }), false);
-    assert.equal(permissionsWithin("write", { actions: "write", contents: "write", issues: "read" }), true);
-    assert.equal(permissionsWithin("write", { contents: "admin" }), false);
-    assert.equal(permissionsWithin("write", { contents: "owner" }), false);
-    assert.equal(permissionsWithin("write", null), false);
-    assert.equal(permissionsWithin("write", ["contents"]), false);
+    const perms = (permissions: unknown): string => mintJson({ permissions });
+    assert.equal(ok(perms({ metadata: "read", contents: "read", pull_requests: "read", issues: "read" }), "read"), true);
+    assert.equal(ok(perms({ contents: "write" }), "read"), false);
+    assert.equal(ok(perms({ actions: "read" }), "read"), false);
+    assert.equal(ok(perms({ metadata: "read", contents: "write" }), "contents-write"), true);
+    assert.equal(ok(perms({ metadata: "write" }), "contents-write"), false);
+    assert.equal(ok(perms({ pull_requests: "read" }), "contents-write"), false);
+    assert.equal(ok(perms({ actions: "write", contents: "write", issues: "read" }), "write"), true);
+    assert.equal(ok(perms({ contents: "admin" }), "write"), false);
+    assert.equal(ok(perms(null), "write"), false);
+    assert.equal(ok(perms(["contents"]), "write"), false);
   });
 
-  it("an installation of another account is its own failure code, case-insensitively matched", () => {
-    const r = validateMint(mintJson({ installationAccount: "other" }), target, "write");
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.equal(r.failure.code, "GH_IDENTITY_INSTALLATION_MISMATCH");
-    assert.equal(validateMint(mintJson({ installationAccount: "EXAMPLE-ORG" }), target, "write").ok, true);
+  it("an installation of another account is its own failure kind, case-insensitively matched", () => {
+    assert.throws(
+      () => validateMintOutput(mintJson({ installationAccount: "other" }), { ...target, scope: "write" }),
+      (e: unknown) => e instanceof MintError && e.kind === "installation-mismatch",
+    );
+    assert.equal(ok(mintJson({ installationAccount: "EXAMPLE-ORG" })), true);
   });
 });
 

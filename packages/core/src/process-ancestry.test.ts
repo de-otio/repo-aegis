@@ -485,6 +485,24 @@ describe("humanPresence — the policy for rules g and h", () => {
     assert.deepEqual([p.present, p.ancestry, read], [true, "skipped", 0]);
   });
 
+  it("the env override does not make an agent host above a TTY a person (M3)", () => {
+    const p = humanPresence({ [EGRESS_HUMAN_ENV]: "1" }, true, claudeAbove);
+    assert.deepEqual([p.present, p.ancestry, p.ancestor], [false, "agent", "claude"]);
+    assert.equal(isHumanPresent({ [EGRESS_HUMAN_ENV]: "1" }, true, () => [proc(2, 1, "script")]), false);
+    assert.equal(isHumanPresent({ [EGRESS_HUMAN_ENV]: "1", CLAUDECODE: "1" }, true, plainShell), false);
+  });
+
+  it("the env override still counts for a person's own terminal, and with no TTY", () => {
+    const p = humanPresence({ [EGRESS_HUMAN_ENV]: "1" }, true, plainShell);
+    assert.deepEqual([p.present, p.ancestry], [true, "skipped"]);
+    assert.equal(isHumanPresent({ [EGRESS_HUMAN_ENV]: "1" }, false, claudeAbove), true);
+    // an unreadable or unrooted chain is not an agent verdict: the override decides
+    assert.equal(isHumanPresent({ [EGRESS_HUMAN_ENV]: "1" }, true, () => null), true);
+    assert.equal(isHumanPresent({ [EGRESS_HUMAN_ENV]: "1" }, true, () => [proc(3, 2, "python3")]), true);
+    // only the value 1 is an override
+    assert.equal(isHumanPresent({ [EGRESS_HUMAN_ENV]: "0" }, true, claudeAbove), false);
+  });
+
   it("L4: an explicit TTY with an injected ancestry is judged; without one it is the labelled test-only skip", () => {
     assert.equal(isHumanPresent({}, true, claudeAbove), false);
     assert.deepEqual(humanPresence({}, true), { present: true, ancestry: "skipped" });

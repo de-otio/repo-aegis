@@ -30,6 +30,7 @@ export type DoctorCheckCode =
   | "OWNER_IDENTITY_UNMAPPED"
   // The taaad that mints App tokens must be root-owned (doc/plan-owner-identity.md A4, §13.3).
   | "TAAAD_AGENT_WRITABLE"
+  | "GIT_CREDENTIAL_HELPER_ORDER"
   // The enforcement pin (doc/plan-pin-enforcement-binary.md).
   | "ENFORCEMENT_UNPINNED"
   | "ENFORCEMENT_PIN_MISSING"

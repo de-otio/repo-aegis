@@ -20,7 +20,7 @@
 //
 // THE TOKEN lives in one local variable and in the `gh` child's environment. See `gh-identity-token.ts`.
 import { spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import {
@@ -54,8 +54,7 @@ import type { OutputOptions } from "../format.js";
 import { evaluateEgress, readbackResult, type AllowVerdict } from "./egress-check.js";
 import { resolveTrustedGh } from "./doctor-owner-checks.js";
 import { fetchLoginToken, ghChildEnv, mintAppToken, runGhAsNobody, tokensEqual } from "./gh-identity-token.js";
-import { parseTaaadPinFromScript, SHIM_HEADER_LINE } from "./shim-script.js";
-import type { TaaadPin } from "./taaad-pin.js";
+import { readPinnedTaaad, type TaaadPin } from "./taaad-pin.js";
 
 export interface GhCommandOptions extends OutputOptions {
   /** The pinned repo-aegis home the shim passes: the ONLY place the registry and the approvals are read from. */
@@ -220,15 +219,6 @@ function loadPinnedRegistry(home: string): { kind: "none" } | { kind: "unreadabl
     return { kind: "ok", registry: loadRegistry(join(home, "engagements.yaml")) };
   } catch (err) {
     return err instanceof RegistryNotFoundError ? { kind: "none" } : { kind: "unreadable" };
-  }
-}
-
-function taaadPinOf(home: string): TaaadPin | null {
-  try {
-    const text = readFileSync(join(home, "bin", "gh"), "utf8");
-    return text.includes(SHIM_HEADER_LINE) ? parseTaaadPinFromScript(text) : null;
-  } catch {
-    return null;
   }
 }
 
@@ -480,7 +470,7 @@ function obtainToken(
     return token === null ? unavailable("the mapped GitHub account has no usable token on this machine") : { kind: "token", token };
   }
   const minted = mintAppToken({
-    pin: deps.taaad !== undefined ? deps.taaad : taaadPinOf(home),
+    pin: deps.taaad !== undefined ? deps.taaad : readPinnedTaaad(home),
     slug: identity.app,
     owner,
     repo,

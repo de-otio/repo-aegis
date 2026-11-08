@@ -59,9 +59,7 @@ import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { registeredOwners, repoAegisHome, type Registry } from "@de-otio/repo-aegis-core";
 import { PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
-import { parseTaaadPinFromScript, SHIM_HEADER_LINE } from "./shim-script.js";
-import { taaadTrustProblem } from "./taaad-pin.js";
-import { readFileSync } from "node:fs";
+import { readPinnedTaaad, taaadTrustProblem } from "./taaad-pin.js";
 import { confirmOnTerminal, isHumanTerminal } from "../require-terminal.js";
 
 const HOST = "github.com";
@@ -158,14 +156,7 @@ export function taaadChecks(registry: Registry, home: string = repoAegisHome()):
   const appMapped = [...(registry.identityMap?.values() ?? [])].some(
     e => e.person?.kind === "github-app" || e.agent?.kind === "github-app",
   );
-  let text: string | null = null;
-  try {
-    const t = readFileSync(join(home, "bin", "gh"), "utf8");
-    text = t.includes(SHIM_HEADER_LINE) ? t : null;
-  } catch {
-    text = null;
-  }
-  const pin = text === null ? null : parseTaaadPinFromScript(text);
+  const pin = readPinnedTaaad(home);
   const severity = appMapped ? {} : { severity: "warn" as const };
   const fix =
     "install taaad into a root-owned prefix (for example `sudo pipx install --global taaad`), remove any user-level copy, " +

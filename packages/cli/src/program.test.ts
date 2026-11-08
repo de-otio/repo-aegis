@@ -102,6 +102,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "egress-readback",
       "engagements",
       "gh",
+      "git-credential",
       "hook",
       "identity",
       "init",
@@ -282,9 +283,11 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "install",
     flags: [],
-    subcommands: ["ci", "claude-md", "gitignore", "hooks", "shim"],
+    subcommands: ["ci", "claude-md", "git-credential", "gitignore", "hooks", "shim"],
   },
   { path: "install shim", flags: ["--force", "--uninstall"], subcommands: [] },
+  { path: "install git-credential", flags: ["--uninstall"], subcommands: [] },
+  { path: "git-credential", flags: [], subcommands: [] },
   {
     path: "install hooks",
     flags: ["--force", "--global", "--local", "--uninstall", "--unset-local"],

@@ -183,13 +183,32 @@ function isNetworkCommand(c: SimpleCommand): boolean {
   return NETWORK_COMMANDS.has(c.cmd) || /^python[\d.]*$/.test(c.cmd);
 }
 
-/** `gh auth token`, and `gh auth status --show-token` / `-t`, which prints the same credential. */
+/** `--show-token`, `--show-token=…`, `-t`, `-t=…` or a short-flag group holding `t` on `gh auth status`: it prints the credential. */
+function showsToken(args: readonly string[]): boolean {
+  return args.some(a => a === "--show-token" || a.startsWith("--show-token=") || /^-[A-Za-z]*t[A-Za-z]*(?:=.*)?$/.test(a));
+}
+
+/** `git credential fill|get|approve`, `git credential-<helper> get`, `git-credential-<helper> get`: a stored token is printed or fed to a helper. */
+function readsGitCredential(c: SimpleCommand): boolean {
+  if (c.cmd === "git") {
+    for (let i = 0; i < c.args.length; i++) {
+      const a = c.args[i]!;
+      if (a === "credential") return c.args.slice(i + 1).some(w => w === "fill" || w === "get" || w === "approve");
+      if (/^credential-[\w.-]+$/.test(a)) return c.args.slice(i + 1).includes("get");
+    }
+    return false;
+  }
+  return /^git-credential-[\w.-]+$/.test(c.cmd) && c.args.includes("get");
+}
+
+/** `gh auth token`, and `gh auth status --show-token` / `-t`, which prints the same credential; the git credential helpers. */
 function readsGhToken(c: SimpleCommand): boolean {
+  if (readsGitCredential(c)) return true;
   if (c.cmd !== "gh") return false;
   const words = ghCommandWords(c.args);
   if (words === null || words.group !== "auth") return false;
   if (words.sub === "token") return true;
-  return words.sub === "status" && c.args.some(a => a === "--show-token" || /^-[A-Za-z]*t[A-Za-z]*$/.test(a));
+  return words.sub === "status" && showsToken(c.args);
 }
 
 /**
@@ -198,7 +217,7 @@ function readsGhToken(c: SimpleCommand): boolean {
  */
 export function checkNetworkRules(command: string): NetworkRuleHit | null {
   // Cheap exit: almost every command mentions neither.
-  if (!/github\.com|auth|(?:^|\s)-[A-Za-z]*K|--config/i.test(command)) return null;
+  if (!/github\.com|auth|credential|(?:^|\s)-[A-Za-z]*K|--config/i.test(command)) return null;
   const commands = simpleCommands(command);
 
   const writer = commands.find(writesGithubApi);
@@ -226,7 +245,9 @@ export function checkNetworkRules(command: string): NetworkRuleHit | null {
   }
 
   const tokenReader = commands.some(readsGhToken);
-  if (tokenReader && commands.some(isNetworkCommand)) {
+  // A credential read is not its own network call (`git credential fill` would otherwise count as a `git` that can
+  // reach a remote): it needs another program that does.
+  if (tokenReader && commands.some(c => !readsGitCredential(c) && isNetworkCommand(c))) {
     return {
       code: "GH_AUTH_TOKEN_NETWORK",
       reason: refusal({
@@ -306,7 +327,9 @@ export function ghVerbChangesIdentityState(args: readonly string[]): boolean {
   const { group, sub } = words;
   switch (group) {
     case "auth":
-      if (sub === "status") return args.some(a => a === "--show-token" || /^-[A-Za-z]*t[A-Za-z]*$/.test(a));
+      // A bare `gh auth` and `gh auth --help` only print usage.
+      if (sub === undefined) return false;
+      if (sub === "status") return showsToken(args);
       return true;
     case "config":
       return sub === "set" || sub === "clear-cache";
@@ -326,7 +349,10 @@ const SECURITY_KEYCHAIN_SUBCOMMANDS: ReadonlySet<string> = new Set([
   "find-generic-password", "find-internet-password", "dump-keychain", "export", "unlock-keychain",
 ]);
 const KEYCHAIN_INTERPRETER_RE = /^(?:python[\d.]*|node(?:js)?|perl|ruby|osascript)$/;
-const KEYCHAIN_TEXT_RE = /\bkeyring\b|SecItemCopyMatching/;
+/** Interpreter text that reaches a keychain or secret store: the python keyring, keytar, Security.framework, the `security` verbs. */
+const KEYCHAIN_TEXT_RE = /\bkeyring\b|\bkeytar\b|SecItemCopyMatching|SecKeychain|find-(?:generic|internet)-password|dump-keychain/;
+/** Command-line secret-store clients: python `keyring` (any path, a venv's bin included) and libsecret's `secret-tool`. */
+const SECRET_STORE_CLIENTS: ReadonlySet<string> = new Set(["keyring", "secret-tool"]);
 
 /** The program text an interpreter would run: the value of `-c` / `-e` / `-m` style options, text-like words, and stdin texts. */
 function interpreterTexts(c: CommandFact): string[] {
@@ -345,9 +371,18 @@ function interpreterTexts(c: CommandFact): string[] {
   return out;
 }
 
+/** `security -i` (reads commands from stdin), or any of the keychain subcommands in the arguments or in text fed on stdin. */
+function securityReadsKeychain(c: CommandFact): boolean {
+  if (c.args.some(a => /^-[A-Za-z]*i[A-Za-z]*$/.test(a))) return true;
+  if (c.args.some(a => SECURITY_KEYCHAIN_SUBCOMMANDS.has(a))) return true;
+  return (c.text ?? "").split(/[^A-Za-z0-9_-]+/).some(w => SECURITY_KEYCHAIN_SUBCOMMANDS.has(w));
+}
+
 function readsKeychainSecret(c: CommandFact): boolean {
+  if (readsGitCredential(c)) return true;
   if (c.cmd === "taaad") return c.args.some(a => TAAAD_TOKEN_SUBCOMMANDS.has(a));
-  if (c.cmd === "security") return c.args.some(a => SECURITY_KEYCHAIN_SUBCOMMANDS.has(a));
+  if (c.cmd === "security") return securityReadsKeychain(c);
+  if (SECRET_STORE_CLIENTS.has(c.cmd)) return true;
   if (KEYCHAIN_INTERPRETER_RE.test(c.cmd)) return interpreterTexts(c).some(t => KEYCHAIN_TEXT_RE.test(t));
   return false;
 }
@@ -376,6 +411,19 @@ function a1Reason(code: "EGRESS_ENV_OVERRIDE" | "EGRESS_PTY_WRAPPER", what: stri
       { by: "agent", command: `${what} run directly`, note: "without script, unbuffer, expect, tmux, screen, socat, ssh -t or a pty module" },
       { by: "person", when: "If it needs a person", step: "runs it from their own terminal" },
     ],
+  });
+}
+
+function persistentEnvReason(): string {
+  return refusal({
+    code: "EGRESS_ENV_OVERRIDE",
+    what: "assigning or exporting a REPO_AEGIS_* variable",
+    why:
+      "The shell this tool runs in keeps its variables between calls, so a REPO_AEGIS_* variable set here would " +
+      "steer the next gh, git, taaad or security command, which repo-aegis then judges against a changed registry or " +
+      "a person who is not there",
+    approval: "No approval covers this",
+    fixes: [{ by: "agent", command: "the command without the assignment or export", note: "a person sets REPO_AEGIS_* in their own shell" }],
   });
 }
 
@@ -425,6 +473,9 @@ export function checkIdentityHookRules(command: string): IdentityHookHit[] {
     if (c.ptyWrapper !== undefined && (isA1Program(c.cmd) || mentionsA1Program(c.text ?? "") || mentionsA1Program(c.args.join(" ")))) {
       hits.push({ code: "EGRESS_PTY_WRAPPER", reason: a1Reason("EGRESS_PTY_WRAPPER", `${c.ptyWrapper} around gh/git/taaad/security`), personLifts: false });
     }
+  }
+  if (facts.some(c => c.assignsRepoAegis.length > 0)) {
+    hits.push({ code: "EGRESS_ENV_OVERRIDE", reason: persistentEnvReason(), personLifts: false });
   }
   for (const c of facts) {
     if (a1Env(c)) {

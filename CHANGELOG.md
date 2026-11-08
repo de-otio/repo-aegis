@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — git credential helper and the pre-push rule (phase 4 of `doc/plan-owner-identity.md` §5.6, §13.4)
+
+- `repo-aegis git-credential --home <home> <get|store|erase>`: a git credential helper. For an agent's HTTPS push to an owner with an `agent` identity it returns `x-access-token` and a token narrowed to that repository (`contents: write` for a push, read for a fetch), minted by the pinned taaad; with a person present, an unmapped owner or a person-only owner it prints nothing and the next helper answers. Every refusal prints exactly `quit=true` with the code on stderr: a request that does not come from `git-remote-https` (`git credential fill` run by hand: `AGENT_CREDENTIAL_DIRECT_FILL`), an unreadable process chain (`AGENT_PUSH_CHAIN_UNREADABLE`), repository-local credential helpers, proxies, TLS and trace settings (`AGENT_PUSH_CREDENTIAL_CONFIG`), a second differing path (`AGENT_PUSH_CREDENTIAL_PATH`), taaad failing or the App not installed.
+- `repo-aegis install git-credential [--uninstall]` (needs a terminal): makes the helper the first one git runs for github.com in the global config, after any reset entry, refusing with instructions when a system-scope or global helper would still answer first; sets `credential.useHttpPath`. `--uninstall` removes exactly what it added (ledger in `<home>/state`); the global config is byte-identical after a round trip. `repo-aegis uninstall` runs it.
+- Pre-push: with no person present, an owner mapped to an agent identity and an SSH push URL (`git@…`, `ssh://…`, an ssh-config alias) is refused with `AGENT_PUSH_NEEDS_APP` and the HTTPS form; over HTTPS the helper order is re-checked (`GIT_CREDENTIAL_HELPER_ORDER`).
+- `doctor`: `GIT_CREDENTIAL_HELPER_ORDER`, a failure when an owner is mapped to an agent identity and the helper is missing, stale or not first.
+- Until `install shim` pins taaad, the helper reads the taaad path from `<home>/state/taaad-pin.json`; with none it refuses (`GH_BINARY_UNTRUSTED`).
+
 ### Added — identity choice for `gh` calls (phase 3 core of `doc/plan-owner-identity.md` §13.1)
 
 No egress behaviour changes: nothing calls these yet. `@de-otio/repo-aegis-core`
@@ -41,6 +49,29 @@ through the hook: with no person present they are now refused.
 - **N8** — a recognised `dot gh` write whose literal owner has an identity mapped
   in the registry is `DOT_GH_OWNER_MAPPED` (re-issue the same arguments to plain
   `gh`), decided before `DOT_GH_WRITE_NEEDS_BOT`. Unmapped owners are unchanged.
+- **Security-review follow-ups to the above** (same release, stricter for agents):
+  - `git credential fill|get|approve`, `git credential-<helper> get` and
+    `git-credential-<helper> get` (osxkeychain, manager, …) are
+    `TOKEN_MINT_NEEDS_HUMAN` with no person present, and count as token reads for
+    `GH_AUTH_TOKEN_NETWORK`, which refuses them next to a network program whether
+    or not a person is present.
+  - Any segment that assigns or exports a `REPO_AEGIS_*` name with no command
+    following (`X=1`, `export X[=…]`, `declare|typeset -x`, `readonly`, `read X`) is
+    `EGRESS_ENV_OVERRIDE`, never lifted: the Bash tool's shell persists across
+    calls. `REPO_AEGIS_EGRESS_HUMAN` is also ignored when a TTY sits under an agent
+    host (an agent ancestor or the agent environment signal); a person's own
+    terminal, and the no-TTY case, behave as before.
+  - N9 also covers the `keyring` CLI and `secret-tool` (any path), `security -i`
+    and `security` fed a listed subcommand on stdin, interpreter text naming
+    `find-generic-password`, `find-internet-password`, `dump-keychain`,
+    `SecKeychain`, `keytar`, `keyring` or `SecItemCopyMatching` (osascript
+    `do shell script` included), and text piped into a non-shell interpreter.
+  - A10 reads `--show-token=…` and `-t=…`, and a `gh` reached through
+    `G=gh; $G …`, `alias g=gh`, `$(which gh)` or `$(command -v gh)`. A bare
+    `gh auth` and `gh auth --help` are no longer refused.
+  - The write hook refuses an agent's Edit or Write to gh's `config.yml` and
+    `hosts.yml` in `$GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh` and `~/.config/gh`
+    (`GH_CONFIG_WRITE_REFUSED`).
 - `refusal` codes are documented in `doc/agent-guide.md`; the shape rules in
   `doc/design/egress-guard.md`.
 

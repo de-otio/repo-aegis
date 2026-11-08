@@ -19,24 +19,11 @@ import { userInfo } from "node:os";
 import { delimiter, dirname } from "node:path";
 import type { IdentityScope } from "@de-otio/repo-aegis-core";
 import { untrustedDirReason } from "./doctor-owner-checks.js";
+import { accountHome, mintAppToken as mintPinned, MintError } from "./taaad-mint.js";
 import { taaadTrustProblem, type TaaadPin } from "./taaad-pin.js";
 
 const CHILD_TIMEOUT_MS = 20_000;
 const CHILD_MAX_BUFFER = 1024 * 1024;
-
-/** The pinned PATH of a minting taaad (A4): nothing the caller can add to. */
-export const TAAAD_PATH = "/usr/bin:/bin";
-
-/** The home directory of the ACCOUNT, from the passwd database; the caller's `HOME` only when there is no entry. */
-function accountHome(env: NodeJS.ProcessEnv): string | undefined {
-  try {
-    const h = userInfo().homedir;
-    if (h !== "") return h;
-  } catch {
-    /* no passwd entry */
-  }
-  return env["HOME"];
-}
 
 /** Copy `names` that are set (non-empty) in `from`. */
 function pick(from: NodeJS.ProcessEnv, names: readonly string[]): NodeJS.ProcessEnv {
@@ -46,16 +33,6 @@ function pick(from: NodeJS.ProcessEnv, names: readonly string[]): NodeJS.Process
     if (v !== undefined && v !== "") out[n] = v;
   }
   return out;
-}
-
-/**
- * The environment taaad is minted with (A4, §13.3): exactly `HOME`, `PATH=/usr/bin:/bin`, `TERM` and `LANG`.
- * No `TAAAD_*` (it selects taaad's app registry), no `XDG_*`, nothing else. `HOME` is the account's, not the
- * caller's: taaad finds its configuration relative to it.
- */
-export function taaadEnv(callerEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const home = accountHome(callerEnv);
-  return { ...(home !== undefined && { HOME: home }), PATH: TAAAD_PATH, ...pick(callerEnv, ["TERM", "LANG"]) };
 }
 
 /** A PATH for the `gh` child that no caller can extend: gh's own directory, then the standard system ones. */
@@ -170,76 +147,6 @@ export type MintFailure =
 
 export type MintResult = { ok: true; token: string } | { ok: false; failure: MintFailure };
 
-const LEVELS: Readonly<Record<string, number>> = { read: 1, write: 2, admin: 3 };
-
-/** The permission keys N5 allows an App token for each scope, and the widest level of each. `*`: any key. */
-const SCOPE_LIMITS: Readonly<Record<IdentityScope, Readonly<Record<string, number>>>> = {
-  read: { metadata: 1, contents: 1, pull_requests: 1, issues: 1 },
-  "contents-write": { metadata: 1, contents: 2 },
-  write: {},
-};
-
-/** True when every permission is within what `scope` allows (a write scope: any key, but never `admin`). */
-export function permissionsWithin(scope: IdentityScope, perms: unknown): boolean {
-  if (typeof perms !== "object" || perms === null || Array.isArray(perms)) return false;
-  const limits = SCOPE_LIMITS[scope];
-  for (const [key, level] of Object.entries(perms as Record<string, unknown>)) {
-    if (typeof level !== "string") return false;
-    const rank = LEVELS[level];
-    if (rank === undefined) return false;
-    if (scope === "write") {
-      if (rank > 2) return false;
-    } else {
-      const max = limits[key];
-      if (max === undefined || rank > max) return false;
-    }
-  }
-  return true;
-}
-
-/**
- * Check `taaad mint ... --json` output against the call it was minted for. The token is returned only when
- * ALL of these hold; the failure text never contains a value taken from the output.
- *   - `installationAccount` equals the destination owner, case-insensitively (N6): else INSTALLATION_MISMATCH;
- *   - `repositories` is exactly the destination repository (N5);
- *   - `permissions` are no wider than the scope (N5).
- */
-export function validateMint(stdout: string, target: { owner: string; repo: string }, scope: IdentityScope): MintResult {
-  const unavailable = (why: string): MintResult => ({ ok: false, failure: { code: "GH_IDENTITY_UNAVAILABLE", why } });
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return unavailable("taaad printed something that is not JSON");
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return unavailable("taaad's answer is not an object");
-  const o = parsed as Record<string, unknown>;
-  const token = o["token"];
-  if (typeof token !== "string" || !TOKEN_SHAPE.test(token)) return unavailable("taaad returned no usable token");
-  const account = o["installationAccount"];
-  if (typeof account !== "string") return unavailable("taaad did not say which account the installation belongs to");
-  if (account.toLowerCase() !== target.owner.toLowerCase()) {
-    return {
-      ok: false,
-      failure: {
-        code: "GH_IDENTITY_INSTALLATION_MISMATCH",
-        why: "the App's installation belongs to a different account than this call's owner, so the token was discarded",
-      },
-    };
-  }
-  const repos = o["repositories"];
-  const want = target.repo.toLowerCase();
-  const named = (r: unknown): boolean =>
-    typeof r === "string" && (r.toLowerCase() === want || r.toLowerCase() === `${target.owner.toLowerCase()}/${want}`);
-  if (!Array.isArray(repos) || repos.length !== 1 || !named(repos[0])) {
-    return unavailable("taaad's token is not narrowed to exactly this repository, so it was discarded");
-  }
-  if (!permissionsWithin(scope, o["permissions"])) {
-    return unavailable("taaad's token carries wider permissions than this call needs, so it was discarded");
-  }
-  return { ok: true, token };
-}
-
 export interface MintInput {
   pin: TaaadPin | null;
   slug: string;
@@ -251,7 +158,11 @@ export interface MintInput {
   trust?: "default" | "permissive";
 }
 
-/** `<pinned taaad> mint --app <slug> --repo <owner>/<repo> --permissions <scope> --json`, validated (N4, N5, N6, A4). */
+/**
+ * Mint through the pinned taaad (`taaad-mint.ts`, the one implementation, shared with the git credential
+ * helper), after the checks only this caller needs: an org-level target, no pin, and a taaad that is not
+ * root-only-writable (N4, A4, D4). A `MintError` becomes a failure code; its text is fixed and never taaad's output.
+ */
 export function mintAppToken(input: MintInput): MintResult {
   const fail = (failure: MintFailure): MintResult => ({ ok: false, failure });
   if (input.repo === null) {
@@ -267,22 +178,27 @@ export function mintAppToken(input: MintInput): MintResult {
     const problem = taaadTrustProblem(input.pin);
     if (problem !== null) return fail({ code: "TAAAD_AGENT_WRITABLE", why: `${problem}, so an App token it mints could be captured` });
   }
-  const res = spawnSync(
-    input.pin.launcher,
-    ["mint", "--app", input.slug, "--repo", `${input.owner}/${input.repo}`, "--permissions", input.scope, "--json"],
-    {
-      env: taaadEnv(input.callerEnv),
-      encoding: "utf8",
-      timeout: CHILD_TIMEOUT_MS,
-      maxBuffer: CHILD_MAX_BUFFER,
-      // stderr is discarded: nothing a minting child says is forwarded.
-      stdio: ["ignore", "pipe", "ignore"],
-    },
-  );
-  if (res.error !== undefined || res.status !== 0 || typeof res.stdout !== "string" || res.stdout.trim() === "") {
-    return fail({ code: "GH_IDENTITY_UNAVAILABLE", why: "taaad could not mint a token for this App and repository" });
+  try {
+    const minted = mintPinned({
+      taaadPath: input.pin.launcher,
+      slug: input.slug,
+      owner: input.owner,
+      repo: input.repo,
+      scope: input.scope,
+    });
+    return { ok: true, token: minted.token };
+  } catch (err) {
+    if (err instanceof MintError && err.kind === "installation-mismatch") {
+      return fail({
+        code: "GH_IDENTITY_INSTALLATION_MISMATCH",
+        why: "the App's installation belongs to a different account than this call's owner, so the token was discarded",
+      });
+    }
+    return fail({
+      code: "GH_IDENTITY_UNAVAILABLE",
+      why: err instanceof MintError ? `${err.message}, so no token was used` : "taaad could not mint a token for this App and repository",
+    });
   }
-  return validateMint(res.stdout, { owner: input.owner, repo: input.repo }, input.scope);
 }
 
 // ---------------------------------------------------------------------------

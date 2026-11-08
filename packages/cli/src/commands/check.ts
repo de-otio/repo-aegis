@@ -4,6 +4,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { currentEnforcementPin } from "../enforcement-pin.js";
+import { helperOrder, readCredentialConfig } from "../git-credential-config.js";
+import { helperCommand } from "./install-git-credential.js";
 import {
   readRepoConfig,
   computeDenySet,
@@ -28,6 +31,10 @@ import {
   // `git` hands this hook the URL AFTER insteadOf/pushInsteadOf rewriting, so
   // only ssh aliases need resolving here (`resolveRemoteUrl`, pure, never `ssh -G`).
   resolveRemoteUrl,
+  classifyRemoteUrl,
+  checkTerminal,
+  identityPresence,
+  repoAegisHome,
   detectSshOverride,
   parseRemoteUrlResolved,
   safeDestination,
@@ -465,6 +472,13 @@ function publicPushApprovalSentence(
   }
 }
 
+/** How a push URL travels: ssh for scp-like, ssh:// and ssh-config alias forms; http for everything else GitHub. */
+function pushTransport(raw: string | undefined): "ssh" | "http" {
+  const c = classifyRemoteUrl(raw);
+  if (c.kind === "github") return c.transport;
+  return c.kind === "alias" ? "ssh" : "http";
+}
+
 /**
  * Run the destination checks for `--remote-url` and return what `--json`
  * should report. Refusals exit through `emitError` (exit 2) and never return.
@@ -709,6 +723,65 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
       },
       opts,
     );
+  }
+
+  // --- AGENT_PUSH_NEEDS_APP (doc/plan-owner-identity.md §5.6, §12.1 A6) --------
+  // After every destination check above, which are unchanged. With no person present (identity presence: no
+  // environment variable counts, A1), an owner mapped to an agent identity is pushed to over HTTPS, where the
+  // repo-aegis credential helper supplies the App token. Over SSH the push would go as whatever key the person
+  // has: refused, with the HTTPS form. Over HTTPS the helper must be first in git's list, or git asks the
+  // person's helper instead.
+  if (registry !== null && registry.identityMap?.get(parsed.org)?.agent !== undefined) {
+    const presence = identityPresence(checkTerminal());
+    if (presence === "agent") {
+      const transport = pushTransport(opts.remoteUrl);
+      const safe = safeDestination(parsed.org, parsed.repo);
+      if (transport === "ssh") {
+        const httpsForm = safe === null ? null : `git push https://github.com/${safe.org}/${safe.repo}.git <branch>`;
+        auditRefusal("AGENT_PUSH_NEEDS_APP", repo, `${dest.org}/${dest.repo}`, ref);
+        emitError(
+          {
+            code: "AGENT_PUSH_NEEDS_APP",
+            error: pushRefusal(
+              "AGENT_PUSH_NEEDS_APP",
+              parsed,
+              ref,
+              "This owner has a GitHub App identity for agents, and an SSH push goes out as the person's SSH key instead of the App; only an HTTPS push gets the App's narrowed token",
+              "No approval covers this",
+              httpsForm === null ? [] : [{ by: "agent", command: httpsForm }],
+            ),
+            details: { destination: `${parsed.org}/${parsed.repo}`, ref },
+          },
+          opts,
+        );
+      }
+      const entries = readCredentialConfig(repo.cwd);
+      const order = entries === null ? null : helperOrder(entries, helperCommand(currentEnforcementPin(), repoAegisHome()));
+      if (order === null || order.kind !== "first") {
+        auditRefusal("GIT_CREDENTIAL_HELPER_ORDER", repo, `${dest.org}/${dest.repo}`, ref);
+        emitError(
+          {
+            code: "GIT_CREDENTIAL_HELPER_ORDER",
+            error: pushRefusal(
+              "GIT_CREDENTIAL_HELPER_ORDER",
+              parsed,
+              ref,
+              "This owner has a GitHub App identity for agents, but the repo-aegis git credential helper is not the first helper git runs for https://github.com (or git's configuration cannot be read), so this push was authenticated with some other credential",
+              "No approval covers this",
+              [
+                {
+                  by: "person",
+                  when: "To fix the helper order",
+                  command: "repo-aegis install git-credential",
+                },
+              ],
+            ),
+            details: { destination: `${parsed.org}/${parsed.repo}`, ref },
+          },
+          opts,
+        );
+      }
+    }
   }
 
   // --- the git-native receipt ---------------------------------------------

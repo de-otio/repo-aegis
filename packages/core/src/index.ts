@@ -292,6 +292,8 @@ export {
   graphqlOperationKind,
   isGhBuiltinGroup,
 } from "./egress-intent.js";
+export { isGhConfigFile, ghConfigDirs, GH_CONFIG_FILES } from "./gh-config-paths.js";
+export type { GhConfigPathContext } from "./gh-config-paths.js";
 export {
   checkNetworkRules,
   checkIdentityHookRules,

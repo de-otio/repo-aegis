@@ -4,7 +4,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBuilt, runCli } from "../_subprocess-utils.js";
 
@@ -430,6 +430,38 @@ engagements:
       input: JSON.stringify({ tool_input: { file_path: file } }),
     });
     assert.equal(r.code, 0, `expected exit 0; got code=${r.code} stdout=${r.stdout}`);
+  });
+});
+
+describe("hook check-write: L6 — refuses writes to gh's config files", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  // Path checks only: nothing here is ever written. The default directory is under the real home of the test
+  // process, which is where the hook (a subprocess with the same HOME) looks.
+  const ghDir = join(homedir(), ".config", "gh");
+
+  it("refuses hosts.yml and config.yml with GH_CONFIG_WRITE_REFUSED", () => {
+    const env = setupAegisHome("ck-gh-config");
+    writeRegistry(env.aegisHome, `schemaVersion: 2\nengagements: []\n`);
+    const repo = makeGitRepo(tmp, "ck-gh-config-repo", { class: "public-eligible" });
+    for (const file of [join(ghDir, "hosts.yml"), join(ghDir, "config.yml"), "~/.config/gh/hosts.yml"]) {
+      const r = runCli(env.aegisHome, repo, ["hook", "check-write"], {
+        input: JSON.stringify({ tool_name: "Write", tool_input: { file_path: file }, cwd: repo }),
+      });
+      assert.equal(r.code, 2, `${file}: expected refuse; got ${r.code} ${r.stderr}`);
+      assert.equal((r.json as { code: string }).code, "GH_CONFIG_WRITE_REFUSED", file);
+      assert.match(r.stderr, /No approval covers this/);
+    }
+  });
+
+  it("allows a neighbouring file and a same-named file elsewhere", () => {
+    const env = setupAegisHome("ck-gh-config-ok");
+    writeRegistry(env.aegisHome, `schemaVersion: 2\nengagements: []\n`);
+    const repo = makeGitRepo(tmp, "ck-gh-config-ok-repo", { class: "public-eligible" });
+    for (const file of [join(ghDir, "state.yml"), join(repo, "hosts.yml"), join(repo, "config.yml")]) {
+      const r = runCli(env.aegisHome, repo, ["hook", "check-write"], {
+        input: JSON.stringify({ tool_name: "Write", tool_input: { file_path: file }, cwd: repo }),
+      });
+      assert.equal(r.code, 0, `${file}: expected allow; got ${r.code} ${r.stderr}`);
+    }
   });
 });
 

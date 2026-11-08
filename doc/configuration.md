@@ -248,6 +248,22 @@ set-identity` (a personal org is `engagements set-identity --personal-org <org>`
 command text (`AGENT_RAN_HUMAN_COMMAND`). See
 [cli-reference.md](cli-reference.md#identities-schema-version-3).
 
+### Git pushes as the agent's App (the credential helper)
+
+For an owner mapped to an `agent` identity (a `github-app`), an agent's HTTPS
+push can carry a token narrowed to that one repository. `repo-aegis install
+git-credential` (a person, at a terminal) puts the repo-aegis helper first in the
+global git config for `https://github.com` and sets
+`credential.https://github.com.useHttpPath=true`; what it added is recorded in
+`<home>/state/git-credential-install.json` and `--uninstall` removes exactly that
+(see [cli-reference.md](cli-reference.md#repo-aegis-install-git-credential---uninstall)).
+
+- With a person present the helper prints nothing and your own helpers answer as before; the same for an owner with no `agent` identity.
+- An agent's push over SSH to such an owner is refused by the pre-push hook (`AGENT_PUSH_NEEDS_APP`): push over HTTPS.
+- The helper needs the pinned taaad. Until `install shim` records the pin, the helper looks for it in `<home>/state/taaad-pin.json` (`{"launcher": "/absolute/path/to/taaad"}`); with none it refuses (`GH_BINARY_UNTRUSTED`).
+- Helper order matters: a reset entry, a system-scope helper such as `osxkeychain`, or `gh auth setup-git` can put another helper first, and that one answers with your credential. The install checks this and refuses with instructions rather than guess; `doctor` fails with `GIT_CREDENTIAL_HELPER_ORDER` when an owner has an agent identity and the order is wrong.
+- Settings that could redirect or capture the token make the helper refuse (`AGENT_PUSH_CREDENTIAL_CONFIG`): a credential helper in the repository's own config, `http.proxy`, `http.sslVerify=false`, `http.sslCAInfo`, `http.extraHeader` or `http.sslBackend` outside system scope, and trace, proxy or TLS variables in the environment. A global proxy or CA bundle you rely on therefore needs to go in the system config, or be given up for agent pushes.
+
 ## Reviewed-benign waivers (`waivers:`)
 
 `.repo-aegis.yml` also carries a `waivers:` list — the auditable
