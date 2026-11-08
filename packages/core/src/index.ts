@@ -538,3 +538,14 @@ export {
   personalOrgName,
 } from "./schemas.js";
 export type { IdentityDefinition, PersonalOrgEntry } from "./schemas.js";
+
+// Which GitHub identity a `gh` call runs as (doc/plan-owner-identity.md §13.1). Pure; nothing calls it yet.
+export { identityPresence, ghCallTargets, chooseIdentity } from "./identity-choice.js";
+export type {
+  IdentityPresence,
+  GhCallTarget,
+  IdentityScope,
+  IdentityRefusalCode,
+  IdentityChoice,
+  ChooseIdentityInput,
+} from "./identity-choice.js";
