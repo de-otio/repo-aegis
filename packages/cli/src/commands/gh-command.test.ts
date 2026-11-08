@@ -173,6 +173,8 @@ interface RunOpts {
   trust?: "default" | "permissive";
   /** Leave the fake bash off the caller's PATH (for pass-through cases, where the stub gh sees that PATH). */
   plainPath?: boolean;
+  /** Replaces the egress decision (a test seam for a fault in it). */
+  evaluate?: GhCommandDeps["evaluate"];
 }
 
 interface Ran {
@@ -218,6 +220,7 @@ function run(w: World, args: string[], o: RunOpts = {}): Ran {
     taaad: o.taaad !== undefined ? o.taaad : w.taaad,
     io: { out: t => void outChunks.push(t), err: t => void errChunks.push(t) },
     captureChild: true,
+    ...(o.evaluate !== undefined && { evaluate: o.evaluate }),
   };
   const status = runGhCommand(args, { home: w.home, cwd: o.cwd ?? w.repo }, deps);
   return {
@@ -816,6 +819,157 @@ describe("repo-aegis gh: faults, pass-through and the pinned home", () => {
         if (r.status === 2) assert.deepEqual(mainCalls(r), [], `${presence} ${args.join(" ")}: a refusal ran gh`);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H1: git options and the repository's own git config, for the agent column
+// ---------------------------------------------------------------------------
+
+describe("H1: gh's git children cannot be steered by argv or by the repository's git config", () => {
+  const git = (cwd: string, ...a: string[]): void => void spawnSync("git", a, { cwd, stdio: "ignore" });
+
+  for (const args of [
+    ["repo", "clone", "example-org/x", "--", "-c", "core.hooksPath=/tmp/h"],
+    ["repo", "clone", "example-org/x", "--", "--template=/tmp/t"],
+    ["repo", "clone", "example-org/x", "--template=/tmp/t"],
+    ["repo", "clone", "example-org/x", "-c", "core.fsmonitor=/tmp/f"],
+    ["repo", "fork", "example-org/x", "--clone", "--", "--template=/tmp/t"],
+  ]) {
+    it(`an agent's gh ${args.join(" ")} never runs gh`, () => {
+      const w = makeWorld();
+      // A person's approval for the owner lets egress (rule g) through, so the identity rule is what decides.
+      mintApproval({ target: { org: "example-org", repo: "*" }, path: approvalsPath(w.home) });
+      const r = run(w, args, { presence: "agent" });
+      assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", r.err);
+      assert.equal(r.status, 2);
+      assert.deepEqual(r.ghArgv, [], "gh ran");
+      assert.deepEqual(r.taaadArgv, [], "a token was minted");
+    });
+  }
+
+  for (const [label, key, value] of [
+    ["core.hooksPath", "core.hooksPath", "/tmp/h"],
+    ["core.fsmonitor", "core.fsmonitor", "/tmp/fsmon"],
+    ["core.sshCommand", "core.sshCommand", "/tmp/ssh"],
+    ["a url insteadOf rewrite", "url.https://example.net/.insteadOf", "https://github.com/"],
+    ["a repo-local credential helper", "credential.helper", "!/tmp/helper"],
+    ["http.proxy", "http.proxy", "http://127.0.0.1:9"],
+  ] as Array<[string, string, string]>) {
+    it(`a repo-local ${label} refuses an agent's gh pr checkout, before any token is minted`, () => {
+      const w = makeWorld();
+      git(w.repo, "config", key, value);
+      const r = run(w, ["pr", "checkout", "1", "--repo", "example-org/svc"], { presence: "agent" });
+      assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", r.err);
+      assert.deepEqual(r.ghArgv, []);
+      assert.deepEqual(r.taaadArgv, []);
+    });
+  }
+
+  it("the same configuration does not stop a verb that spawns no git, or a person at a terminal", () => {
+    const w = makeWorld();
+    git(w.repo, "config", "core.hooksPath", "/tmp/h");
+    assert.equal(run(w, READ, { presence: "agent" }).status, 0, "pr view spawns no git");
+    const person = run(w, ["pr", "checkout", "1", "--repo", "example-org/svc"], { presence: "person" });
+    assert.equal(person.status, 0, person.err);
+  });
+
+  it("a harmless repo-local configuration (fsmonitor off, a benign key) does not refuse pr checkout", () => {
+    const w = makeWorld();
+    git(w.repo, "config", "core.fsmonitor", "false");
+    git(w.repo, "config", "user.name", "alice");
+    const r = run(w, ["pr", "checkout", "1", "--repo", "example-org/svc"], { presence: "agent" });
+    assert.equal(r.status, 0, r.err);
+    assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], TOKEN_BOT);
+  });
+
+  it("pr create, repo sync and issue develop --checkout are pre-flighted too; a caller's proxy variable is not a violation (the child's environment is allowlisted)", () => {
+    const w = makeWorld();
+    git(w.repo, "config", "core.hooksPath", "/tmp/h");
+    mintApproval({ target: { org: "example-org", repo: "*" }, path: approvalsPath(w.home) });
+    for (const args of [
+      WRITE,
+      ["repo", "sync", "--repo", "example-org/svc"],
+      ["issue", "develop", "1", "--checkout", "--repo", "example-org/svc"],
+    ]) {
+      const r = run(w, args, { presence: "agent" });
+      assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", `${args.join(" ")}: ${r.err}`);
+      assert.deepEqual(r.ghArgv, []);
+    }
+    const w2 = makeWorld();
+    const ok = run(w2, ["pr", "checkout", "1", "--repo", "example-org/svc"], { presence: "agent", env: { HTTPS_PROXY: "http://127.0.0.1:9" } });
+    assert.equal(ok.status, 0, ok.err);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M1, M5: an unreadable or missing registry, and a fault in the egress parse
+// ---------------------------------------------------------------------------
+
+describe("M1: verbs that read tokens are refused without a person whatever the registry", () => {
+  it("a missing registry: `gh auth token` is GH_AUTH_NEEDS_HUMAN for an agent, and runs for a person", () => {
+    const w = makeWorld();
+    rmSync(join(w.home, "engagements.yaml"));
+    const r = run(w, ["auth", "token"], { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_AUTH_NEEDS_HUMAN", r.err);
+    assert.deepEqual(r.ghArgv, []);
+    assert.equal(run(w, ["auth", "token", "--user", "alice"], { presence: "person", plainPath: true }).status, 0);
+  });
+
+  it("an unreadable registry: `gh auth token` is GH_AUTH_NEEDS_HUMAN for an agent", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.home, "engagements.yaml"), "schemaVersion: 3\nidentities: [this is not valid\n");
+    const r = run(w, ["auth", "token"], { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_AUTH_NEEDS_HUMAN", r.err);
+    assert.deepEqual(r.ghArgv, []);
+  });
+
+  it("an unreadable registry: an agent call naming an owner (literal, GH_REPO or the cwd) is GH_IDENTITY_UNAVAILABLE, and gh does not run", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.home, "engagements.yaml"), "schemaVersion: 3\nidentities: [this is not valid\n");
+    for (const [args, env] of [
+      [READ, {}],
+      [["pr", "view", "1"], { GH_REPO: "plain-org/x" }],
+      [["pr", "view", "1"], {}], // the owner comes from the cwd's remote
+    ] as Array<[string[], Record<string, string>]>) {
+      const r = run(w, args, { presence: "agent", env });
+      assert.equal(refusalCode(r), "GH_IDENTITY_UNAVAILABLE", `${args.join(" ")} ${JSON.stringify(env)}: ${r.err}`);
+      assert.deepEqual(r.ghArgv, []);
+    }
+  });
+
+  it("an unreadable registry: a call that names no owner still runs for an agent, and a person's call warns and runs", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.home, "engagements.yaml"), "schemaVersion: 3\nidentities: [this is not valid\n");
+    const none = run(w, ["api", "user"], { presence: "agent", plainPath: true });
+    assert.equal(none.status, 0, none.err);
+    const person = run(w, READ, { presence: "person", plainPath: true });
+    assert.equal(person.status, 0, person.err);
+    assert.match(person.err, /registry could not be read/);
+    assert.deepEqual(mainCalls(person), ["api user", READ.join(" ")]);
+  });
+});
+
+describe("M5: a fault in the egress parse on a mapped owner", () => {
+  const fault: GhCommandDeps["evaluate"] = () => ({ kind: "fault", message: "the parser exploded" });
+
+  it("is GH_IDENTITY_UNAVAILABLE for an agent, and gh is not run", () => {
+    const w = makeWorld();
+    const r = run(w, READ, { presence: "agent", evaluate: fault });
+    assert.equal(refusalCode(r), "GH_IDENTITY_UNAVAILABLE", r.err);
+    assert.equal(r.status, 2);
+    assert.deepEqual(r.ghArgv, []);
+    assert.deepEqual(r.taaadArgv, []);
+  });
+
+  it("with an unmapped owner, or a person present, keeps warn-and-run", () => {
+    const w = makeWorld();
+    const unmapped = run(w, ["pr", "view", "1", "--repo", "plain-org/x"], { presence: "agent", evaluate: fault, plainPath: true });
+    assert.equal(unmapped.status, 0, unmapped.err);
+    assert.match(unmapped.err, /the egress decision failed \(the parser exploded\); proceeding/);
+    const person = run(w, READ, { presence: "person", evaluate: fault });
+    assert.equal(person.status, 0, person.err);
+    assert.match(person.err, /proceeding/);
   });
 });
 

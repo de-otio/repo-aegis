@@ -51,7 +51,8 @@ import {
   type TerminalCheck,
 } from "@de-otio/repo-aegis-core";
 import type { OutputOptions } from "../format.js";
-import { evaluateEgress, readbackResult, type AllowVerdict } from "./egress-check.js";
+import { evaluateEgress, readbackResult, type AllowVerdict, type EgressEvaluation } from "./egress-check.js";
+import { gitSpawnViolation, readCredentialConfig } from "../git-credential-config.js";
 import { resolveTrustedGh } from "./doctor-owner-checks.js";
 import { fetchLoginToken, ghChildEnv, mintAppToken, runGhAsNobody, tokensEqual } from "./gh-identity-token.js";
 import { readPinnedTaaad, type TaaadPin } from "./taaad-pin.js";
@@ -74,6 +75,8 @@ export interface GhCommandDeps {
   taaad?: TaaadPin | null;
   /** Where this command's own output goes. Default: the process's stdout and stderr. */
   io?: { out: (text: string) => void; err: (text: string) => void };
+  /** Replaces the egress decision (a test seam for a fault in it). Default: `evaluateEgress`. */
+  evaluate?: (args: string[], cwd: string) => EgressEvaluation;
   /** Capture the `gh` child's output through `io` instead of inheriting the terminal. */
   captureChild?: boolean;
 }
@@ -214,6 +217,22 @@ type IdentityOutcome =
       label: string;
     };
 
+/** A registry with nothing in it, for the verb-only rules when the real one is missing or unreadable. */
+const NO_REGISTRY: Registry = { engagements: [], alwaysBlock: [] };
+
+/**
+ * Verbs whose gh runs `git` in the working directory or clones (H1): `pr checkout`, `pr create`, `repo sync`,
+ * `repo clone`, `gist clone`, `repo fork --clone`, `issue develop --checkout`. Judged by the first two words.
+ */
+function spawnsGitHere(args: readonly string[]): boolean {
+  const words = args.filter(a => !a.startsWith("-"));
+  const key = `${words[0] ?? ""} ${words[1] ?? ""}`;
+  if (["pr checkout", "pr create", "repo sync", "repo clone", "gist clone"].includes(key)) return true;
+  if (key === "repo fork") return args.some(a => a === "--clone" || a.startsWith("--clone="));
+  if (key === "issue develop") return args.some(a => a === "--checkout" || a === "-c" || a.startsWith("--checkout="));
+  return false;
+}
+
 function loadPinnedRegistry(home: string): { kind: "none" } | { kind: "unreadable" } | { kind: "ok"; registry: Registry } {
   try {
     return { kind: "ok", registry: loadRegistry(join(home, "engagements.yaml")) };
@@ -246,49 +265,98 @@ function decideIdentity(
   const presenceOf = (): IdentityPresence => identityPresence((deps.terminal ?? (() => checkTerminal()))());
   // Rule 1 (A10) and the alias/extension rule: verbs that read or change tokens, or that could expand to one.
   const firstWord = args.find(a => !a.startsWith("-"));
-  const authish = args.some(a => AUTH_GROUPS.includes(a)) || (firstWord !== undefined && !isGhBuiltinGroup(firstWord));
+  const authVerb = args.some(a => AUTH_GROUPS.includes(a));
+  const aliasLike = firstWord !== undefined && !isGhBuiltinGroup(firstWord);
 
-  let registry: Registry | null = loaded.kind === "ok" ? loaded.registry : null;
+  const presenceMemo: { v?: IdentityPresence } = {};
+  const presence = (): IdentityPresence => (presenceMemo.v ??= presenceOf());
+  const registry: Registry | null = loaded.kind === "ok" ? loaded.registry : null;
   const hasMapping = registry !== null && ((registry.identityMap?.size ?? 0) > 0 || registry.requireIdentity === true);
 
-  // Rule 1 (A10) is about the VERB, so it applies even where nothing is mapped. Cheap pre-check first: the
-  // presence reader may read the process table.
-  if (authish && registry !== null) {
-    const first = chooseIdentity(baseInput(args, intents, [], registry, presenceOf(), home, callerEnv));
+  // Rule 1 (A10) and the alias rule are about the VERB, so they apply whatever the registry: missing, unreadable
+  // or with nothing mapped (M1). Cheap pre-check first: the presence reader may read the process table.
+  // An alias or extension is judged only where an identity could be injected (a mapping exists): with none,
+  // nothing is at stake, and refusing every extension for every unregistered user would break them.
+  if (authVerb || (aliasLike && hasMapping)) {
+    const first = chooseIdentity(baseInput(args, intents, [], registry ?? NO_REGISTRY, presence(), home, callerEnv));
     if (first.kind === "refuse") return refuseOutcome(first, home, verb);
   }
-  if (loaded.kind === "none" || !hasMapping) return { kind: "plain" };
-
-  if (loaded.kind === "unreadable") {
-    // The registry says which owners are mapped, and it cannot be read. A person at a terminal runs as
-    // themselves (doctor reports REGISTRY_UNREADABLE); with nobody present, a call that names an owner is refused.
-    return presenceOf() === "person"
-      ? { kind: "plain", note: "the registry could not be read, so no GitHub identity was chosen" }
-      : refuseUnavailable("the registry could not be read, so repo-aegis cannot tell whether this owner has a GitHub identity", verb, home);
-  }
-  registry = loaded.registry;
+  if (loaded.kind === "none") return { kind: "plain" };
 
   // Targets: the cwd's remote is read only when the argv would use it.
   const ghRepoEnv = callerEnv["GH_REPO"];
   // `isWrite` is the egress parser's verdict: a graphql read gets no base target (core decides with it).
   const isWrite = intents === null ? true : intents.length > 0;
   const ctxBase = { isWrite, ...(ghRepoEnv !== undefined && ghRepoEnv !== "" && { ghRepoEnv }) };
-  const probe = ghCallInfo(args, { ...ctxBase, cwdRemoteOwnerRepo: { owner: "cwd-probe", repo: "cwd-probe" } });
-  let info = ghCallInfo(args, ctxBase);
-  if (probe.targets.some(t => t.source === "cwd")) {
-    const plain = intents?.[0]?.ghPlainBase === true;
-    const base = ghBaseRepo(cwd, plain);
-    if (base.kind === "repo") {
-      info = ghCallInfo(args, { ...ctxBase, cwdRemoteOwnerRepo: { owner: base.org, repo: base.repo } });
+  const targetsInfo = (): ReturnType<typeof ghCallInfo> => {
+    const probe = ghCallInfo(args, { ...ctxBase, cwdRemoteOwnerRepo: { owner: "cwd-probe", repo: "cwd-probe" } });
+    let found = ghCallInfo(args, ctxBase);
+    if (probe.targets.some(t => t.source === "cwd")) {
+      const plain = intents?.[0]?.ghPlainBase === true;
+      const base = ghBaseRepo(cwd, plain);
+      if (base.kind === "repo") {
+        found = ghCallInfo(args, { ...ctxBase, cwdRemoteOwnerRepo: { owner: base.org, repo: base.repo } });
+      }
     }
+    return found;
+  };
+
+  if (loaded.kind === "unreadable") {
+    // The registry says which owners are mapped, and it cannot be read. A person at a terminal runs as
+    // themselves (doctor reports REGISTRY_UNREADABLE); with nobody present, a call that names an owner (literal,
+    // GH_REPO or the cwd's remote) is refused (M1). A call that names none is not about an owner.
+    if (presence() === "person") return { kind: "plain", note: "the registry could not be read, so no GitHub identity was chosen" };
+    const named = targetsInfo();
+    if (named.targets.length === 0 && !named.foreignHost) return { kind: "plain" };
+    return refuseUnavailable("the registry could not be read, so repo-aegis cannot tell whether this owner has a GitHub identity", verb, home);
   }
+  if (!hasMapping) return { kind: "plain" };
+
+  const info = targetsInfo();
   const targets = info.targets;
   const foreignHost = info.foreignHost;
 
-  const input: ChooseIdentityInput = { ...baseInput(args, intents, targets, registry, presenceOf(), home, callerEnv), foreignHost };
+  const input: ChooseIdentityInput = { ...baseInput(args, intents, targets, registry!, presence(), home, callerEnv), foreignHost };
   let choice = chooseIdentity(input);
   if (choice.kind === "inject") {
     state.mapped = true;
+    // M5: without the egress parse nobody knows what this call publishes; an agent's call for a mapped owner
+    // does not proceed on a guess. A person at a terminal keeps warn-and-run.
+    if (intents === null && presence() !== "person") {
+      return refuseUnavailable("the egress decision for this call could not be made, so repo-aegis will not run it as a mapped identity", verb, home, choice);
+    }
+    // H1: for the agent column, the repository's own git configuration is judged before a token is minted, for
+    // the verbs whose gh spawns git in this directory.
+    if (presence() === "agent" && spawnsGitHere(args)) {
+      // Read as the CHILD would: without the caller's GIT_CONFIG_* (the child gets its own, fixed ones).
+      const readEnv: NodeJS.ProcessEnv = {};
+      for (const [k, v] of Object.entries(callerEnv)) {
+        if (k === "GIT_CONFIG_COUNT" || k === "GIT_CONFIG_PARAMETERS" || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) continue;
+        readEnv[k] = v;
+      }
+      const entries = readCredentialConfig(cwd, readEnv);
+      const hit = entries === null ? "the git configuration could not be read" : gitSpawnViolation(entries, { path: null }, {});
+      if (hit !== null) {
+        return refuseOutcome(
+          {
+            kind: "refuse",
+            code: "GH_IDENTITY_ARG_UNSAFE",
+            reason: ownRefusal(
+              "GH_IDENTITY_ARG_UNSAFE",
+              "this gh call",
+              `it runs git in this directory with a token, and ${hit}, which could run a program or send the token elsewhere`,
+              [
+                { by: "agent", command: "the same call from a checkout whose local git configuration sets none of core.hooksPath, core.fsmonitor, core.sshCommand, url.*.insteadOf, credential.helper or http.proxy-style options" },
+                { by: "person", step: "removes that setting from the repository's configuration" },
+              ],
+              choice,
+            ),
+          },
+          home,
+          verb,
+        );
+      }
+    }
     // D9 second half, only for a call that will inject: the trusted gh's own config. Needs the trusted gh anyway.
     const trusted = resolveTrustedGh({ ...callerEnv, REPO_AEGIS_HOME: home }, trust);
     if (trusted.kind === "skip") {
@@ -575,7 +643,7 @@ function runPinned(
   let verdict: AllowVerdict | null = null;
   let intents: EgressIntent[] | null = null;
   try {
-    const ev = evaluateEgress(args, cwd);
+    const ev = (deps.evaluate ?? evaluateEgress)(args, cwd);
     if (ev.kind === "deny") {
       io.err(ev.stderrLine);
       return 2;

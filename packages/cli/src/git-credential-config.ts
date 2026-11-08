@@ -34,7 +34,8 @@ const isSystemScope = (scope: string): boolean => scope === "system" || scope ==
 /** How a scope reads in a message. */
 export const scopeLabel = (scope: string): string => (scope === "unknown" ? "system (the git build's bundled config)" : scope);
 
-const CONFIG_KEYS = "^(credential\\.|http\\.|remote\\..*\\.proxy$)";
+const CONFIG_KEYS =
+  "^(credential\\.|http\\.|remote\\..*\\.proxy$|core\\.(hookspath|fsmonitor|sshcommand)$|url\\..*\\.(insteadof|pushinsteadof)$)";
 
 /** Parse `git config --show-scope --get-regexp` output (`scope<TAB>key value`). */
 export function parseShowScopeList(out: string): ConfigEntry[] {
@@ -307,4 +308,30 @@ export function laterStoringHelper(entries: readonly ConfigEntry[], ctx: Credent
     return helperKind(v);
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// gh's git children (doc/plan-owner-identity.md A2, H1)
+// ---------------------------------------------------------------------------
+
+/**
+ * A fixed phrase naming why a `gh` verb that runs `git` in this directory must not carry a token, or null.
+ * The environment overrides `repo-aegis gh` gives gh's git children cover most of this, but git reads them
+ * BEFORE a command-line `-c`, and a repository can hold what a clone or checkout then runs or follows, so the
+ * effective configuration is judged as well: `core.hooksPath`, `core.fsmonitor` (anything but off) and
+ * `core.sshCommand` from local, worktree or command scope; `url.<base>.insteadOf` / `pushInsteadOf` from those
+ * scopes (it re-points the remote the token is sent to); and everything {@link credentialConfigViolation} judges
+ * (`credential.helper` outside system and global scope, `http.proxy`, `sslVerify=false`, `sslCAInfo`,
+ * `extraHeader`). `env` is the CHILD's environment, which `repo-aegis gh` allowlists, so it is `{}` there.
+ */
+export function gitSpawnViolation(entries: readonly ConfigEntry[], ctx: CredentialContext, env: NodeJS.ProcessEnv): string | null {
+  for (const e of entries) {
+    if (isSystemScope(e.scope) || e.scope === "global") continue;
+    const v = e.value;
+    if (e.key === "core.hookspath" && v !== null && v !== "") return `core.hooksPath is set in ${e.scope} scope`;
+    if (e.key === "core.fsmonitor" && v !== null && !FALSY.test(v)) return `core.fsmonitor is set in ${e.scope} scope`;
+    if (e.key === "core.sshcommand" && v !== null && v !== "") return `core.sshCommand is set in ${e.scope} scope`;
+    if (/^url\..*\.(insteadof|pushinsteadof)$/.test(e.key)) return `a url.<base>.insteadOf rewrite is set in ${e.scope} scope`;
+  }
+  return credentialConfigViolation(entries, ctx, env);
 }

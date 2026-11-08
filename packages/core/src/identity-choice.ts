@@ -393,10 +393,33 @@ function nonBuiltinFirstWord(args: readonly string[]): boolean {
   return scan !== null && !isGhBuiltinGroup(scan.group);
 }
 
+/** `repo clone`, `repo fork --clone` and `gist clone`: gh runs `git clone` with what follows `--` and these options. */
+function spawnsGitClone(scan: NonNullable<ReturnType<typeof scanGhCommand>>): boolean {
+  const key = `${scan.group} ${scan.sub ?? ""}`;
+  if (key === "repo clone" || key === "gist clone") return true;
+  return key === "repo fork" && scan.flags.some(f => f.flag === "--clone" && (f.value === undefined || !/^(false|0)$/i.test(f.value)));
+}
+
+/**
+ * H1: git reads a command line `-c key=value` AFTER `GIT_CONFIG_COUNT`, and `--template` copies hooks into the
+ * clone, so either defeats the overrides a token-carrying gh child gets. gh hands everything after `--` to git,
+ * and `--template`, `--config`, `-c` to the clone it runs. Judged on the raw argv after the group word (the
+ * flag table stops at `--`).
+ */
+function unsafeCloneOptions(args: readonly string[], group: string): boolean {
+  const at = args.indexOf(group);
+  for (const a of at === -1 ? args : args.slice(at + 1)) {
+    if (a === "--" || a === "--template" || a.startsWith("--template=") || a === "--config" || a.startsWith("--config=")) return true;
+    if (a === "-c" || (a.startsWith("-c") && !a.startsWith("--"))) return true;
+  }
+  return false;
+}
+
 /** A2 (rule 8): arguments that could redirect an injected token. Null when none. */
 function unsafeArg(args: readonly string[]): boolean {
   const scan = scanGhCommand(args);
   if (scan === null) return false;
+  if (spawnsGitClone(scan) && unsafeCloneOptions(args, scan.group)) return true;
   if (scan.flags.some(f => f.flag === "--editor" || f.flag === "-e" || f.flag === "--web" || f.flag === "-w")) return true;
   if (scan.group === "api") {
     if (scan.flags.some(f => f.flag === "--hostname")) return true;
@@ -415,7 +438,7 @@ function unsafeArgRefusal(dest: { owner: string; repo: string | null } | undefin
   return refuse(
     "GH_IDENTITY_ARG_UNSAFE",
     "this gh call",
-    "its arguments (an editor or browser option, another host or a full-URL endpoint, or a command that is not a built-in gh group) could hand a token to another program or host",
+    "its arguments (an editor or browser option, another host or a full-URL endpoint, git options for a clone such as `--`, `--template` or `-c`, or a command that is not a built-in gh group) could hand a token to another program or host",
     NO_APPROVAL,
     [{ by: "agent", command: "the same call on github.com only, without --editor/-e, --web/-w or --hostname, using a built-in gh command" }],
     dest,

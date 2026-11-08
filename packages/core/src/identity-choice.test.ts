@@ -920,3 +920,37 @@ describe("properties (seeded LCG)", () => {
     }
   });
 });
+
+// ---- H1: gh's git children read git command-line options after GIT_CONFIG_COUNT -----------------------------
+
+describe("H1: git passthrough and clone options are unsafe for the agent column", () => {
+  const CLONE = ["repo", "clone", "both-org/r"];
+  const UNSAFE: string[][] = [
+    [...CLONE, "--", "-c", "core.hooksPath=/tmp/h"],
+    [...CLONE, "--", "--template=/tmp/t"],
+    [...CLONE, "--", "--depth", "1"],
+    [...CLONE, "--template=/tmp/t"],
+    [...CLONE, "--template", "/tmp/t"],
+    [...CLONE, "--config", "core.hooksPath=/tmp/h"],
+    [...CLONE, "--config=core.hooksPath=/tmp/h"],
+    [...CLONE, "-c", "core.hooksPath=/tmp/h"],
+    ["repo", "fork", "both-org/r", "--clone", "--", "-c", "core.fsmonitor=/tmp/x"],
+    ["repo", "fork", "both-org/r", "--clone", "--template=/tmp/t"],
+    ["gist", "clone", "abc123", "--", "-c", "core.hooksPath=/tmp/h"],
+    ["gist", "clone", "abc123", "--template=/tmp/t"],
+  ];
+  for (const args of UNSAFE) {
+    it(`agent: gh ${args.join(" ")} is GH_IDENTITY_ARG_UNSAFE`, () => {
+      assert.equal(refused(chooseIdentity(input({ presence: "agent", args, targets: [lit("both-org")] }))), "GH_IDENTITY_ARG_UNSAFE");
+    });
+    it(`person: gh ${args.join(" ")} is not refused (rule 8 is the agent column's)`, () => {
+      assert.equal(chooseIdentity(input({ presence: "person", args, targets: [lit("both-org")] })).kind, "inject");
+    });
+  }
+
+  it("a plain clone, and a `-c`/`--` on a verb that spawns no clone, are not refused by this rule", () => {
+    for (const args of [CLONE, ["repo", "fork", "both-org/r"], ["pr", "view", "5", "--repo", "both-org/r"], ["api", "repos/both-org/r", "-f", "x=-c"]]) {
+      assert.equal(chooseIdentity(input({ presence: "agent", args, targets: [lit("both-org")] })).kind, "inject", args.join(" "));
+    }
+  });
+});
