@@ -307,6 +307,14 @@ The reason texts follow the existing five-part `refusal()` style and never conta
   - It also pins taaad: the realpaths of the launcher, its interpreter and its package directory. If any of them is not root-owned and root-only-writable, `github-app` injection is refused with `TAAAD_AGENT_WRITABLE`, and `doctor` reports it as a failure.
   - The shim `exec`s `repo-aegis gh` for every verb except `--version`, `help` and `completion` (D1), with no shell code after the `exec`.
 
+### 13.3a Contract changes after building (2026-11-08)
+
+- **Faults:** `GH_IDENTITY_UNAVAILABLE` is also a core `IdentityRefusalCode`, returned when a callback or a registry getter throws.
+- **Rule 8** (the A2 argument checks) applies only to presence `agent`. A person's own `gh pr view -w` on a mapped owner is not refused.
+- **A16, amended by the owner:** logins may be Enterprise Managed User logins (`handle_shortcode`). The shortcode can identify a customer, so `status` and `doctor` **text** output never prints the login of an identity that only engagements reference; JSON may carry it.
+- **The schema-version guard** (review H1 on phase 2) covers every install that would read the registry: `PATH`, the pinned git hooks and shim, and the CLI pinned by the Claude Code hooks (the one that runs `hook check-write`).
+- **Fail-closed:** `hook check-write` exits 2 (block) on an unreadable registry, instead of exit 1, which Claude Code treats as non-blocking.
+
 ### 13.4 git credential helper (phase 4, `packages/cli`)
 
 As §5.6 with A5, A6, A7 and A17. It uses `chooseIdentity` with `args = ["git-push"]` semantics: `isWrite` true when the parent chain shows `git push` or `send-pack`, scope `contents-write`, else `read` (A7). Install and uninstall are added to the uninstall surface.
