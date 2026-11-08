@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-08
+
+**Upgrade:** re-run `repo-aegis install shim` (`doctor` reports `SHIM_STALE` until you do), and
+optionally `repo-aegis install git-credential`. `person` (gh-login) identities need nothing new;
+`agent` (GitHub App) identities need taaad v0.6.0 or later. taaad's macOS helper `taaad-signer`
+is optional.
+
 ### Added — `repo-aegis gh`: the `gh` shim chooses the GitHub identity per call (phase 3 of `doc/plan-owner-identity.md` §13.3)
 
 - **The shim now execs `repo-aegis gh --home <pinned home> -- "$@"` for every `gh` call except `--version`, `help` and `completion`.** The bash verb pre-filter is gone: reads in any group, and groups that were never publishing, are judged by the CLI too, at the price of one Node start per call. No shell code runs after the `exec`. With the pinned node or CLI missing the shim refuses every such call (exit 2), reads included; before, reads fell open. Re-run `repo-aegis install shim` after upgrading (`SHIM_STALE`).
@@ -147,6 +154,7 @@ data yet.
   `OWNER_IDENTITY_UNMAPPED` per registered owner with no identity entry: a
   warning, a failure when `requireIdentity` is set (the text says how many
   owners are still unmapped; owners are named only in `--json`).
+
 ### Fixed
 
 - The registry mutators that scan `personalOrgs` for an existing org (`engagements
@@ -1986,7 +1994,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.11.4...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/de-otio/repo-aegis/compare/v0.11.4...v0.12.0
 [0.11.4]: https://github.com/de-otio/repo-aegis/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/de-otio/repo-aegis/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/de-otio/repo-aegis/compare/v0.11.1...v0.11.2
