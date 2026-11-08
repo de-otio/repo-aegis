@@ -311,7 +311,9 @@ describe("repo-aegis gh: injection", () => {
     assert.equal(r.status, 0, r.err);
     const names = lines(join(w.stubs, "taaad.env"))
       .map(l => l.slice(0, l.indexOf("=")))
-      .filter(n => !["PWD", "SHLVL", "_", "OLDPWD"].includes(n))
+      // The shell adds PWD/SHLVL/_/OLDPWD; Node itself adds NODE_V8_COVERAGE to every child under coverage
+      // (`npm run test:cov`), whatever env the spawn passes. Neither comes from the caller.
+      .filter(n => !["PWD", "SHLVL", "_", "OLDPWD", "NODE_V8_COVERAGE"].includes(n))
       .sort();
     assert.deepEqual(names, ["HOME", "LANG", "PATH", "TERM"]);
     const path = lines(join(w.stubs, "taaad.env")).find(l => l.startsWith("PATH="));

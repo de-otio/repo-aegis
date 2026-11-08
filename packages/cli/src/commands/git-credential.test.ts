@@ -499,7 +499,8 @@ describe("the taaad spawn", () => {
     for (const k of ["HOME", "PATH", "TERM", "LANG"]) assert.ok(seen.has(k), `${k} is set`);
     assert.equal(seen.get("PATH"), "/usr/bin:/bin");
     for (const k of Object.keys(decoys)) assert.ok(!seen.has(k), `${k} must not reach taaad`);
-    const extra = [...seen.keys()].filter(k => !["HOME", "PATH", "TERM", "LANG", "PWD", "SHLVL", "_", "OLDPWD"].includes(k));
+    // NODE_V8_COVERAGE: Node adds it to every child under coverage (`npm run test:cov`), whatever env is passed.
+    const extra = [...seen.keys()].filter(k => !["HOME", "PATH", "TERM", "LANG", "PWD", "SHLVL", "_", "OLDPWD", "NODE_V8_COVERAGE"].includes(k));
     assert.deepEqual(extra, [], "no other variable");
   });
 
