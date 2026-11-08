@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-11-08
+
 ### Fixed — `GH_AUTH_TOKEN_NETWORK` refused lines with a local `git` command
 
 - `gh auth token` next to any `git` command was refused as a token handed to
@@ -1822,7 +1824,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.11.3...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.11.4...HEAD
+[0.11.4]: https://github.com/de-otio/repo-aegis/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/de-otio/repo-aegis/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/de-otio/repo-aegis/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/de-otio/repo-aegis/compare/v0.11.0...v0.11.1
