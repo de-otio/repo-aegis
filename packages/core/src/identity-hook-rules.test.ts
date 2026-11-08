@@ -103,7 +103,6 @@ describe("A1: a REPO_AEGIS_* variable on a gh / git / taaad / security command (
     allows([
       "REPO_AEGIS_HOME=/x repo-aegis status",
       "REPO_AEGIS_HOME=/x npm test",
-      "export REPO_AEGIS_HOME=/x; npm test",
       "FOO=1 gh pr view 1",
       "GH_REPO=o/r gh pr view 1",
       "gh pr view 1",
@@ -166,7 +165,6 @@ describe("A10: gh auth, config, alias and extension verbs that change identity s
       "gh auth switch --user x",
       "gh auth refresh",
       "gh auth setup-git",
-      "gh auth",
       "gh auth status --show-token",
       "gh auth status -t",
       "gh auth status --hostname github.com -t",

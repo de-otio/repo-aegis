@@ -41,6 +41,29 @@ through the hook: with no person present they are now refused.
 - **N8** — a recognised `dot gh` write whose literal owner has an identity mapped
   in the registry is `DOT_GH_OWNER_MAPPED` (re-issue the same arguments to plain
   `gh`), decided before `DOT_GH_WRITE_NEEDS_BOT`. Unmapped owners are unchanged.
+- **Security-review follow-ups to the above** (same release, stricter for agents):
+  - `git credential fill|get|approve`, `git credential-<helper> get` and
+    `git-credential-<helper> get` (osxkeychain, manager, …) are
+    `TOKEN_MINT_NEEDS_HUMAN` with no person present, and count as token reads for
+    `GH_AUTH_TOKEN_NETWORK`, which refuses them next to a network program whether
+    or not a person is present.
+  - Any segment that assigns or exports a `REPO_AEGIS_*` name with no command
+    following (`X=1`, `export X[=…]`, `declare|typeset -x`, `readonly`, `read X`) is
+    `EGRESS_ENV_OVERRIDE`, never lifted: the Bash tool's shell persists across
+    calls. `REPO_AEGIS_EGRESS_HUMAN` is also ignored when a TTY sits under an agent
+    host (an agent ancestor or the agent environment signal); a person's own
+    terminal, and the no-TTY case, behave as before.
+  - N9 also covers the `keyring` CLI and `secret-tool` (any path), `security -i`
+    and `security` fed a listed subcommand on stdin, interpreter text naming
+    `find-generic-password`, `find-internet-password`, `dump-keychain`,
+    `SecKeychain`, `keytar`, `keyring` or `SecItemCopyMatching` (osascript
+    `do shell script` included), and text piped into a non-shell interpreter.
+  - A10 reads `--show-token=…` and `-t=…`, and a `gh` reached through
+    `G=gh; $G …`, `alias g=gh`, `$(which gh)` or `$(command -v gh)`. A bare
+    `gh auth` and `gh auth --help` are no longer refused.
+  - The write hook refuses an agent's Edit or Write to gh's `config.yml` and
+    `hosts.yml` in `$GH_CONFIG_DIR`, `$XDG_CONFIG_HOME/gh` and `~/.config/gh`
+    (`GH_CONFIG_WRITE_REFUSED`).
 - `refusal` codes are documented in `doc/agent-guide.md`; the shape rules in
   `doc/design/egress-guard.md`.
 
