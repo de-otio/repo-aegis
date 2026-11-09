@@ -13,11 +13,14 @@
 // have failed — are visible here and nowhere else. Both incidents that
 // motivated this design were shape failures.
 //
-// Three agents expose a compatible pre-command hook, and all three put the
-// pending command in `tool_input.command`:
+// Each agent host has its own stdin shape and answer shape. Those two edges
+// live in one adapter per host under `./hook-hosts/` (contract:
+// hook-hosts/types.ts, plan doc/plan-landscape-recommendations.md §5); this
+// file is the host-independent middle and never looks at a payload field or
+// prints a host's JSON itself. Today:
 //
 //   Claude Code  PreToolUse,  matcher Bash              ask available
-//   Codex CLI    PreToolUse,  matcher shell             no ask
+//   Codex CLI    PreToolUse,  matcher Bash (was shell)  no ask
 //   Gemini CLI   BeforeTool,  matcher run_shell_command no ask
 //
 // Where a framework has no "ask", `ask` degrades to `deny` with a
@@ -65,9 +68,10 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { currentHumanPresent } from "../human-presence.js";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
+import { adapterFor, type HookVerdict, type HostAdapter } from "./hook-hosts/index.js";
 
 export interface HookGuardEgressOptions {
-  /** `claude` (default) | `codex` | `gemini`. Only `claude` is assumed to have an "ask". */
+  /** The host adapter: `claude` (default) | `codex` | `gemini`; see ./hook-hosts/. Unknown → no ask. */
   agent?: string;
   /** Test seam: the environment whose `PATH` decides whether the `gh` shim can run. */
   env?: NodeJS.ProcessEnv;
@@ -92,82 +96,16 @@ function ghShimOnPath(env: NodeJS.ProcessEnv): boolean | undefined {
   }
 }
 
-// PreToolUse exit-code contract, shared by all three frameworks:
-//   0              → proceed (with the JSON decision, if any, on stdout),
-//   2              → BLOCK the tool; stderr is fed back to the model,
-//   other non-zero → non-blocking error; the tool still runs (fail open).
-const EXIT_BLOCK = 2;
-const EXIT_INTERNAL_ERROR = 1;
-
 /**
- * Tool names that carry a shell command. Compared case-insensitively so a
- * harness that spells its tool `bash` rather than `Bash` still matches. A
- * payload with NO `tool_name` is inspected anyway: some harnesses omit it,
- * and the parse is harmless on a non-command payload (it yields no intents).
+ * Print the adapter's rendering of `verdict` and exit with its code. The one
+ * place this hook writes to stdout: every decision goes through the host
+ * adapter, so no code path here can print a host shape (or a rewritten
+ * command) behind the adapter's back.
  */
-const SHELL_TOOL_NAMES = new Set(["bash", "shell", "run_shell_command"]);
-
-interface HookInput {
-  command?: string;
-  cwd?: string;
-  toolName?: string;
-}
-
-/**
- * Flatten an argv-style command (`["bash", "-lc", "git push"]`) to the
- * shell text it would run. Harnesses that exec directly rather than through
- * a shell send this shape; the script after `-c` / `-lc` is the part the
- * policy must see.
- */
-function flattenCommand(value: unknown): string | undefined {
-  if (typeof value === "string") return value.length > 0 ? value : undefined;
-  if (!Array.isArray(value)) return undefined;
-  const parts = value.filter((v): v is string => typeof v === "string");
-  if (parts.length === 0) return undefined;
-  const dashC = parts.findIndex(p => /^-[a-z]*c$/.test(p));
-  if (dashC !== -1 && dashC + 1 < parts.length) return parts[dashC + 1];
-  return parts.join(" ");
-}
-
-/**
- * Tolerant field extraction across the three harness shapes, in the spirit
- * of `hook-scan-bash-output.ts`: the pending command from
- * `tool_input.command` (all three) or a root-level `command`, and the
- * session cwd from the root `cwd`.
- *
- * `cwd` matters for the same reason it does in `hook-check-write.ts`: it is
- * where the command WILL run, whereas `process.cwd()` is wherever the agent
- * happened to spawn this hook. Reading the spawn cwd was the cause of the
- * spurious `CROSS_ORG_WRITE` blocks (doc/bugs/repo-aegis-check-write-flake.md).
- */
-function parseHookInput(json: string): HookInput {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
-    return {};
-  }
-  if (!parsed || typeof parsed !== "object") return {};
-  const root = parsed as Record<string, unknown>;
-  const out: HookInput = {};
-
-  const toolName = root["tool_name"];
-  if (typeof toolName === "string" && toolName.length > 0) out.toolName = toolName;
-
-  const ti = root["tool_input"];
-  if (ti && typeof ti === "object") {
-    const command = flattenCommand((ti as Record<string, unknown>)["command"]);
-    if (command !== undefined) out.command = command;
-  }
-  if (out.command === undefined) {
-    const command = flattenCommand(root["command"]);
-    if (command !== undefined) out.command = command;
-  }
-
-  const cwd = root["cwd"];
-  if (typeof cwd === "string" && cwd.length > 0) out.cwd = cwd;
-
-  return out;
+function emit(adapter: HostAdapter, verdict: HookVerdict): never {
+  const out = adapter.render(verdict);
+  if (out.stdout !== "") process.stdout.write(out.stdout);
+  process.exit(out.exitCode);
 }
 
 /** The most hook input read; a longer payload is not judged, it is refused (issue #151, final review V1). */
@@ -195,10 +133,8 @@ async function readStdin(): Promise<{ text: string; truncated: boolean }> {
  * So it is refused, unless what was read already names a tool that is not a shell (a harness that sends every
  * tool to this hook). `tool_name` comes first in every harness's payload, well inside the cap.
  */
-export function oversizedInputVerdict(prefix: string): "proceed" | "refuse" {
-  const m = /"tool_name"\s*:\s*"([^"\\]{1,64})"/.exec(prefix.slice(0, 4096));
-  if (m !== null && !SHELL_TOOL_NAMES.has(m[1]!.toLowerCase())) return "proceed";
-  return "refuse";
+export function oversizedInputVerdict(prefix: string, adapter: HostAdapter = adapterFor(undefined)): "proceed" | "refuse" {
+  return adapter.oversized(prefix);
 }
 
 const HOOK_INPUT_TOO_LARGE_REASON =
@@ -271,11 +207,11 @@ function destinationDetails(
 
 /**
  * An approval stood in for a person (rule g). Best-effort audit record —
- * the mint was recorded; so is every use — and the decision goes out on
- * the JSON channel as an explicit `allow` with the approval named, so a
- * framework that shows decision reasons shows this one.
+ * the mint was recorded; so is every use — and the returned reason goes out
+ * as an explicit `allow` with the approval named, so a framework that shows
+ * decision reasons shows this one.
  */
-function recordApprovalUse(decision: Extract<EgressDecision, { action: "allow" }>, layer: string): void {
+function recordApprovalUse(decision: Extract<EgressDecision, { action: "allow" }>, layer: string): string {
   const a = decision.approval!;
   try {
     appendAuditRecord({
@@ -291,79 +227,62 @@ function recordApprovalUse(decision: Extract<EgressDecision, { action: "allow" }
   } catch {
     /* audit must not block the allow */
   }
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason:
-          `repo-aegis: human approval ${a.id} (${a.org}/${a.repo}${a.ref !== undefined ? `, ref ${a.ref}` : ""}, ` +
-          `until ${a.expiresAt}) stands in for a person on this publish.`,
-      },
-    }) + "\n",
+  return (
+    `repo-aegis: human approval ${a.id} (${a.org}/${a.repo}${a.ref !== undefined ? `, ref ${a.ref}` : ""}, ` +
+    `until ${a.expiresAt}) stands in for a person on this publish.`
   );
 }
 
-function writeDecisionJson(decision: "ask" | "deny", reason: string): void {
-  // The frameworks' own JSON channel. `permissionDecision` is the entire
-  // vocabulary this hook uses: there is deliberately no `updatedInput`.
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: decision,
-        permissionDecisionReason: reason,
-      },
-    }) + "\n",
-  );
+/**
+ * Every refusal leaves on two channels: the structured `{ code, error,
+ * details }` on stderr (host-independent: what most hosts feed back to the
+ * model on a block) and the adapter's deny on stdout (for hosts that read
+ * their JSON channel instead).
+ */
+function deny(adapter: HostAdapter, code: string, reason: string, details: Record<string, unknown>, stdoutReason = reason): never {
+  process.stderr.write(JSON.stringify({ code, error: reason, details }, null, 2) + "\n");
+  emit(adapter, { action: "deny", reason: stdoutReason });
 }
 
 /** Refuse a command line that runs a human-only repo-aegis command. Same channels as every other deny. */
-function denyHumanOnlyCommand(kind: HumanOnlyKind): never {
-  const reason = humanCommandRefusal({ kind });
-  process.stderr.write(JSON.stringify({ code: AGENT_RAN_HUMAN_COMMAND, error: reason, details: { command: kind } }, null, 2) + "\n");
-  writeDecisionJson("deny", reason);
-  process.exit(EXIT_BLOCK);
+function denyHumanOnlyCommand(adapter: HostAdapter, kind: HumanOnlyKind): never {
+  deny(adapter, AGENT_RAN_HUMAN_COMMAND, humanCommandRefusal({ kind }), { command: kind });
 }
 
 /** Refuse a command line that starts a detached session. Same channels as every other deny. */
-function denyDetachedStart(hit: DetachedHit): never {
-  const reason = detachedStartRefusal(hit);
-  process.stderr.write(JSON.stringify({ code: AGENT_DETACHED_SESSION, error: reason, details: { start: hit.kind } }, null, 2) + "\n");
-  writeDecisionJson("deny", reason);
-  process.exit(EXIT_BLOCK);
+function denyDetachedStart(adapter: HostAdapter, hit: DetachedHit): never {
+  deny(adapter, AGENT_DETACHED_SESSION, detachedStartRefusal(hit), { start: hit.kind });
 }
 
 /**
  * `repo-aegis hook guard-egress` — PreToolUse(Bash) egress guard.
  *
- * Exit semantics:
- *   - 0 and silent when the command carries no publishing operation,
- *     the tool is not a shell tool, or stdin is unusable,
- *   - 0 with an `ask` decision on stdout (Claude Code only),
- *   - 2 with the structured reason on stderr — the channel these
- *     frameworks feed back to the model — and the decision JSON on stdout
+ * Outcomes, rendered by the host adapter (`--agent`, ./hook-hosts/):
+ *   - allow, and silent (where the host allows silence) when the command
+ *     carries no publishing operation, the tool is not a shell tool, or
+ *     stdin is unusable (`skip` / `malformed`: fail open),
+ *   - allow with the approval named, when a human approval stood in,
+ *   - ask (hosts with an ask only),
+ *   - deny, with the structured reason on stderr — the channel most
+ *     frameworks feed back to the model — and the adapter's deny on stdout
  *     for frameworks that read it,
- *   - 1 on an internal error: non-blocking, so the guard's own failure
- *     never becomes a wall between the agent and every Bash call.
+ *   - error: the guard's own failure, rendered as the host's fail-open
+ *     answer, so it never becomes a wall between the agent and every command.
  */
 export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<void> {
+  const adapter = adapterFor(opts.agent);
   let stdinText: string;
   try {
     const input = await readStdin();
-    if (input.truncated && oversizedInputVerdict(input.text) === "refuse") {
-      process.stderr.write(
-        JSON.stringify({ code: "HOOK_INPUT_TOO_LARGE", error: HOOK_INPUT_TOO_LARGE_REASON, details: { verb: "(oversized command)" } }, null, 2) + "\n",
-      );
-      writeDecisionJson("deny", HOOK_INPUT_TOO_LARGE_REASON);
-      process.exit(EXIT_BLOCK);
+    if (input.truncated && adapter.oversized(input.text) === "refuse") {
+      deny(adapter, "HOOK_INPUT_TOO_LARGE", HOOK_INPUT_TOO_LARGE_REASON, { verb: "(oversized command)" });
     }
     stdinText = input.text;
   } catch (err) {
     process.stderr.write(
       `repo-aegis: hook guard-egress could not read stdin: ${(err as Error).message}\n`,
     );
-    process.exit(EXIT_INTERNAL_ERROR);
+    emit(adapter, { action: "error" });
   }
 
   let decision: EgressDecision;
@@ -371,31 +290,28 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   let ruleH: RuleHStatus = "applied";
   let humanPresent = false;
   try {
-    const { command, cwd, toolName } = parseHookInput(stdinText);
-    if (toolName !== undefined && !SHELL_TOOL_NAMES.has(toolName.toLowerCase())) process.exit(0);
-    if (command === undefined) process.exit(0);
+    const parsed = adapter.parse(stdinText);
+    // Not a shell command, or not a payload this adapter understands: fail
+    // open, without touching the registry. (A `malformed` audit record is
+    // plan Phase 1 work, not part of the no-behaviour-change refactor.)
+    if (parsed.kind !== "command") emit(adapter, { action: "allow" });
+    const { command, cwd } = parsed;
 
     // R6 (plan §8.2): a raw HTTP client writing to the GitHub API, or `gh auth token` next to a network
     // call. Shape rules on the command text: no registry, no approval, and no `ask`.
     const network = checkNetworkRules(command);
-    if (network !== null) {
-      process.stderr.write(
-        JSON.stringify({ code: network.code, error: network.reason, details: { verb: "(raw network call)" } }, null, 2) + "\n",
-      );
-      writeDecisionJson("deny", network.reason);
-      process.exit(EXIT_BLOCK);
-    }
+    if (network !== null) deny(adapter, network.code, network.reason, { verb: "(raw network call)" });
     // Commands only a person may run (`approve`, owner adds, `upstreams add`,
     // `init --migrate-classify|--force`): refused in ANY agent Bash text, with
     // or without a terminal, before the egress parse and its early exit. A pty
     // wrapper can fake the terminal that those commands' own gate tests, so the
     // text is the second lock (issue #151, PR 2b).
     const humanOnly = findHumanOnlyCommand(command);
-    if (humanOnly !== null) denyHumanOnlyCommand(humanOnly.kind);
+    if (humanOnly !== null) denyHumanOnlyCommand(adapter, humanOnly.kind);
     // A detached session start (`tmux new -d`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`)
     // re-parents a pty to init, where no gate sees an agent above it: refused in any command, egress or not.
     const detached = findDetachedStart(command);
-    if (detached !== null) denyDetachedStart(detached);
+    if (detached !== null) denyDetachedStart(adapter, detached);
 
     // Identity hook rules (plan-owner-identity §13.2): a REPO_AEGIS_* variable or a terminal wrapper on a command
     // that runs gh, git, taaad or security (A1, never lifted), and, with no person present, the gh and keychain
@@ -403,18 +319,12 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     // publishes. After the two more specific refusals above, so those keep their codes. Presence is read only
     // when a person-liftable rule is the sole hit.
     const identityHit = decideIdentityHookRules(command, currentHumanPresent);
-    if (identityHit !== null) {
-      process.stderr.write(
-        JSON.stringify({ code: identityHit.code, error: identityHit.reason, details: { verb: "(identity rule)" } }, null, 2) + "\n",
-      );
-      writeDecisionJson("deny", identityHit.reason);
-      process.exit(EXIT_BLOCK);
-    }
+    if (identityHit !== null) deny(adapter, identityHit.code, identityHit.reason, { verb: "(identity rule)" });
 
     const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit
     // before touching the registry or the filesystem.
-    if (intents.length === 0) process.exit(0);
+    if (intents.length === 0) emit(adapter, { action: "allow" });
 
     const loaded = loadRegistryOrEmpty();
     registryNote = loaded.note;
@@ -433,11 +343,11 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
       registry: loaded.registry,
       registryState: loaded.registryState,
       humanPresent,
-      // Only Claude Code is assumed to have an "ask". Anything else —
-      // including an unrecognised `--agent` value — is treated as a
-      // framework without one, so `ask` degrades to `deny`.
+      // The adapter says whether its host can ask. An unrecognised
+      // `--agent` value gets an adapter without one (hook-hosts/index.ts),
+      // so `ask` degrades to `deny`.
       capabilities: (() => {
-        const ask = (opts.agent ?? "claude") === "claude";
+        const ask = adapter.hasAsk;
         // Only worth answering where `ask` is on the table at all: without
         // an ask, rule g already denies.
         const shim = ask ? ghShimOnPath(opts.env ?? process.env) : undefined;
@@ -451,12 +361,12 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     process.stderr.write(
       `repo-aegis: hook guard-egress failed, command not evaluated: ${(err as Error).message}\n`,
     );
-    process.exit(EXIT_INTERNAL_ERROR);
+    emit(adapter, { action: "error" });
   }
 
   if (decision.action === "allow") {
-    if (decision.approval !== undefined) recordApprovalUse(decision, "hook guard-egress");
-    process.exit(0);
+    if (decision.approval !== undefined) emit(adapter, { action: "allow", reason: recordApprovalUse(decision, "hook guard-egress") });
+    emit(adapter, { action: "allow" });
   }
 
   // Rule h's own refusal already says the registry could not be read and how
@@ -473,10 +383,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);
   const reason = notes.length === 0 ? decision.reason : `${decision.reason} (${notes.join("; ")})`;
 
-  if (decision.action === "ask") {
-    writeDecisionJson("ask", reason);
-    process.exit(0);
-  }
+  if (decision.action === "ask") emit(adapter, { action: "ask", reason });
 
   const details: Record<string, unknown> = { verb: describeVerb(decision.intent.verb) };
   const dest = destinationDetails(decision.destination);
@@ -487,10 +394,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   // stderr carries the reason because that is what these frameworks feed
   // back to the model on a non-zero exit (Bug A in
   // doc/bugs/repo-aegis-check-write-flake.md); stdout carries the same
-  // decision for frameworks that read the JSON channel instead.
-  process.stderr.write(
-    JSON.stringify({ code: decision.code, error: decision.reason, details }, null, 2) + "\n",
-  );
-  writeDecisionJson("deny", reason);
-  process.exit(EXIT_BLOCK);
+  // decision for frameworks that read the JSON channel instead. stderr gets
+  // the bare reason (the notes travel in `details`), stdout the noted one.
+  deny(adapter, decision.code, decision.reason, details, reason);
 }

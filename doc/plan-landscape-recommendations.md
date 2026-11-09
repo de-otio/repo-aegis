@@ -357,4 +357,152 @@ files.
 
 ## 5. Phase 0 findings
 
-_To be filled in by the Phase 0 spike._
+Spike T0a, 2026-11-09. Items 1–4 only. Item 5 (ggshield coexistence) is
+task T0b. Sources are the vendors' primary docs, read on that date.
+
+**Nothing below was observed from a real host run. Every fact is
+doc-derived.** Cursor was the only host installed (`cursor`,
+`cursor-agent` 2025.09.12-4852336), and `cursor-agent status` reports
+"Not logged in", so the planned probe run could not happen. The probe hook
+is ready for H1:
+`packages/cli/src/commands/__fixtures__/hosts/probe/dump-stdin.sh <host> <out-dir>`.
+Register it only in a project-level config inside a throwaway directory.
+Copilot CLI, Antigravity CLI, Codex and Gemini CLI are not installed.
+Fixtures (`__fixtures__/hosts/*.json`, described in `index.json`) are all
+labelled `doc-derived`. H1 replaces them with captures and changes the label.
+
+### 5.1 Host facts
+
+| | Cursor | Copilot CLI | Antigravity CLI (`agy`) | Codex |
+|---|---|---|---|---|
+| Config (project / user) | `.cursor/hooks.json` / `~/.cursor/hooks.json`; also enterprise `/Library/Application Support/Cursor/hooks.json` and team (dashboard). Precedence: enterprise, team, project, user | `.github/hooks/*.json` (also inline `hooks` in `.github/copilot/settings{,.local}.json` and `.claude/settings{,.local}.json`) / `~/.copilot/hooks/*.json` (`$COPILOT_HOME/hooks/`) or inline in `~/.copilot/settings.json`; policy `/etc/github-copilot/policy.d/` | `.agents/hooks.json` / `~/.gemini/config/hooks.json`; a plugin's `hooks.json`. Hooks in `~/.gemini/antigravity-cli/settings.json` are **not** loaded. `/hooks` lists the loaded ones | `<repo>/.codex/hooks.json` or `[hooks]` in `<repo>/.codex/config.toml` / the same under `~/.codex/`. On by default (`[features] hooks = false` turns it off) |
+| Format | `{"version": 1, "hooks": {"<event>": [{"command": "…", "matcher"?, "timeout"? (s), "failClosed"?}]}}` | `{"version": 1, "hooks": {"<event>": [{"type": "command", "bash": "…", "matcher"?, "timeoutSec"? (default 30)}]}}` | `{"<hook-name>": {"enabled"?, "PreToolUse": [{"matcher": "run_command", "hooks": [{"type": "command", "command": "…", "timeout"? (s, default 30)}]}]}}`. No version field | Claude-style: `{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "…"}]}]}}` |
+| Event for shell commands | `beforeShellExecution` (also `preToolUse` with tool `Shell`) | `preToolUse` (camelCase payload) or `PreToolUse` (snake_case, VS Code-compatible payload) | `PreToolUse` | `PreToolUse` |
+| Matcher | regex on the **full command string** for `beforeShellExecution`; on the tool type (`Shell`, …) for `preToolUse` | regex on `toolName`, anchored `^(?:…)$`; the shell tool is `bash` (`powershell` on Windows; both `Bash` under `PreToolUse`) | regex on the tool name; the shell tool is `run_command` | `Bash`. Unified exec (`exec_command`) also matches as `Bash`. **The plan's `shell` is out of date.** The adapter accepts both |
+| stdin field with the command | root `command` (also `cwd`, `sandbox`); `preToolUse`: `tool_input.command` (+ `working_directory`) | camelCase: `toolArgs` is a **JSON-encoded string**, `{"command": "…"}` inside it. snake_case: `tool_input.command`, where `tool_input` may itself be a string ("parsed from JSON string when possible"). Root `cwd` in both | `toolCall.args.CommandLine` (`toolCall.name` = `run_command`). No root `cwd`. Common fields are camelCase (`conversationId`, `workspacePaths`, …) | `tool_input.command` (a string). Root `cwd`, `tool_name` = `Bash` |
+| Deny | stdout `{"permission": "deny", "user_message", "agent_message"}`, or exit 2 | stdout `{"permissionDecision": "deny", "permissionDecisionReason"}` (reason required), or exit 2 (any stdout JSON merged into the deny) | stdout `{"decision": "deny", "reason"}`. Exit codes not documented | `hookSpecificOutput.permissionDecision: "deny"` + `permissionDecisionReason`, or legacy `{"decision": "block", "reason"}`, or exit 2 + stderr |
+| `ask` | yes for `beforeShellExecution`; accepted but **not enforced** for `preToolUse` | yes in interactive CLI; treated as **deny** in cloud agent and autopilot mode | yes (`ask`, `force_ask`; also `allow`, `auto_approve`, `deny_unless_prior_grant`) | **no**: the hook run is marked failed and the tool **runs** |
+| Empty stdout, exit 0 | not stated. A permission hook's "invalid JSON or a response that doesn't match the schema **blocks** the action", so empty stdout probably blocks. Emit `{"permission": "allow"}` until H1 shows otherwise | default behaviour (normal permission flow) | not stated. `decision` is required, so emit `{"decision": "allow"}` until H1 shows otherwise | proceeds |
+| Hook error / timeout | crash, timeout, non-zero ≠ 2: **fail open** (unless `failClosed: true`). Invalid output: **closed** | non-zero ≠ 2 or crash: **fail closed** ("hook errored"). Timeout: open. Unparseable output: treated as none | not documented | unsupported output (e.g. `ask`): open. Errors and timeouts not stated for CLI (the managed cloud docs say they "can let the tool run") |
+| Rewrite field (never used) | `preToolUse.updated_input` | `modifiedArgs` | `overwrite` | `updatedInput` |
+| Other | `afterFileEdit` gives `file_path` (absolute) and `edits[{old_string, new_string}]`. It has no output schema and is listed for formatters and auditing, so it is **observe-only**: Phase 1 step 6 can use it as detection. Cloud agents run project, team and enterprise hooks, including `beforeShellExecution`, but **not user hooks**. CLI coverage is stated only for `workspaceOpen` | Repo hooks also run for the Copilot cloud agent | Gemini CLI was replaced by Antigravity CLI on 2026-06-18. **The `--agent gemini` adapter does not work with Antigravity**: different config path, event name, payload and answer shape. Antigravity needs its own adapter. Keep `gemini` as legacy | **Trust step:** a non-managed hook does not run until it is reviewed and trusted in `/hooks`. Trust is tied to the hook's hash, so after changing the hook command you must trust it again. Project `.codex/` hooks load only when the project layer is trusted. `--dangerously-bypass-hook-trust` skips the step for one run |
+
+Primary sources: cursor.com/docs/hooks;
+docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference
+(the toolArgs-as-string example is in the debugging section of
+docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/use-hooks);
+antigravity.google/docs/hooks;
+learn.chatgpt.com/docs/hooks (developers.openai.com/codex/hooks redirects
+there); geminicli.com/docs/hooks/reference/ (Gemini, re-check of item 3).
+The Gemini docs do not name the `run_shell_command` argument, so
+`tool_input.command` is still unconfirmed. Item 3's real-payload check is
+left to H1.
+
+What the pre-refactor hook does with each payload, recorded in
+`golden/hook-guard-egress-hosts.json`:
+
+- **Cursor `beforeShellExecution`** is judged, because the hook falls back to a root
+  `command`.
+- **Copilot camelCase** and **Antigravity** payloads are **silently allowed, even
+  for `git push`**: there is no `tool_input.command` and no root `command`.
+  T1c and T1d close this gap.
+
+Consequences for Phase 1:
+
+1. **The error outcome is host-specific.** Copilot fails closed on a non-zero
+   exit, so the guard's internal-error exit 1 would block every Copilot
+   command. Hence `render({action: "error"})` in the contract below.
+2. **Allow cannot always be silent.** Cursor (probably) and Antigravity need an explicit allow
+   on stdout. Invariant 2 therefore means "no registry read, no I/O, and
+   the least output the host accepts".
+3. **Cursor `ask` is enforced only on `beforeShellExecution`.** The adapter
+   registers on that event, not on `preToolUse`.
+
+### 5.2 T1a adapter contract
+
+Code: `packages/cli/src/commands/hook-hosts/types.ts`. It is the
+authoritative text, and this section summarises it. One module per host
+(`claude.ts`, `codex.ts`, `gemini.ts`; the Claude-style family shares
+`pre-tool-use.ts`). They are registered in `hook-hosts/index.ts` (`ADAPTERS`,
+`adapterFor`). `hook-guard-egress.ts` is the host-independent middle. It
+never reads a payload field or prints host JSON itself: every stdout byte
+goes through `emit(adapter, verdict)`.
+
+```ts
+type ParsedHookInput =
+  | { kind: "command"; command: string; cwd?: string } // judge this
+  | { kind: "skip" }                                    // not a shell tool / no command
+  | { kind: "malformed"; reason: string };              // not understood: fail open
+
+type HookVerdict =
+  | { action: "allow"; reason?: string }  // reason only when an approval stood in
+  | { action: "ask"; reason: string }
+  | { action: "deny"; reason: string }
+  | { action: "error" };                  // the guard's own failure
+
+interface HostOutput { stdout: string; exitCode: number }
+
+interface HostAdapter {
+  readonly name: string;      // the --agent value
+  readonly hasAsk: boolean;   // → decideEgress capabilities.ask
+  parse(stdin: string): ParsedHookInput;              // pure, never throws
+  oversized(prefix: string): "proceed" | "refuse";    // input cut at 1 MiB
+  render(verdict: HookVerdict): HostOutput;           // pure, never throws
+}
+```
+
+Rules an adapter MUST follow. Each one is checked for every registered
+adapter by `hook-hosts/hosts.test.ts`, "contract conformance":
+
+1. **Pure.** No I/O, no env, no clock, in `parse`, `oversized` or `render`.
+2. **Decision-only.** `render` never emits a rewrite field (`updatedInput`,
+   `updated_input`, `modifiedArgs`, `overwrite`) or the command.
+3. **`ask` never becomes `allow`.** If `hasAsk` is false, `render(ask)` must
+   equal `render(deny)` with the same reason. The core already degrades `ask`
+   to `deny` for such hosts, so this is the belt behind those braces.
+4. **`deny` blocks**, by exit code or by a deny on stdout, **and the reason
+   reaches stdout**. The core writes the structured
+   `{code, error, details}` to stderr for every host; the adapter does not
+   touch stderr.
+5. **`error` fails open** in the host's terms: exit 1 where non-zero ≠ 2 is
+   non-blocking (Claude, Codex, Gemini, Cursor), exit 0 with the allow
+   output where non-zero blocks (Copilot).
+6. **`allow` without a reason prints the least the host accepts**: nothing
+   where empty stdout means proceed, otherwise the host's minimal allow
+   (Cursor `{"permission":"allow"}`, Antigravity `{"decision":"allow"}`).
+   Exit 0.
+7. **`parse`**: return `skip` for a well-formed payload that is not a shell
+   command (another tool, no command field). Return `malformed` for anything
+   not understood, including non-JSON, a non-object, an array, or a wrong
+   type where the host's shape says string. The `malformed` reason must
+   carry no payload text. Return `cwd` only from the payload, never
+   `process.cwd()`. Decode JSON-in-a-string fields (Copilot `toolArgs`). A
+   command must be the payload's own text, never assembled from other fields
+   (argv arrays are flattened as `flattenCommand` does).
+8. **`oversized`**: return `"proceed"` only when the prefix proves the
+   payload is for a non-shell tool. Otherwise return `"refuse"`.
+
+To add a host (T1b–T1d): write `hook-hosts/<host>.ts` exporting a
+`HostAdapter`, add it to `ADAPTERS`, and point its entries in
+`__fixtures__/hosts/index.json` at the right `agent`. The conformance suite
+then runs on it unchanged. Add a per-host table of exact outputs, as
+`hosts.test.ts` does for the PreToolUse family. Then re-record that host's
+golden entries (`REPO_AEGIS_GUARD_GOLDEN=record`, see next paragraph) and
+say in the PR that its output changed on purpose.
+
+**Behaviour-comparison proof (T1a).** `hook-hosts/_golden.ts` records or
+compares, per invocation, the hook's stdout, stderr and exit code. It does
+this for every input in `hook-guard-egress{,-human,-identity}.test.ts` and
+for every fixture × probe command in `hook-guard-egress-hosts.test.ts`.
+Temp paths, approval ids and timestamps are normalised. The goldens in
+`__fixtures__/hosts/golden/` were recorded from the pre-refactor hook,
+commit 23cdede. The refactored hook replays all 409 recorded
+invocations, from 264 tests, byte-identically
+(`REPO_AEGIS_GUARD_GOLDEN=compare`). A deliberate one-byte change to the deny
+JSON fails 30 of the 88 fixture tests, so the comparison does detect a
+change. The comparison is opt-in (env-gated), so an intended wording
+change elsewhere does not break unrelated suites. The semantic tests are
+the standing net.
+
+Malformed input is still silent, with no audit record. Adding that record
+is Phase 1 work, and it would change behaviour. T1a did not change it.
