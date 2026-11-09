@@ -5,10 +5,12 @@
 // interpreter its shebang names and its package directory, recorded by `install shim` and read back by
 // `repo-aegis gh` (which mints App tokens through it) and `doctor`.
 //
-// A token minted by an agent-writable taaad is a token the agent can capture, so github-app injection is
-// refused (`TAAAD_AGENT_WRITABLE`) unless all three, and every directory above them, are owned by root and
-// not writable by group or others. The check is LIVE (made on each call and each `doctor` run), not a
-// flag recorded at install: a flag an agent could outlive is worth less than an `lstat`.
+// A token minted by an agent-writable taaad is a token the agent can capture. `taaadTrustProblem` checks that
+// the launcher, its interpreter and its package directory, and the directories under the package directory
+// (down to three levels), are owned by root and not writable by group or others. The check is LIVE (run by
+// `install shim` and each `doctor` run, on the filesystem as it is then), not a flag recorded at install: a
+// flag an agent could outlive is worth less than an `lstat`. A failure is a warning (`TAAAD_AGENT_WRITABLE` in
+// `doctor`), never a refusal: App identities keep working (doc/plan-owner-identity.md §2.1, Q5).
 import { closeSync, constants, lstatSync, openSync, readSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join } from "node:path";

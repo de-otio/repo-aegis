@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Documentation now matches the code.** The README says what `init` does: it asks nothing, uses no
+  `sudo`, and sets the git hooks globally. `doc/agent-install.md` step 4 no longer runs a second
+  `engagements add` for an engagement that has a GitHub org (it fails with `ENGAGEMENT_EXISTS`).
+  `doc/configuration.md` lists `REPO_AEGIS_MARKERS_DIR`, `REPO_AEGIS_VISIBILITY_LOOKUP` and
+  `REPO_AEGIS_EGRESS_HUMAN`. A comment in `taaad-pin.ts` said an untrusted taaad refuses App tokens;
+  it is a warning.
+
 ## [0.13.1] - 2026-11-09
 
 ### Fixed

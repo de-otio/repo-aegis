@@ -101,9 +101,12 @@ By hand:
    repo-aegis init
    ```
 
-   `init` creates the registry, installs the git hooks in the current repository and installs
-   the Claude Code hooks. For the last part it shows what it will write, asks `[y/N]`, and
-   then `sudo` asks for your password.
+   `init` creates the registry, installs the git hooks and installs the Claude Code hooks. It
+   asks nothing and does not use `sudo`. The git hooks go into git's **global** `core.hooksPath`,
+   so they cover every repository on this machine (`repo-aegis install hooks --local` limits them
+   to one repository). The Claude Code hooks go into your own `settings.json`. To move them into
+   the root-owned file, run `repo-aegis install claude-md` afterwards: that one shows what it will
+   write, asks `[y/N]`, and then `sudo` asks for your password.
 
 2. **Install the `gh` wrapper** so that `gh` commands are checked too:
 

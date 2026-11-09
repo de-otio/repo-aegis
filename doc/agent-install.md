@@ -258,8 +258,11 @@ ask one at a time if the user prefers. Either is fine.
 
 Two different things happen here, and only the first is yours.
 
-**4a. You register each engagement and its markers.** Leave the org flags
-off:
+**4a. You register each engagement that has no GitHub org, with its markers.**
+Leave the org flags off. An engagement is created once: a second
+`engagements add` for the same id fails with `ENGAGEMENT_EXISTS`, and no verb
+adds an org to an existing engagement. So skip 4a for any engagement that has
+a GitHub org; 4b creates that one in a single command.
 
 ```sh
 repo-aegis engagements add customer-a \
@@ -279,14 +282,18 @@ repo-aegis that publishing there is safe, so those commands refuse unless a
 person is at a terminal (`OWNER_ADD_NEEDS_TTY`), and the agent hook refuses
 any command line that contains them (`AGENT_RAN_HUMAN_COMMAND`). **Do not run
 them, wrap them in `script`, `tmux` or `bash -c`, or edit
-`engagements.yaml`.** Print the exact lines for the user, with the values they
-gave you in step 3, and wait until they say they have run them:
+`engagements.yaml`.** For an engagement with a GitHub org, the user's command
+creates the engagement with its org and its markers together. Print the exact
+lines for the user, with the engagement id and org from step 3 and the markers
+as `<marker>` placeholders (do not echo the patterns; the user fills them in
+from their own notes), and wait until they say they have run them:
 
 > Please run these in your own terminal window (not through me), then tell me
 > when they are done:
 >
 > ```sh
-> repo-aegis engagements add customer-a --github-org acme-corp
+> repo-aegis engagements add customer-a --github-org acme-corp \
+>   --marker '<marker>' --marker '<marker>'
 > repo-aegis engagements add --personal-org rmyers --personal-org my-oss-org
 > ```
 
@@ -931,14 +938,16 @@ repo-aegis init
 # 2b. gh shim — then add the printed `export PATH=…` line to the user's shell profile
 repo-aegis install shim
 
-# 3 + 4. for each engagement the user named, with their markers:
+# 3 + 4. for each engagement the user named that has NO GitHub org, with its markers:
 repo-aegis engagements add <id> \
   --name "<Name>" \
   --marker '<pattern>' \
   --marker '<pattern>'
 
-# 3b. THE USER runs these in their own terminal (an agent cannot: they need a TTY):
-#     repo-aegis engagements add <id> --github-org <org>
+# 3b. THE USER runs these in their own terminal (an agent cannot: they need a TTY).
+#     An engagement with a GitHub org is created once, here, with its markers
+#     (do not run 3 + 4 for it first: a second add of the same id is ENGAGEMENT_EXISTS):
+#     repo-aegis engagements add <id> --github-org <org> --marker '<pattern>' --marker '<pattern>'
 #     repo-aegis engagements add --personal-org <org>
 # Wait for them before continuing.
 
