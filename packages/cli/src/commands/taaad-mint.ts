@@ -43,13 +43,75 @@ export class MintError extends Error {
   constructor(
     readonly kind: "unavailable" | "installation-mismatch",
     message: string,
+    /** Which step failed, as a fixed word safe for the audit log. */
+    readonly reason: MintFailureReason = "failed",
   ) {
     super(message);
     this.name = "MintError";
   }
 }
 
-const SPAWN_TIMEOUT_MS = 30_000;
+export type MintFailureReason =
+  | "timeout"
+  | "not-runnable"
+  | "tty"
+  | "rate-limited"
+  | "denied"
+  | "screen-locked"
+  | "signer"
+  | "not-installed"
+  | "repo-not-covered"
+  | "permission-not-granted"
+  | "installation-mismatch"
+  | "bad-output"
+  | "failed";
+
+/**
+ * Classify a failed `taaad mint` (non-zero exit) into a fixed reason and message. taaad's stderr is only
+ * MATCHED here, never copied into the message: it can name an owner (a customer) and it is printed to agents.
+ * Patterns follow taaad v0.6's `taaad mint` error texts; anything unrecognised is the generic failure.
+ */
+export function classifyMintFailure(status: number | null, stderr: string): MintError {
+  const e = (reason: MintFailureReason, message: string, kind: MintError["kind"] = "unavailable"): MintError =>
+    new MintError(kind, message, reason);
+  switch (status) {
+    case 2:
+      return e("tty", "taaad refused to print a token to a terminal");
+    case 3:
+      return e("rate-limited", "taaad's presence-prompt limit is reached; wait a few minutes and retry");
+    case 4:
+      return e("denied", "your human declined taaad's presence prompt; stop and ask them before retrying");
+  }
+  if (/User interaction is not allowed/i.test(stderr)) {
+    return e("screen-locked", "taaad-signer could not show its presence prompt (Touch ID), most likely because the screen is locked; retry when your human is at the machine");
+  }
+  if (/taaad-signer\b.*timed out/i.test(stderr)) {
+    return e("timeout", "nobody answered taaad's presence prompt (Touch ID) in time; retry when your human is at the machine");
+  }
+  if (/taaad-signer/i.test(stderr)) {
+    return e("signer", "taaad-signer failed, so no token was signed; your human can run the same command from a terminal to see taaad's own message");
+  }
+  if (/has no install_id/i.test(stderr)) {
+    return e("not-installed", "the App has no installation yet (taaad has no installation id for it)");
+  }
+  if (/is not the installation account/i.test(stderr)) {
+    return e("installation-mismatch", "the App's installation belongs to a different account than the destination owner", "installation-mismatch");
+  }
+  if (/contents:write is not granted|grants no permission/i.test(stderr)) {
+    return e("permission-not-granted", "the App's installation does not grant the permission this operation needs (for a push: contents: write)");
+  }
+  if (/not accessible to the parent installation|\b(404|422)\b|not found/i.test(stderr)) {
+    return e("repo-not-covered", "GitHub would not issue a token for this repository: the App's installation does not include it");
+  }
+  return e("failed", "taaad exited with a failure and minted nothing; your human can run the same command from a terminal to see taaad's own message");
+}
+
+/**
+ * Longer than taaad's own wait: taaad-signer gives a person 240 s to answer its presence prompt (Touch ID),
+ * then taaad makes a few GitHub calls of up to 10 s each. Killing taaad sooner turns a slow fingerprint into
+ * a failed mint that looks like a broken install.
+ */
+export const SPAWN_TIMEOUT_MS = 300_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 /** What a GitHub installation token looks like, loosely: no whitespace, no line breaks (the credential protocol is line based). */
 const TOKEN_SHAPE = /^[A-Za-z0-9_.=-]{8,1024}$/;
@@ -160,6 +222,19 @@ export function validateMintOutput(raw: string, p: Pick<MintParams, "owner" | "r
   };
 }
 
+/** A spawn that did not finish: killed at the timeout, or never started. Exported for tests. */
+export function spawnFailure(error: Error): MintError {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ETIMEDOUT") {
+    return new MintError(
+      "unavailable",
+      `taaad did not finish within ${SPAWN_TIMEOUT_MS / 1000} s (its presence prompt, Touch ID, was probably not answered); retry when your human is at the machine`,
+      "timeout",
+    );
+  }
+  return new MintError("unavailable", "the pinned taaad could not be started; your human re-runs `repo-aegis install shim`", "not-runnable");
+}
+
 /**
  * Mint an installation token narrowed to one repository and one scope, from the pinned taaad.
  * Synchronous (a credential helper has nothing else to do). The token is returned, never printed or logged.
@@ -177,13 +252,11 @@ export function mintAppToken(p: MintParams): MintedToken {
       maxBuffer: MAX_OUTPUT_BYTES,
     },
   );
-  if (r.error !== undefined) throw new MintError("unavailable", "taaad could not be run");
-  // taaad's documented refusal codes (agreed with taaad for its presence-prompt release): 3 = the prompt
-  // budget is spent, 4 = the person cancelled or denied the prompt. Any other non-zero is a generic failure.
-  if (r.status === 3) throw new MintError("unavailable", "taaad's presence-prompt limit is reached; wait a few minutes and retry");
-  if (r.status === 4) throw new MintError("unavailable", "your human declined taaad's presence prompt; stop and ask them before retrying");
-  if (r.status !== 0) throw new MintError("unavailable", "taaad exited with a failure and minted nothing");
-  if (typeof r.stdout !== "string" || r.stdout.trim() === "") throw new MintError("unavailable", "taaad printed nothing");
+  if (r.error !== undefined) throw spawnFailure(r.error);
+  // taaad's documented exit codes: 2 = stdout is a terminal, 3 = the prompt budget is spent, 4 = the person
+  // cancelled or denied the prompt, 1 = anything else (told apart by its stderr, never copied).
+  if (r.status !== 0) throw classifyMintFailure(r.status, typeof r.stderr === "string" ? r.stderr : "");
+  if (typeof r.stdout !== "string" || r.stdout.trim() === "") throw new MintError("unavailable", "taaad printed nothing", "bad-output");
   return validateMintOutput(r.stdout, p);
 }
 

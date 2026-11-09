@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-09
+
+### Fixed — an App token mint gave up before Touch ID did
+
+- taaad-signer waits up to 240 s for its presence prompt (Touch ID), but repo-aegis killed
+  `taaad mint` after 30 s and reported it as "taaad could not be run". A fingerprint given after
+  30 s refused the push or `gh` call. taaad now gets 300 s, and a timeout is reported as one.
+
+### Fixed — a failed mint names the step that failed
+
+- The credential helper always added "(the App may not be installed on this repository)", whatever
+  went wrong. The refusal now names the step, from taaad's exit code and its error text (matched,
+  never printed): the screen is locked, nobody answered Touch ID in time, the prompt was declined or
+  its limit reached, the App has no installation, its installation does not include the repository
+  or grant `contents: write`, or the launcher could not be started. `repo-aegis gh` gives the same
+  messages.
+- With the audit log on, a failed mint in the credential helper is now recorded: a `git-credential`
+  entry with `outcome: "refused"`, the code and a fixed `reason` word. Before, it left no trace.
+
+### Changed — `doctor` reports unmapped owners once
+
+- `OWNER_IDENTITY_UNMAPPED` was one finding per owner. The owners are kept out of the text, so the
+  report showed the same line once per owner. It is now one finding with the count; `--json` lists
+  every owner in `names`.
+
 ## [0.12.1] - 2026-11-09
 
 ### Fixed — docs and `doctor` text for identities
@@ -2018,6 +2043,7 @@ to commit, push, or surface anything that names an unrelated engagement.
   and produce a half-written registry.
 
 [Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.12.1...HEAD
+[0.12.2]: https://github.com/de-otio/repo-aegis/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/de-otio/repo-aegis/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/de-otio/repo-aegis/compare/v0.11.4...v0.12.0
 [0.11.4]: https://github.com/de-otio/repo-aegis/compare/v0.11.3...v0.11.4

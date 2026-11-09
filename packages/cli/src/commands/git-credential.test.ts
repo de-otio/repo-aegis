@@ -220,6 +220,37 @@ describe("git-credential get: every refusal is exactly quit=true (A5, I15)", () 
     assertRefused(get(request()), "GH_IDENTITY_UNAVAILABLE");
   });
 
+  it("a failed mint names the step, not a guess, and is written to the audit log (a fixed reason, no taaad output)", () => {
+    writeFileSync(join(stubDir, "exit"), "1");
+    writeFileSync(
+      join(stubDir, "taaad"),
+      `#!/bin/sh\necho "error: taaad mint: taaad-signer: User interaction is not allowed. customer-a-org ghs_${"B".repeat(36)}" >&2\nexit 1\n`,
+    );
+    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    const saved = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = home;
+    let r: { stdout: string; stderr: string };
+    try {
+      r = get(request());
+    } finally {
+      if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
+      else process.env["REPO_AEGIS_HOME"] = saved;
+    }
+    assertRefused(r, "GH_IDENTITY_UNAVAILABLE");
+    assert.match(r.stderr, /screen is locked/);
+    assert.ok(!r.stderr.includes("may not be installed"), "no guessed cause");
+    for (const leak of ["customer-a-org", "ghs_"]) assert.ok(!r.stderr.includes(leak), `taaad's stderr leaked: ${leak}`);
+    const lines = readFileSync(join(home, "state", "audit.log"), "utf8").trim().split("\n");
+    const rec = JSON.parse(lines[lines.length - 1]!) as { action: string; details: Record<string, unknown> };
+    assert.equal(rec.action, "git-credential");
+    assert.deepEqual(
+      { ...rec.details },
+      { identity: "bot", kind: "github-app", owner: "o", repo: "r", scope: "contents-write", verb: "push", outcome: "refused", code: "GH_IDENTITY_UNAVAILABLE", reason: "screen-locked" },
+    );
+    const text = lines.join("\n");
+    for (const leak of ["customer-a-org", "ghs_"]) assert.ok(!text.includes(leak), `audit log holds taaad output: ${leak}`);
+  });
+
   it("I15b: the App is not installed on the repository (taaad refuses): refused, not passed through", () => {
     writeFileSync(join(stubDir, "exit"), "1");
     const r = get(request("o/other.git"));
