@@ -324,6 +324,34 @@ describe("git-credential get: the parent chain (A7, review finding)", () => {
     assert.deepEqual(parentFromAncestry(null, null), { kind: "unreadable" });
     assert.deepEqual(parentFromAncestry([{ pid: 1, ppid: 0, comm: "zsh", argv: [] }], null), { kind: "direct" });
   });
+
+  // Real git (seen with GIT_TRACE=1): `git push` runs `git remote-https <remote> <url>` and waits, and that
+  // process runs git-remote-https as its child. The dispatcher must not decide push vs fetch.
+  const url = "https://github.com/o/r.git";
+  const realChain = (sub: string[], dispatcherArgs: string[] = [url, url]): AncestorInfo[] => [
+    { pid: 11, ppid: 10, comm: "sh", argv: ["sh", "-c", "x get"] },
+    { pid: 10, ppid: 9, comm: "git-remote-https", argv: ["git-remote-https", url, url] },
+    { pid: 9, ppid: 8, comm: "git", argv: ["/opt/homebrew/opt/git/libexec/git-core/git", "remote-https", ...dispatcherArgs] },
+    { pid: 8, ppid: 7, comm: "git", argv: ["git", ...sub] },
+    { pid: 7, ppid: 1, comm: "zsh", argv: ["zsh"] },
+  ];
+
+  it("real git's chain: a push through the `git remote-https` dispatcher is a push", () => {
+    assert.deepEqual(parentFromAncestry(realChain(["-C", "/w", "push", url, "main"]), "o/r.git"), { kind: "push", sub: "push" });
+    assert.match(get(request(), deps({ ancestry: () => realChain(["push", "origin", "main"]) })).stdout, /^username=/);
+    assert.match(argv(), /--permissions contents-write/, "a push mints contents-write, not read");
+  });
+
+  it("real git's chain: a fetch through the dispatcher is still a read", () => {
+    assert.deepEqual(parentFromAncestry(realChain(["fetch", "origin"]), "o/r.git"), { kind: "remote", sub: "fetch" });
+  });
+
+  it("only a dispatcher with the remote helper's own arguments is skipped", () => {
+    assert.deepEqual(
+      parentFromAncestry(realChain(["push", "origin", "main"], [url, "https://github.com/o/other.git"]), "o/r.git"),
+      { kind: "remote", sub: "remote-https" },
+    );
+  });
 });
 
 describe("git-credential get: the chain's shape (M3)", () => {

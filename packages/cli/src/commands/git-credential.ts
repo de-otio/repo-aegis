@@ -195,6 +195,15 @@ function normalisedPath(path: string): string | null {
   return or === null ? null : `${or.owner}/${or.repo}`.toLowerCase();
 }
 
+/** `git remote-https <remote> <url>` whose `<remote> <url>` are the remote helper's own arguments. */
+function isDispatcherOf(dispatcher: readonly string[], remote: readonly string[]): boolean {
+  const at = dispatcher.findIndex(w => w === "remote-https" || w === "remote-http");
+  if (at === -1) return false;
+  const rest = dispatcher.slice(at + 1);
+  const own = remote.slice(1);
+  return rest.length === own.length && rest.every((w, k) => w === own[k]);
+}
+
 /**
  * A7, hardened. The helper answers only a request that git's HTTPS remote helper made, and "the chain contains a
  * process called git-remote-https" is forgeable (`cp /bin/sh /tmp/git-remote-https`), so the shape is checked:
@@ -235,11 +244,15 @@ export function parentFromAncestry(chain: AncestryChain | readonly AncestorInfo[
   // A request path that is not owner/repo is refused later, as a configuration problem; only a real one is compared.
   const requested = requestPath === null ? null : normalisedPath(requestPath);
   if (requested !== null && requested !== urlPath) return { kind: "direct" };
-  for (const a of ancestors.slice(at + 1)) {
+  for (const [i, a] of ancestors.slice(at + 1).entries()) {
     const name = basename(a.comm);
     const arg0 = a.argv[0] !== undefined ? basename(a.argv[0]) : "";
     if (name === "git" || arg0 === "git") {
       const sub = subcommandOf(a.argv);
+      // git starts the remote helper as `git remote-https <remote> <url>` and waits; that process runs
+      // `git-remote-https` as its child. Skip that dispatcher (directly above, same arguments) and let the git
+      // that asked for the transport decide, or every push is read as a fetch.
+      if (i === 0 && (sub === "remote-https" || sub === "remote-http") && isDispatcherOf(a.argv, remote.argv)) continue;
       if (sub === "credential" || (sub !== null && sub.startsWith("credential-"))) return { kind: "direct" };
       return sub === "push" || sub === "send-pack" ? { kind: "push", sub } : { kind: "remote", sub };
     }

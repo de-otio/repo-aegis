@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the git credential helper read every agent push as a fetch
+
+- Real git starts the HTTPS remote helper as `git remote-https <remote> <url>`, waits, and that
+  process runs `git-remote-https` as its child. The helper took that dispatcher for the git that
+  asked, so a push minted a read-only token and GitHub refused it (403, `Permission … denied to
+  <app>[bot]`). It failed safe, but no agent HTTPS push to an App-mapped owner worked. The
+  dispatcher is now skipped when it sits directly above the remote helper with the same arguments.
+  The tests use the chain shape `GIT_TRACE=1` shows.
+
 ## [0.12.0] - 2026-11-08
 
 **Upgrade:** re-run `repo-aegis install shim` (`doctor` reports `SHIM_STALE` until you do), and
