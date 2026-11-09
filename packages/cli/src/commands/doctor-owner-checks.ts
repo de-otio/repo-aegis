@@ -7,7 +7,7 @@
 //
 // Two groups:
 //
-//   registryStateChecks  pure, offline: OWNERS_UNDECLARED and REGISTRY_UNREADABLE.
+//   registryStateChecks  pure, offline: OWNERS_UNDECLARED, REGISTRY_UNREADABLE and REGISTRY_ENCRYPTED.
 //   ghOwnerChecks        best-effort, network via `gh`: GH_LOGIN_UNREGISTERED,
 //                        GH_MEMBER_ORG_UNREGISTERED, REGISTERED_ORG_NOT_MEMBER.
 //
@@ -64,6 +64,7 @@ import {
   resolvePushUrls,
   safeDestination,
   type Registry,
+  type RegistryLoad,
 } from "@de-otio/repo-aegis-core";
 import { PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
@@ -76,45 +77,55 @@ const GH_TIMEOUT_MS = 20_000;
 /** `gh api user/orgs --paginate` for an account in hundreds of orgs is still well under this. */
 const GH_MAX_BUFFER = 8 * 1024 * 1024;
 
-/** How the registry file looked when doctor tried to load it. */
-export type DoctorRegistryState = "loaded" | "missing" | "unreadable";
-
 // ---------------------------------------------------------------------------
 // Registry state (D4)
 // ---------------------------------------------------------------------------
 
 /**
- * `REGISTRY_UNREADABLE` (a FAILURE, decision D4) and `OWNERS_UNDECLARED`.
+ * `REGISTRY_UNREADABLE` (a FAILURE, decision D4), `REGISTRY_ENCRYPTED` (a warning) and `OWNERS_UNDECLARED`.
  *
- * An unreadable registry (encrypted at rest, or a file that does not parse)
- * makes rule h refuse every non-interactive egress that has a destination, so
- * it is a failure and not a warning. A missing registry is not a finding here:
- * rule h is skipped by design when no registry exists, and a machine that never
- * set repo-aegis up has nothing to fix.
+ * A registry that exists but cannot be read (it does not parse or validate, or a newer repo-aegis wrote it) makes
+ * rule h ask or refuse every non-interactive egress that has a destination, so it is a failure and not a warning.
+ * An encrypted-at-rest registry is read as no registry at all (encryption at rest is deprecated), so it is a
+ * warning: nothing is refused, but rule h and the identity mapping are off. A missing registry is not a finding
+ * here: rule h is skipped by design when no registry exists, and a machine that never set repo-aegis up has nothing
+ * to fix.
  *
- * Neither message includes the loader's error text: zod and YAML messages can
- * name orgs and engagement ids.
+ * No message includes the loader's error text: zod and YAML messages can name orgs and engagement ids.
  */
-export function registryStateChecks(
-  state: DoctorRegistryState,
-  registry: Registry | null,
-  encrypted: boolean,
-): DoctorCheck[] {
-  if (state === "unreadable") {
+export function registryStateChecks(load: RegistryLoad): DoctorCheck[] {
+  if (load.state === "unparseable" || load.state === "newer-schema") {
     return [
       {
         code: "REGISTRY_UNREADABLE",
         ok: false,
         detail:
-          "the registry exists but cannot be read (encrypted at rest, or it does not parse or validate), " +
-          "so rule h refuses every non-interactive egress that has a destination; a person at a terminal can still publish",
-        fix: encrypted
-          ? `repo-aegis registry decrypt --identity <your age identity file>   (${PERSON_RUNS_THIS})`
-          : "repair or restore the registry file (run `repo-aegis status` for the parse error), then re-run doctor",
+          (load.state === "newer-schema"
+            ? "the registry was written by a newer repo-aegis than this one"
+            : "the registry exists but does not parse or validate") +
+          ", so rule h asks (agent hook) or refuses (pre-push, the gh shim) every non-interactive egress that has a destination; " +
+          "a person at a terminal can still publish",
+        fix:
+          load.state === "newer-schema"
+            ? `upgrade repo-aegis (this one reads schemaVersion up to ${load.max}), then run \`repo-aegis install hooks\` and \`repo-aegis install claude-md\``
+            : "repair or restore the registry file (run `repo-aegis status` for the parse error), then re-run doctor",
       },
     ];
   }
-  if (state === "loaded" && registry !== null && registeredOwners(registry).size === 0) {
+  if (load.state === "encrypted") {
+    return [
+      {
+        code: "REGISTRY_ENCRYPTED",
+        ok: false,
+        severity: "warn",
+        detail:
+          "the registry is encrypted at rest, so repo-aegis runs as if there were none: rule h and the GitHub identity mapping are off; " +
+          "marker scanning (`_always` and engagement files) is unaffected. Encryption at rest is removed in 0.15.0",
+        fix: `repo-aegis registry decrypt --identity <your age identity file>   (${PERSON_RUNS_THIS})`,
+      },
+    ];
+  }
+  if (load.state === "loaded" && registeredOwners(load.registry).size === 0) {
     return [
       {
         code: "OWNERS_UNDECLARED",

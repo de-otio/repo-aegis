@@ -344,3 +344,48 @@ describe("hook scan-after-write --agent cursor (afterFileEdit)", { skip: !SUBPRO
     }
   });
 });
+
+describe("hook scan-after-write: the registry's state", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  it("an encrypted registry is read as none: an `_always` marker written is still reported, and the code is not REGISTRY_ENCRYPTED", () => {
+    const env = setupAegisHome("scan-encrypted");
+    writeFileSync(join(env.aegisHome, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    writeMarker(env.aegisHome, "_always", "globally-banned-token\n");
+    const file = join(tmp, "scan-encrypted-leak.ts");
+    writeFileSync(file, "let x = 'globally-banned-token';\n");
+    const r = runCli(env.aegisHome, tmp, ["hook", "scan-after-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 1, `${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /REGISTRY_ENCRYPTED|REGISTRY_ERROR/);
+    const json = r.json as { hits: Array<{ engagement: string }> };
+    assert.equal(json.hits.length, 1);
+    assert.equal(json.hits[0]!.engagement, "_always");
+  });
+
+  it("a registry from a newer schema (99): REGISTRY_ERROR, exit 2, the newer-schema text", () => {
+    const env = setupAegisHome("scan-newer");
+    writeRegistry(env.aegisHome, "schemaVersion: 99\nengagements: []\n");
+    const file = join(tmp, "scan-newer-probe.txt");
+    writeFileSync(file, "innocuous");
+    const r = runCli(env.aegisHome, tmp, ["hook", "scan-after-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 2, `${r.stdout}${r.stderr}`);
+    const json = r.json as { code: string; error: string };
+    assert.equal(json.code, "REGISTRY_ERROR");
+    assert.match(json.error, /written by a newer repo-aegis than the one this hook runs/);
+  });
+
+  it("an unparseable registry: REGISTRY_ERROR, exit 2, and the loader's message (which can name orgs) is not echoed", () => {
+    const env = setupAegisHome("scan-unparseable");
+    writeRegistry(env.aegisHome, "schemaVersion: 2\npersonalOrgs: [secret-org-name, secret-org-name]\nengagements: []\n");
+    const file = join(tmp, "scan-unparseable-probe.txt");
+    writeFileSync(file, "innocuous");
+    const r = runCli(env.aegisHome, tmp, ["hook", "scan-after-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 2, `${r.stdout}${r.stderr}`);
+    assert.equal((r.json as { code: string }).code, "REGISTRY_ERROR");
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /secret-org-name/);
+  });
+});

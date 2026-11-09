@@ -895,8 +895,9 @@ drop-in is verified. `--user-settings` writes `~/.claude/settings.json` instead
    `--user-settings`), all idempotent. The commands
    below are shown by hook name; each is written as a one-line `sh` command
    that runs the hook on the **pinned** node and CLI by absolute path and
-   exits 2 (blocking) if either is gone, never a `repo-aegis` looked up on
-   PATH. An older by-name entry is replaced, not duplicated:
+   exits 2 (blocking) if either is gone and no `repo-aegis` at least as new as
+   the pinned version is on PATH (it then runs that one, with a warning), never
+   a `repo-aegis` looked up on PATH while the pin works. An older by-name entry is replaced, not duplicated:
 
 | Event | Matcher | Command |
 |---|---|---|
@@ -1622,8 +1623,9 @@ Writes `<home>/bin/gh` (the only `tool` today), a wrapper to put first on
 `completion` through untouched, and `exec`s `repo-aegis gh --home <home> -- "$@"`
 (see [`repo-aegis gh`](#repo-aegis-gh---home-home----gh-args)) for every other
 invocation, publishing or not: no shell code runs after the `exec`, so nothing in
-the shim can see a token. With the pinned node or CLI gone, such a call is refused
-(exit 2), reads included. Idempotent: a second run reports
+the shim can see a token. With the pinned node or CLI gone, such a call goes to the
+`repo-aegis` on `PATH` when that is at least as new as the pinned version (with a
+warning), and is otherwise refused (exit 2), reads included. Idempotent: a second run reports
 `already installed`. A file at that path that repo-aegis did not write
 is refused with `SHIM_PATH_OCCUPIED` unless `--force` is passed.
 
@@ -1825,7 +1827,7 @@ now reports, unless `--no-egress-checks`:
 | `PUSH_DEFAULT_IMPLICIT` | global `push.default` is unset or not `nothing` | `git config --global push.default nothing` |
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` | no shim; another `gh` precedes it on `PATH`; the shim on `PATH` is an earlier release's script | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
 | `ENFORCEMENT_UNPINNED` (**fail**) | an installed git hook, the shim or a Claude Code hook command calls `repo-aegis` by name (an install from before the enforcement pin) | `repo-aegis install hooks` / `install shim` / `install claude-md` |
-| `ENFORCEMENT_PIN_MISSING` (**fail**) | a pinned node or CLI path no longer exists, so that hook exits 1 and that shim refuses publishing verbs | `repo-aegis install hooks` / `repo-aegis install shim` |
+| `ENFORCEMENT_PIN_MISSING` (**fail**) | a pinned node or CLI path no longer exists, so the hook or shim falls back to the `repo-aegis` on `PATH` when it is at least the pinned version, and refuses otherwise | `repo-aegis install hooks` / `repo-aegis install shim` / `repo-aegis install claude-md` |
 | `MULTIPLE_INSTALLS` (warn) | more than one `repo-aegis` on `PATH` (each listed with its version), or the first one is not the pinned one | keep one install, then re-run `install hooks` and `install shim` |
 | `GUARD_HOOK_UNREGISTERED` | neither the managed drop-in nor Claude Code `settings.json` has a `guard-egress` entry | `repo-aegis install claude-md` |
 | `MANAGED_DROPIN_STALE` / `MANAGED_DROPIN_NOT_ROOT_OWNED` / `MANAGED_DROPIN_UNREADABLE` (**fail**) | the managed drop-in differs from what would be written now; it or a directory above it is owned by a user, writable by group or others or a symlink; it is not `0644` (directories `0755`) | `repo-aegis install claude-md` |
@@ -1835,7 +1837,8 @@ now reports, unless `--no-egress-checks`:
 | `ENFORCEMENT_IN_USER_SETTINGS` (warn) | repo-aegis hooks are in `~/.claude/settings.json`, which must stay per machine | `repo-aegis install claude-md` |
 | `CLASS_VISIBILITY_UNRESOLVED` (per repo) | a repo with a GitHub remote has no explicit class or no cached visibility | `repo-aegis classify --apply && repo-aegis status` in that repo |
 | `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
-| `REGISTRY_UNREADABLE` (**fail**) | the registry exists but is encrypted at rest or does not parse, so rule h refuses every non-interactive egress that has a destination | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal), or repair the file |
+| `REGISTRY_UNREADABLE` (**fail**) | the registry exists but does not parse or validate, or a newer repo-aegis wrote it (`schemaVersion` above what this build reads), so rule h asks (agent hook) or refuses (pre-push, the shim) every non-interactive egress that has a destination | repair the file (`repo-aegis status` shows why); for a newer schema, upgrade repo-aegis, then `repo-aegis install hooks` and `repo-aegis install claude-md` |
+| `REGISTRY_ENCRYPTED` (warn) | the registry is encrypted at rest, so repo-aegis runs as if there were none: rule h and the GitHub identity mapping are off; marker scanning is unaffected. Encryption at rest is removed in 0.15.0 | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal) |
 | `OWNERS_UNDECLARED` (**fail**) | the registry loads but declares no owners, so rule h is inert | `repo-aegis engagements add --personal-org <login>` (a person, at a terminal) |
 | `GIT_CREDENTIAL_HELPER_ORDER` (**fail**, only when some owner is mapped to an `agent` identity) | the repo-aegis git credential helper is not installed, is from another install (a moved CLI or Node), or another helper answers first for `https://github.com` (a reset entry, a system-scope helper, `gh auth setup-git`); an agent's HTTPS push there would be authenticated as the person | a person runs `repo-aegis install git-credential` from a terminal |
 | `OWNER_IDENTITY_UNMAPPED` (warn; **fail** when `requireIdentity` is set) | registered owners have no identity entry (no `person` and no `agent`); one finding with the count, the owners are named only in `--json` (`names`; registered owners can be customer names) | `repo-aegis identity add`, then `repo-aegis engagements set-identity` (a person, at a terminal) |

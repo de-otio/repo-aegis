@@ -348,28 +348,52 @@ describe("pre-push rule h — registry states match the hook and the shim (D4)",
     assert.match(r.stderr, /rule h \(unregistered-owner check\) skipped: the registry declares no owners/);
   });
 
-  it("an unparseable registry refuses, and says it could not be read", () => {
+  it("an unparseable registry refuses, and says it does not parse", () => {
     const ctx = setup("s-corrupt", "engagements: [\n");
     const repo = makeRepo("s-corrupt-repo", STRANGER);
     const r = refusalOf(pushCheck(ctx, repo, STRANGER));
     assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(r.error, /registry could not be read/);
+    assert.match(r.error, /does not parse or validate/);
+    assert.match(r.error, /No approval covers this/, "the pre-push hook cannot ask: no approval line about a prompt");
     assert.equal(r.details.ruleH, "applied");
   });
 
-  it("an encrypted registry (ciphertext only) refuses, even for an owner it would have listed", () => {
+  it("an encrypted registry (ciphertext only) runs as if there were none: rule h does not refuse, and stderr says so once", () => {
     const ctx = setup("s-encrypted", null);
     writeFileSync(`${ctx.registry}.age`, "age-encryption.org/v1\n");
-    const repo = makeRepo("s-encrypted-repo", "git@github.com:acme/x.git");
-    const r = refusalOf(pushCheck(ctx, repo, "git@github.com:acme/x.git"));
-    assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(r.error, /registry could not be read/);
+    const repo = makeRepo("s-encrypted-repo", STRANGER);
+    const r = pushCheck(ctx, repo, STRANGER);
+    assert.equal(r.exitCode, undefined, r.stderr);
+    const lines = r.stderr.split("\n").filter(l => l.includes("registry is encrypted"));
+    assert.deepEqual(lines, [
+      "repo-aegis: registry is encrypted, so rule h was skipped and the cross-org check used only this repository's remote; a person runs `repo-aegis registry decrypt --identity <key>`",
+    ]);
+    assert.doesNotMatch(r.stderr, /no registry file exists/, "the encrypted line replaces the skip note");
   });
 
-  it("a registry from a newer schema is unreadable, so it refuses", () => {
+  it("an encrypted registry: the cross-org check still runs on the origin fallback (an empty registry, not a skipped check)", () => {
+    const ctx = setup("s-encrypted-cross", null);
+    writeFileSync(`${ctx.registry}.age`, "age-encryption.org/v1\n");
+    const repo = makeRepo("s-encrypted-cross-repo", "git@github.com:acme/x.git");
+    const r = refusalOf(pushCheck(ctx, repo, "git@github.com:other-org/y.git"));
+    assert.equal(r.code, "CROSS_ORG_PUSH", "an unregistered owner is not refused by rule h, but the origin's org is the boundary");
+  });
+
+  it("a registry from a newer schema (99) is unreadable: the agent's pre-push is refused UNREGISTERED_OWNER_EGRESS, with the upgrade text", () => {
     const ctx = setup("s-newer", "schemaVersion: 99\nengagements: []\n");
     const repo = makeRepo("s-newer-repo", STRANGER);
-    assert.equal(refusalOf(pushCheck(ctx, repo, STRANGER)).code, "UNREGISTERED_OWNER_EGRESS");
+    const r = refusalOf(pushCheck(ctx, repo, STRANGER));
+    assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
+    assert.match(r.error, /written by a newer repo-aegis than the one running this check/);
+    assert.match(r.error, /upgrades repo-aegis, then runs `repo-aegis install hooks` and `repo-aegis install claude-md`/);
+    assert.doesNotMatch(r.error, /encrypt/);
+    assert.equal(r.details.ruleH, "applied");
+  });
+
+  it("a registry from a newer schema refuses even a destination the file would have listed", () => {
+    const ctx = setup("s-newer-listed", "schemaVersion: 99\npersonalOrgs:\n  - acme\nengagements: []\n");
+    const repo = makeRepo("s-newer-listed-repo", "git@github.com:acme/x.git");
+    assert.equal(refusalOf(pushCheck(ctx, repo, "git@github.com:acme/x.git")).code, "UNREGISTERED_OWNER_EGRESS");
   });
 
   it("an unreadable registry does not refuse a person at a terminal", () => {

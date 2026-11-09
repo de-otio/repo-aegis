@@ -407,6 +407,35 @@ which repo is read). `repo-aegis status --json` does not report which source a
 value came from: its `repo` object carries `class`, `classExplicit` (`false`
 means the default is in use) and `engagements`.
 
+## The registry's five states
+
+Every layer (the agent hook, the `gh` shim, the pre-push hook, the `gh` identity
+layer, the write hooks and `doctor`) reads the registry through one loader and
+gets one of five states. They cannot disagree about which one applies.
+
+| State | What it is | Rule h (unregistered owner) | The write hooks | `doctor` |
+|---|---|---|---|---|
+| `loaded` | the file parses and validates | judges, unless it declares no owners | read it | `OWNERS_UNDECLARED` (fail) when it declares no owners |
+| `missing` | no registry file | skipped, with a note | an empty registry | nothing |
+| `encrypted` | only `engagements.yaml.age` exists | skipped, with a note: repo-aegis runs **as if there were no registry** | an empty registry (not an error) | `REGISTRY_ENCRYPTED` (warn) |
+| `unparseable` | the file exists but does not parse or validate | the agent hook **asks** a person (a host with no prompt denies); pre-push and the shim refuse | `REGISTRY_ERROR`, exit 2 | `REGISTRY_UNREADABLE` (fail) |
+| `newer-schema` | the file parses but its `schemaVersion` is above what this build reads (`3`) | as `unparseable`, with an "upgrade repo-aegis" fix | `REGISTRY_ERROR` with the newer-schema text, exit 2 | `REGISTRY_UNREADABLE` (fail), fix: upgrade, then `install hooks` and `install claude-md` |
+
+An error the loader does not recognise counts as `unparseable`: it never reads
+as "no registry".
+
+**Encryption at rest is deprecated** and is removed in 0.15.0. Until then,
+`registry encrypt` still works, but an encrypted registry switches off rule h and
+the GitHub identity mapping (a registry-reading command such as `status` still
+says `REGISTRY_ENCRYPTED`). Marker scanning (`_always` and the engagement marker
+files) is not affected. `registry decrypt --identity <key>` brings the registry
+back; a person runs it.
+
+The `ask` on an unreadable registry is not a way through for a push: the pre-push
+hook refuses until the registry can be read. When a newer repo-aegis has written
+the registry (schema skew), upgrade repo-aegis, then run `repo-aegis install hooks`
+and `repo-aegis install claude-md`, so the hooks run the new version.
+
 ## The pinned enforcement binary
 
 The git hooks (`pre-commit`, `pre-push`) and the `gh` shim run the scanner by
@@ -416,9 +445,11 @@ install shim` resolve two paths and write them into the generated scripts:
 - the Node executable (`process.execPath`, canonicalised), and
 - the CLI entry (the `dist/index.js` of the install that is running, canonicalised).
 
-Every call in the scripts is `"$__ra_node" "$__ra_cli" …`; no call by name
-remains. The paths are shell-quoted when rendered, and a path containing a
-newline or NUL refuses the install (`PIN_PATH_UNSUPPORTED`).
+Every call in the scripts is `"$__ra_node" "$__ra_cli" …`; the only other way
+in is the fallback below. The paths are shell-quoted when rendered, and a path
+containing a newline or NUL refuses the install (`PIN_PATH_UNSUPPORTED`). A third
+line, `__ra_version='<version>'`, records the version of the CLI that was
+pinned.
 
 Why: a name is looked up on the caller's `PATH`, and an agent can usually write
 to a directory in the user's home that comes first on it. A `repo-aegis` (or a
@@ -427,18 +458,34 @@ exits 0 there would switch off the pre-commit scan, the pre-push scan and the
 shim's egress check. Two installs on one machine also meant the person's
 terminal and the agent's shell enforced different versions.
 
-**Fail closed.** If a pinned file is missing or not usable (a Node upgrade
-through a version manager moves `process.execPath`; an install was removed):
+**A pin that is gone no longer locks you out, and no longer opens a hole.** If a
+pinned file is missing or not usable (a Node upgrade through a version manager
+moves `process.execPath`; an install was removed), the script does not look at
+`PATH` while the pin works. When it does not, it falls back to the `repo-aegis`
+on `PATH` **only if that one is at least as new as the pinned version**, prints a
+`WARNING` that names both versions and the re-pin command, and runs it. Otherwise
+it refuses:
 
-| Script | Result |
+| The `repo-aegis` found on `PATH` | Result |
 |---|---|
-| `pre-commit`, `pre-push` | exit 1, naming the missing path and `repo-aegis install hooks` |
-| `gh` shim | publishing verbs refused with exit 2, naming the missing path and `repo-aegis install shim`; every other `gh` verb still passes through |
+| none | refuse: "no repo-aegis is on PATH" |
+| older than the pinned version | refuse, naming both versions ("an older repo-aegis may not read this machine's registry") |
+| first line of `--version` is not exactly `MAJOR.MINOR.PATCH` (a prerelease, `v0.14.0`, empty, a crash) | refuse; what it printed is never echoed |
+| at least as new | run it, with a warning |
+| (the pin has no recorded version: an install from before 0.14.0) | refuse, and say so; no fallback |
 
-There is no environment variable that turns this off, because an agent could set
-it. A person re-runs the installer from a terminal. **After moving or upgrading
-Node, or reinstalling repo-aegis, re-run `repo-aegis install hooks` and
-`repo-aegis install shim`.**
+Refusals exit as before: `pre-commit` and `pre-push` exit 1, the `gh` shim exits 2
+for any call but `--version`, `help` and `completion`, and every Claude Code hook
+command exits 2. The comparison is numeric (0.9.0 is older than 0.14.0); a
+prerelease suffix on the pinned version is dropped, which only raises the floor.
+The reason for the floor: a `repo-aegis` older than the pinned one may not read
+this machine's registry (a newer schema), which is the lockout this replaces.
+
+There is no environment variable that turns any of this off, because an agent
+could set it. A person re-runs the installer from a terminal. **After moving or
+upgrading Node, or reinstalling repo-aegis, re-run `repo-aegis install hooks`,
+`repo-aegis install shim` and `repo-aegis install claude-md`.** `doctor` keeps
+reporting `ENFORCEMENT_PIN_MISSING` as a failure until you do.
 
 How it shows up elsewhere:
 

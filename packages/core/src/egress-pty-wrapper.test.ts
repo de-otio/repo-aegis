@@ -114,8 +114,8 @@ describe("EGRESS_PTY_WRAPPER — every pty form is refused", () => {
 describe("EGRESS_PTY_WRAPPER — nothing lifts it", () => {
   const command = "script -q /dev/null gh issue create --repo acme/svc --title x";
 
-  it("needs no registry (missing, and unreadable)", () => {
-    for (const registryState of ["missing", "unreadable"] as const) {
+  it("needs no registry (missing, encrypted, unparseable, newer-schema)", () => {
+    for (const registryState of ["missing", "encrypted", "unparseable", "newer-schema"] as const) {
       const d = decide(command, { registryState, registry: { ...REGISTRY, personalOrgs: [] } as Registry });
       assert.equal(d.action === "deny" && d.code, "EGRESS_PTY_WRAPPER", registryState);
     }

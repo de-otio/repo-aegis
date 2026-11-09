@@ -24,8 +24,8 @@ import {
   repoAegisOnPath,
   runningInstallVersion,
   versionIsOlder,
-  versionOf,
 } from "./doctor-pin-checks.js";
+import { versionOf } from "../enforcement-pin.js";
 
 export interface InstallGuardOptions {
   /** TEST-ONLY seam: the PATH searched (default `process.env.PATH`). */

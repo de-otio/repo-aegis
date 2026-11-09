@@ -3,18 +3,16 @@
 import { existsSync } from "node:fs";
 import {
   computeDenySet,
-  loadRegistry,
+  loadRegistryState,
   scanFile,
   CustomerCoupledNoEngagementError,
-  RegistryEncryptedError,
-  RegistryNotFoundError,
   EXIT_HIT,
   type RepoJson,
   type ScanHit,
   type SkippedFile,
   type Registry,
 } from "@de-otio/repo-aegis-core";
-import { decideHookAction, type HookDecision } from "./hook-policy.js";
+import { decideHookAction, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import { parseHookWriteFields, readHookStdin, WRITE_HOOK_INPUT_MAX_BYTES } from "./hook-input.js";
 
 interface HookOptions {
@@ -103,36 +101,28 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   }
   if (!existsSync(filePath)) process.exit(0);
 
-  let registry: Registry;
-  try {
-    registry = loadRegistry();
-  } catch (err) {
-    // Registry is required for trust-boundary computation. Surface
-    // structured errors; otherwise stay silent (hook context).
-    if (err instanceof RegistryNotFoundError) {
-      // No registry => no engagements, no orgs. Treat the whole world
-      // as one boundary and scan with an empty deny set. The agent
-      // would have run `repo-aegis init` already if engagement scoping
-      // were in use; the hook should not block plain installs.
-      registry = { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
-    } else if (err instanceof RegistryEncryptedError) {
-      emit(
-        {
-          code: err.code,
-          error: err.message,
-        },
-        2,
-      );
-    } else {
-      emit(
-        {
-          code: "REGISTRY_ERROR",
-          error: (err as Error).message,
-        },
-        2,
-      );
-    }
+  // Missing: no registry => no engagements, no orgs. Treat the whole world as one boundary and scan with an empty
+  // deny set. The agent would have run `repo-aegis init` already if engagement scoping were in use; the hook should
+  // not block plain installs. Encrypted is read the same way (no plaintext to read; encryption at rest is
+  // deprecated), so `_always` and engagement markers still scan. A registry that exists but cannot be read is
+  // surfaced as REGISTRY_ERROR with fixed text (the parse error names orgs and engagement ids).
+  const load = loadRegistryState();
+  if (load.state === "newer-schema") emit({ code: "REGISTRY_ERROR", error: NEWER_SCHEMA_ERROR }, 2);
+  if (load.state === "unparseable") {
+    emit(
+      {
+        code: "REGISTRY_ERROR",
+        error:
+          "the registry cannot be read, so the cross-org write check cannot run. " +
+          "Run `repo-aegis status` (or `repo-aegis doctor`) in a terminal to see why.",
+      },
+      2,
+    );
   }
+  const registry: Registry =
+    load.state === "loaded"
+      ? load.registry
+      : { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
 
   const decision: HookDecision = decideHookAction({
     filePath,

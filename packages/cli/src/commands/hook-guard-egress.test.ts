@@ -804,31 +804,61 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
     }
   });
 
-  it("an unparseable registry REFUSES (one bad YAML line must not switch rule h off), and says how to repair", () => {
+  function asked(r: GuardResult): DecisionJson["hookSpecificOutput"] {
+    assert.equal(r.code, 0, `expected an ask; got ${r.code} ${r.stdout} ${r.stderr}`);
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecision, "ask", r.stdout);
+    return j.hookSpecificOutput;
+  }
+
+  it("an unparseable registry ASKS on Claude Code (one bad YAML line must not switch rule h off), and says how to repair", () => {
     const home = aegisHome("h-corrupt", OWNERS_REGISTRY + "this line: is: not valid: yaml: [\n");
     const r = runGuard(claudePayload(PUSH_STRANGER), { home });
-    const p = denied(r);
-    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(p.error, /could not be read/);
-    assert.match(p.error, /repair/);
-    assert.match(p.error, /repo-aegis registry decrypt --identity/);
-    for (const bad of REGISTERED) assert.ok(!r.stderr.includes(bad), `must not contain "${bad}"`);
+    const a = asked(r);
+    assert.match(a.permissionDecisionReason, /UNREGISTERED_OWNER_EGRESS/);
+    assert.match(a.permissionDecisionReason, /does not parse or validate/);
+    assert.match(a.permissionDecisionReason, /A person repairs /);
+    assert.match(a.permissionDecisionReason, /A person's yes at this prompt lets this one command run; a push is still refused by the pre-push hook until the registry can be read/);
+    assert.doesNotMatch(a.permissionDecisionReason, /encrypt|decrypt/);
+    for (const bad of REGISTERED) assert.ok(!r.stdout.includes(bad), `must not contain "${bad}"`);
     // A person still passes.
     assert.equal(runGuard(claudePayload(PUSH_STRANGER), { home, human: true }).code, 0);
+    assert.equal(runGuard(claudePayload(PUSH_STRANGER), { home, human: true }).stdout, "");
   });
 
-  it("an encrypted registry (only the .age ciphertext on disk) REFUSES", () => {
+  it("an unparseable registry DENIES on a host without an ask (Codex, Gemini)", () => {
+    const home = aegisHome("h-corrupt-noask", OWNERS_REGISTRY + "this line: is: not valid: yaml: [\n");
+    for (const [payload, agent] of [
+      [codexPayload(PUSH_STRANGER), "codex"],
+      [geminiPayload(PUSH_STRANGER), "gemini"],
+    ] as const) {
+      const p = denied(runGuard(payload, { home, agent }));
+      assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS", agent);
+      assert.match(p.error, /No approval covers this/);
+    }
+  });
+
+  it("an encrypted registry (only the .age ciphertext on disk) is read as no registry: rule h does not refuse, and the note says so", () => {
     const home = aegisHome("h-encrypted");
     writeFileSync(join(home, "engagements.yaml.age"), "age-encryption.org/v1\n");
-    const p = denied(runGuard(claudePayload(PUSH_STRANGER), { home }));
-    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(p.error, /encrypted/);
-    assert.match(p.error, /repo-aegis registry decrypt --identity/);
+    const r = runGuard(claudePayload(PUSH_STRANGER), { home });
+    // No registry, so the rule g question about an unknown destination is asked, but rule h is not what asks it.
+    const a = asked(r);
+    assert.doesNotMatch(a.permissionDecisionReason, /UNREGISTERED_OWNER_EGRESS/);
+    assert.match(a.permissionDecisionReason, /registry is encrypted: context rules and rule h ran without it/);
+    const codex = runGuard(codexPayload(PUSH_STRANGER), { home, agent: "codex" });
+    assert.notEqual((JSON.parse(codex.stderr) as DenyPayload).code, "UNREGISTERED_OWNER_EGRESS");
   });
 
-  it("a registry from a newer schema is unreadable, so it refuses too", () => {
+  it("a registry from a newer schema (99) ASKS on Claude Code with the upgrade text, and denies without an ask", () => {
     const home = aegisHome("h-newer", "schemaVersion: 99\nengagements: []\n");
-    assert.equal(denied(runGuard(claudePayload(PUSH_STRANGER), { home })).code, "UNREGISTERED_OWNER_EGRESS");
+    const repo = makeRepo("h-newer-repo", { remote: "git@github.com:stranger/repo.git" });
+    const r = runGuard(claudePayload("git push origin main", repo), { home, cwd: repo });
+    const a = asked(r);
+    assert.match(a.permissionDecisionReason, /UNREGISTERED_OWNER_EGRESS/);
+    assert.match(a.permissionDecisionReason, /written by a newer repo-aegis than the one running this check/);
+    assert.match(a.permissionDecisionReason, /A person upgrades repo-aegis, then runs `repo-aegis install hooks` and `repo-aegis install claude-md`/);
+    assert.equal(denied(runGuard(codexPayload(PUSH_STRANGER), { home, agent: "codex" })).code, "UNREGISTERED_OWNER_EGRESS");
   });
 
   it("an unreadable registry does not wall off commands with no destination or no egress", () => {

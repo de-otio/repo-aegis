@@ -4,13 +4,11 @@ import { homedir } from "node:os";
 import { basename } from "node:path";
 import {
   isGhConfigFile,
-  loadRegistry,
-  RegistryEncryptedError,
-  RegistryNotFoundError,
+  loadRegistryState,
   OVERRIDE_FILENAME,
   type Registry,
 } from "@de-otio/repo-aegis-core";
-import { decideHookAction, type HookDecision } from "./hook-policy.js";
+import { decideHookAction, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import {
   parseHookWriteFields,
   readHookStdin,
@@ -145,29 +143,30 @@ export async function hookCheckWrite(): Promise<void> {
     );
   }
 
-  let registry: Registry;
-  try {
-    registry = loadRegistry();
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
-      registry = { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
-    } else if (err instanceof RegistryEncryptedError) {
-      emitJsonAndExit({ code: err.code, error: err.message }, EXIT_BLOCK);
-    } else {
-      // Block, never exit 1: Claude Code treats exit 1 as non-blocking, so an unreadable registry (a schemaVersion
-      // this build cannot read, a typo) would switch the cross-org write check off. The message is fixed text:
-      // the parse error names orgs and engagement ids, which must not reach an agent's transcript.
-      emitJsonAndExit(
-        {
-          code: "REGISTRY_ERROR",
-          error:
-            "the registry cannot be read, so the cross-org write check cannot run and the write is refused. " +
-            "Run `repo-aegis status` (or `repo-aegis doctor`) in a terminal to see why.",
-        },
-        EXIT_BLOCK,
-      );
-    }
+  // Missing and encrypted both run as if there were no registry (an encrypted one has no plaintext to read, and
+  // encryption at rest is deprecated). Block, never exit 1, for a registry that exists but cannot be read: Claude Code
+  // treats exit 1 as non-blocking, so a schemaVersion this build cannot read, or a typo, would switch the cross-org
+  // write check off. The messages are fixed text: the parse error names orgs and engagement ids, which must not reach
+  // an agent's transcript.
+  const load = loadRegistryState();
+  if (load.state === "newer-schema") {
+    emitJsonAndExit({ code: "REGISTRY_ERROR", error: NEWER_SCHEMA_ERROR }, EXIT_BLOCK);
   }
+  if (load.state === "unparseable") {
+    emitJsonAndExit(
+      {
+        code: "REGISTRY_ERROR",
+        error:
+          "the registry cannot be read, so the cross-org write check cannot run and the write is refused. " +
+          "Run `repo-aegis status` (or `repo-aegis doctor`) in a terminal to see why.",
+      },
+      EXIT_BLOCK,
+    );
+  }
+  const registry: Registry =
+    load.state === "loaded"
+      ? load.registry
+      : { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
 
   const decision: HookDecision = decideHookAction({
     filePath,

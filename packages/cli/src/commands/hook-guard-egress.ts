@@ -60,13 +60,11 @@ import {
   findDetachedStart,
   detachedStartRefusal,
   isPrintableDestination,
-  loadRegistry,
+  loadRegistryState,
   parseEgressIntents,
   ruleHSkipNote,
   ruleHStatus,
   SHAPE_RULE_CODES,
-  RegistryEncryptedError,
-  RegistryNotFoundError,
   type Destination,
   type DetachedHit,
   type EgressDecision,
@@ -180,32 +178,40 @@ const EMPTY_REGISTRY: Registry = {
  * and a guard that refused to run because a registry was missing would be
  * inert exactly where it is most needed (a fresh machine). So a failure falls
  * back to an empty registry and the condition travels with the decision as
- * `registryState`, which rule h reads (issue #151, decision D4):
+ * `registryState`, which rule h reads (issue #151, decision D4), from the one
+ * core loader:
  *
  *   - no registry file  → `missing`: rule h is skipped;
- *   - encrypted, or a file that does not parse or validate → `unreadable`:
- *     rule h REFUSES any egress that has a destination, because no owner can
- *     be confirmed. Skipping here would let an agent that can write the file
- *     switch rule h off with one bad YAML line.
- *
- * Only {@link RegistryNotFoundError} is "missing". Anything else, including an
- * error this code does not know, is `unreadable`: fail closed.
+ *   - only a ciphertext → `encrypted`: runs as if there were no registry (rule
+ *     h skipped), and the note says so;
+ *   - a file that does not parse or validate (`unparseable`), or was written by
+ *     a newer repo-aegis (`newer-schema`): rule h ASKS (the pre-push hook still
+ *     refuses the push), because no owner can be confirmed. Skipping here would
+ *     let an agent that can write the file switch rule h off with one bad YAML
+ *     line.
  */
 function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistryState; note?: string } {
-  try {
-    return { registry: loadRegistry(), registryState: "loaded" };
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
+  const load = loadRegistryState();
+  switch (load.state) {
+    case "loaded":
+      return { registry: load.registry, registryState: "loaded" };
+    case "missing":
       return { registry: EMPTY_REGISTRY, registryState: "missing" };
-    }
-    return {
-      registry: EMPTY_REGISTRY,
-      registryState: "unreadable",
-      note:
-        err instanceof RegistryEncryptedError
-          ? "registry is encrypted: context rules ran without it, and any publish with a destination is refused until it is decrypted"
-          : "registry could not be read: context rules ran without it, and any publish with a destination is refused until it is repaired",
-    };
+    case "encrypted":
+      return {
+        registry: EMPTY_REGISTRY,
+        registryState: "encrypted",
+        note: "registry is encrypted: context rules and rule h ran without it",
+      };
+    case "unparseable":
+    case "newer-schema":
+      return {
+        registry: EMPTY_REGISTRY,
+        registryState: load.state,
+        note:
+          `registry could not be read (${load.state === "newer-schema" ? "was written by a newer repo-aegis" : "does not parse"}): ` +
+          "any publish with a destination needs a person",
+      };
   }
 }
 
@@ -455,7 +461,11 @@ function planOutcome(
   // (no destination) or a person at the keyboard gets no extra line. No
   // registry contents, ever.
   const skipNote =
-    !ctx.humanPresent && decision.code !== "UNREGISTERED_OWNER_EGRESS" && !SHAPE_RULE_CODES.has(decision.code)
+    !ctx.humanPresent &&
+    decision.code !== "UNREGISTERED_OWNER_EGRESS" &&
+    !SHAPE_RULE_CODES.has(decision.code) &&
+    // An encrypted registry already travels as `registryNote`, so its skip would only repeat it.
+    ctx.ruleH !== "skipped:encrypted"
       ? ruleHSkipNote(ctx.ruleH)
       : null;
   const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);

@@ -40,13 +40,12 @@ import {
   ghCallInfo,
   checkTerminal,
   identityPresence,
-  loadRegistry,
+  loadRegistryState,
   personLoginOf,
   refusal,
   registeredOwners,
   safeDestination,
   statePath,
-  RegistryNotFoundError,
   type ChooseIdentityInput,
   type GhCallTarget,
   type EgressIntent,
@@ -302,11 +301,24 @@ function spawnsGitHere(args: readonly string[]): boolean {
   return false;
 }
 
-function loadPinnedRegistry(home: string): { kind: "none" } | { kind: "unreadable" } | { kind: "ok"; registry: Registry } {
-  try {
-    return { kind: "ok", registry: loadRegistry(join(home, "engagements.yaml")) };
-  } catch (err) {
-    return err instanceof RegistryNotFoundError ? { kind: "none" } : { kind: "unreadable" };
+/**
+ * The registry in the pinned home, by the one core loader. `none` (with a note when it is encrypted: repo-aegis
+ * runs as if there were no registry); `unreadable` for a file that does not parse or a newer schema.
+ */
+function loadPinnedRegistry(
+  home: string,
+): { kind: "none"; note?: string } | { kind: "unreadable" } | { kind: "ok"; registry: Registry } {
+  const load = loadRegistryState(join(home, "engagements.yaml"));
+  switch (load.state) {
+    case "loaded":
+      return { kind: "ok", registry: load.registry };
+    case "missing":
+      return { kind: "none" };
+    case "encrypted":
+      return { kind: "none", note: "the registry is encrypted, so repo-aegis ran as if there were none and no GitHub identity was chosen" };
+    case "unparseable":
+    case "newer-schema":
+      return { kind: "unreadable" };
   }
 }
 
@@ -350,7 +362,7 @@ function decideIdentity(
     const first = chooseIdentity(baseInput(args, intents, [], registry ?? NO_REGISTRY, presence(), home, callerEnv));
     if (first.kind === "refuse") return refuseOutcome(first, home, verb);
   }
-  if (loaded.kind === "none") return { kind: "plain" };
+  if (loaded.kind === "none") return { kind: "plain", ...(loaded.note !== undefined && { note: loaded.note }) };
 
   // Targets: the cwd's remote is read only when the argv would use it.
   const ghRepoEnv = callerEnv["GH_REPO"];
@@ -377,7 +389,7 @@ function decideIdentity(
     if (presence() === "person") return { kind: "plain", note: "the registry could not be read, so no GitHub identity was chosen" };
     const named = targetsInfo();
     if (named.targets.length === 0 && !named.foreignHost) return { kind: "plain" };
-    return refuseUnavailable("the registry in the pinned home could not be read (it is encrypted or damaged; repo-aegis did not change it), so repo-aegis cannot tell whether this owner has a GitHub identity", verb, home, isWrite);
+    return refuseUnavailable("the registry in the pinned home could not be read (it does not parse or validate, or a newer repo-aegis wrote it; repo-aegis did not change it), so repo-aegis cannot tell whether this owner has a GitHub identity", verb, home, isWrite);
   }
   if (!hasMapping) return { kind: "plain" };
 

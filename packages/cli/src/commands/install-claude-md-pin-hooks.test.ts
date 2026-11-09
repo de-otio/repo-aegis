@@ -19,7 +19,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { pinnedHookCommand, type EnforcementPin } from "@de-otio/repo-aegis-core";
+import { isPinnedHookCommand, pinnedHookCommand, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { captureOutput, lastJsonLine, withEnv } from "../_test-utils.js";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { installClaudeMd } from "./install-claude-md.js";
@@ -233,6 +233,8 @@ function runHookCommand(command: string, input: string, env: NodeJS.ProcessEnv):
 }
 
 const GUARD_ARGS = "hook guard-egress --agent claude";
+/** A PATH with no `repo-aegis` on it, so a pin-gone case cannot fall back to a developer's own install. */
+const NO_REPO_AEGIS_PATH = "/usr/bin:/bin";
 const bashCall = (command: string): string =>
   JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command } });
 
@@ -247,7 +249,11 @@ describe("T14: the rendered guard-egress hook command", subprocess, () => {
   it("pinned CLI deleted: exit 2 (not 127), the missing path and the fix on stderr", () => {
     const e = makeEnv("t14-missing-cli");
     const gone = join(tmp, "t14-gone", "dist", "index.js");
-    const r = runHookCommand(pinnedHookCommand({ node: process.execPath, cli: gone }, GUARD_ARGS), bashCall("ls"), hookEnv(e));
+    const r = runHookCommand(
+      pinnedHookCommand({ node: process.execPath, cli: gone }, GUARD_ARGS),
+      bashCall("ls"),
+      hookEnv(e, NO_REPO_AEGIS_PATH),
+    );
     assert.equal(r.status, 2, `stdout=${r.stdout} stderr=${r.stderr}`);
     assert.ok(r.stderr.includes(gone), r.stderr);
     assert.ok(r.stderr.includes("repo-aegis install claude-md"), r.stderr);
@@ -256,7 +262,7 @@ describe("T14: the rendered guard-egress hook command", subprocess, () => {
   it("pinned node deleted: exit 2 with the path and the fix", () => {
     const e = makeEnv("t14-missing-node");
     const gone = join(tmp, "t14-gone-node", "node");
-    const r = runHookCommand(pinnedHookCommand({ node: gone, cli: cliPath }, GUARD_ARGS), bashCall("ls"), hookEnv(e));
+    const r = runHookCommand(pinnedHookCommand({ node: gone, cli: cliPath }, GUARD_ARGS), bashCall("ls"), hookEnv(e, NO_REPO_AEGIS_PATH));
     assert.equal(r.status, 2, r.stderr);
     assert.ok(r.stderr.includes(gone), r.stderr);
     assert.ok(r.stderr.includes("repo-aegis install claude-md"), r.stderr);
@@ -335,5 +341,117 @@ describe("T14: the rendered guard-egress hook command", subprocess, () => {
     const env = hookEnv(e, [bin, process.env["PATH"] ?? ""].join(delimiter));
     const r = runHookCommand(`repo-aegis ${GUARD_ARGS}`, bashCall("git push"), env);
     assert.equal(r.status, 0, "the impostor allowed it");
+  });
+});
+
+describe("the pinned hook command: pin gone, PATH fallback (P1-D)", subprocess, () => {
+  /** Runs `command` through sh -c with a PATH holding a stub `repo-aegis` (or none), and reports what the stub saw. */
+  function runWithStub(
+    label: string,
+    command: string,
+    stubVersion: string | null,
+    stdin = bashCall("ls"),
+  ): { status: number | null; stderr: string; argv: string[]; stdinSeen: string; stubCalled: boolean } {
+    const dir = join(tmp, `fb-${label}-${n++}`);
+    const bin = join(dir, "bin");
+    mkdirSync(bin, { recursive: true });
+    const argvLog = join(dir, "argv.log");
+    const stdinLog = join(dir, "stdin.log");
+    const called = join(dir, "called");
+    if (stubVersion !== null) {
+      writeFileSync(
+        join(bin, "repo-aegis"),
+        `#!/bin/sh\n: > "$STUB_CALLED"\nif [ "$1" = "--version" ]; then printf '%s\\n' "$VER"; exit 0; fi\necho "$*" >> "$ARGV_LOG"\ncat >> "$STDIN_LOG"\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      chmodSync(join(bin, "repo-aegis"), 0o755);
+    }
+    const r = runHookCommand(command, stdin, {
+      PATH: `${bin}:${NO_REPO_AEGIS_PATH}`,
+      HOME: dir,
+      ARGV_LOG: argvLog,
+      STDIN_LOG: stdinLog,
+      STUB_CALLED: called,
+      VER: stubVersion ?? "",
+    });
+    const read = (p: string): string => (existsSync(p) ? readFileSync(p, "utf8") : "");
+    return {
+      status: r.status,
+      stderr: r.stderr,
+      argv: read(argvLog).split("\n").filter(l => l !== ""),
+      stdinSeen: read(stdinLog),
+      stubCalled: existsSync(called),
+    };
+  }
+
+  const goneCli = (label: string): string => join(tmp, `fb-gone-${label}`, "dist", "index.js");
+  const pinned = (label: string, version: string | undefined): string =>
+    pinnedHookCommand({ node: process.execPath, cli: goneCli(label), ...(version !== undefined && { version }) }, GUARD_ARGS);
+
+  for (const have of ["0.14.0", "0.14.1", "1.0.0"]) {
+    it(`a PATH repo-aegis ${have} (not older than the pinned 0.14.0) runs the hook with the payload on stdin, after a WARNING`, () => {
+      const payload = bashCall("ls");
+      const r = runWithStub(`ok-${have}`, pinned(`ok-${have}`, "0.14.0"), have, payload);
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(r.argv, [GUARD_ARGS]);
+      assert.equal(r.stdinSeen, payload, "the tool call reached the fallback unread by --version");
+      assert.match(r.stderr, /^repo-aegis: WARNING: the pinned enforcement binary is missing or not usable \(.*index\.js\); running .*\/bin\/repo-aegis /m);
+      assert.ok(r.stderr.includes(`(${have}, pinned 0.14.0) instead. Re-pin it by running: repo-aegis install claude-md`), r.stderr);
+    });
+  }
+
+  for (const have of ["0.13.9", "0.9.0"]) {
+    it(`an older PATH repo-aegis ${have} is refused with exit 2, naming both versions; the stub never got the hook`, () => {
+      const r = runWithStub(`older-${have}`, pinned(`older-${have}`, "0.14.0"), have);
+      assert.equal(r.status, 2, r.stderr);
+      assert.ok(r.stderr.includes(`is ${have}, older than the pinned 0.14.0`), r.stderr);
+      assert.ok(r.stderr.includes("Install 0.14.0 or later, then run: repo-aegis install claude-md"), r.stderr);
+      assert.ok(r.stderr.startsWith("repo-aegis: hook blocked: "), r.stderr);
+      assert.deepEqual(r.argv, []);
+    });
+  }
+
+  it("no repo-aegis on PATH is refused with exit 2 (not 127) and says so", () => {
+    const r = runWithStub("none", pinned("none", "0.14.0"), null);
+    assert.equal(r.status, 2, r.stderr);
+    assert.ok(r.stderr.includes("no repo-aegis is on PATH"), r.stderr);
+    assert.ok(r.stderr.includes("Re-pin it by running: repo-aegis install claude-md"), r.stderr);
+  });
+
+  for (const [i, version] of ["0.14.0-rc.1", "v0.14.0", "0.14", "", "1234567890.0.0", "9.9.9-secret-token"].entries()) {
+    it(`a PATH repo-aegis printing ${JSON.stringify(version)} is refused with exit 2 and never echoed`, () => {
+      const r = runWithStub(`unparsable-${i}`, pinned(`unparsable-${i}`, "0.14.0"), version);
+      assert.equal(r.status, 2, r.stderr);
+      assert.ok(r.stderr.includes("did not report a plain MAJOR.MINOR.PATCH version (pinned 0.14.0)"), r.stderr);
+      assert.ok(!r.stderr.includes("secret-token"), r.stderr);
+      assert.deepEqual(r.argv, []);
+    });
+  }
+
+  it("a pin installed without a recorded version never falls back, however new the PATH repo-aegis is", () => {
+    const r = runWithStub("noversion", pinned("noversion", undefined), "99.0.0");
+    assert.equal(r.status, 2, r.stderr);
+    assert.ok(r.stderr.includes("installed without a recorded version"), r.stderr);
+    assert.deepEqual(r.argv, []);
+    assert.equal(r.stubCalled, false, "PATH is not even asked");
+  });
+
+  it("a valid pin never looks at PATH: the stub is not called, not even with --version", () => {
+    const dir = join(tmp, `fb-valid-${n++}`);
+    mkdirSync(dir, { recursive: true });
+    const cli = join(dir, "stub-cli.cjs");
+    writeFileSync(cli, `process.stdout.write("ran:" + process.argv.slice(2).join(" "));\n`);
+    const r = runWithStub("valid", pinnedHookCommand({ node: process.execPath, cli, version: "0.14.0" }, GUARD_ARGS), "99.0.0");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stubCalled, false);
+    assert.ok(!r.stderr.includes("WARNING"), r.stderr);
+  });
+
+  it("the command still reads as a pinned hook command to `doctor` and `install` (starts `if [ -f `, ends `; exit 2`)", () => {
+    const c = pinned("shape", "0.14.0");
+    assert.ok(c.startsWith("if [ -f "));
+    assert.ok(c.endsWith("; exit 2"));
+    assert.ok(isPinnedHookCommand(c, "guard-egress"));
+    assert.ok(c.indexOf("__ra_version='0.14.0'") > c.indexOf("; fi; "), "the version sits after the pinned exec");
   });
 });

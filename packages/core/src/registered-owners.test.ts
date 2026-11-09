@@ -43,12 +43,16 @@ describe("ruleHStatus / ruleHSkipNote", () => {
     assert.equal(ruleHStatus("missing", REG), "skipped:missing");
     assert.equal(ruleHStatus("loaded", none), "skipped:no-owners");
     assert.equal(ruleHStatus("loaded", REG), "applied");
-    assert.equal(ruleHStatus("unreadable", none), "applied", "unreadable refuses, it does not skip");
+    assert.equal(ruleHStatus("unparseable", none), "applied", "unparseable refuses, it does not skip");
+    assert.equal(ruleHStatus("newer-schema", none), "applied", "newer-schema asks or refuses, it does not skip");
+    assert.equal(ruleHStatus("encrypted", REG), "skipped:encrypted", "encrypted runs as if there were no registry");
   });
 
   it("a skip note says which state applied and never carries registry contents", () => {
     assert.match(ruleHSkipNote("skipped:missing")!, /no registry file exists/);
     assert.match(ruleHSkipNote("skipped:no-owners")!, /declares no owners/);
+    assert.match(ruleHSkipNote("skipped:encrypted")!, /the registry is encrypted, so repo-aegis runs as if there were none/);
+    assert.match(ruleHSkipNote("skipped:encrypted")!, /`repo-aegis registry decrypt --identity <key>`/);
     assert.equal(ruleHSkipNote("applied"), null);
   });
 });

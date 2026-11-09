@@ -2,6 +2,8 @@
 
 Status: shipped in v0.11.1 (#158) (historical: the branch `fix/pin-enforcement-binary` no longer exists). The text below is the spec as written before the build.
 
+Note (0.14.0): D2's strict fail-closed is replaced by a **version-gated PATH fallback**. When the pinned node or CLI is gone, the git hooks, the shim and the Claude Code hook commands run the `repo-aegis` on `PATH` only if its `--version` is at least the version recorded next to the pin (`__ra_version=`), after a warning, and refuse otherwise (nothing on `PATH`, older, a version that is not plain `MAJOR.MINOR.PATCH`, or a pin with no recorded version). The fail-open and shadowing concerns below still hold: `PATH` is never consulted while the pin works. See `doc/configuration.md`, "The pinned enforcement binary".
+
 ## 1. Problem
 
 The generated git hooks (`packages/core/src/hook-scripts.ts`: `PRE_COMMIT_SCRIPT`, `PRE_PUSH_SCRIPT`) and the `gh` shim (`packages/cli/src/commands/shim-script.ts`: `GH_SHIM_SCRIPT`) run the CLI by **name**: `command -v repo-aegis`, then `repo-aegis check …` / `repo-aegis egress-check …`. Three consequences:

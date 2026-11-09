@@ -1373,6 +1373,59 @@ describe("M1: verbs that read tokens are refused without a person whatever the r
   });
 });
 
+describe("the registry's other states: encrypted is none, a newer schema is unreadable (P1-D)", () => {
+  /** The registry is only a ciphertext in the pinned home. */
+  function encryptedWorld(): World {
+    const w = makeWorld();
+    rmSync(join(w.home, "engagements.yaml"));
+    writeFileSync(join(w.home, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    return w;
+  }
+
+  it("an encrypted registry is read as none: an agent READ naming an owner is a plain call, with one note and no refusal", () => {
+    const w = encryptedWorld();
+    const r = run(w, READ, { presence: "agent", plainPath: true });
+    assert.equal(r.status, 0, r.err);
+    assert.equal(refusalCode(r), undefined);
+    assert.deepEqual(mainCalls(r), [READ.join(" ")]);
+    const note = r.err.split("\n").filter(l => l.includes("registry is encrypted"));
+    assert.deepEqual(note, [
+      "repo-aegis gh: the registry is encrypted, so repo-aegis ran as if there were none and no GitHub identity was chosen; proceeding",
+    ]);
+  });
+
+  it("an encrypted registry is not an 'unreadable' one: a call that names no owner runs without the unreadable-registry text", () => {
+    const w = encryptedWorld();
+    const r = run(w, ["api", "user"], { presence: "agent", plainPath: true });
+    assert.equal(r.status, 0, r.err);
+    assert.doesNotMatch(r.err, /could not be read/);
+  });
+
+  it("an encrypted registry does not unlock the token verbs: `gh auth token` is still GH_AUTH_NEEDS_HUMAN for an agent", () => {
+    const w = encryptedWorld();
+    const r = run(w, ["auth", "token"], { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_AUTH_NEEDS_HUMAN", r.err);
+    assert.deepEqual(r.ghArgv, []);
+  });
+
+  it("a registry from a newer schema (99): an agent WRITE naming an owner is refused and gh does not run, as an unparseable one is", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.home, "engagements.yaml"), "schemaVersion: 99\nengagements: []\n");
+    const r = run(w, WRITE, { presence: "agent" });
+    assert.ok(["UNREGISTERED_OWNER_EGRESS", "GH_IDENTITY_UNAVAILABLE"].includes(refusalCode(r) ?? ""), r.err);
+    assert.equal(r.status, 2);
+    assert.deepEqual(r.ghArgv, []);
+  });
+
+  it("a registry from a newer schema (99): an agent READ runs as the active account with the unreadable-registry warning", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.home, "engagements.yaml"), "schemaVersion: 99\nengagements: []\n");
+    const r = run(w, READ, { presence: "agent", plainPath: true });
+    assert.equal(r.status, 0, r.err);
+    assert.match(r.err, /the registry in the pinned home could not be read \(it does not parse or validate, or a newer repo-aegis wrote it/);
+  });
+});
+
 describe("M5: a fault in the egress parse on a mapped owner", () => {
   const fault: GhCommandDeps["evaluate"] = () => ({ kind: "fault", message: "the parser exploded" });
 

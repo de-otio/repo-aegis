@@ -26,6 +26,14 @@ import {
   type TrustBoundary,
 } from "@de-otio/repo-aegis-core";
 
+/**
+ * The `REGISTRY_ERROR` text of the write hooks when the registry was written by a newer repo-aegis than the one
+ * running them: fixed text (the loader's message can name orgs), and the way out is an upgrade, not a repair.
+ */
+export const NEWER_SCHEMA_ERROR =
+  "the registry was written by a newer repo-aegis than the one this hook runs, so the cross-org write check cannot " +
+  "run and the write is refused. A person upgrades repo-aegis and runs `repo-aegis install claude-md`.";
+
 export type HookDecision =
   | HookScanDecision
   | HookScanWithWarningDecision
