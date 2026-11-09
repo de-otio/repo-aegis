@@ -18,6 +18,7 @@ that, and against two standing rules:
 
 | # | Goal | From analysis |
 |---|---|---|
+| G0 | An agent with a valid approval can push a branch and open a PR from a default (sandboxed) Claude Code session with no further human steps | Observed 2026-11-09, Phase U |
 | G1 | The egress guard runs in the agent hosts people now use: add Cursor and Copilot CLI | C2 |
 | G2 | Stop growing commodity secret detection; document a companion scanner and prove the two coexist | C1 |
 | G3 | Freeze the identity layer's scope and make its failure mode diagnosable | C3 |
@@ -66,6 +67,48 @@ captured stdin/stdout samples saved as test fixtures under
 
 Exit criterion: each fact above is either confirmed with a fixture or marked
 "unsupported", and the affected goal is cut.
+
+### Phase U: the agent publish path must work (G0) — before Phase 1
+
+**Observed 2026-11-09.** Opening one docs PR from an agent session took
+five refusals and four human round-trips, with an active 12-hour
+account-bound approval (`repo-aegis approve 'de-otio/*' --ttl 12h`):
+
+| # | Step | Refusal | Cause |
+|---|---|---|---|
+| 1 | `gh repo view` (read) | `GH_IDENTITY_UNAVAILABLE` | the mint failed; a read was refused anyway |
+| 2 | `git push origin <branch>` | `AGENT_PUSH_NEEDS_APP` | the repo's own SSH remote is unusable for agents |
+| 3 | `git push https://…` | `AGENT_PUSH_CHAIN_UNREADABLE` | the default Claude Code sandbox blocks process-list reads; the message does not mention the sandbox |
+| 4 | same push, sandbox off | succeeded | needed explicit human permission |
+| 5 | `gh pr create` | `GH_IDENTITY_ARG_UNSAFE` | a repo-local `core.hooksPath` that `install hooks --local` writes (`install-hooks.ts:45`), here equal to the global value |
+
+Why this phase comes first:
+
+- **Self-inflicted.** Refusals 2 and 5 fire on state that repo-aegis's own
+  installer and onboarding create.
+- **Fails in the default agent environment.** Refusal 3 makes every agent
+  HTTPS push in a sandboxed session need either the sandbox off or a person.
+- **The approval barely helps.** It lifts rule g only; refusals 1, 3 and 5
+  say "No approval covers this", so a person who just approved still gets
+  several more round-trips.
+- **Out of the threat model.** Refusals 3 and 5 defend against an agent
+  deliberately exfiltrating a token, which §0 puts out of scope. Every
+  more host added in Phase 1 is another place to hit this.
+
+Items, smallest first:
+
+| # | Change | Kind | Decision needed |
+|---|---|---|---|
+| U1 | Accept a repo-local `core.hooksPath` that resolves to repo-aegis's own pinned hooks directory (the same check `doctor` uses for the pin). Stop `install hooks` from writing a local value equal to the global one; `doctor` reports such a duplicate as removable | code | no |
+| U2 | `AGENT_PUSH_CHAIN_UNREADABLE`: when the process list is unreadable, say that a sandbox is the likely cause and give the two remedies (run outside the sandbox, or a person runs the push). Spike: can the helper confirm git's remote helper without a process list (for example from what git passes to the helper)? Unverified | code + spike | no |
+| U3 | For an owner with an App identity for agents, `doctor` and `classify` flag an SSH `origin` and offer `git remote set-url --push origin https://…` (person-run) | code | no |
+| U4 | A read-only `gh` call whose identity can't be minted falls through to the active account with a warning instead of refusing (this answers the open question in Phase 3 item 3) | policy | **owner** |
+| U5 | An active approval bound to an account covers the deliberate-bypass refusals (`AGENT_PUSH_CHAIN_UNREADABLE`, `GH_IDENTITY_ARG_UNSAFE`) for its scope and lifetime, not just rule g. Shape, cross-org and payload rules still apply | policy | **owner** |
+| U6 | Acceptance test: a fixture session with a valid approval, in a sandbox-like environment where `ps` fails, pushes a branch over HTTPS and opens a PR (gh stubbed) with no further human step. It fails on v0.12.2 and must pass after U1–U5 | test | no |
+| U7 | Refusal-text audit: every "report this to your human" refusal names the setting or environment that caused it, says whether repo-aegis created it, and says whether removing it is safe | docs + code | no |
+
+Exit criterion: U6 passes, and the 2026-11-09 sequence above replays with at
+most one human step (the approval).
 
 ### Phase 1: egress guard for Cursor and Copilot CLI (G1)
 
@@ -136,7 +179,8 @@ re-run against the docs' instructions as written.
    is reported as a timeout, git-credential audits failed mints, and
    doctor groups `OWNER_IDENTITY_UNMAPPED`. Drop task T3c unless a gap
    remains after that release.
-3. **Open question for the owner (decide before coding):** should a read-only
+3. **Open question for the owner (decide before coding; now Phase U item
+   U4):** should a read-only
    `gh` call (for example `gh repo view`) that cannot mint its identity fail
    closed as today, or fall through to the active account with a warning?
    Reads publish nothing, but the wrong identity can still see a private repo
@@ -196,11 +240,20 @@ public egress). Agents stop at an `H` and report; they never work around one.
 
 | ID | Task | Phase | Model | Depends on | Output |
 |---|---|---|---|---|---|
+| TU6 | Acceptance test for the agent publish path (Phase U item U6), written first; it must fail on v0.12.2 | U | Sonnet | none | failing test, committed with a skip marker that names Phase U |
+| TU1 | Accept repo-aegis's own pinned hooks path in the `GH_IDENTITY_ARG_UNSAFE` check; `install hooks` stops writing a duplicate local value; `doctor` reports an existing duplicate | U | Sonnet | none | code plus tests |
+| TU2 | Sandbox-aware `AGENT_PUSH_CHAIN_UNREADABLE` text, plus a spike on confirming git's remote helper without a process list | U | Sonnet | none | code plus tests; spike findings in §5 |
+| TU3 | `doctor`/`classify` flag an SSH `origin` for owners with an App identity and print the person-run `set-url --push` line | U | Sonnet | TU1 merged (both touch doctor) | code plus tests |
+| TU7 | Audit the refusal texts that say "report this to your human" (U7) | U | Sonnet | TU1, TU2 | text changes plus tests that pin each message's cause line |
+| TUm | Decision memo for U4 (read fall-through) and U5 (approval covers the deliberate-bypass refusals): what each lets through, against the §0 threat model, with a recommendation. Replaces T3a | U | Opus | none | memo in §5 |
+| HU | Decide U4 and U5 | U | owner | TUm | decision recorded in §5 |
+| TU45 | Build whatever HU decides for U4 and U5 | U | Sonnet | HU | code plus tests |
+| RU | Security review of TU1, TU2 and TU45: no token leaves the process and no hook runs from a non-pinned path; an approval cannot widen past its account and scope | U | Fable (`security-reviewer`) | TU1, TU2, TU45 | findings |
 | T0a | Hook facts for Cursor, Copilot CLI, Antigravity CLI and Codex (Phase 0 items 1–4): read primary docs, write a stdin-dumping probe hook, capture fixtures | 0 | Sonnet | none | §5 findings, fixtures under `__fixtures__/hosts/` |
 | H1 | Trigger one allowed and one egress command in each host with the probe hook installed (if the agent can't drive the host itself) | 0 | owner | T0a probe ready | raw stdin captures |
 | T0b | ggshield coexistence in a scratch `HOME`: both installers, both hooks firing in Claude Code, no overwritten entries. If a GitGuardian API key is needed, stop and ask; do not create a credential | 0 | Sonnet | none | §5 findings |
-| T3a | Decision memo for the read-only `gh` fallback question (Phase 3 item 3): options, what each leaks, recommendation | 3 | Opus | none | short memo in §5 |
-| H2 | Decide T3a | 3 | owner | T3a | decision recorded in §5 |
+| T3a | ~~Decision memo for the read-only `gh` fallback~~ folded into TUm | 3 | — | — | — |
+| H2 | ~~Decide T3a~~ folded into HU | 3 | — | — | — |
 | T3b | Non-goals section in `doc/plan-owner-identity.md` (text in Phase 3 item 1) | 3 | Haiku | none | doc edit |
 | T4a | Locate the background data-leak guide, prepare a publishable version, `repo-aegis check --path` plus a manual customer-string read | 4 | Sonnet | none | draft ready for H3 |
 | T4b | `package.json` keywords; draft GitHub topics and description (do not apply) | 4 | Haiku | none | diff plus proposed `gh repo edit` line |
@@ -222,15 +275,21 @@ public egress). Agents stop at an `H` and report; they never work around one.
 ### 3.3 Waves
 
 ```
-Wave 1 (start together, up to 4 agents):
-  T0a  T0b  T3a  T4a            ← Sonnet, Sonnet, Opus, Sonnet
-  T3b  T4b  T5                  ← Haiku, in one agent, doc-only, no tests
-  owner: H1 (when T0a's probe is ready), H2 (when T3a lands)
+Wave 0 (Phase U, first; up to 4 agents):
+  TU6  TU1  TU2  TUm            ← Sonnet, Sonnet, Sonnet, Opus
+  then TU3 (after TU1), TU7 (after TU1 + TU2)
+  owner: HU (when TUm lands) → TU45 (Sonnet) → RU (Fable)
+  exit: TU6 passes and the 2026-11-09 sequence replays with one human step
 
-Wave 2 (after T0a + H1):
+Wave 1 (research and docs; may overlap Wave 0, as nothing here touches code):
+  T0a  T0b  T4a                 ← Sonnet, Sonnet, Sonnet
+  T3b  T4b  T5                  ← Haiku, in one agent, doc-only, no tests
+  owner: H1 (when T0a's probe is ready)
+
+Wave 2 (after T0a + H1, and after Wave 0's exit):
   T1a                           ← Opus spec, then Sonnet refactor (serial: everything builds on it)
   T2   (after T0b)              ← Sonnet, parallel with T1a
-  T3c  (after H2)               ← Sonnet, parallel with T1a
+  T3c  (only if a gap remains)  ← Sonnet, parallel with T1a
 
 Wave 3 (after T1a merges):
   T1b  T1c                      ← two Sonnet agents in parallel, separate worktrees and modules
@@ -240,8 +299,13 @@ Wave 4 (reviews, in parallel):
   R1 (Opus)  R2 (Fable)  R3 (Sonnet)  → builders fix → F
 ```
 
-Critical path: T0a → H1 → T1a → T1b/T1c → T1e/T1f → R1/R2 → F. Everything
-else fits beside it. Phase 4 needs the owner (H3) and runs on its own clock.
+Critical path: TUm → HU → TU45 → RU (Wave 0 exit) → T1a → T1b/T1c →
+T1e/T1f → R1/R2 → F, with T0a → H1 running beside Wave 0. Phase 4 needs the
+owner (H3) and runs on its own clock.
+
+Why Wave 0 gates Phase 1: every host Phase 1 adds is another session that
+hits the broken publish path. Fixing the path first means the new hosts
+arrive usable.
 
 Why T1a stays serial: the existing claude/codex/gemini handling sits in
 one file. Building two adapters against it in parallel would conflict.
@@ -273,7 +337,8 @@ files.
 
 | Wave | Wall-clock | Owner time |
 |---|---|---|
-| 1 | half a day | H1 about 15 min, H2 about 10 min |
+| 0 (Phase U) | 1 to 1.5 days | HU about 15 min |
+| 1 | half a day | H1 about 15 min |
 | 2 | half a day | none |
 | 3 | 1 day | none |
 | 4 | half a day plus fixes | merge approvals |
