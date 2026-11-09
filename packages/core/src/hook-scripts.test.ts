@@ -347,6 +347,8 @@ function runFallback(
   pin: EnforcementPin,
   stubVersion: string | null,
   stdin = `refs/heads/main ${LOCAL_SHA} refs/heads/main ${ZERO}\n`,
+  /** The exit status of `stub --version` (the version is still printed first). */
+  versionExit = 0,
 ): FallbackRun {
   const dir = join(tmp, `fb-${label}`);
   const bin = join(dir, "bin");
@@ -357,7 +359,7 @@ function runFallback(
     const stub = join(bin, "repo-aegis");
     writeFileSync(
       stub,
-      `#!/bin/sh\n: > "$STUB_CALLED"\nif [ "$1" = "--version" ]; then printf '%s\\n' "$VER"; exit 0; fi\necho "$*" >> "$ARGV_LOG"\nexit 0\n`,
+      `#!/bin/sh\n: > "$STUB_CALLED"\nif [ "$1" = "--version" ]; then printf '%s\\n' "$VER"; exit "$VER_EXIT"; fi\necho "$*" >> "$ARGV_LOG"\nexit 0\n`,
       { mode: 0o755 },
     );
     chmodSync(stub, 0o755);
@@ -375,6 +377,7 @@ function runFallback(
       ARGV_LOG: log,
       STUB_CALLED: called,
       VER: stubVersion ?? "",
+      VER_EXIT: String(versionExit),
       REPO_AEGIS_HOME: join(dir, "home"),
     },
   });
@@ -468,6 +471,21 @@ describe("pre-push script: pin gone, PATH fallback", () => {
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stubCalled, false, "the PATH stub ran");
     assert.ok(!r.stderr.includes("WARNING"), r.stderr);
+  });
+
+  it("a PATH repo-aegis that prints a valid, new-enough version but exits non-zero from --version is refused as not a version", () => {
+    const r = runFallback("version-exit", "pre-push", gonePin("version-exit"), "9.9.9", undefined, 1);
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes("did not report a plain MAJOR.MINOR.PATCH version (pinned 0.14.0)"), r.stderr);
+    assert.deepEqual(r.argv, [], "the stub never got `check`");
+  });
+
+  it("only the first line of --version counts: a valid first line passes, a blank first line does not", () => {
+    const ok = runFallback("first-line-ok", "pre-push", gonePin("first-line-ok"), "0.14.0\nbuilt by someone");
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.ok(!ok.stderr.includes("built by someone"), "the rest of the output is never echoed");
+    const blank = runFallback("first-line-blank", "pre-push", gonePin("first-line-blank"), "\n0.14.0");
+    assert.equal(blank.status, 1, blank.stderr);
   });
 
   it("the fallback does not eat git's ref list: --version runs with stdin closed", () => {

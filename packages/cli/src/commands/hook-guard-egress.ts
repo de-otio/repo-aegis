@@ -74,6 +74,7 @@ import {
   type RuleHStatus,
 } from "@de-otio/repo-aegis-core";
 import { currentHumanPresent } from "../human-presence.js";
+import { ENCRYPTED_REGISTRY_NOTICE } from "./hook-policy.js";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
 import { adapterFor, type HookVerdict, type HostAdapter } from "./hook-hosts/index.js";
 
@@ -104,13 +105,26 @@ function ghShimOnPath(env: NodeJS.ProcessEnv): boolean | undefined {
 }
 
 /**
+ * The pinned-enforcement-binary fallback (`pinnedHookCommand`) exports `REPO_AEGIS_PIN_FALLBACK=1` to the
+ * `repo-aegis` it falls back to. It only ever adds a notice, so an agent that sets it gains nothing.
+ */
+export const PIN_FALLBACK_NOTICE =
+  "repo-aegis: the pinned enforcement binary is missing or not usable, so this hook ran the repo-aegis found on PATH " +
+  "(it is at least as new as the pinned version); re-pin it by running: repo-aegis install claude-md";
+
+function withFallbackNotice(verdict: HookVerdict): HookVerdict {
+  if (verdict.action !== "allow" || process.env["REPO_AEGIS_PIN_FALLBACK"] !== "1") return verdict;
+  return { ...verdict, notice: [verdict.notice, PIN_FALLBACK_NOTICE].filter(n => n !== undefined).join(" ") };
+}
+
+/**
  * Print the adapter's rendering of `verdict` and exit with its code. The one
  * place this hook writes to stdout: every decision goes through the host
  * adapter, so no code path here can print a host shape (or a rewritten
  * command) behind the adapter's back.
  */
 function emit(adapter: HostAdapter, verdict: HookVerdict): never {
-  const out = adapter.render(verdict);
+  const out = adapter.render(withFallbackNotice(verdict));
   if (out.stdout !== "") process.stdout.write(out.stdout);
   process.exit(out.exitCode);
 }
@@ -409,7 +423,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   // `error` verdict through the adapter (the host's fail-open answer), never
   // an uncaught exception, which commander turns into exit 1 (and Copilot
   // fails CLOSED on exit 1). The outcome is computed first and emitted after.
-  const outcome = outcomeOrError(decision, { registryNote, ruleH, humanPresent });
+  const outcome = outcomeOrError(decision, { registryNote, ruleH, humanPresent, encrypted: ruleH === "skipped:encrypted" });
   if (outcome.stderr !== undefined) process.stderr.write(outcome.stderr);
   emit(adapter, outcome.verdict);
 }
@@ -441,6 +455,8 @@ interface OutcomeContext {
   registryNote: string | undefined;
   ruleH: RuleHStatus;
   humanPresent: boolean;
+  /** The registry is encrypted (read as none): an allow carries a notice, because rule h and the org boundaries are off. */
+  encrypted?: boolean;
 }
 
 function planOutcome(
@@ -449,8 +465,13 @@ function planOutcome(
 ): Outcome {
   let { registryNote } = ctx;
   if (decision.action === "allow") {
-    if (decision.approval !== undefined) return { verdict: { action: "allow", reason: recordApprovalUse(decision, "hook guard-egress") } };
-    return { verdict: { action: "allow" } };
+    // An allow while the registry is encrypted says so: rule h and the engagement org boundaries are off, and the
+    // person would otherwise see nothing (the hosts drop exit-0 stderr).
+    const notice = ctx.encrypted === true ? { notice: ENCRYPTED_REGISTRY_NOTICE } : {};
+    if (decision.approval !== undefined) {
+      return { verdict: { action: "allow", reason: recordApprovalUse(decision, "hook guard-egress"), ...notice } };
+    }
+    return { verdict: { action: "allow", ...notice } };
   }
 
   // Rule h's own refusal already says the registry could not be read and how

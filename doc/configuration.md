@@ -431,6 +431,20 @@ says `REGISTRY_ENCRYPTED`). Marker scanning (`_always` and the engagement marker
 files) is not affected. `registry decrypt --identity <key>` brings the registry
 back; a person runs it.
 
+**What an encrypted registry quietly widens.** With no registry, an engagement
+has no `githubOrgs`, so the cross-org boundary collapses to the repository's own
+`origin` org. Two engagements under **one** org (say, two customers hosted in the
+same GitHub org) stop being separate boundaries: a write or push from one
+engagement's checkout into the other's is no longer a cross-org event, and
+nothing refuses it. Rule h is off at the same time, so an unregistered owner is
+not refused either. To keep this from being silent, every layer says so: the
+write hooks (`check-write`, `scan-after-write`) and the agent's egress hook show
+the person a one-line notice as the JSON `systemMessage` (Claude Code drops
+stderr on exit 0), once per call; pre-push prints it on stderr once per push;
+`doctor` warns `REGISTRY_ENCRYPTED`. And because an agent must not be able to put
+the machine into this state, `registry encrypt` refuses unless a person's
+terminal is attached (`REGISTRY_ENCRYPT_NEEDS_TTY`).
+
 The `ask` on an unreadable registry is not a way through for a push: the pre-push
 hook refuses until the registry can be read. When a newer repo-aegis has written
 the registry (schema skew), upgrade repo-aegis, then run `repo-aegis install hooks`
@@ -473,6 +487,11 @@ it refuses:
 | first line of `--version` is not exactly `MAJOR.MINOR.PATCH` (a prerelease, `v0.14.0`, empty, a crash) | refuse; what it printed is never echoed |
 | at least as new | run it, with a warning |
 | (the pin has no recorded version: an install from before 0.14.0) | refuse, and say so; no fallback |
+
+When a Claude Code hook runs through the fallback, the `repo-aegis` it runs shows
+the person a one-line notice (the JSON `systemMessage`, on every answer, an allow
+included, because stderr is dropped on exit 0); the fallback tells it so with
+`REPO_AEGIS_PIN_FALLBACK=1`, which only ever adds that notice.
 
 Refusals exit as before: `pre-commit` and `pre-push` exit 1, the `gh` shim exits 2
 for any call but `--version`, `help` and `completion`, and every Claude Code hook

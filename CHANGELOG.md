@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says "upgrade repo-aegis, then re-run `install hooks` and `install claude-md`" for a newer
   schema instead of "decrypt or repair". `doctor` reports a newer-schema registry as
   `REGISTRY_UNREADABLE` with the upgrade fix.
+- **`registry encrypt` is person-only** (`REGISTRY_ENCRYPT_NEEDS_TTY`): an encrypted registry is read
+  as none, which collapses every engagement's org boundary to the repository's origin org and turns
+  rule h off, so an agent must not be able to do it. While the registry is encrypted the write hooks
+  and the agent's egress hook (allows included) show the person a one-line notice as the JSON
+  `systemMessage`; the egress hook also shows a notice when it ran through the pin fallback.
+  `approve` now has a sentence of its own for an encrypted registry ("rule h is off while the
+  registry is encrypted") instead of "encrypted or damaged".
 - The write hooks (`hook check-write`, `hook scan-after-write`) report a registry from a newer
   repo-aegis as `REGISTRY_ERROR` with its own text ("a person upgrades repo-aegis and runs
   `repo-aegis install claude-md`"). Both now use fixed text for an unparseable registry: the

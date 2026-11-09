@@ -579,7 +579,30 @@ describe("hook check-write: an unreadable registry blocks (exit 2), never fails 
       input: JSON.stringify({ tool_input: { file_path: join(tmp, "x") }, cwd: tmp }),
     });
     assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
-    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /REGISTRY_ENCRYPTED|encrypted/);
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /REGISTRY_ENCRYPTED/);
+    // Claude Code drops stderr on exit 0, so the person sees the notice only as the JSON systemMessage: once.
+    const j = JSON.parse(r.stdout) as { systemMessage?: string };
+    assert.equal(
+      j.systemMessage,
+      "repo-aegis: rule h and engagement org boundaries are off while the registry is encrypted; run `repo-aegis registry decrypt --identity <key>` (a person runs this).",
+    );
+    assert.equal(r.stdout.split("systemMessage").length - 1, 1, "once per call");
+    assert.equal(r.stderr, "");
+  });
+
+  it("a readable registry (or none) prints nothing on an allowed write: the notice is for the encrypted state only", () => {
+    const env = setupAegisHome("ck-no-notice");
+    const none = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: join(tmp, "x") }, cwd: tmp }),
+    });
+    assert.equal(none.code, 0);
+    assert.equal(none.stdout, "");
+    writeRegistry(env.aegisHome, "schemaVersion: 2\nengagements: []\n");
+    const loaded = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: join(tmp, "x") }, cwd: tmp }),
+    });
+    assert.equal(loaded.code, 0);
+    assert.equal(loaded.stdout, "");
   });
 
   it("a missing registry still passes (nothing to protect yet)", () => {

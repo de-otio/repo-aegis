@@ -357,9 +357,37 @@ describe("hook scan-after-write: the registry's state", { skip: !SUBPROCESS_TEST
     });
     assert.equal(r.code, 1, `${r.stdout}${r.stderr}`);
     assert.doesNotMatch(`${r.stdout}${r.stderr}`, /REGISTRY_ENCRYPTED|REGISTRY_ERROR/);
-    const json = r.json as { hits: Array<{ engagement: string }> };
+    const json = r.json as { hits: Array<{ engagement: string }>; systemMessage?: string };
     assert.equal(json.hits.length, 1);
     assert.equal(json.hits[0]!.engagement, "_always");
+    assert.match(json.systemMessage ?? "", /rule h and engagement org boundaries are off while the registry is encrypted; run `repo-aegis registry decrypt/);
+    assert.equal(`${r.stdout}${r.stderr}`.split("systemMessage").length - 1, 1, "once per call");
+  });
+
+  it("an encrypted registry, a clean write (exit 0): the notice is the JSON systemMessage on stdout, which the person sees", () => {
+    const env = setupAegisHome("scan-encrypted-clean");
+    writeFileSync(join(env.aegisHome, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const file = join(tmp, "scan-encrypted-clean.txt");
+    writeFileSync(file, "innocuous");
+    const r = runCli(env.aegisHome, tmp, ["hook", "scan-after-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    const json = JSON.parse(r.stdout) as { systemMessage?: string; status?: string };
+    assert.match(json.systemMessage ?? "", /engagement org boundaries are off while the registry is encrypted/);
+    assert.equal(r.stderr, "");
+  });
+
+  it("a readable registry adds no systemMessage", () => {
+    const env = setupAegisHome("scan-no-notice");
+    writeRegistry(env.aegisHome, "schemaVersion: 2\nengagements: []\n");
+    const file = join(tmp, "scan-no-notice.txt");
+    writeFileSync(file, "innocuous");
+    const r = runCli(env.aegisHome, tmp, ["hook", "scan-after-write"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(r.stdout, /systemMessage/);
   });
 
   it("a registry from a newer schema (99): REGISTRY_ERROR, exit 2, the newer-schema text", () => {

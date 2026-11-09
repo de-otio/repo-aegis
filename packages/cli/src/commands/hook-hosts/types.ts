@@ -48,6 +48,9 @@ export type ParsedHookInput =
  * - `allow` without a reason: the common case; nothing to say.
  * - `allow` with a reason: a human approval stood in for a person; the reason
  *   names it, on the channel the host shows decision reasons on.
+ * - `allow` with a `notice`: nothing is wrong with the command, but the person should know something about the
+ *   guard (the registry is encrypted, so rule h is off; the pin is gone and the PATH fallback ran). Rendered only
+ *   by an adapter whose host shows a `systemMessage` on exit 0 (Claude Code); the others drop it, silently.
  * - `ask`: a person should confirm. The core only produces it for an adapter
  *   with `hasAsk: true`; an adapter without one must still render it as a
  *   deny (never as an allow) should one reach it.
@@ -57,7 +60,7 @@ export type ParsedHookInput =
  *   a host that fails closed on a non-zero exit needs exit 0 here.
  */
 export type HookVerdict =
-  | { action: "allow"; reason?: string }
+  | { action: "allow"; reason?: string; notice?: string }
   | { action: "ask"; reason: string }
   | { action: "deny"; reason: string }
   | { action: "error" };

@@ -12,7 +12,7 @@ import {
   type SkippedFile,
   type Registry,
 } from "@de-otio/repo-aegis-core";
-import { decideHookAction, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
+import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import { parseHookWriteFields, readHookStdin, WRITE_HOOK_INPUT_MAX_BYTES } from "./hook-input.js";
 
 interface HookOptions {
@@ -92,8 +92,18 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   // Cursor's `afterFileEdit` has no output schema and cannot block: say so on every non-zero answer, so
   // nobody reads a hit as a prevented write.
   // (The explicit `never` annotation on the binding is what keeps control-flow narrowing after a call.)
+  // Set once the registry is known to be encrypted: every answer then carries the person-facing `systemMessage`
+  // (Claude Code drops stderr on exit 0), once per call.
+  let notice: string | undefined;
   const emit: (value: unknown, exitCode: number) => never = (value, exitCode) =>
-    emitJsonAndExit(cursor && exitCode !== 0 ? { ...(value as object), note: CURSOR_DETECTION_ONLY } : value, exitCode);
+    emitJsonAndExit(
+      {
+        ...(value as object),
+        ...(cursor && exitCode !== 0 && { note: CURSOR_DETECTION_ONLY }),
+        ...(notice !== undefined && { systemMessage: notice }),
+      },
+      exitCode,
+    );
 
   if (!filePath) {
     if (input.truncated) emit({ code: "HOOK_INPUT_TOO_LARGE", error: NOT_SCANNED_REASON }, 2);
@@ -119,6 +129,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
       2,
     );
   }
+  if (load.state === "encrypted") notice = ENCRYPTED_REGISTRY_NOTICE;
   const registry: Registry =
     load.state === "loaded"
       ? load.registry

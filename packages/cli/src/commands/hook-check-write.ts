@@ -8,7 +8,7 @@ import {
   OVERRIDE_FILENAME,
   type Registry,
 } from "@de-otio/repo-aegis-core";
-import { decideHookAction, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
+import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import {
   parseHookWriteFields,
   readHookStdin,
@@ -178,6 +178,8 @@ export async function hookCheckWrite(): Promise<void> {
   });
 
   if (decision.action !== "refuse") {
+    // Claude Code drops stderr on exit 0, so the person only sees the notice as the JSON `systemMessage`.
+    if (load.state === "encrypted") process.stdout.write(JSON.stringify({ systemMessage: ENCRYPTED_REGISTRY_NOTICE }) + "\n");
     process.exit(0);
   }
 

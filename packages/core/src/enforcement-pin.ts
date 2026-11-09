@@ -178,7 +178,11 @@ function fallbackSelect(o: FallbackSelect): string[] {
       missing,
       q(`), and this hook was installed without a recorded version, so it does not fall back to the repo-aegis on PATH. Re-pin it by running: ${tail}`),
     )}${stop}; fi`,
-    `__ra_fv=$(${fb} --version 2>/dev/null </dev/null | { IFS= read -r __ra_l || :; printf '%s' "$__ra_l"; }) || __ra_fv=""`,
+    // No pipe, so a non-zero exit from `--version` reads as no version on sh, dash and bash alike (a pipeline's
+    // status is its last command's). Then the first line, by parameter expansion on a newline built without a
+    // literal one, so the statement stays one line.
+    `__ra_fv=$(${fb} --version 2>/dev/null </dev/null) || __ra_fv=""`,
+    `__ra_nl=$(printf '\\nx'); __ra_nl=\${__ra_nl%x}; __ra_fv=\${__ra_fv%%"$__ra_nl"*}`,
     ...fallbackVerdictShell(),
     `if [ "$__ra_fverdict" = older ]; then ${say(
       head,
@@ -297,7 +301,8 @@ export function pinnedHookCommand(pin: EnforcementPin, hookArgs: string): string
     `if [ -f ${n} ] && [ -x ${n} ] && [ -f ${c} ] && [ -r ${c} ]; then exec ${n} ${c} ${hookArgs}; fi; ` +
     `__ra_version=${shellQuote(pin.version ?? "")}; __ra_missing=${shellQuote(`${pin.node}, ${pin.cli}`)}; ` +
     `${fallbackSelect({ blocked: "hook blocked", fix: "repo-aegis install claude-md", exitCode: 2 }).join("; ")}; ` +
-    `exec "$__ra_fb" ${hookArgs}; exit 2`
+    // Tells the fallback it is one (the hook then shows the person a notice: exit-0 stderr is dropped).
+    `REPO_AEGIS_PIN_FALLBACK=1; export REPO_AEGIS_PIN_FALLBACK; exec "$__ra_fb" ${hookArgs}; exit 2`
   );
 }
 
@@ -365,7 +370,8 @@ export function managedHookCommand(pin: EnforcementPin, hookArgs: string, ctx: M
       exitCode: 2,
       tail: `   or remove this managed hook: ${remove}`,
     }).join("; ")}; ` +
-    `exec "$__ra_fb" ${hookArgs}; exit 2`
+    // Tells the fallback it is one (the hook then shows the person a notice: exit-0 stderr is dropped).
+    `REPO_AEGIS_PIN_FALLBACK=1; export REPO_AEGIS_PIN_FALLBACK; exec "$__ra_fb" ${hookArgs}; exit 2`
   );
 }
 

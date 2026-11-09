@@ -351,6 +351,7 @@ describe("the pinned hook command: pin gone, PATH fallback (P1-D)", subprocess, 
     command: string,
     stubVersion: string | null,
     stdin = bashCall("ls"),
+    versionExit = 0,
   ): { status: number | null; stderr: string; argv: string[]; stdinSeen: string; stubCalled: boolean } {
     const dir = join(tmp, `fb-${label}-${n++}`);
     const bin = join(dir, "bin");
@@ -361,7 +362,7 @@ describe("the pinned hook command: pin gone, PATH fallback (P1-D)", subprocess, 
     if (stubVersion !== null) {
       writeFileSync(
         join(bin, "repo-aegis"),
-        `#!/bin/sh\n: > "$STUB_CALLED"\nif [ "$1" = "--version" ]; then printf '%s\\n' "$VER"; exit 0; fi\necho "$*" >> "$ARGV_LOG"\ncat >> "$STDIN_LOG"\nexit 0\n`,
+        `#!/bin/sh\n: > "$STUB_CALLED"\nif [ "$1" = "--version" ]; then printf '%s\\n' "$VER"; exit "$VER_EXIT"; fi\necho "$*" >> "$ARGV_LOG"\ncat >> "$STDIN_LOG"\nexit 0\n`,
         { mode: 0o755 },
       );
       chmodSync(join(bin, "repo-aegis"), 0o755);
@@ -373,6 +374,7 @@ describe("the pinned hook command: pin gone, PATH fallback (P1-D)", subprocess, 
       STDIN_LOG: stdinLog,
       STUB_CALLED: called,
       VER: stubVersion ?? "",
+      VER_EXIT: String(versionExit),
     });
     const read = (p: string): string => (existsSync(p) ? readFileSync(p, "utf8") : "");
     return {
@@ -427,6 +429,25 @@ describe("the pinned hook command: pin gone, PATH fallback (P1-D)", subprocess, 
       assert.deepEqual(r.argv, []);
     });
   }
+
+  it("a PATH repo-aegis that prints a valid, new-enough version but exits non-zero from --version is refused (sh and dash alike)", () => {
+    const r = runWithStub("version-exit", pinned("version-exit", "0.14.0"), "9.9.9", bashCall("ls"), 1);
+    assert.equal(r.status, 2, r.stderr);
+    assert.ok(r.stderr.includes("did not report a plain MAJOR.MINOR.PATCH version (pinned 0.14.0)"), r.stderr);
+    assert.deepEqual(r.argv, []);
+  });
+
+  it("the fallback exports REPO_AEGIS_PIN_FALLBACK=1 to the repo-aegis it runs (so the hook can tell the person)", () => {
+    const dir = join(tmp, `fb-env-${n++}`);
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    const out = join(dir, "env.out");
+    writeFileSync(join(dir, "bin", "repo-aegis"), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 0.14.0; exit 0; fi\necho "fb=$REPO_AEGIS_PIN_FALLBACK" >> "${out}"\nexit 0\n`, { mode: 0o755 });
+    chmodSync(join(dir, "bin", "repo-aegis"), 0o755);
+    const env = { PATH: `${join(dir, "bin")}:${NO_REPO_AEGIS_PATH}`, HOME: dir };
+    const r = runHookCommand(pinned("env", "0.14.0"), bashCall("ls"), env);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(out, "utf8"), "fb=1\n");
+  });
 
   it("a pin installed without a recorded version never falls back, however new the PATH repo-aegis is", () => {
     const r = runWithStub("noversion", pinned("noversion", undefined), "99.0.0");

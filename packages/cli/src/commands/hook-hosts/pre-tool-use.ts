@@ -128,12 +128,30 @@ function decisionJson(permissionDecision: "allow" | "ask" | "deny", reason: stri
  * the hook has always answered every host with `hookEventName: "PreToolUse"`
  * and relied on exit 2 + stderr to block; T1a changes no byte of that.
  */
-export function renderPreToolUse(verdict: HookVerdict, hasAsk: boolean): HostOutput {
+export function renderPreToolUse(verdict: HookVerdict, hasAsk: boolean, showNotice = false): HostOutput {
   switch (verdict.action) {
-    case "allow":
+    case "allow": {
+      const notice = showNotice ? verdict.notice : undefined;
+      if (notice !== undefined) {
+        // `systemMessage` is what the person sees (stderr is dropped on exit 0); `additionalContext` tells the
+        // model. No `permissionDecision` unless an approval stood in: a notice must not skip the normal prompt.
+        return {
+          stdout:
+            JSON.stringify({
+              systemMessage: notice,
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                ...(verdict.reason !== undefined && { permissionDecision: "allow", permissionDecisionReason: verdict.reason }),
+                additionalContext: notice,
+              },
+            }) + "\n",
+          exitCode: 0,
+        };
+      }
       return verdict.reason === undefined
         ? { stdout: "", exitCode: 0 }
         : { stdout: decisionJson("allow", verdict.reason), exitCode: 0 };
+    }
     case "ask":
       // The policy never asks a host without an ask; if one does, refuse. Never allow.
       return hasAsk

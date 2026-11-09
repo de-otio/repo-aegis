@@ -412,7 +412,12 @@ immediately.
 
 ### Encrypting the registry
 
-The engagement registry can be encrypted at rest with age:
+The engagement registry can be encrypted at rest with age. Encryption at rest
+is deprecated (removed in 0.15.0), and `registry encrypt` is **human-only**: it
+refuses without a person's terminal (`REGISTRY_ENCRYPT_NEEDS_TTY`), and you never
+run it. An encrypted registry is read as no registry, which switches off rule h
+and collapses every engagement's org boundary to the repository's origin org.
+
 
 ```sh
 repo-aegis registry encrypt --recipient age1...
@@ -1126,6 +1131,7 @@ gh`) are covered by an approval; the rest say "No approval covers this":
 | `REGISTRY_WOULD_BE_INVALID` | a registry mutator refused because the result would not load (typically an org registered twice: an org belongs to `personalOrgs` or to exactly one engagement) | nothing was written. Surface it; run `repo-aegis doctor` once the registry loads. Do not edit the file to force it. |
 | `MIGRATION_NOT_CONFIRMED` | `init --migrate-classify` listed the owners it would register and did not get a typed `y` on a stdin terminal | nothing was written. A person re-runs it at a terminal and answers `y` after reading the list. |
 | `APPROVE_NEEDS_TTY` | `repo-aegis approve` was run without a person's terminal | ask the user to run the `approve` line themselves; never set `REPO_AEGIS_EGRESS_HUMAN` or wrap it. |
+| `REGISTRY_ENCRYPT_NEEDS_TTY` | `repo-aegis registry encrypt` was run without a person's terminal (an encrypted registry is read as none: rule h and the org boundaries go off) | do not retry or wrap it. Encryption at rest is deprecated; if the user wants it, they run the line themselves. |
 | `CROSS_ORG_EGRESS` / `CROSS_ORG_PUSH` | egress guard: the pushed repo (or the payload's tree) belongs to a trust boundary disjoint from the destination's | this is the boundary both incidents crossed. Stop; name the destination to the user. Do NOT widen `personalOrgs` / `githubOrgs` to make it pass. |
 | `PAYLOAD_MARKER_HIT` | egress guard: the body file matches the destination's deny set (`selfIdentity` included for a customer-coupled destination) | run `repo-aegis check --path <file>` from the destination repo to see which stems (never `--verbose` from a hook); redact; re-run. The reason carries a hit count only. |
 | `PUBLIC_EGRESS_NEEDS_HUMAN` / `PUBLIC_PUSH_NEEDS_HUMAN` | egress guard: public destination, or `merge` / `release` / `publish` / `repo edit` / `workflow run`, and no human present | on Claude Code this arrives as a permission prompt — the user's decision. Elsewhere: tell the user what would be published where and stop. Never set `REPO_AEGIS_EGRESS_HUMAN`; never re-shape the command to dodge the rule. |

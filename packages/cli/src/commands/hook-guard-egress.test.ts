@@ -57,6 +57,8 @@ interface GuardOptions {
    * `PATH` before `install shim` ran.
    */
   shimOnPath?: boolean;
+  /** Extra environment for the hook process (for example `REPO_AEGIS_PIN_FALLBACK=1`, which the pin fallback exports). */
+  env?: Record<string, string>;
 }
 
 /**
@@ -70,6 +72,7 @@ function runGuard(input: string, opts: GuardOptions): GuardResult {
   delete env["REPO_AEGIS_EGRESS_HUMAN"];
   delete env["REPO_AEGIS_ASSUME_PUBLIC"];
   if (opts.human) env["REPO_AEGIS_EGRESS_HUMAN"] = "1";
+  Object.assign(env, opts.env ?? {});
   if (opts.shimOnPath === true) {
     const binDir = join(opts.home, "bin");
     mkdirSync(binDir, { recursive: true });
@@ -1038,5 +1041,66 @@ describe("hook guard-egress — input past the 1 MiB cap (issue #151, final revi
     const payload = JSON.stringify({ tool_name: "Write", tool_input: { file_path: "/tmp/x", content: "x".repeat(1_100_000) } });
     const r = runGuard(payload, { home: aegisHome("v1-write") });
     assert.equal(r.code, 0, r.stderr);
+  });
+});
+
+describe("hook guard-egress — notices on an allow (P1-D)", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  interface NoticeJson {
+    systemMessage?: string;
+    hookSpecificOutput?: { hookEventName: string; permissionDecision?: string; additionalContext?: string };
+  }
+  const privateRepo = (name: string): string =>
+    makeRepo(name, { remote: "git@github.com:acme/internal.git", class: "private-strict", visibility: "private" });
+
+  it("an allowed push while the registry is encrypted says rule h and the org boundaries are off, as a systemMessage, with no permission decision", () => {
+    const home = aegisHome("notice-encrypted");
+    writeFileSync(join(home, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const repo = privateRepo("notice-encrypted-repo");
+    const r = runGuard(claudePayload("git push origin main", repo), { home, cwd: repo });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    const j = JSON.parse(r.stdout) as NoticeJson;
+    assert.match(j.systemMessage ?? "", /rule h and engagement org boundaries are off while the registry is encrypted; run `repo-aegis registry decrypt/);
+    assert.equal(j.hookSpecificOutput?.additionalContext, j.systemMessage);
+    assert.equal(j.hookSpecificOutput?.permissionDecision, undefined, "a notice must not skip the normal permission flow");
+    assert.equal(r.stderr, "");
+  });
+
+  it("the same allowed push with a readable registry stays silent (the notice is about the encrypted state only)", () => {
+    const home = aegisHome("notice-loaded", EMPTY_REGISTRY);
+    const repo = privateRepo("notice-loaded-repo");
+    const r = runGuard(claudePayload("git push origin main", repo), { home, cwd: repo });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(r.stdout, "");
+  });
+
+  it("a host with no systemMessage channel (Codex) stays silent on that allow", () => {
+    const home = aegisHome("notice-encrypted-codex");
+    writeFileSync(join(home, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const repo = privateRepo("notice-encrypted-codex-repo");
+    const r = runGuard(codexPayload("git push origin main", repo), { home, cwd: repo, agent: "codex" });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(r.stdout, "");
+  });
+
+  it("when the hook ran via the pin fallback (REPO_AEGIS_PIN_FALLBACK=1), even a command with no egress carries the notice", () => {
+    const home = aegisHome("notice-fallback", EMPTY_REGISTRY);
+    const r = runGuard(claudePayload("ls -la"), { home, env: { REPO_AEGIS_PIN_FALLBACK: "1" } });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    const j = JSON.parse(r.stdout) as NoticeJson;
+    assert.match(j.systemMessage ?? "", /the pinned enforcement binary is missing or not usable, so this hook ran the repo-aegis found on PATH/);
+    assert.match(j.systemMessage ?? "", /repo-aegis install claude-md/);
+    assert.equal(j.hookSpecificOutput?.permissionDecision, undefined);
+    // Control: without the variable, the same command prints nothing.
+    assert.equal(runGuard(claudePayload("ls -la"), { home }).stdout, "");
+  });
+
+  it("an allowed push under the fallback AND an encrypted registry carries both notices in one message", () => {
+    const home = aegisHome("notice-both");
+    writeFileSync(join(home, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const repo = privateRepo("notice-both-repo");
+    const r = runGuard(claudePayload("git push origin main", repo), { home, cwd: repo, env: { REPO_AEGIS_PIN_FALLBACK: "1" } });
+    const j = JSON.parse(r.stdout) as NoticeJson;
+    assert.match(j.systemMessage ?? "", /registry is encrypted/);
+    assert.match(j.systemMessage ?? "", /ran the repo-aegis found on PATH/);
   });
 });

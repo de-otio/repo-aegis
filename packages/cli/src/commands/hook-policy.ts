@@ -34,6 +34,15 @@ export const NEWER_SCHEMA_ERROR =
   "the registry was written by a newer repo-aegis than the one this hook runs, so the cross-org write check cannot " +
   "run and the write is refused. A person upgrades repo-aegis and runs `repo-aegis install claude-md`.";
 
+/**
+ * The notice a write hook shows the person (as the JSON `systemMessage`: Claude Code drops stderr on exit 0) when
+ * the registry is encrypted. An encrypted registry is read as none, so rule h is off AND every engagement
+ * collapses to the repository's own org: two engagements under one org stop being separate boundaries. Fixed text.
+ */
+export const ENCRYPTED_REGISTRY_NOTICE =
+  "repo-aegis: rule h and engagement org boundaries are off while the registry is encrypted; " +
+  "run `repo-aegis registry decrypt --identity <key>` (a person runs this).";
+
 export type HookDecision =
   | HookScanDecision
   | HookScanWithWarningDecision
