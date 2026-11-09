@@ -520,18 +520,24 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   if (choice.kind === "refuse") return choice.code === "GH_IDENTITY_WRITE_NEEDS_HUMAN" ? needsHuman() : refuseText(choice.code, choice.reason);
   // The id of the login-bound approval under which this push runs as the person's account, when it does.
   let personApproval: string | null = null;
-  // An agent that may only read as the person (N3): the next helper answers, but only for a subcommand known to
-  // read. An alias or an unreadable subcommand could be a push, and a push as the person needs a login-bound
-  // approval, which is looked up as for any write.
+  // An agent that may only read as the person (N3), on a subcommand known to read: answered with the MAPPED login's
+  // token, no approval (a read is not egress). Falling through to the next helper instead would answer with
+  // whichever account that helper holds (gh's active account, the keychain's), which is the wrong account whenever
+  // the person has more than one: the fetch then fails with "Repository not found". An alias or an unreadable
+  // subcommand could be a push, and a push as the person needs a login-bound approval, looked up as for any write.
+  let personRead = false;
   if (choice.column === "person") {
-    if (parent.kind === "remote" && parent.sub !== null && KNOWN_READ_SUBCOMMANDS.has(parent.sub)) return NOTHING;
-    const asWrite = chain ? choice : decide(true);
-    if (asWrite.kind !== "inject" || asWrite.column !== "person" || asWrite.approvalId === undefined) return needsHuman();
-    choice = asWrite;
-    personApproval = asWrite.approvalId;
+    if (parent.kind === "remote" && parent.sub !== null && KNOWN_READ_SUBCOMMANDS.has(parent.sub)) {
+      personRead = true;
+    } else {
+      const asWrite = chain ? choice : decide(true);
+      if (asWrite.kind !== "inject" || asWrite.column !== "person" || asWrite.approvalId === undefined) return needsHuman();
+      choice = asWrite;
+      personApproval = asWrite.approvalId;
+    }
   }
 
-  if (personApproval === null && choice.identity.kind !== "github-app") {
+  if (personApproval === null && !personRead && choice.identity.kind !== "github-app") {
     return refuse(
       "GH_IDENTITY_UNAVAILABLE",
       "the agent identity of this owner is not a GitHub App (the registry maps a GitHub login there; a person set that, repo-aegis did not)",
@@ -566,27 +572,30 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
     );
   }
 
-  if (personApproval !== null) {
-    // A person's account under a login-bound approval: the token is THAT login's, from the trusted gh, never the
-    // active gh account's. Every check above applied to it exactly as to an App token.
+  if (personApproval !== null || personRead) {
+    // A person's account, for a known read or under a login-bound approval: the token is THAT login's, from the
+    // trusted gh, never the active gh account's. Every check above applied to it exactly as to an App token.
     const identity = choice.identity;
     if (identity.kind !== "gh-login") {
       // approvalFor is only consulted for a gh-login, so this is unreachable; fail closed rather than guess.
       return refuse("GH_IDENTITY_UNAVAILABLE", "the person identity of this owner is not a GitHub login", dest);
     }
     // The audit record names the approval (an id, never the login) and never a token.
-    const record = {
-      identity: identity.name,
-      kind: "gh-login",
-      column: "person",
-      owner: dest.owner,
-      repo: dest.repo,
-      scope: "write",
-      verb: "push",
-      approval: personApproval,
-      covers: "GH_IDENTITY_WRITE_NEEDS_HUMAN",
-      ...(covered !== null && { chainApproval: covered.id }),
-    };
+    const record =
+      personApproval === null
+        ? { identity: identity.name, kind: "gh-login", column: "person", owner: dest.owner, repo: dest.repo, scope: "read", verb: "fetch" }
+        : {
+            identity: identity.name,
+            kind: "gh-login",
+            column: "person",
+            owner: dest.owner,
+            repo: dest.repo,
+            scope: "write",
+            verb: "push",
+            approval: personApproval,
+            covers: "GH_IDENTITY_WRITE_NEEDS_HUMAN",
+            ...(covered !== null && { chainApproval: covered.id }),
+          };
     const got = deps.loginToken(identity.login, deps.env, home);
     if (got.kind !== "token") {
       const untrusted = got.kind === "untrusted";
@@ -605,6 +614,8 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
           });
     }
     auditBestEffort(record, home);
+    // A read prints nothing: it needs no approval, and a line on every fetch would be noise.
+    if (personApproval === null) return { stdout: `username=x-access-token\npassword=${got.token}\n`, stderr: "" };
     return {
       stdout: `username=x-access-token\npassword=${got.token}\n`,
       // One line naming the approval, so a person reading the push output sees why an agent could push as them.
