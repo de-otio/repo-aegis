@@ -6,7 +6,7 @@
 // engagement's markers.
 //
 // [SEC M-3] Lock scope covers the entire load-modify-write-render
-// cycle so concurrent callers (parallel `suggest-markers` runs against
+// cycle so concurrent callers (parallel marker-adding runs against
 // different engagements) cannot lose updates or leave the rendered
 // markers stale relative to the registry.
 
@@ -44,7 +44,7 @@ export interface AddMarkerPatternOptions {
   registryPath?: string;
   /**
    * When true, audit-log writes record the source the pattern came from
-   * (e.g. `"suggest-markers"`). Caller-provided so the caller's verb
+   * (e.g. `"scan-env"`). Caller-provided so the caller's verb
    * shows up in the trail. Default: `"manual"`.
    */
   source?: string;

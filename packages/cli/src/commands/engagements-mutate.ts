@@ -442,8 +442,8 @@ export function engagementsAdd(
   if (markerWarning) {
     writeWarning(
       `engagement "${id}" was created with 0 markers; ` +
-        `run \`repo-aegis suggest-markers --engagement ${id} --from <repo>\` ` +
-        `to populate, or add markers via \`engagements add ... --marker <pattern>\`.`,
+        `add markers by editing the engagement's \`markers:\` list in engagements.yaml, ` +
+        `or discover registry hosts with \`repo-aegis scan-env --accept engagement --engagement ${id}\`.`,
     );
   }
 

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The LLM features are gone.** `repo-aegis suggest-markers`, the `@de-otio/repo-aegis-llm`
+  package, `repo-aegis-scan run --semantic` (with `--ollama-endpoint`, `--ollama-model`,
+  `--ollama-timeout-ms`, `--allow-remote-ollama` and `--semantic-max-bytes-per-candidate`) and
+  `repo-aegis-scan rebuild-profiles` were deleted, along with the Ollama dependency. They could
+  only re-rank regex hits or propose markers for a person to review, and they added a network
+  call and a place for customer prose to leave the machine. The gate is unchanged: it was always
+  regex-only and offline. Nothing in `engagements.yaml` or any other config file ever configured
+  these features, so there is no key to remove. A leftover `~/.config/repo-aegis/profiles/`
+  directory is now unused and can be deleted. Passing a removed `repo-aegis-scan` flag, or running
+  `repo-aegis-scan rebuild-profiles`, exits 2 with a `REMOVED` error that says the feature was
+  removed in 0.15.0, rather than a generic unknown-option error. To add markers, edit the
+  engagement's `markers:` list or use `repo-aegis scan-env`. The `status` and `engagements add`
+  zero-marker warnings point there now.
+
 ## [0.13.1] - 2026-11-09
 
 ### Fixed

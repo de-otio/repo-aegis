@@ -195,7 +195,7 @@ JSON:
 
 `zeroMarkerEngagements` lists the ids of **active** engagements that have no
 markers (an engagement with nothing to match protects nothing; add markers by
-hand or with [`suggest-markers`](#repo-aegis-suggest-markers)). Ids only, never
+hand in the registry or with [`scan-env`](#scan-env)). Ids only, never
 patterns.
 
 `regexBackend` is `"re2"` when the optional `re2` dependency is
@@ -942,7 +942,7 @@ reports the count per event.
    `markers/**` is denied, an agent-run `repo-aegis render` is refused inside
    the sandbox (`MARKERS_WRITE_PROTECTED`: a person runs `render` from their own
    terminal); the other flows that re-render (`engagements add|end|remove`,
-   `markers add`, `suggest-markers --auto-accept-above`, `init`) already fail
+   `markers add`, `init`) already fail
    earlier, because they rewrite the denied registry file. A
    registry relocated to `$HOME`, `/` or a git work tree is denied as a file
    only, with a warning. `hooks/**`, `bin/**` and `markers/**` are narrow
@@ -1956,24 +1956,6 @@ An unknown code exits 2 with `UNKNOWN_CODE` and the nearest known codes (in
 `details.nearest` under `--json`). `EXPLAIN_DOCS_MISSING` (exit 2) means the
 guide is not next to the command, which only happens in an unbuilt checkout.
 
-### `repo-aegis suggest-markers`
-
-LLM-assisted marker discovery: extracts prose from a repo, asks a **local**
-Ollama model for candidate tokens and proposes regex markers for an
-engagement. Off the deterministic gate path; it runs only when invoked. See
-[packages/llm/README.md](../packages/llm/README.md).
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--engagement <id>` | required | engagement to add markers to |
-| `--from <path>` | cwd | repo to scan |
-| `--model <id>` | `llama3.2:3b` | Ollama model id |
-| `--endpoint <url>` | `http://127.0.0.1:11434` | Ollama endpoint |
-| `--allow-remote-model` | off | allow a non-loopback endpoint (sends the repo's prose to a remote service) |
-| `--accept-remote-author-domains` | off | send git-log author email domains even to a non-loopback endpoint |
-| `--auto-accept-above <n>` | — | auto-accept candidates with confidence at or above `n` (0 to 1) |
-| `--dry-run` | off | print candidates and exit without persisting |
-
 ### `repo-aegis registry encrypt --recipient <pubkey>` / `registry decrypt --identity <path>`
 
 Encrypts the registry at rest with `age` (`engagements.yaml` becomes
@@ -2000,7 +1982,7 @@ the `gh` shim and the git credential helper. A **dry run** unless `--yes`.
 `--purge-repos` also unsets the `repo-aegis.*` git config in every repo under
 the scan roots (default `~/repos`, `~/code`, `~/src`, `~/projects`);
 `--purge-home` also deletes `~/.config/repo-aegis/` (registry, audit log,
-profiles, caches).
+caches).
 
 `repo-aegis uninstall sweep-repos [--yes] [--scan-root <path...>]` runs just
 the per-repo step: it walks the scan roots and unsets `repo-aegis.class` and
@@ -2041,16 +2023,12 @@ repo-aegis-scan run \
   [--no-update-state]               # dry-run
   [--prune-state-older-than <days>] # drop seenIso entries older than this
   [--reveal-matches]                # include literal snippets in output (default OFF)
-  [--semantic]                      # embedding-based sweep alongside the regex one (needs Ollama)
-  [--ollama-endpoint <url>]         # default: http://127.0.0.1:11434
-  [--ollama-model <id>]             # embedding model; default: nomic-embed-text
-  [--ollama-timeout-ms <n>]
-  [--allow-remote-ollama]           # permit a non-loopback endpoint (default OFF)
-  [--semantic-max-bytes-per-candidate <n>]  # default: 16384
 ```
 
-`--semantic` is off by default, asynchronous and advisory; it needs an
-engagements registry and the profile files that `rebuild-profiles` builds.
+`--semantic`, the `--ollama-*` flags and `--semantic-max-bytes-per-candidate`
+were removed in 0.15.0 (with the LLM features). Passing one exits 2 with a
+`REMOVED` error rather than being ignored.
+
 - 0: completed; either no new hits, or new hits filed via issue/markdown
 - 1: completed; new hits found AND `--output-format=json` (caller must react)
 - 2: error (token missing, query parse fail, all-queries-failed,
@@ -2074,11 +2052,3 @@ and you don't want to commit plain-text query strings. Other flags:
 Inverse of `encrypt-query`. `--output <path>` writes the cleartext there
 (default: stdout).
 
-### `repo-aegis-scan rebuild-profiles`
-
-Builds the per-engagement embedding profiles that `run --semantic` compares
-against. Flags: `--ollama-endpoint`, `--ollama-model`, `--ollama-timeout-ms`
-and `--allow-remote-ollama` (as for `run`), `--threshold <n>` (cosine
-threshold for new profiles, default 0.78), `--diff` (report stored-vs-current
-manifest drift without embedding or writing), `--engagement <id...>`
-(restrict to these engagements) and `--registry <path>`.

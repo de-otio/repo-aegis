@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 //
-// Integration tests for `scan-env`. Like suggest-markers.test.ts, behaviour is
+// Integration tests for `scan-env`. Behaviour is
 // asserted against the registry file on disk rather than captured stdout.
 
 import { describe, it, before, after, beforeEach } from "node:test";

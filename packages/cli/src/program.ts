@@ -303,34 +303,6 @@ export async function buildProgram(): Promise<Command> {
     .action((opts, cmd) => classify(withGlobals(opts, cmd)));
 
   program
-    .command("suggest-markers")
-    .description(
-      "LLM-assisted marker discovery (Phase 2 onboarding). Runs prose extraction + local Ollama call against a repo and suggests regex markers to add to an engagement.",
-    )
-    .requiredOption("--engagement <id>", "engagement id to add markers to")
-    .option("--from <path>", "repo to scan (default: cwd)")
-    .option("--model <id>", "Ollama model id (default: llama3.2:3b)")
-    .option("--endpoint <url>", "Ollama endpoint (default: http://127.0.0.1:11434)")
-    .option(
-      "--allow-remote-model",
-      "allow non-loopback Ollama endpoint (sends customer prose data to a remote service)",
-    )
-    .option(
-      "--accept-remote-author-domains",
-      "send git-log author email domains even when the endpoint is non-loopback",
-    )
-    .option(
-      "--auto-accept-above <n>",
-      "auto-accept candidates with confidence >= n (number in [0,1])",
-      v => parseFloat(v),
-    )
-    .option("--dry-run", "print candidates and exit without persisting")
-    .action(async (opts, cmd) => {
-      const { suggestMarkers } = await import("./commands/suggest-markers.js");
-      await suggestMarkers(withGlobals(opts, cmd));
-    });
-
-  program
     .command("scan-env")
     .description(
       "discover private package-registry hosts from this machine's toolchain configs (~/.npmrc, pip.conf, ~/.docker/config.json, ~/.m2/settings.xml, ~/.cargo/config.toml, ~/.yarnrc.yml) and offer them as markers. Dry-run unless --accept is given; never reads auth tokens.",

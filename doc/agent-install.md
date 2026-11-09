@@ -44,9 +44,7 @@ do not guess:
   on disk.
 - **What the markers are for each engagement.** The user knows their
   customer's identifiers (company name, codename, canonical domain,
-  internal hostnames). Ask. Do **not** invent markers; do **not**
-  run `suggest-markers` (which sends prose to a local model) without
-  explicit user direction.
+  internal hostnames). Ask. Do **not** invent markers.
 - **Which classification to apply to each existing repo.** Use
   `classify --apply` (which derives from the git remote + registry
   org membership) when you have it; ask the user when you don't.
@@ -901,13 +899,6 @@ user's customers and their identifying patterns).
 
 ## What you should never do during install
 
-- **Run `suggest-markers`.** It sends prose from the user's repo
-  to a local Ollama model. The user must opt in.
-- **Set `--auto-accept-above` on `suggest-markers`.** Auto-acceptance
-  bypasses the user's review of model-suggested markers.
-- **Set `--allow-remote-model` / `--allow-remote-ollama`** anywhere.
-  Sending customer prose to a non-localhost model is a compliance
-  decision.
 - **Use `--purge-repos` / `--purge-home`** in any flow. These belong
   to uninstall, not install.
 - **Echo a literal marker pattern back to the user.** They typed it;

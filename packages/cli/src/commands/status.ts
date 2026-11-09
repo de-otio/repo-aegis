@@ -201,7 +201,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   const denying = denySet.files.map(f => f.stem);
 
   // [SEC H-5] follow-up: surface engagements that have zero markers so
-  // the user knows to run suggest-markers (or hand-add markers).
+  // the user knows to add markers (engagements.yaml, or `scan-env`).
   // Active-only — ended engagements with retained markers don't count.
   const zeroMarkerEngagements = registryEngagements
     .filter(e => e.active && e.markerCount === 0)
@@ -338,7 +338,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
       `  warning:  ${zeroMarkerEngagements.length} engagement(s) with 0 markers: ${zeroMarkerEngagements.join(", ")}`,
     );
     emitText(
-      `            run \`repo-aegis suggest-markers --engagement <id> --from <repo>\` to populate`,
+      `            add markers in engagements.yaml (\`markers:\`) or run \`repo-aegis scan-env --accept engagement --engagement <id>\``,
     );
   }
   for (const w of denySet.warnings) emitText(`  warning:  ${w}`);

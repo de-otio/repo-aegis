@@ -7,7 +7,9 @@
 >
 > Status: design accepted; Phase 1 (org-keyed JIT classification),
 > Phase 2 (LLM-assisted marker discovery), and Phase 3 (semantic
-> audit sweep) shipped in v0.2.0.
+> audit sweep) shipped in v0.2.0. **Phases 2 and 3 were removed in 0.15.0**
+> (`packages/llm`, `suggest-markers`, `--semantic`, `rebuild-profiles`);
+> their sections below are kept as history only.
 
 This document is the source of truth for the *as-designed* shape of:
 
