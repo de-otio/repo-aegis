@@ -1,6 +1,6 @@
 {
-  "conversation_id": "00000000-0000-4000-8000-000000000002",
-  "generation_id": "00000000-0000-4000-8000-000000000003",
+  "conversation_id": "00000000-0000-4000-8000-00000000a002",
+  "generation_id": "00000000-0000-4000-8000-00000000a003",
   "model": "example-model",
   "hook_event_name": "beforeShellExecution",
   "cursor_version": "0.0.0",
