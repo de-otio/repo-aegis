@@ -43,7 +43,7 @@ import { cliBuilt, cliPath } from "./_subprocess-utils.js";
 import { hermeticGitEnv, scrubGitEnv } from "./_test-utils.js";
 import { renderShimScript } from "./commands/shim-script.js";
 import { runGhCommand, type GhCommandDeps } from "./commands/gh-command.js";
-import { runGitCredential, type GitCredentialDeps } from "./commands/git-credential.js";
+import { realGitCredentialDeps, runGitCredential, type GitCredentialDeps } from "./commands/git-credential.js";
 import { mintAppToken } from "./commands/taaad-mint.js";
 import { readCredentialConfig } from "./git-credential-config.js";
 import type { TaaadPin } from "./commands/taaad-pin.js";
@@ -221,6 +221,8 @@ function helper(
     },
     readConfig: readCredentialConfig,
     loadRegistry: h => loadRegistry(join(h, "engagements.yaml")),
+    // Real: the world's repo is recorded private, and its core.hooksPath is repo-aegis's own.
+    destinationPublic: realGitCredentialDeps().destinationPublic,
     resolveTaaad: () => w.taaadPath,
     mint: mintAppToken,
     loginToken: () => ({ kind: "unavailable" }),

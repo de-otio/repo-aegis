@@ -30,15 +30,23 @@ import {
   appendAuditRecord,
   checkTerminal,
   chooseIdentity,
+  destinationCachePath,
+  getRemoteUrl,
   identityPresence,
   loadRegistry,
+  parseRemoteUrlResolved,
+  readCachedVisibility,
   readProcessAncestry,
+  readRepoConfig,
   refusal,
   registeredOwners,
   RegistryEncryptedError,
   RegistryNotFoundError,
+  resolveCachedDestination,
+  treatAsPublicDestination,
   type AncestorInfo,
   type AncestryChain,
+  type RepoConfig,
   type IdentityPresence,
   type IdentityScope,
   type Registry,
@@ -47,11 +55,13 @@ import {
 import {
   credentialConfigViolation,
   credentialConfigWarnings,
+  helperKind,
   laterStoringHelper,
   readCredentialConfig,
   type ConfigEntry,
 } from "../git-credential-config.js";
 import { resolveTrustedGh } from "./doctor-owner-checks.js";
+import { isOwnHooksPath } from "./gh-command.js";
 import { fetchLoginToken } from "./gh-identity-token.js";
 import { mintAppToken, MintError, resolvePinnedTaaad, type MintParams, type MintedToken } from "./taaad-mint.js";
 
@@ -78,6 +88,12 @@ export interface GitCredentialDeps {
    * newer repo-aegis wrote it. Anything else that throws is `"unreadable"` too, never `"missing"`.
    */
   loadRegistry: (home: string) => Registry | "missing" | "encrypted" | "unreadable";
+  /**
+   * Is the push's destination possibly public, judged offline from the caches pre-push reads (the repository's
+   * `repo-aegis.visibility` and `.class`, or the machine-wide destination cache for another repository)? The same
+   * rule as pre-push, `treatAsPublicDestination`: only a recorded `private` is false. Fails closed (true).
+   */
+  destinationPublic: (cwd: string, owner: string, repo: string, env: NodeJS.ProcessEnv, home: string) => boolean;
   resolveTaaad: (home: string) => string | null;
   mint: (params: MintParams) => MintedToken;
   /**
@@ -100,6 +116,28 @@ function realLoginToken(login: string, env: NodeJS.ProcessEnv, home: string): Lo
   return token === null ? { kind: "unavailable" } : { kind: "token", token };
 }
 
+function realDestinationPublic(cwd: string, owner: string, repo: string, env: NodeJS.ProcessEnv, home: string): boolean {
+  try {
+    const url = getRemoteUrl(cwd);
+    const own = url === null ? null : parseRemoteUrlResolved(url);
+    const isOwn = own !== null && own.org.toLowerCase() === owner.toLowerCase() && own.repo.toLowerCase() === repo.toLowerCase();
+    // As pre-push judges it: this repository's cache describes the destination only when it IS the origin.
+    let visibility = readCachedVisibility(cwd, env);
+    if (!isOwn && visibility !== "public") visibility = "unknown";
+    let cls: RepoConfig["class"] = isOwn ? readRepoConfig(cwd).class : "private-strict";
+    if (!isOwn) {
+      const cached = resolveCachedDestination(owner, repo, destinationCachePath(home));
+      if (cached !== null) {
+        visibility = cached.visibility;
+        cls = cached.class;
+      }
+    }
+    return treatAsPublicDestination(cls, visibility);
+  } catch {
+    return true;
+  }
+}
+
 export function realGitCredentialDeps(): GitCredentialDeps {
   return {
     env: process.env,
@@ -117,6 +155,7 @@ export function realGitCredentialDeps(): GitCredentialDeps {
         return "unreadable";
       }
     },
+    destinationPublic: realDestinationPublic,
     resolveTaaad: resolvePinnedTaaad,
     mint: mintAppToken,
     loginToken: realLoginToken,
@@ -339,6 +378,19 @@ function refuse(
   return { stdout: QUIT, stderr: `repo-aegis git-credential: ${reason}\n` };
 }
 
+/**
+ * The scope word ("local", "worktree" or "command") when the repository's own configuration sets `core.hooksPath` to a
+ * directory that is not `<home>/hooks`, else null. With that setting git runs only that directory, so repo-aegis's
+ * global pre-push does not run (a hooks manager such as husky does this). git reads the last value; a global or
+ * system value is the person's own and is not judged here. A relative value cannot be compared and counts as foreign.
+ */
+function localHooksOverride(entries: readonly ConfigEntry[], home: string, env: NodeJS.ProcessEnv): string | null {
+  let last: ConfigEntry | null = null;
+  for (const e of entries) if (e.key === "core.hookspath" && e.value !== null && e.value !== "") last = e;
+  if (last === null || (last.scope !== "local" && last.scope !== "worktree" && last.scope !== "command")) return null;
+  return isOwnHooksPath({ ...last, scope: "local" }, home, env) ? null : last.scope;
+}
+
 function refuseText(code: string, reason: string): GitCredentialResult {
   return { stdout: QUIT, stderr: `repo-aegis git-credential: ${reason.includes(code) ? reason : `${reason} [${code}]`}\n` };
 }
@@ -489,8 +541,8 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
     });
   }
   // A known read of the person's account publishes nothing and prints nothing: the trace and helper-scope checks
-  // (which guard where a push's token could be captured) and the TLS note do not apply to it. The store guard
-  // below is App-only. (0.13.1: reads answer as the mapped account, so a fetch is not stopped by a setting that
+  // (which guard where a push's token could be captured) and the TLS note do not apply to it. The plaintext-store
+  // guard below still does. (0.13.1: reads answer as the mapped account, so a fetch is not stopped by a setting that
   // only matters for a push.)
   const personRead = column === "person" && knownRead;
   const violation = personRead ? null : credentialConfigViolation(entries, matchCtx, deps.env);
@@ -499,17 +551,46 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   }
   const warnings = personRead ? "" : credentialConfigWarnings(entries, matchCtx, deps.env).join("");
 
-  // `store` goes to every helper in the list: one that persists would save an App token, and the person's own
-  // later pushes would then run as the App. A person's own login token stored in the person's own keychain
-  // changes nothing about which account later pushes use, so this guard is for App tokens only (A5).
-  if (column === "agent") {
-    const storing = laterStoringHelper(entries, matchCtx);
-    if (storing !== null) {
+  // `store` goes to every helper in the list. An App token that a later helper saved would make the person's own
+  // later pushes run as the App, so ANY later storing helper refuses it. A person's own login token saved in the
+  // person's own OS store (osxkeychain, libsecret, wincred, a credential manager, the in-memory cache) changes
+  // nothing about which account later pushes use, so those pass; `store` writes it in plaintext to
+  // ~/.git-credentials, and an unrecognised helper may, so those refuse for the person column too, reads included (A5).
+  const storing = laterStoringHelper(entries, matchCtx);
+  if (storing !== null) {
+    const plaintextRisk = storing === "store" || storing === "an unrecognised helper";
+    if (column === "agent" || plaintextRisk) {
+      const what =
+        column === "agent"
+          ? "the App token would be saved"
+          : storing === "store"
+            ? "the person's token would be written in plaintext to ~/.git-credentials"
+            : "the person's token might be written in plaintext";
       return refuse(
         "AGENT_PUSH_CREDENTIAL_STORE",
-        `the App token would be saved by a later credential helper (${storing}), because git sends \`store\` to every helper; scope that helper away from https://github.com (credential.https://github.com.helper with a reset entry) or reorder, then re-run \`repo-aegis install git-credential\`; repo-aegis did not add that helper`,
+        `${what} by a later credential helper (${storing}), because git sends \`store\` to every helper; scope that helper away from https://github.com (credential.https://github.com.helper with a reset entry) or reorder, then re-run \`repo-aegis install git-credential\`; repo-aegis did not add that helper`,
         dest,
         { by: "person", command: "git config --list --show-origin", note: "it lists the helpers in order and names the files that set them; scope the later one away from https://github.com or move it before repo-aegis's, then re-run `repo-aegis install git-credential`" },
+      );
+    }
+  }
+
+  // A push as the person's own account needs the pre-push guard to be running, because the helper no longer judges
+  // whether the push may go. A repository whose own configuration points core.hooksPath at another directory (husky)
+  // runs only that directory, so a script-run push (`npm run release`) to a possibly-public repository would carry the
+  // person's token with nothing checking it. Refused only then: the destination is not known private, offline.
+  // Residual: `git push --no-verify` skips the hook whatever this says.
+  if (column === "person" && !knownRead) {
+    const override = localHooksOverride(entries, home, deps.env);
+    if (override !== null && deps.destinationPublic(deps.cwd, dest.owner, dest.repo, deps.env, home)) {
+      return refuse(
+        "AGENT_PUSH_GUARD_NOT_RUNNING",
+        `the pre-push guard does not run in this repository (core.hooksPath is set in ${override} scope to a directory that is not repo-aegis's, as a hooks manager such as husky does), and the destination is not known to be private, so a push as the person's account to a possibly-public repository is refused; repo-aegis did not set it`,
+        dest,
+        {
+          by: "person",
+          step: "pushes from a terminal, or chains repo-aegis's pre-push hook from the repository's own hooks directory (doc/configuration.md, \"Git pushes by an agent\"); a recorded private visibility (`repo-aegis classify`) also lets this push through",
+        },
       );
     }
   }

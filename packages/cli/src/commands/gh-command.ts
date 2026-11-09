@@ -438,7 +438,7 @@ function decideIdentity(
                       { by: "person", command: "git config --list --show-origin", note: "it shows which file fails to read; repair or remove that file" },
                     ]
                   : [
-                      { by: "agent", command: "the same call from a checkout whose local git configuration sets none of core.hooksPath, core.fsmonitor, core.sshCommand, url.*.insteadOf, credential.helper or http.proxy-style options" },
+                      { by: "agent", command: "the same call from a checkout whose local git configuration sets none of core.hooksPath, core.fsmonitor, core.sshCommand, url.*.insteadOf or credential.helper" },
                       settingFix(hit),
                       { by: "person", command: "repo-aegis approve <owner>/<repo>", note: "account-bound: it covers this setting for the approval's lifetime, without changing the configuration" },
                     ],

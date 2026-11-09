@@ -36,10 +36,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--uninstall` removes exactly what was added: the helper, each re-added helper, then the reset
   (only when no other value is left under the key). A non-empty list with a system helper in front
   is still refused. The "needs an administrator" hint is gone.
-- **`AGENT_PUSH_CREDENTIAL_STORE` applies to App tokens only.** A later helper that would save the
-  token (`osxkeychain`, `store`, ...) would make the person's later pushes run as the App. A person's
-  own login token stored in the person's own keychain changes nothing about which account later
-  pushes use, so it no longer refuses.
+- **`AGENT_PUSH_CREDENTIAL_STORE` is narrower for a person's token.** A later helper that would save
+  an App token still always refuses (the person's later pushes would run as the App). A person's own
+  login token, push or read, now refuses only for `store` (plaintext in `~/.git-credentials`) and an
+  unrecognised helper; the OS stores (`osxkeychain`, `libsecret`, `wincred`, a credential manager)
+  and `cache` pass.
+- **A backstop for repositories that run their own hooks (`AGENT_PUSH_GUARD_NOT_RUNNING`).** With a
+  repository-level `core.hooksPath` (husky), git does not run repo-aegis's pre-push, so a script-run
+  push as the person's account to a repository not recorded as private is refused by the helper; a
+  private repository, a global `core.hooksPath`, an App identity and reads are unaffected. Known
+  residual: `git push --no-verify` skips the pre-push hook.
+- **Known reads skip the trace-variable checks.** A `fetch`, `pull` or `clone` as the person's account
+  no longer refuses on `GIT_TRACE_CURL` and the other trace variables (nothing is published); the
+  plaintext-store guard still applies to reads.
 - **The sandbox hint for a failed App mint names the network.** Inside the Claude Code sandbox,
   taaad-signer's own connection to GitHub does not go through the sandbox's proxy (it fails with
   `NSURLErrorDomain -1003`), so the old "keychain or network" guess is replaced, and the text says

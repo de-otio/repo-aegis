@@ -187,6 +187,7 @@ describe("U7 refusal text: git credential helper", () => {
     ancestry: pushChain,
     readConfig: () => [],
     loadRegistry: h => loadRegistry(join(h, "engagements.yaml")),
+    destinationPublic: () => true,
     resolveTaaad: () => "/stub/taaad",
     loginToken: () => ({ kind: "unavailable" }),
     mint: () => {

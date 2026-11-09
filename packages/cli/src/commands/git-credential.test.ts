@@ -105,6 +105,7 @@ function deps(over: Partial<GitCredentialDeps> = {}, presence: IdentityPresence 
     ancestry: pushChain,
     readConfig: () => [],
     loadRegistry: realGitCredentialDeps().loadRegistry,
+    destinationPublic: () => destinationPublic,
     resolveTaaad: () => taaad,
     mint: mintAppToken,
     loginToken: (login, env, h) => (loginCalls.push({ login, env, home: h }), personToken()),
@@ -116,7 +117,10 @@ function deps(over: Partial<GitCredentialDeps> = {}, presence: IdentityPresence 
 const PERSON_TOKEN = "gho_personTOKEN0123456789abcdef";
 let personToken = (): LoginTokenResult => ({ kind: "token", token: PERSON_TOKEN });
 let loginCalls: { login: string; env: NodeJS.ProcessEnv; home: string }[] = [];
+/** What the injected destination cache says: true (public or unknown) is the fail-closed default. */
+let destinationPublic = true;
 beforeEach(() => {
+  destinationPublic = true;
   loginCalls = [];
   personToken = () => ({ kind: "token", token: PERSON_TOKEN });
 });
@@ -606,13 +610,104 @@ describe("git-credential get: a push as the owner's person account (D1: the defa
     assert.equal(loginCalls.length, 0, "refused before the token was asked for");
   });
 
-  it("A5: a later storing helper after ours does NOT refuse a person's token (it stays the person's own account), push or read", () => {
-    const cfg =
-      "global\tcredential.https://github.com.helper \nglobal\tcredential.https://github.com.helper !'/n' '/c' git-credential --home '/h'\nglobal\tcredential.https://github.com.helper store";
-    const push = get(request("p/r.git"), deps({ readConfig: () => entries(cfg) }));
-    assert.equal(push.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, push.stderr);
-    const read = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"]), readConfig: () => entries(cfg) }));
-    assert.equal(read.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, read.stderr);
+  const OURS = "!'/n' '/c' git-credential --home '/h'";
+  const withLater = (later: string): string =>
+    `global\tcredential.https://github.com.helper \nglobal\tcredential.https://github.com.helper ${OURS}\nglobal\tcredential.https://github.com.helper ${later}`;
+
+  it("A5: a later OS store (osxkeychain, libsecret, wincred, a credential manager, cache) does NOT refuse a person's token, push or read", () => {
+    for (const later of ["osxkeychain", "libsecret", "wincred", "manager", "manager-core", "git-credential-manager", "cache", "cache --timeout 60"]) {
+      const push = get(request("p/r.git"), deps({ readConfig: () => entries(withLater(later)) }));
+      assert.equal(push.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, `${later} push: ${push.stderr}`);
+      const read = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"], "p/r.git"), readConfig: () => entries(withLater(later)) }));
+      assert.equal(read.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, `${later} read: ${read.stderr}`);
+    }
+  });
+
+  it("A5: a later `store` (plaintext in ~/.git-credentials) or an unrecognised helper refuses a person's token, push and read alike, before any token is fetched", () => {
+    for (const later of ["store", "store --file /tmp/x", "!/opt/x/bin/mystery"]) {
+      loginCalls = [];
+      const push = get(request("p/r.git"), deps({ readConfig: () => entries(withLater(later)) }));
+      assertRefused(push, "AGENT_PUSH_CREDENTIAL_STORE", `${later} push`);
+      assert.match(push.stderr, /the person's token (would be written in plaintext|might be written in plaintext)/, later);
+      const read = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"], "p/r.git"), readConfig: () => entries(withLater(later)) }));
+      assertRefused(read, "AGENT_PUSH_CREDENTIAL_STORE", `${later} read`);
+      assert.equal(loginCalls.length, 0, `${later}: refused before the token was asked for`);
+    }
+  });
+
+  describe("the pre-push backstop: a repository's own core.hooksPath (husky)", () => {
+    const HUSKY = "local\tcore.hookspath .husky/_";
+    const GLOBAL_OWN = "global\tcore.hookspath /h/hooks";
+    const push = (cfg: string, over: Partial<GitCredentialDeps> = {}): { stdout: string; stderr: string } =>
+      get(request("p/r.git"), deps({ readConfig: () => entries(cfg), ...over }));
+
+    it("a local hooksPath that is not repo-aegis's, and a destination that is unknown or public: refused, no token fetched", () => {
+      destinationPublic = true;
+      const r = push(HUSKY);
+      assertRefused(r, "AGENT_PUSH_GUARD_NOT_RUNNING");
+      assert.match(r.stderr, /core\.hooksPath is set in local scope/);
+      assert.match(r.stderr, /pushes from a terminal, or chains repo-aegis's pre-push hook/);
+      assert.equal(loginCalls.length, 0);
+      for (const scope of ["worktree", "command"]) assertRefused(push(`${scope}\tcore.hookspath /tmp/h`), "AGENT_PUSH_GUARD_NOT_RUNNING", scope);
+    });
+
+    it("the same with the destination recorded private: the token", () => {
+      destinationPublic = false;
+      const r = push(HUSKY);
+      assert.equal(r.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, r.stderr);
+    });
+
+    it("a global hooksPath (the person's own or repo-aegis's), or none: the token, even for an unknown destination", () => {
+      destinationPublic = true;
+      for (const cfg of [GLOBAL_OWN, "global\tcore.hookspath /somewhere/else", "system\tcore.hookspath /x", ""]) {
+        assert.equal(push(cfg).stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, cfg);
+      }
+    });
+
+    it("a local hooksPath that IS repo-aegis's own hooks directory (install hooks --local) is not an override", () => {
+      destinationPublic = true;
+      const ownDir = join(home, "hooks");
+      mkdirSync(ownDir, { recursive: true });
+      assert.equal(push(`local\tcore.hookspath ${ownDir}`).stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`);
+      // The last value wins: a local override after a correct global one is still an override.
+      assertRefused(push(`global\tcore.hookspath ${ownDir}\nlocal\tcore.hookspath .husky/_`), "AGENT_PUSH_GUARD_NOT_RUNNING");
+      // ... and a correct local value after a foreign global one is fine.
+      assert.equal(push(`global\tcore.hookspath /elsewhere\nlocal\tcore.hookspath ${ownDir}`).stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`);
+    });
+
+    it("known reads, and the App column, are not affected", () => {
+      destinationPublic = true;
+      const read = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"], "p/r.git"), readConfig: () => entries(HUSKY) }));
+      assert.equal(read.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, read.stderr);
+      const app = get(request(), deps({ readConfig: () => entries(HUSKY) }));
+      assert.match(app.stdout, /^username=x-access-token\npassword=ghs_/, app.stderr);
+    });
+
+    it("the real offline visibility rule: a repository recorded private passes, an uncached or public one is refused", () => {
+      const repo = join(tmp, `husky-repo${n}`);
+      mkdirSync(repo, { recursive: true });
+      const git = (...a: string[]): void => void spawnSync("git", a, { cwd: repo, env: hermeticGitEnv(), stdio: "ignore" });
+      git("init", "-q", "-b", "main");
+      git("remote", "add", "origin", "https://github.com/p/r.git");
+      const real = realGitCredentialDeps().destinationPublic;
+      const check = (): boolean => real(repo, "p", "r", {}, home);
+      assert.equal(check(), true, "no cache: unknown is treated as public");
+      git("config", "repo-aegis.visibility", "public");
+      assert.equal(check(), true);
+      git("config", "repo-aegis.visibility", "private");
+      assert.equal(check(), false, "recorded private");
+      assert.equal(real(repo, "p", "other", {}, home), true, "another destination does not inherit this repository's cache");
+      assert.equal(real(repo, "p", "r", { REPO_AEGIS_ASSUME_PUBLIC: "1" }, home), true, "the one-directional public override still applies");
+      git("config", "repo-aegis.class", "public-eligible");
+      assert.equal(check(), true, "a public-eligible declaration is public whatever the cache says");
+      assert.equal(real(join(tmp, "not-a-repo-at-all"), "p", "r", {}, home), true, "fails closed");
+      // Wired end to end: the injected-nothing deps decide.
+      git("config", "repo-aegis.class", "private-strict");
+      const r = get(request("p/r.git"), deps({ cwd: repo, readConfig: () => entries(HUSKY), destinationPublic: real }));
+      assert.equal(r.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, r.stderr);
+      git("config", "repo-aegis.visibility", "public");
+      assertRefused(get(request("p/r.git"), deps({ cwd: repo, readConfig: () => entries(HUSKY), destinationPublic: real })), "AGENT_PUSH_GUARD_NOT_RUNNING");
+    });
   });
 
   it("no trusted gh, or no token for the mapped login: refused with a named code, audited as refused, nothing printed", () => {
