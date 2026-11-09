@@ -35,7 +35,9 @@ import {
   type IdentityPresence,
   type TerminalCheck,
 } from "@de-otio/repo-aegis-core";
+import { cliBuilt, cliPath } from "./_subprocess-utils.js";
 import { hermeticGitEnv, scrubGitEnv } from "./_test-utils.js";
+import { renderShimScript } from "./commands/shim-script.js";
 import { runGhCommand, type GhCommandDeps } from "./commands/gh-command.js";
 import { runGitCredential, type GitCredentialDeps } from "./commands/git-credential.js";
 import { mintAppToken } from "./commands/taaad-mint.js";
@@ -208,6 +210,7 @@ function helper(w: World, how: Unreadable, presence: IdentityPresence = "agent")
     loadRegistry: h => loadRegistry(join(h, "engagements.yaml")),
     resolveTaaad: () => w.taaadPath,
     mint: mintAppToken,
+    loginToken: () => ({ kind: "unavailable" }),
   };
   return runGitCredential("get", GIT_ASKS, w.home, deps);
 }
@@ -390,5 +393,46 @@ describe("Phase U exit criterion: an agent publishes under one account-bound app
       assert.equal(r.status, 2);
       assert.deepEqual(mainCalls(r), [], "gh ran as the active account for a write");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The real seams, once
+// ---------------------------------------------------------------------------
+
+describe("the real seams: the built helper with the real process-list reader and presence reader", { skip: !cliBuilt() }, () => {
+  it("answers the covered credential or refuses under a named code, never a crash or silent empty output", () => {
+    const w = makeWorld(); // approved: example-org/*, bound to alice, which the registry maps
+    write(join(w.home, "bin", "gh"), renderShimScript({ node: process.execPath, cli: cliPath }, { home: w.home, taaad: w.taaad }), 0o755);
+    // A `ps` that fails, first on PATH. The real reader runs ps by ABSOLUTE path (an agent must not be able to
+    // fake it), so this does not make the process list unreadable here; where the sandbox does block it, the
+    // chain is unreadable and the approval covers it. Either way the outcome below must hold, and nothing is
+    // injected: the real `readProcessAncestry`, the real presence reader and the real git config reader all run.
+    const fakeBin = join(w.root, "fakebin");
+    write(join(fakeBin, "ps"), "#!/bin/sh\nexit 1\n", 0o755);
+    const r = spawnSync(process.execPath, [cliPath, "git-credential", "--home", w.home, "get"], {
+      cwd: w.repo,
+      input: GIT_ASKS,
+      encoding: "utf8",
+      env: {
+        PATH: `${fakeBin}:${process.env["PATH"] ?? ""}`,
+        HOME: join(w.root, "fake-home"),
+        GIT_CONFIG_GLOBAL: w.globalConfig,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+      },
+    });
+    const label = `status=${r.status} stdout=${JSON.stringify(r.stdout)} stderr=${r.stderr}`;
+    assert.equal(r.status, 0, `a helper always exits 0: ${label}`);
+    assert.notEqual(r.stdout, "", `silent empty output would hand the agent the person's own helper: ${label}`);
+    assert.ok(!/TypeError|ReferenceError|\n\s+at .*\.js:\d+/.test(r.stderr), `no stack trace: ${label}`);
+    assert.ok(!r.stderr.includes("ghs_"), `the token never reaches stderr: ${label}`);
+    if (r.stdout.startsWith("quit=true")) {
+      assert.equal(r.stdout, "quit=true\n", label);
+      assert.match(r.stderr, /\[(AGENT_CREDENTIAL_DIRECT_FILL|AGENT_PUSH_CHAIN_UNREADABLE)[;\]]/, `a named refusal: ${label}`);
+    } else {
+      assert.match(r.stdout, /^username=x-access-token\npassword=ghs_STUBexamplebot0123456789abcdef\n/, label);
+      assert.match(r.stderr, /^repo-aegis: approval [0-9a-f]+ covers an unreadable process list for example-org\/svc\n$/, label);
+    }
   });
 });

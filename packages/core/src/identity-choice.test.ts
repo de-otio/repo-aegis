@@ -9,6 +9,7 @@ import {
   ghCallInfo,
   ghCallTargets,
   identityPresence,
+  personLoginOf,
   type ChooseIdentityInput,
   type GhCallTarget,
   type IdentityChoice,
@@ -997,5 +998,26 @@ describe("H1: git passthrough and clone options are unsafe for the agent column"
     for (const args of [CLONE, ["repo", "fork", "both-org/r"], ["pr", "view", "5", "--repo", "both-org/r"], ["api", "repos/both-org/r", "-f", "x=-c"]]) {
       assert.equal(chooseIdentity(input({ presence: "agent", args, targets: [lit("both-org")] })).kind, "inject", args.join(" "));
     }
+  });
+});
+
+// ---- personLoginOf (the account an approval is bound to, U5) ----------------------------------
+
+describe("personLoginOf", () => {
+  it("is the owner's person gh-login in the CURRENT registry, owner matched case-insensitively", () => {
+    assert.equal(personLoginOf(reg(), "both-org"), "alice");
+    assert.equal(personLoginOf(reg(), "BOTH-ORG"), "alice");
+    assert.equal(personLoginOf(reg(), "person-org"), "alice-work");
+    // Re-mapped: the answer follows the registry, not any earlier mapping.
+    const remapped = reg({ identityMap: new Map<string, OwnerIdentities>([["both-org", { person: WORK, agent: ME_BOT }]]) });
+    assert.equal(personLoginOf(remapped, "both-org"), "alice-work");
+  });
+
+  it("is null with no person identity, with a person that is not a login, with an unmapped owner or no map at all", () => {
+    assert.equal(personLoginOf(reg(), "agent-org"), null, "agent only");
+    assert.equal(personLoginOf(reg(), "unmapped-org"), null);
+    const app: Identity = { name: "p-app", kind: "github-app", app: "x" };
+    assert.equal(personLoginOf(reg({ identityMap: new Map<string, OwnerIdentities>([["o", { person: app }]]) }), "o"), null, "a github-app in the person column");
+    assert.equal(personLoginOf({ engagements: [], alwaysBlock: [] }, "both-org"), null, "no identityMap");
   });
 });

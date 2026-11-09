@@ -33,6 +33,7 @@ import {
   chooseIdentity,
   describeVerb,
   findAccountBoundApproval,
+  findApprovalWithAnyLogin,
   findLoginApproval,
   ghBaseRepo,
   isGhBuiltinGroup,
@@ -40,6 +41,7 @@ import {
   checkTerminal,
   identityPresence,
   loadRegistry,
+  personLoginOf,
   refusal,
   registeredOwners,
   safeDestination,
@@ -188,7 +190,8 @@ function ownRefusal(
 const SETTING_APPROVAL =
   "No approval covers this yet. An account-bound approval does: a person runs `repo-aegis approve <owner>/<repo>` " +
   "(or `<owner>/*`) from a terminal, for an owner with a mapped GitHub account, and the same call then runs " +
-  "for the life of that approval. A `*` approval and one with no recorded account do not.";
+  "for the life of that approval. A `*` approval, one with no recorded account and one recorded for an account " +
+  "the owner is no longer mapped to do not.";
 
 /**
  * The fix line for a repository git setting refused as GH_IDENTITY_ARG_UNSAFE. A person runs it; an agent never does.
@@ -411,8 +414,13 @@ function decideIdentity(
         // U5: an account-bound approval for this owner/repo, within its lifetime, covers the refusal. The shape,
         // cross-org and payload rules were decided above and still apply. A configuration git could not read is
         // not a setting an approval can vouch for, so it is never covered.
+        // It must be bound to the login the owner's person identity has NOW: an approval minted before that
+        // identity was re-mapped covers nothing, and an owner with no person login has nothing to bind to.
+        const boundLogin = personLoginOf(registry!, choice.owner);
         const covering =
-          judged === null ? null : findAccountBoundApproval({ org: choice.owner, repo: choice.repo ?? "*" }, approvalsPath(home));
+          judged === null || boundLogin === null
+            ? null
+            : findAccountBoundApproval({ org: choice.owner, repo: choice.repo ?? "*" }, boundLogin, approvalsPath(home));
         if (covering === null) {
           return refuseOutcome(
             {
@@ -504,7 +512,8 @@ function decideIdentity(
       presence,
       approvalFor: (owner, repo, login) =>
         findLoginApproval({ org: owner, repo: repo ?? "*" }, login, approvalsPath(h))?.id ?? null,
-      boundApprovalFor: (owner, repo) => findAccountBoundApproval({ org: owner, repo: repo ?? "*" }, approvalsPath(h))?.id ?? null,
+      // Explanation only: an approval with ANY login, so a refusal can say it is bound to another account.
+      boundApprovalFor: (owner, repo) => findApprovalWithAnyLogin({ org: owner, repo: repo ?? "*" }, approvalsPath(h))?.id ?? null,
       suppliedToken: (env["GH_TOKEN"] ?? "") !== "" || (env["GITHUB_TOKEN"] ?? "") !== "",
       redirect: firstSet(env, REDIRECT_VARS),
       registeredOwner: o => owners.has(o.toLowerCase()),

@@ -397,25 +397,39 @@ export function findLoginApproval(
 }
 
 /**
- * The live, account-bound approval covering `destination`, or null
- * (doc/plan-landscape-recommendations.md Phase U, U5).
+ * The live approval that covers the deliberate-bypass refusals for `destination` because it is bound to `login`
+ * (doc/plan-landscape-recommendations.md Phase U, U5), or null.
  *
- * A person who ran `repo-aegis approve <org>/<repo>` or `<org>/*` for an owner
- * with a mapped person identity has said, at a terminal and for a bounded time,
- * "agents may publish here". The refusals that only defend against an agent
- * DELIBERATELY stealing a token — `AGENT_PUSH_CHAIN_UNREADABLE` (the process
- * list cannot be read, typically inside a sandbox) and `GH_IDENTITY_ARG_UNSAFE`
- * (a local git setting that could run a program or redirect the token) — are
- * outside the threat model (accidental leaks), so such an approval covers them.
+ * A person who minted an approval for `<org>/<repo>` or `<org>/*`, for an owner with a mapped person identity,
+ * has said, at a terminal and for a bounded time, "agents may publish here". The refusals that only defend against
+ * an agent DELIBERATELY stealing a token (`AGENT_PUSH_CHAIN_UNREADABLE`, the process list cannot be read,
+ * typically inside a sandbox; and `GH_IDENTITY_ARG_UNSAFE` for a local git setting that could run a program or
+ * redirect the token) are outside the threat model (accidental leaks), so such an approval covers them.
  *
- * Same matching as {@link findLoginApproval} except that ANY recorded login
- * qualifies: the token those refusals guard is the App's, not the person's, so
- * the person's login is evidence of who approved, not of who writes. Only an
- * `<org>/<repo>` or `<org>/*` approval with a login and no ref matches; a `*`
- * approval, an approval without a login (no mapped person at mint time), a
- * ref-limited approval and an expired one match nothing. Never throws.
+ * `login` is the login of the owner's CURRENT mapped person identity, read from the registry by the caller (see
+ * `personLoginOf`). The approval must carry exactly that login (case-insensitively): an approval minted before the
+ * person identity was re-mapped to another account stops covering at once, not when its lifetime (up to 24 hours)
+ * ends. An owner with no person identity, or one without a login, has nothing to bind to: the caller passes none
+ * and nothing is covered (an empty `login` matches nothing). Otherwise exactly {@link findLoginApproval}: only an
+ * `<org>/<repo>` or `<org>/*` approval with a login and no ref matches; a `*` approval, an approval without a
+ * login, a ref-limited one and an expired one match nothing. Never throws.
  */
 export function findAccountBoundApproval(
+  destination: { org: string; repo: string },
+  login: string,
+  path: string = approvalsPath(),
+  now: Date = new Date(),
+): EgressApproval | null {
+  return findLoginApproval(destination, login, path, now);
+}
+
+/**
+ * The live `<org>/<repo>` or `<org>/*` approval for `destination` that carries ANY login, or null. Only for
+ * EXPLAINING a refusal ("an approval exists but is bound to another account"): it never covers anything. Coverage
+ * is {@link findAccountBoundApproval} (the owner's current login) or {@link findLoginApproval} (a login-bound
+ * person write). Same matching otherwise: no `*` approval, no ref-limited one, no empty login. Never throws.
+ */
+export function findApprovalWithAnyLogin(
   destination: { org: string; repo: string },
   path: string = approvalsPath(),
   now: Date = new Date(),

@@ -188,6 +188,7 @@ describe("U7 refusal text: git credential helper", () => {
     readConfig: () => [],
     loadRegistry: h => loadRegistry(join(h, "engagements.yaml")),
     resolveTaaad: () => "/stub/taaad",
+    loginToken: () => ({ kind: "unavailable" }),
     mint: () => {
       throw new Error("a refusal must not mint");
     },
@@ -268,7 +269,7 @@ describe("U7 refusal text: git credential helper", () => {
         cause: /would run as a person's GitHub account, and the git subcommand is not one known to only read/,
         created: /repo-aegis created no setting for it/,
         fix: /runs the push from a terminal/,
-        approval: /does not consult approvals for a person's account, so an approval does not help here/,
+        approval: /A login-bound `repo-aegis approve p\/r` \(or `p\/\*`\) run by a person from a terminal covers this/,
       },
       {
         label: "the agent identity is a login, not an App",

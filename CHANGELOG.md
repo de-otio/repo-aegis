@@ -91,6 +91,25 @@ and no command explained a code.
 
 - The git credential helper wrote its audit record to the caller's `REPO_AEGIS_HOME` instead of
   the pinned home.
+- **An agent push for an owner whose only identity is a person can now be approved.** The credential
+  helper passed no approvals to the identity decision, so `GH_IDENTITY_WRITE_NEEDS_HUMAN` could never
+  be lifted for an HTTPS push, while `repo-aegis gh` honoured the same login-bound approval. The helper
+  now reads the pinned home's approvals; with one that carries the owner's person login it hands git
+  THAT login's token (`gh auth token --user <login>` through the trusted gh, never the active gh
+  account's), after every check an App token passes (A5 configuration and environment, the `store`
+  guard). It prints one stderr line naming the approval id and writes an audit record (id only: no
+  login, no token). Without an approval the refusal stays, and its text now says a login-bound
+  `repo-aegis approve <owner>/<repo>` from a terminal covers it.
+- **An account-bound approval covers only the owner's CURRENT person login.** `AGENT_PUSH_CHAIN_UNREADABLE`
+  and `GH_IDENTITY_ARG_UNSAFE` (git setting) were covered by an approval carrying any login, so one
+  minted before the owner's person identity was re-mapped kept covering for up to 24 hours. Both
+  callers now compare the approval's login (case-insensitively) with the login the registry maps
+  now; an owner with no person login, or a registry that cannot be read, is covered by nothing.
+- A covered unreadable-chain request for an owner with no registry is refused
+  (`AGENT_PUSH_CHAIN_UNREADABLE`), never answered with silence that hands the push to the person's
+  own helper.
+- `install hooks --local` compares a `~`-spelled global `core.hooksPath` by its expansion, so
+  `~/.repo-aegis/hooks` is the duplicate it is.
 
 ### Documentation
 

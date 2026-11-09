@@ -11,6 +11,7 @@ import {
   findApproval,
   findLoginApproval,
   findAccountBoundApproval,
+  findApprovalWithAnyLogin,
   findUncoveringStarApproval,
   starApprovalCovers,
   listApprovals,
@@ -381,31 +382,76 @@ describe("login-bound approvals (doc/plan-owner-identity.md N3, A11)", () => {
     });
   });
 
-  it("findAccountBoundApproval: any login, the repository or the whole owner, nothing else (Phase U, U5)", () => {
+  it("findAccountBoundApproval: only the login the owner's person identity has NOW, the repository or the whole owner (Phase U, U5)", () => {
     store(p => {
-      assert.equal(findAccountBoundApproval(dest, p, T0), null, "no store");
+      assert.equal(findAccountBoundApproval(dest, "alice", p, T0), null, "no store");
       const a = mintApproval({ target: dest, login: "alice", path: p, now: T0 });
-      assert.equal(findAccountBoundApproval(dest, p, T0)?.id, a.id);
-      assert.equal(findAccountBoundApproval({ org: "EXAMPLE-ORG", repo: "SVC" }, p, T0)?.id, a.id, "case-insensitive");
-      assert.equal(findAccountBoundApproval({ org: "example-org", repo: "other" }, p, T0), null, "another repository");
-      assert.equal(findAccountBoundApproval({ org: "other-org", repo: "svc" }, p, T0), null, "another owner");
-      assert.equal(findAccountBoundApproval(dest, p, new Date(T0.getTime() + DEFAULT_APPROVAL_TTL_MS + 1)), null, "expired");
+      assert.equal(findAccountBoundApproval(dest, "alice", p, T0)?.id, a.id);
+      assert.equal(findAccountBoundApproval(dest, "ALICE", p, T0)?.id, a.id, "the login matches case-insensitively");
+      assert.equal(findAccountBoundApproval({ org: "EXAMPLE-ORG", repo: "SVC" }, "alice", p, T0)?.id, a.id, "case-insensitive destination");
+      assert.equal(findAccountBoundApproval(dest, "mallory", p, T0), null, "an approval bound to another account covers nothing");
+      assert.equal(findAccountBoundApproval({ org: "example-org", repo: "other" }, "alice", p, T0), null, "another repository");
+      assert.equal(findAccountBoundApproval({ org: "other-org", repo: "svc" }, "alice", p, T0), null, "another owner");
+      assert.equal(findAccountBoundApproval(dest, "alice", p, new Date(T0.getTime() + DEFAULT_APPROVAL_TTL_MS + 1)), null, "expired");
     });
     store(p => {
       mintApproval({ target: { org: "example-org", repo: "*" }, login: "bob", path: p, now: T0 });
-      assert.notEqual(findAccountBoundApproval(dest, p, T0), null, "<org>/* with a login covers the repository");
+      assert.notEqual(findAccountBoundApproval(dest, "bob", p, T0), null, "<org>/* with the login covers the repository");
+      assert.equal(findAccountBoundApproval(dest, "alice", p, T0), null, "...and only for that login");
     });
   });
 
-  it("findAccountBoundApproval: no login, a '*' approval, a ref-limited one or a non-ASCII owner match nothing", () => {
+  it("findAccountBoundApproval: no login, an empty login, a '*' approval, a ref-limited one or a non-ASCII owner match nothing", () => {
     store(p => {
       mintApproval({ target: dest, path: p, now: T0 });
       mintApproval({ target: { org: "*", repo: "*" }, path: p, now: T0 });
       mintApproval({ target: dest, login: "alice", ref: "main", path: p, now: T0 });
-      assert.equal(findAccountBoundApproval(dest, p, T0), null);
+      assert.equal(findAccountBoundApproval(dest, "alice", p, T0), null);
       mintApproval({ target: { org: "korp", repo: "*" }, login: "alice", path: p, now: T0 });
-      assert.equal(findAccountBoundApproval({ org: "Korp", repo: "svc" }, p, T0), null, "Kelvin sign is not k");
-      assert.notEqual(findAccountBoundApproval({ org: "korp", repo: "svc" }, p, T0), null, "control: ASCII owner matches");
+      assert.equal(findAccountBoundApproval({ org: "\u212Aorp", repo: "svc" }, "alice", p, T0), null, "Kelvin sign is not k");
+      assert.notEqual(findAccountBoundApproval({ org: "korp", repo: "svc" }, "alice", p, T0), null, "control: ASCII owner matches");
+    });
+    // An approval whose recorded login is empty (hand-written: a mint never writes one) matches nothing, and an
+    // empty login asked for matches nothing either.
+    store(p => {
+      const t = new Date(T0.getTime() + 60_000).toISOString();
+      writeFileSync(
+        p,
+        JSON.stringify({
+          version: 1,
+          approvals: [{ id: "0123abcd", org: "example-org", repo: "svc", createdAt: T0.toISOString(), expiresAt: t, by: "x", login: "" }],
+        }),
+      );
+      assert.notEqual(listApprovals(p, T0).length, 0, "control: the approval is live");
+      assert.equal(findAccountBoundApproval(dest, "", p, T0), null, "empty login asked for");
+      assert.equal(findAccountBoundApproval(dest, "alice", p, T0), null, "empty login recorded");
+      assert.equal(findLoginApproval(dest, "alice", p, T0), null, "same for the person-write finder");
+      assert.equal(findApprovalWithAnyLogin(dest, p, T0), null, "and for the explanation finder");
+    });
+  });
+
+  it("an approval expires exactly at createdAt + TTL: one millisecond before covers, the instant itself does not", () => {
+    store(p => {
+      mintApproval({ target: dest, login: "alice", ttlMs: 60_000, path: p, now: T0 });
+      const at = plus(60_000);
+      assert.notEqual(findAccountBoundApproval(dest, "alice", p, plus(59_999)), null, "1 ms before");
+      assert.equal(findAccountBoundApproval(dest, "alice", p, at), null, "at T0+TTL");
+      assert.equal(findLoginApproval(dest, "alice", p, at), null, "at T0+TTL (person write)");
+      assert.equal(findApprovalWithAnyLogin(dest, p, at), null, "at T0+TTL (explanation)");
+      assert.equal(listApprovals(p, at).length, 0);
+    });
+  });
+
+  it("findApprovalWithAnyLogin: any login (to explain a mismatch), never a '*', ref-limited or loginless approval", () => {
+    store(p => {
+      assert.equal(findApprovalWithAnyLogin(dest, p, T0), null, "no store");
+      mintApproval({ target: dest, path: p, now: T0 });
+      mintApproval({ target: { org: "*", repo: "*" }, path: p, now: T0 });
+      mintApproval({ target: dest, login: "alice", ref: "main", path: p, now: T0 });
+      assert.equal(findApprovalWithAnyLogin(dest, p, T0), null);
+      const a = mintApproval({ target: dest, login: "mallory", path: p, now: T0 });
+      assert.equal(findApprovalWithAnyLogin(dest, p, T0)?.id, a.id);
+      assert.equal(findApprovalWithAnyLogin({ org: "\u212Aorp", repo: "svc" }, p, T0), null);
     });
   });
 
