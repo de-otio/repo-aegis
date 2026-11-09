@@ -133,7 +133,7 @@ jobs:
           # npm actually produced and have the publish step read it back, so the
           # archive that ships is provably the archive that was scanned.
           : > "$PACK_DIR/manifest.txt"
-          for pkg in core llm scan cli mcp; do
+          for pkg in core llm scan cli; do
             dir="packages/${pkg}"
             name=$(node -p "require('./${dir}/package.json').name")
             echo "==> Packing ${name} from ${dir}"

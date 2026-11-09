@@ -152,8 +152,8 @@ indistinguishable from a real pass. That happens on:
   marker file (use `min-patterns` for this one).
 
 The floor is enforced **in the CLI**, where the number is computed, so it
-applies to local runs, the MCP server, and scheduled sweeps identically — not
-only to this action. Exit code is **2**, not 1: "the gate could not run" is a
+applies to local runs and scheduled sweeps identically — not only to this
+action. Exit code is **2**, not 1: "the gate could not run" is a
 different fact from "the gate found something", and conflating them is what
 lets a broken gate look like a passing one.
 

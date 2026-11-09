@@ -9,9 +9,7 @@
 // PATH-resolved at hook time. The agent reads the JSON output from the
 // session-start context and reacts per the documented status shapes.
 //
-// Identical behaviour to the MCP `aegis_classify_first_touch` tool;
-// both share the same core implementation. Output JSON is verbatim the
-// `FirstTouchResult` shape — no envelope.
+// Output JSON is verbatim the `FirstTouchResult` shape — no envelope.
 
 import { firstTouchClassify } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, type OutputOptions } from "../format.js";

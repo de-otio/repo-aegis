@@ -38,12 +38,6 @@ The monorepo has six packages plus a thin Action wrapper.
   status and scan output in the editor (status bar, diagnostics,
   commands). View-only — the deterministic gate stays in the git
   hooks and the Claude Code PostToolUse hook.
-- **`@de-otio/repo-aegis-mcp`** — Model Context Protocol server
-  exposing the core library as agent-readable tools (status, check,
-  audit, markers test, engagements list/show, classify-first-touch).
-  Same JSON shapes as the CLI, no `--verbose` path, redaction policy
-  enforced at the tool boundary. See
-  [packages/mcp/README.md](../packages/mcp/README.md).
 
 Plus two composite Actions:
 
@@ -121,8 +115,7 @@ a string is identified as a leak by the same logic at every layer.
   --recipient <pubkey>` / `decrypt --identity <path>`.
 - **Operator audit log** — `repo-aegis audit-log on/off/show/path`
   (off by default).
-- **MCP server, VSCode extension, GitHub Actions** — all in this
-  monorepo.
+- **VSCode extension, GitHub Actions** — all in this monorepo.
 - **CI hardening (0.8.0).** The server-side half of the gate, since the
   client-side one is advisory by construction (`--no-verify`, fresh clones
   without hooks, stale remote-tracking refs):

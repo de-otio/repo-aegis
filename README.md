@@ -164,7 +164,7 @@ Working in another repository, where those files are not on disk? Every refusal 
 (the guides ship in the npm package; `explain --list` names every code).
 
 Optional add-ons: [packages/llm](packages/llm/README.md) (local-LLM marker suggestions and a
-semantic audit sweep; never part of the blocking checks) and [packages/mcp](packages/mcp/README.md).
+semantic audit sweep; never part of the blocking checks).
 
 ## Companion tools
 

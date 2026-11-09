@@ -436,7 +436,7 @@ export function engagementsAdd(
   // Closes the window where a freshly registered org has no deny-set
   // entry to catch leaks. Surfaced both as a stderr warning (for the
   // human / agent reading text output) and as a `markerWarning` field
-  // in the JSON envelope (for the MCP-driven flow).
+  // in the JSON envelope (for machine callers).
   const markerWarning =
     markers.length === 0 ? { engagementId: id ?? "", count: 0 } : null;
   if (markerWarning) {

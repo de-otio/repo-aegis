@@ -428,9 +428,8 @@ command, hand-rolled scripts) against silent breakage.
 - **Operator audit log** — `repo-aegis audit-log on/off/show/path`.
   JSONL records to `~/.config/repo-aegis/state/audit.log`. Default OFF.
   Covers state-changing actions only; never logs literal markers.
-- **MCP server** (`@de-otio/repo-aegis-mcp`), **VSCode extension**
-  (`repo-aegis-vscode`), **GitHub Action** (`uses: de-otio/repo-aegis@v1`)
-  — all live in this monorepo.
+- **VSCode extension** (`repo-aegis-vscode`), **GitHub Action**
+  (`uses: de-otio/repo-aegis@v1`) — both live in this monorepo.
 
 ## Future hardening (designed but not implemented)
 

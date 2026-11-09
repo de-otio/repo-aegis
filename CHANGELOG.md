@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **The `@de-otio/repo-aegis-mcp` MCP server package is gone.** Its tools duplicated the CLI's
+  `status`, `check`, `markers` and `engagements` commands, and the first-touch classification
+  is still available through `repo-aegis hook first-touch`. The CLI never wrote an MCP
+  config, so `repo-aegis` has no uninstall step for it. If you registered the server in your
+  own `.mcp.json` (or another agent's MCP config), delete that entry yourself. Agents can run
+  the same checks through the `repo-aegis` CLI.
+
 ## [0.13.1] - 2026-11-09
 
 ### Fixed

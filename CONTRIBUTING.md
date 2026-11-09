@@ -21,7 +21,6 @@ compiled output under `packages/*/dist/`.
 | `@de-otio/repo-aegis-core`    | `packages/core`     | Scanning engine, registry, state, redaction logic.  |
 | `repo-aegis` (CLI)            | `packages/cli`      | The `repo-aegis` command-line tool.                 |
 | `@de-otio/repo-aegis-scan`    | `packages/scan`     | Org-wide GitHub code-search sweep tool.             |
-| `@de-otio/repo-aegis-mcp`     | `packages/mcp`      | Model Context Protocol server for coding agents.    |
 | `repo-aegis-vscode`           | `packages/vscode`   | VSCode extension (editor diagnostics).              |
 
 ## Build
@@ -96,7 +95,7 @@ harness), so a lower figure there is acceptable, but aim higher when you can.
 `packages/cli/src/program.test.ts` snapshots the public flag surface of every
 subcommand. **Any flag rename, addition, or removal must update
 `program.test.ts` in the same commit as the change.** This is how we keep
-shell scripts, hooks, MCP wrappers, the GitHub Action, and the VSCode
+shell scripts, hooks, the GitHub Action, and the VSCode
 extension from silently desynchronising from the CLI.
 
 If you're not sure whether your change is "flag-shaped", run `npm test` —

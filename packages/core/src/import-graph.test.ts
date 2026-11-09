@@ -18,7 +18,7 @@
 
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
 // ---- configuration --------------------------------------------------------
@@ -42,6 +42,13 @@ const GATE_PATH_ENTRY_POINTS: string[] = [
 const FORBIDDEN_PACKAGE_PATTERNS: RegExp[] = [
   /(?:^|[\\/])packages[\\/]llm[\\/]/,
   /(?:^|[\\/])@de-otio[\\/]repo-aegis-llm[\\/]/,
+];
+
+// Packages removed in P2-C (D5). The literals must not appear in any
+// shipped compiled file.
+const REMOVED_PACKAGE_LITERALS: string[] = [
+  "@de-otio/repo-aegis-mcp",
+  "packages/mcp",
 ];
 
 // String literals that must not appear in any source file reachable
@@ -235,5 +242,25 @@ describe("hot-path determinism guard", () => {
       `gate-path file(s) contain forbidden string literal(s):\n` +
         offenders.map(o => `  ${o.file}  (literal: "${o.literal}")`).join("\n"),
     );
+  });
+
+  // P2-C (D5): the MCP server package was removed. No shipped (non-test)
+  // compiled file may name it, so a re-added import fails here rather than
+  // at publish time. Scans every package's dist/, not just the gate path.
+  it("no shipped file references the removed MCP package", () => {
+    const offenders: string[] = [];
+    for (const pkg of readdirSync(join(repoRoot, "packages"))) {
+      const dist = join(repoRoot, "packages", pkg, "dist");
+      if (!existsSync(dist)) continue;
+      for (const rel of readdirSync(dist, { recursive: true }) as string[]) {
+        if (!rel.endsWith(".js") || rel.endsWith(".test.js")) continue;
+        const file = join(dist, rel);
+        const source = readFileSync(file, "utf8");
+        for (const literal of REMOVED_PACKAGE_LITERALS) {
+          if (source.includes(literal)) offenders.push(`${relative(repoRoot, file)}  (literal: "${literal}")`);
+        }
+      }
+    }
+    assert.deepEqual(offenders, [], `shipped file(s) reference the removed MCP package:\n${offenders.join("\n")}`);
   });
 });

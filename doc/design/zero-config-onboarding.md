@@ -8,6 +8,11 @@
 > Status: design accepted; Phase 1 (org-keyed JIT classification),
 > Phase 2 (LLM-assisted marker discovery), and Phase 3 (semantic
 > audit sweep) shipped in v0.2.0.
+>
+> Later change: the MCP server (`packages/mcp`) and its first-touch tool
+> (§1.5 below) were removed in the release after 0.13.x. The CLI
+> `hook first-touch` is the surviving classification path. The MCP
+> sections are kept as the design record only.
 
 This document is the source of truth for the *as-designed* shape of:
 
@@ -54,7 +59,6 @@ packages/
 │   └── library: registry, deny-set, scan, render, regex-safety, locking
 ├── cli/               @de-otio/repo-aegis                (gains JIT classify, suggest-markers)
 ├── scan/              @de-otio/repo-aegis-scan           (gains semantic sweep)
-├── mcp/               @de-otio/repo-aegis-mcp            (gains first-touch tool)
 ├── vscode/            repo-aegis-vscode                  (unchanged)
 └── llm/               @de-otio/repo-aegis-llm            (NEW)
     └── library: ollama client, prose extraction,
@@ -71,8 +75,6 @@ construction.
 ```
 git remote ──▶ classify ──▶ engagement match ──▶ setClass + addEngagement
                   │
-                  └─▶ first-touch MCP tool ──▶ agent prompts user
-                                               on unknown org
 
 repo prose ──▶ prose extraction ──▶ Ollama (local) ──▶ tokens
                                                        │
@@ -215,9 +217,10 @@ invocation). Validation reuses the schema rules above.
 Two-flag UX rather than positional disambiguation: easier to script and
 to call via MCP.
 
-### 1.5 First-touch MCP tool
+### 1.5 First-touch MCP tool (removed)
 
-[packages/mcp/src/tools/first-touch.ts](../../packages/mcp/src/tools/first-touch.ts) (new)
+Removed with the MCP server; this section is the design record only. The
+file it described (`packages/mcp/src/tools/first-touch.ts`) no longer exists.
 
 Note: the SessionStart hook this section describes is a command hook (`hook
 first-touch`, see `packages/cli/src/commands/claude-hook-specs.ts`), not an MCP
@@ -579,7 +582,6 @@ the same time as `packages/llm/` is created so it can never be true.
   conservatively (off in `install claude-md` upgrades; on in
   `init`) so an existing `~/.claude/settings.json` is not modified
   without opt-in.
-- MCP tool surface is additive. Existing tools unchanged.
 
 ### Test strategy
 
@@ -630,7 +632,7 @@ permanent unless explicitly redesigned.
 | Personal orgs vs engagement orgs | Disjoint. Same-string overlap is a parse error. |
 | Non-github hosts | Phase 1 returns `null` from `parseRemoteUrl`. Out of scope. |
 | Migration of `classify.yml` | One-warning-per-invocation deprecation; migration is opt-in via `init --migrate-classify`. |
-| First-touch agent prompt | Single MCP tool returns `needs-confirmation`; agent surfaces to user; user-confirmed `repo-aegis engagements add` (a CLI call; there is no MCP add tool) mutates the registry. Tool itself never mutates the registry. |
+| First-touch agent prompt | Historical: an MCP tool returned `needs-confirmation` (tool removed; the CLI `hook first-touch` now covers this path). User-confirmed `repo-aegis engagements add` mutates the registry. |
 | LLM endpoint default | `http://127.0.0.1:11434` (Ollama default). Non-local endpoints require explicit `--allow-remote-model`. |
 | LLM determinism | `temperature: 0, seed: 42` by default. Tests assert reproducibility. |
 | LLM output shape | Tokens with kind, never regex. Synthesis is deterministic and lives in trusted code. |
