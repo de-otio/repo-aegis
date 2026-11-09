@@ -133,10 +133,13 @@ describe("rule h — hostile destination names never reach pasteable text (revie
   function assertSafe(reason: string, bad: string, label: string): void {
     assert.match(reason, /The destination name is not a valid GitHub owner\/repo/, label);
     assert.match(reason, /No approval covers this/, label);
-    assert.match(reason, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]$/, label);
+    assert.match(reason, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]$/, label);
     if (bad !== "") assert.ok(!reason.includes(bad), `${label}: the name must not be echoed`);
     for (const frag of FORBIDDEN_COMMANDS) assert.ok(!reason.includes(frag), `${label}: no command fragment "${frag}"`);
-    assert.ok(!/[$`;|&\n\r]/.test(reason), `${label}: no shell metacharacter or line break in the reason`);
+    // The fixed trailer `[CODE; details: repo-aegis explain CODE]` carries a `;`: it is checked above, and the rest
+    // of the reason is what a hostile name could have reached.
+    const body = reason.replace(/\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]$/, "");
+    assert.ok(!/[$`;|&\n\r]/.test(body), `${label}: no shell metacharacter or line break in the reason`);
   }
 
   for (const [label, bad] of HOSTILE) {
@@ -191,7 +194,7 @@ describe("rule h — hostile destination names never reach pasteable text (revie
       assert.ok(out.destination?.unresolved === "opaque-repo" || out.destination?.unresolved === "unparsed-shape");
       assert.match(out.reason, /not a literal <owner>\/<repo>|could not take this command line apart/);
       assert.match(out.reason, /No approval covers this/);
-      assert.match(out.reason, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]$/);
+      assert.match(out.reason, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]$/);
       for (const frag of ["evil.example", "curl", "$(", ...FORBIDDEN_COMMANDS]) {
         assert.ok(!out.reason.includes(frag), `end to end: no "${frag}"`);
       }

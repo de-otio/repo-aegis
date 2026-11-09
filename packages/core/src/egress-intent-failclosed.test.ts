@@ -647,7 +647,7 @@ describe("unresolved refusals say what is wrong, and carry nothing from the comm
       assert.match(d.reason, /To act on a repository, re-issue as: /);
       assert.match(d.reason, /A person runs the original command, from a terminal\./);
       assert.match(d.reason, /Agents: do not run that yourself/);
-      assert.match(d.reason, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]/);
+      assert.match(d.reason, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]/);
       // Only this reason's wording: never the GraphQL text, never a name from the command.
       assert.ok(!/GraphQL|node id/.test(d.reason), d.reason);
       for (const leaked of ["secret-org", "secret-repo", "SECRET_REPO_VAR", "secret-alias-name", "acme"]) {

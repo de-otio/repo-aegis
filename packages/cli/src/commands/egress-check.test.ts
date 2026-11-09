@@ -410,7 +410,7 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     assert.match(p.error, /^gh issue create → stranger\/repo: refused\./);
     assert.match(p.error, /No approval covers this/);
     assert.match(p.error, /a person runs, from a terminal: repo-aegis engagements add --personal-org stranger/);
-    assert.match(p.error, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]/);
+    assert.match(p.error, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]/);
     for (const bad of REGISTERED) assert.ok(!r.stderr.includes(bad), `must not contain "${bad}"`);
   });
 

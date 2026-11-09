@@ -31,7 +31,7 @@
     "!**/*.test.*"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js"
+    "build": "tsc && chmod +x dist/index.js && node ../../scripts/copy-cli-docs.mjs"
   },
   "dependencies": {
     "@de-otio/repo-aegis-core": "^0.13.0",

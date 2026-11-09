@@ -611,7 +611,7 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
     assert.match(p.error, /^gh issue create → stranger\/repo: refused\./);
     assert.match(p.error, /No approval covers this/);
     assert.match(p.error, /a person runs, from a terminal: repo-aegis engagements add --personal-org stranger/);
-    assert.match(p.error, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]/);
+    assert.match(p.error, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]/);
     for (const bad of REGISTERED) {
       assert.ok(!r.stderr.includes(bad), `stderr must not contain "${bad}"`);
       assert.ok(!r.stdout.includes(bad), `stdout must not contain "${bad}"`);

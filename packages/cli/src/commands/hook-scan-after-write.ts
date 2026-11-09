@@ -42,7 +42,7 @@ export const CURSOR_DETECTION_ONLY =
 const NOT_SCANNED_REASON =
   "repo-aegis: this write's hook payload is larger than 1 MiB and the file path could not be read from its " +
   "start, so the file that was written has NOT been scanned for markers. Tell your human which file you wrote; " +
-  "they can scan it with `repo-aegis check --path <file>`. See doc/agent-guide.md#hook_input_too_large.";
+  "they can scan it with `repo-aegis check --path <file>`. [HOOK_INPUT_TOO_LARGE; details: repo-aegis explain HOOK_INPUT_TOO_LARGE]";
 
 function emitJsonAndExit(value: unknown, exitCode: number): never {
   // Claude Code's hook contract forwards stderr (not stdout) to the agent

@@ -504,6 +504,7 @@ function decideIdentity(
       presence,
       approvalFor: (owner, repo, login) =>
         findLoginApproval({ org: owner, repo: repo ?? "*" }, login, approvalsPath(h))?.id ?? null,
+      boundApprovalFor: (owner, repo) => findAccountBoundApproval({ org: owner, repo: repo ?? "*" }, approvalsPath(h))?.id ?? null,
       suppliedToken: (env["GH_TOKEN"] ?? "") !== "" || (env["GITHUB_TOKEN"] ?? "") !== "",
       redirect: firstSet(env, REDIRECT_VARS),
       registeredOwner: o => owners.has(o.toLowerCase()),

@@ -26,6 +26,7 @@ import {
   ORG_NAME_REGEX,
   IDENTITY_NAME_REGEX,
   GH_LOGIN_REGEX,
+  ghLoginProblem,
   REGISTRY_IDENTITIES_MIN_VERSION,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
@@ -241,6 +242,28 @@ function failUsage(error: string, opts: OutputOptions): never {
   return emitError({ code: "USAGE", error }, opts);
 }
 
+/**
+ * The warning `set-identity --person` prints when the identity's login is empty or not GitHub login syntax, or
+ * null. The command still succeeds (a person ran it at a terminal and the registry accepted it); the point is
+ * that agent writes through that identity are refused until the login is fixed, which the person would
+ * otherwise find out from an agent's refusal. Never contains the login.
+ */
+export function loginWarning(name: string, login: string | undefined): string | null {
+  if (ghLoginProblem(login) === null) return null;
+  return (
+    `warning: identity "${name}" has a login that is empty or not a valid GitHub login, so writes through it will be refused ` +
+    `until the login is fixed. Fix: clear its mappings (\`engagements set-identity <id> --clear\`), \`identity remove ${name}\`, ` +
+    `\`identity add ${name} --gh-login <login>\`, then map it again.`
+  );
+}
+
+/** {@link loginWarning} for identity `name` as the document has it now (nothing for an identity with no login field, such as an App). */
+export function identityLoginWarning(doc: Doc, name: string): string | null {
+  if (doc.getIn(["identities", name, "kind"]) !== "gh-login") return null;
+  const node = doc.getIn(["identities", name, "login"]);
+  return loginWarning(name, strOf(node) ?? (node instanceof Scalar ? String(node.value ?? "") : undefined));
+}
+
 /** Check a `--person` / `--agent` value names an identity of the right kind, as the schema will. */
 function checkReference(doc: Doc, column: "person" | "agent", name: string): void {
   const kind = definedIdentities(doc).get(name);
@@ -308,7 +331,8 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
       }
       changed = editMapColumns(node, person, agent, opts.clear === true);
     }
-    if (!changed) return { changed: false, firstSet: false, render: null };
+    const warning = person !== undefined && opts.clear !== true ? identityLoginWarning(doc, person) : null;
+    if (!changed) return { changed: false, firstSet: false, render: null, warning };
     let firstSet = false;
     if (opts.clear !== true) {
       ensureSchemaVersion(doc, REGISTRY_IDENTITIES_MIN_VERSION, opts);
@@ -318,7 +342,7 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
       }
     }
     commitRegistry(doc, path, { ...opts, ownersBefore, command: { kind: "identity-change" } });
-    return { changed: true, firstSet, render: renderMarkers(loadRegistry(path)) };
+    return { changed: true, firstSet, render: renderMarkers(loadRegistry(path)), warning };
   });
   if (result.changed) audit(opts.clear === true ? "set-identity-clear" : "set-identity");
   const target = org !== undefined ? `personal org ${org}` : `engagement ${id}`;
@@ -328,12 +352,14 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
       target: org !== undefined ? { personalOrg: org } : { engagement: id },
       changed: result.changed,
       requireIdentitySet: result.firstSet,
+      ...(result.warning !== null && { warning: result.warning }),
     });
     return;
   }
   if (!result.changed) emitText(`${target}: identities unchanged`);
   else emitText(`${target}: identities ${opts.clear === true ? "cleared" : "set"}`);
   if (result.firstSet) emitText("requireIdentity set to true (turn it off with `repo-aegis identity require --off`)");
+  if (result.warning !== null) process.stderr.write(`repo-aegis: ${result.warning}\n`);
 }
 
 /** The `githubOrgs` of an engagement node. */

@@ -149,7 +149,18 @@ export const IDENTITY_NAME_REGEX = /^[a-z0-9][a-z0-9-]{0,62}$/;
  */
 export const GH_LOGIN_REGEX = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:_[A-Za-z0-9]{1,20})?$/;
 
-const identityNameSchema = z.string().regex(IDENTITY_NAME_REGEX, {
+/**
+ * Why a gh-login identity's login cannot be used, or null when it can: `"empty"` or `"invalid"` (not
+ * {@link GH_LOGIN_REGEX}). The registry loader already rejects both, so this is for the places that look at an
+ * identity without trusting how it got there (`identity list`, the refusal that explains a mismatched approval,
+ * the `set-identity` warning). It never returns the login, so callers can say it without printing it.
+ */
+export function ghLoginProblem(login: string | undefined): "empty" | "invalid" | null {
+  if (login === undefined || login.trim() === "") return "empty";
+  return GH_LOGIN_REGEX.test(login) ? null : "invalid";
+}
+
+const identityNameSchema =z.string().regex(IDENTITY_NAME_REGEX, {
   message: "identity name must match ^[a-z0-9][a-z0-9-]{0,62}$ (lowercase, digits, hyphens; no leading hyphen)",
 });
 

@@ -49,6 +49,30 @@ own installer had created.
 - The acceptance test `packages/cli/src/agent-publish-path.test.ts` replays the sequence above and
   must pass. Not yet exercised against a live sandbox with real Touch ID.
 
+### Added — refusals explain themselves from any repository
+
+A refusal used to end `[CODE, see doc/agent-guide.md#code]`, a path in the repo-aegis repository.
+An agent working in another repository had nothing to open, the npm package shipped only `dist`,
+and no command explained a code.
+
+- `repo-aegis explain <CODE|topic> [--json]` and `explain --list`. The guide now ships in the
+  package (`dist/docs/agent-guide.md` and `agent-sandbox.md`, copied at build time), and the command
+  prints the guide's error-table row for the code and the `###` section it links to. Read-only: no
+  registry, no network, no git, no repository; the same answer from any directory. An unknown code
+  exits 2 with the nearest codes.
+- **Every refusal ends `[CODE; details: repo-aegis explain CODE]`.** The code token is first and
+  unchanged, so a tool that matches `[CODE` still works. The trailer used to differ in form between
+  gates, and three of them linked a case that did not match the guide's anchors.
+- `repo-aegis identity list [--json]`, read-only: every identity (name, kind, login or App slug) and
+  the personal orgs and engagements that use it as `person` or `agent`. An agent may run it and
+  `explain`; the mutating `identity` verbs, `engagements set-identity` and `approve` are still
+  refused for agents. Text redacts an engagement-only login, as `status` does.
+- `engagements set-identity --person` warns (and still succeeds) when the identity's login is empty
+  or not a valid GitHub login, and says writes through it will be refused until it is fixed.
+- `GH_IDENTITY_WRITE_NEEDS_HUMAN` now says so when a live approval exists for the owner and
+  repository but is bound to a different account than the owner's `person` identity, or when that
+  identity has no valid login. It names the approval's id and prints no login.
+
 ### Added — egress guard for more agent hosts
 
 - `hook guard-egress --agent copilot | cursor | antigravity`, with one adapter module per host

@@ -474,12 +474,20 @@ describe("repo-aegis gh: refusals never run gh", () => {
       ["a star approval", () => mintApproval({ target: { org: "*", repo: "*" }, login: "alice", path })],
     ] as const) {
       rmSync(path, { force: true });
-      mint();
+      const minted = mint();
       writeFileSync(join(w.stubs, "seq"), "0");
       rmSync(join(w.stubs, "gh.argv"), { force: true });
       const r = run(w, POX_WRITE, { presence: "agent", cwd });
       assert.equal(refusalCode(r), "GH_IDENTITY_WRITE_NEEDS_HUMAN", `${label}: ${r.err}`);
       assert.deepEqual(r.ghArgv, [], `${label}: gh ran`);
+      // An approval bound to another account is named (by id, never by login); the other two are not "live for this
+      // owner and repository" in the account-bound sense, so the refusal is the plain one.
+      if (label === "another login") {
+        assert.match(r.err, new RegExp(`approval ${minted.id} is live for this owner and repository but is bound to a different GitHub account`), r.err);
+        assert.ok(!r.err.includes("bob") && !r.err.includes("alice"), "no login in the refusal");
+      } else {
+        assert.doesNotMatch(r.err, /bound to a different GitHub account/, `${label}: ${r.err}`);
+      }
     }
   });
 

@@ -629,6 +629,51 @@ describe("rule 11: agent presence, only a person identity", () => {
     const c = chooseIdentity(input({ presence: "agent", isWrite: true, targets: PERSON_ONLY }));
     assert.ok(c.kind === "refuse" && c.reason.includes("'*'") && c.reason.includes("GH_IDENTITY_WRITE_NEEDS_HUMAN"));
   });
+
+  describe("an approval that exists but is for another account (or the identity has no usable login)", () => {
+    const reasonOf = (c: IdentityChoice): string => {
+      assert.ok(c.kind === "refuse" && c.code === "GH_IDENTITY_WRITE_NEEDS_HUMAN", JSON.stringify(c));
+      return c.kind === "refuse" ? c.reason : "";
+    };
+    const write = (over: Partial<ChooseIdentityInput>): string =>
+      reasonOf(chooseIdentity(input({ presence: "agent", isWrite: true, targets: PERSON_ONLY, ...over })));
+
+    it("names the approval id and says its account is not the identity's, without printing any login", () => {
+      const calls: unknown[][] = [];
+      const reason = write({ boundApprovalFor: (...a) => (calls.push(a), "appr-9") });
+      assert.deepEqual(calls, [["person-org", "r"]]);
+      assert.match(reason, /approval appr-9 is live for this owner and repository but is bound to a different GitHub account/);
+      assert.match(reason, /\[GH_IDENTITY_WRITE_NEEDS_HUMAN; details: repo-aegis explain GH_IDENTITY_WRITE_NEEDS_HUMAN\]$/);
+      assert.ok(!reason.includes("alice-work") && !reason.includes("alice"), reason); // logins stay out of agent output
+      assert.match(reason, /repo-aegis identity list/);
+    });
+    it("the plain refusal is unchanged when no approval exists (and says nothing about a mismatch)", () => {
+      const reason = write({ boundApprovalFor: () => null });
+      assert.match(reason, /no person has approved a write as that account here/);
+      assert.doesNotMatch(reason, /different GitHub account|not a valid GitHub login/);
+      assert.equal(reason, write({}));
+    });
+    it("an approval for the identity's own login still injects, whatever else exists", () => {
+      const c = chooseIdentity(input({ presence: "agent", isWrite: true, targets: PERSON_ONLY, approvalFor: () => "own", boundApprovalFor: () => "other" }));
+      assert.ok(c.kind === "inject" && c.approvalId === "own");
+    });
+    it("a person identity with an empty or malformed login says so, even with no approval at all", () => {
+      for (const login of ["", "  ", "-alice", "al ice", "a".repeat(40)]) {
+        const bad: Registry = reg({ identityMap: new Map([["person-org", { person: { name: "work", kind: "gh-login", login } }]]) });
+        const reason = write({ registry: bad });
+        assert.match(reason, /login that is empty or not a valid GitHub login, so no approval can match it/, JSON.stringify(login));
+        assert.doesNotMatch(reason, /different GitHub account/);
+        assert.ok(login.trim() === "" || !reason.includes(login), "the login is never printed");
+        const both = write({ registry: bad, boundApprovalFor: () => "appr-3" });
+        assert.match(both, /approval appr-3 is live/);
+        assert.match(both, /not a valid GitHub login/);
+      }
+    });
+    it("a valid Enterprise Managed User login (handle_shortcode) is not flagged", () => {
+      const emu: Registry = reg({ identityMap: new Map([["person-org", { person: { name: "work", kind: "gh-login", login: "alice_example" } }]]) });
+      assert.doesNotMatch(write({ registry: emu }), /not a valid GitHub login/);
+    });
+  });
 });
 
 describe("L3: several repositories of one owner", () => {
@@ -719,14 +764,14 @@ describe("totality and reasons", () => {
     const c = chooseIdentity(input({ presence: "unknown", targets: [lit("both-org", evil)] }));
     assert.ok(c.kind === "refuse" && !c.reason.includes("touch pwned"));
   });
-  it("every refusal carries its own code and the agent-guide anchor", () => {
+  it("every refusal carries its own code and the explain command", () => {
     const cases: IdentityChoice[] = [
       chooseIdentity(input({ presence: "unknown" })),
       chooseIdentity(input({ redirect: "X" })),
       chooseIdentity(input({ presence: "agent", suppliedToken: true })),
       chooseIdentity(input({ presence: "agent", args: ["pr", "view", "-w"] })),
     ];
-    for (const c of cases) assert.ok(c.kind === "refuse" && c.reason.includes(`[${c.code}, see doc/agent-guide.md#${c.code.toLowerCase()}]`));
+    for (const c of cases) assert.ok(c.kind === "refuse" && c.reason.includes(`[${c.code}; details: repo-aegis explain ${c.code}]`));
   });
 });
 

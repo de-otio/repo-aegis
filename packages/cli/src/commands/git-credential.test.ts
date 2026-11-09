@@ -400,7 +400,7 @@ describe("git-credential get: an unreadable process list (U2, U5)", () => {
     assert.match(r.stderr, /A person runs, from a terminal: repo-aegis approve o\/r \(agents may then push to it for the approval's lifetime\)\./);
     assert.match(r.stderr, /A person lets the agent's command run outside the sandbox\./);
     assert.match(r.stderr, /Agents: do not run that yourself/);
-    assert.match(r.stderr, /doc\/agent-guide\.md#agent_push_chain_unreadable/);
+    assert.match(r.stderr, /\[AGENT_PUSH_CHAIN_UNREADABLE; details: repo-aegis explain AGENT_PUSH_CHAIN_UNREADABLE\]/);
     assert.ok(!/(agent|you) (may|can|should) (disable|leave|run outside)/i.test(r.stderr), "never tells an agent to leave the sandbox");
     assert.equal(calls(), 0);
   });

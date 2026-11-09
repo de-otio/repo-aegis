@@ -386,7 +386,7 @@ describe("D10 GH_PR_CREATE_IMPLICIT_TARGET", () => {
       assert.match(none!.reason, /Without --repo, gh chooses the base repository/);
       assert.match(none!.reason, /No approval covers this; nothing is wrong with the destination, only with how it is named\./);
       assert.match(none!.reason, /Re-issue as: gh pr create --repo <owner>\/<repo> …/);
-      assert.match(none!.reason, /\[GH_PR_CREATE_IMPLICIT_TARGET, see doc\/agent-guide\.md#gh_pr_create_implicit_target\]/);
+      assert.match(none!.reason, /\[GH_PR_CREATE_IMPLICIT_TARGET; details: repo-aegis explain GH_PR_CREATE_IMPLICIT_TARGET\]/);
       assert.ok(!/A person runs/.test(none!.reason), "the fix is the agent's, not a person's");
     }
   });
@@ -472,7 +472,7 @@ describe("R6: raw HTTP clients and the gh token (plan §8.2)", () => {
       const reason = hit?.reason ?? "";
       assert.match(reason, /: refused\./);
       assert.match(reason, /No approval covers this\./);
-      assert.match(reason, new RegExp(`\\[${expected}, see doc/agent-guide\\.md#${expected.toLowerCase()}\\]`));
+      assert.match(reason, new RegExp(`\\[${expected}; details: repo-aegis explain ${expected}\\]`));
       assert.match(reason, /re-issue as: /i, "an agent re-issue is offered");
       assert.match(reason, /A person runs the original command, from a terminal\./, "and a person's step is marked");
     });

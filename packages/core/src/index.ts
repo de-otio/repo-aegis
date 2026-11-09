@@ -368,7 +368,7 @@ export type { OwnerCandidate, RuleHStatus } from "./registered-owners.js";
 // to read more), so the three enforcement layers cannot drift in wording.
 export {
   refusal,
-  agentGuideAnchor,
+  refusalTrailer,
   safeDestination,
   isSafeOwner,
   isPrintableDestination,
@@ -546,6 +546,7 @@ export {
   upstreamProblem,
   IDENTITY_NAME_REGEX,
   GH_LOGIN_REGEX,
+  ghLoginProblem,
   REGISTRY_IDENTITIES_MIN_VERSION,
   personalOrgName,
 } from "./schemas.js";

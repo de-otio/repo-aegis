@@ -159,6 +159,10 @@ By hand:
 | [doc/architecture.md](doc/architecture.md)   | Packages and how they fit together                                      |
 | [doc/design/](doc/design/)                   | Design notes and threat model                                           |
 
+Working in another repository, where those files are not on disk? Every refusal ends
+`[CODE; details: repo-aegis explain CODE]`, and `repo-aegis explain <CODE>` prints the guide's text for it
+(the guides ship in the npm package; `explain --list` names every code).
+
 Optional add-ons: [packages/llm](packages/llm/README.md) (local-LLM marker suggestions and a
 semantic audit sweep; never part of the blocking checks) and [packages/mcp](packages/mcp/README.md).
 

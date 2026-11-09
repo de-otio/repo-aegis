@@ -5,7 +5,7 @@
 // upstream) to the registry needs a person at a terminal. Without the gate,
 // rule h ("refuse egress to an unregistered owner") is undone by one
 // non-interactive command.
-import { ORG_NAME_REGEX, appendAuditRecord } from "@de-otio/repo-aegis-core";
+import { ORG_NAME_REGEX, appendAuditRecord, refusalTrailer } from "@de-otio/repo-aegis-core";
 import { requireTerminal, type RequireTerminalOptions } from "./require-terminal.js";
 
 export const OWNER_ADD_NEEDS_TTY = "OWNER_ADD_NEEDS_TTY";
@@ -89,7 +89,7 @@ export function ownerAddRefusal(cmd: OwnerAddCommand): string {
     `No approval covers this, and REPO_AEGIS_EGRESS_HUMAN is not honoured here. ` +
     `A person runs, from a terminal: ${fix}. ` +
     `Agents: do not retry or reroute; ask your human to run this command themselves. ` +
-    `[${OWNER_ADD_NEEDS_TTY}, see doc/agent-guide.md#${OWNER_ADD_NEEDS_TTY}]`
+    refusalTrailer(OWNER_ADD_NEEDS_TTY)
   );
 }
 
@@ -187,6 +187,6 @@ export function ownerSetEmptyRefusal(cmd: EmptyingCommand): string {
     `No approval covers this, and REPO_AEGIS_EGRESS_HUMAN is not honoured here. ` +
     `A person runs, from a terminal: repo-aegis ${command}. ` +
     `Agents: do not retry or reroute; ask your human to run this command themselves. ` +
-    `[${OWNER_SET_EMPTY_NEEDS_TTY}, see doc/agent-guide.md#${OWNER_SET_EMPTY_NEEDS_TTY}]`
+    refusalTrailer(OWNER_SET_EMPTY_NEEDS_TTY)
   );
 }

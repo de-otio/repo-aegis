@@ -554,7 +554,7 @@ describe("rule h — refusal messages (§3.9, §5.4)", () => {
     assert.match(reason, /Agents: do not run that yourself, retry or reroute; report this to your human\./);
     assert.match(
       reason,
-      /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]$/,
+      /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]$/,
       "where to read more",
     );
   });
@@ -612,7 +612,7 @@ describe("rule h — refusal messages (§3.9, §5.4)", () => {
     assert.match(reason, /'\*' approval no longer does/);
     assert.match(reason, /--repo <owner>\/<repo>/);
     assert.match(reason, /A person runs the original command, from a terminal/);
-    assert.match(reason, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]$/);
+    assert.match(reason, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]$/);
     for (const bad of FORBIDDEN) assert.ok(!reason.includes(bad), bad);
   });
 
@@ -635,7 +635,7 @@ describe("rule h — refusal messages (§3.9, §5.4)", () => {
     });
     assert.ok(reason.startsWith("gh issue create → stranger/repo: refused."), reason);
     assert.match(reason, /could not be read/);
-    assert.match(reason, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]$/);
+    assert.match(reason, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]$/);
     for (const bad of FORBIDDEN) assert.ok(!reason.includes(bad), bad);
   });
 });

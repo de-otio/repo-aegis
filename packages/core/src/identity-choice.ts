@@ -16,6 +16,7 @@ import {
   parseRepoRef,
   scanGhCommand,
 } from "./egress-intent.js";
+import { ghLoginProblem } from "./schemas.js";
 import type { Identity, OwnerIdentities, Registry } from "./registry.js";
 import type { TerminalCheck } from "./process-ancestry.js";
 
@@ -333,6 +334,13 @@ export interface ChooseIdentityInput {
   presence: IdentityPresence;
   /** A live approval for org/repo minted for this login, never a '*' approval (A11); returns its id or null. */
   approvalFor: (owner: string, repo: string | null, login: string) => string | null;
+  /**
+   * The id of a live account-bound approval for org/repo, whatever login it carries (never a '*' approval), or
+   * null. Used only to explain a refusal: when {@link approvalFor} found none for the person identity's own
+   * login but this finds one, the approval exists and is bound to another account. Optional; absent means no
+   * such explanation.
+   */
+  boundApprovalFor?: (owner: string, repo: string | null) => string | null;
   suppliedToken: boolean; // GH_TOKEN or GITHUB_TOKEN set in the caller's environment
   redirect: string | null; // the name of a D9 variable or `http_unix_socket`, if present
   registeredOwner: (owner: string) => boolean;
@@ -593,10 +601,43 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
   }
   const approvalId = person.kind === "gh-login" ? input.approvalFor(owner, repo, person.login) : null;
   if (approvalId === null) {
+    // Tell the agent when the approval its human minted exists but is for a different account than the one this
+    // owner is mapped to (or when the mapped identity has no usable login), instead of a bare "no approval": the
+    // human otherwise believes the approval worked. Logins are never printed here (an Enterprise Managed User
+    // login carries a shortcode that can name a customer); the approval id is a random token and is safe.
+    const loginUnusable = person.kind === "gh-login" && ghLoginProblem(person.login) !== null;
+    const bound = input.boundApprovalFor?.(owner, repo) ?? null;
+    const base =
+      "it would write as a person's GitHub account, this owner has no agent identity (none is mapped, and repo-aegis maps none by itself)";
+    if (loginUnusable || bound !== null) {
+      const parts: string[] = [];
+      if (bound !== null) {
+        parts.push(
+          `approval ${bound} is live for this owner and repository but is bound to a different GitHub account than the one this owner's person identity names, so it does not cover this write`,
+        );
+      }
+      if (loginUnusable) {
+        parts.push("the person identity mapped to this owner has a login that is empty or not a valid GitHub login, so no approval can match it");
+      }
+      return refuse(
+        "GH_IDENTITY_WRITE_NEEDS_HUMAN",
+        "a gh write",
+        `${base}, and ${parts.join("; and ")}`,
+        "Only an approval minted for this owner and repository, for the account the person identity names, covers this; a '*' approval does not.",
+        [
+          {
+            by: "person",
+            command:
+              "repo-aegis identity list (shows the mapping), then fix the identity or run repo-aegis approve <owner>/<repo> again so it records the right account, or run the original command yourself",
+          },
+        ],
+        dest,
+      );
+    }
     return refuse(
       "GH_IDENTITY_WRITE_NEEDS_HUMAN",
       "a gh write",
-      "it would write as a person's GitHub account, this owner has no agent identity (none is mapped, and repo-aegis maps none by itself), and no person has approved a write as that account here",
+      `${base}, and no person has approved a write as that account here`,
       "Only an approval minted for this owner and repository, for that account, covers this; a '*' approval does not.",
       [{ by: "person", command: "repo-aegis approve <owner>/<repo> (it records the account), or run the original command yourself" }],
       dest,

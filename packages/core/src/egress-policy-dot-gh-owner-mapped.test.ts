@@ -101,7 +101,7 @@ describe("N8: dot gh on a mapped owner is DOT_GH_OWNER_MAPPED", () => {
     const d = decide(`dot gh --as bot pr create --repo mapped-org/r ${BODY}`);
     assert.ok(d.action === "deny");
     assert.match(d.reason, /gh <the same arguments>/);
-    assert.match(d.reason, /\[DOT_GH_OWNER_MAPPED, see doc\/agent-guide\.md#dot_gh_owner_mapped\]/);
+    assert.match(d.reason, /\[DOT_GH_OWNER_MAPPED; details: repo-aegis explain DOT_GH_OWNER_MAPPED\]/);
     assert.ok(!d.reason.includes("mapped-org"));
     assert.ok(!d.reason.includes("b.md"));
     assert.ok(SHAPE_RULE_CODES.has("DOT_GH_OWNER_MAPPED"));

@@ -182,4 +182,4 @@ export function scanJsonPrefix(text: string): Map<string, string> {
 export const WRITE_HOOK_INPUT_TOO_LARGE_REASON =
   "repo-aegis: refused. This write's hook payload is larger than 1 MiB and the file path could not be read from " +
   "its start, so the write could not be checked. No approval covers this. Fix: write the file in smaller parts " +
-  "(a first Write, then Edits), or have your human check the payload. See doc/agent-guide.md#hook_input_too_large.";
+  "(a first Write, then Edits), or have your human check the payload. [HOOK_INPUT_TOO_LARGE; details: repo-aegis explain HOOK_INPUT_TOO_LARGE]";

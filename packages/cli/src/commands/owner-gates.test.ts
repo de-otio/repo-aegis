@@ -134,7 +134,7 @@ function assertFivePartRefusal(stderr: string, command: string): void {
   );
   assert.match(stderr, /Agents: do not retry or reroute; ask your human to run this command themselves/);
   // 5. where to read more
-  assert.match(stderr, /doc\/agent-guide\.md#OWNER_ADD_NEEDS_TTY/);
+  assert.match(stderr, /\[OWNER_ADD_NEEDS_TTY; details: repo-aegis explain OWNER_ADD_NEEDS_TTY\]/);
 }
 
 function assertNoRegistryContents(text: string): void {
@@ -724,7 +724,7 @@ function assertEmptySetRefusal(stderr: string, command: string): void {
   assert.match(stderr, /No approval covers this/);
   assert.ok(stderr.includes(`A person runs, from a terminal: repo-aegis ${command}.`), stderr);
   assert.match(stderr, /Agents: do not retry or reroute/);
-  assert.match(stderr, /doc\/agent-guide\.md#OWNER_SET_EMPTY_NEEDS_TTY/);
+  assert.match(stderr, /\[OWNER_SET_EMPTY_NEEDS_TTY; details: repo-aegis explain OWNER_SET_EMPTY_NEEDS_TTY\]/);
   for (const secret of ["only-customer-org", "only-marker"]) {
     assert.ok(!stderr.includes(secret), `refusal must not name registry contents (${secret})`);
   }

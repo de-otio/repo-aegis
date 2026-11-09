@@ -637,12 +637,44 @@ GitHub identity belongs to which owner (see
 This release stores and shows the mapping only; no command chooses or injects
 a token from it.
 
-**Every command here needs a person at a terminal**, checked the same way as
+**Every command here but `identity list` and `identity require --on` needs a person at a terminal**, checked the same way as
 `engagements add --personal-org`: otherwise it exits 2 with
 `IDENTITY_CHANGE_NEEDS_TTY` (no environment variable or approval lifts it) and
 writes nothing. The agent hook also refuses any Bash command whose text runs
 one (`AGENT_RAN_HUMAN_COMMAND`). The gate runs before validation, so an invalid
 argument is no oracle for an agent.
+
+#### `repo-aegis identity list [--json]`
+
+Read-only, and **an agent may run it** (the hook does not refuse it, unlike
+every other `identity` verb but `require --on`). Prints every identity (name,
+kind, and its GitHub login or App slug) and where each is used: the
+`person` column (acts when a person is present) and the `agent` column (acts
+when none is), as personal orgs and engagements. Engagements appear by id,
+never by their orgs. It prints no token, key or key-file path: the registry
+holds none, and the command reads nothing else. Use it to answer "which
+account does repo-aegis think acts for this owner?" when a refusal such as
+`GH_IDENTITY_WRITE_NEEDS_HUMAN` asks.
+
+Redaction follows `status`: text prints a `gh-login` identity's login only when a personal org (the
+operator's own) uses it; an engagement-only or unreferenced one prints `<engagement-only login>`, because an
+Enterprise Managed User login carries a shortcode that can name a customer. `--json` carries every login. A login that
+is empty or is not GitHub login syntax prints `(not a valid GitHub login)` in text and carries `loginProblem`
+(`empty` or `invalid`) in JSON; the registry loader rejects such a login today, so this is a check, not an expected state.
+The registry records no App installation account, so none is listed.
+
+```
+identities (requireIdentity):
+  alice: gh-login alice
+    person: personal-org example-org
+    agent:  -
+  work: gh-login <engagement-only login>
+    person: engagement customer-a
+    agent:  -
+  work-bot: github-app example-bot
+    person: -
+    agent:  personal-org example-org, engagement customer-a
+```
 
 #### `repo-aegis identity add <name> --gh-login <login> | --app <slug>`
 
@@ -690,6 +722,14 @@ this mirrors that form; it takes no `<id>`. The org must already be registered
 (`PERSONAL_ORG_NOT_FOUND`): this command never adds an owner. A plain entry
 becomes `{ name, person?, agent? }` and goes back to a plain string when
 cleared; a comment on the entry is kept.
+
+When `--person` names an identity whose login is empty or not GitHub login
+syntax, the command still succeeds (a person ran it at a terminal) but warns on
+stderr that writes through that identity will be refused until the login is
+fixed, and prints the fix (clear the mappings, `identity remove`,
+`identity add --gh-login`, map again); `--json` carries the same text as
+`warning`. The registry loader rejects such a login today, so the warning is a
+backstop, not a state you will normally see. The warning never contains the login.
 
 An engagement with no `githubOrgs` is refused (`ENGAGEMENT_HAS_NO_ORGS`): an
 identity would map nothing. The version guard (`MULTIPLE_INSTALLS`) sits on the
@@ -1861,6 +1901,34 @@ as markers. Dry run unless `--accept` is given; it never reads auth tokens.
 ---
 
 ## Additional commands
+
+### `repo-aegis explain <CODE|topic> [--json]`, `explain --list`
+
+Prints what a refusal or error code means and what to do about it. Every
+refusal ends `[CODE; details: repo-aegis explain CODE]`, and a refusal can
+reach an agent working in any repository, where this repo's
+`doc/agent-guide.md` does not exist; the guide ships inside the npm package
+(`dist/docs/`, copied at build time, with `agent-sandbox.md`) and this command
+reads it from there.
+
+**Read-only, and an agent may run it.** It reads two files that sit next to the
+command and nothing else: no registry, no network, no git, no repository, and
+the working directory is irrelevant, so it gives the same answer from any
+directory.
+
+It finds the row of the guide's error table whose `<a id="…">` anchor matches
+the code (or whose first cell names it) and prints its meaning and recovery,
+followed by the `###` section of the guide that row links to, if it links to
+one. The code is matched case-insensitively and `-` counts as `_`. Besides
+codes, `sandbox` prints the shipped `agent-sandbox.md`, and the slug of any `##`
+or `###` heading of the guide (`cross-repo-writes`) prints that section.
+`--list` prints every known code, one per line. `--json` prints `{ code, codes,
+anchor, meaning, recovery, section }` (or `{ topic, markdown, source }` for a
+topic); `--list --json` prints `{ codes, topics }`.
+
+An unknown code exits 2 with `UNKNOWN_CODE` and the nearest known codes (in
+`details.nearest` under `--json`). `EXPLAIN_DOCS_MISSING` (exit 2) means the
+guide is not next to the command, which only happens in an unbuilt checkout.
 
 ### `repo-aegis suggest-markers`
 

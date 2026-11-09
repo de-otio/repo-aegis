@@ -101,6 +101,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "egress-check",
       "egress-readback",
       "engagements",
+      "explain",
       "gh",
       "git-credential",
       "hook",
@@ -152,6 +153,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
     subcommands: [],
   },
   { path: "egress-check", flags: [], subcommands: [] },
+  { path: "explain", flags: ["--list"], subcommands: [] },
   { path: "gh", flags: [], subcommands: [] },
   { path: "gh", flags: [], subcommands: [] },
   {
@@ -254,8 +256,9 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "engagements set-identity", flags: ["--agent", "--clear", "--person", "--personal-org"], subcommands: [] },
 
   // ---- identity ----
-  { path: "identity", flags: [], subcommands: ["add", "remove", "require"] },
+  { path: "identity", flags: [], subcommands: ["add", "list", "remove", "require"] },
   { path: "identity add", flags: ["--app", "--gh-login"], subcommands: [] },
+  { path: "identity list", flags: [], subcommands: [] },
   { path: "identity remove", flags: [], subcommands: [] },
   { path: "identity require", flags: ["--off", "--on"], subcommands: [] },
 
@@ -349,7 +352,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
     ],
   },
   { path: "hook managed-heartbeat", flags: [], subcommands: [] },
-  { path: "hook scan-after-write", flags: [], subcommands: [] },
+  { path: "hook scan-after-write", flags: ["--agent"], subcommands: [] },
   { path: "hook check-write", flags: [], subcommands: [] },
   { path: "hook guard-egress", flags: ["--agent"], subcommands: [] },
   { path: "hook egress-receipt", flags: [], subcommands: [] },
