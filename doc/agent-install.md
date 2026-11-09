@@ -690,6 +690,42 @@ behaviour is part of the documented hook contract, and every shape rule
 uses it. If you verify the `ask` behaviour, say so to the user; if you
 observe it NOT prompting under auto mode, that is a finding worth an issue.
 
+## Companion tools
+
+repo-aegis is not a general secret scanner; its built-in secret-shape check is
+frozen. Offer the user a dedicated scanner alongside it. Do not install one
+without asking, and never create a GitGuardian account or API key for them.
+
+- **ggshield** ([AI coding tools guide](https://docs.gitguardian.com/ggshield-docs/integrations/ai-coding-tools/secret-scanning-for-ai-coding-tools)):
+  AI hooks (prompts, tool calls, tool output) plus git pre-commit and pre-push
+  hooks. Scanning needs a GitGuardian account (SaaS); the user does that part.
+- **[gitleaks](https://github.com/gitleaks/gitleaks)**: local, no account,
+  pre-commit and CI. Already a common choice.
+
+What each covers versus repo-aegis: a secret scanner recognises credential
+shapes. repo-aegis does engagement scoping (a customer's markers must not reach
+another customer's repo or a public one), destination (where `git push` and `gh`
+send bytes) and identity (which account runs them). They do not overlap; keep both.
+
+**Coexistence result (ggshield 1.56.1, checked in a scratch home).** After
+`repo-aegis install claude-md`, the user can run
+`ggshield machine setup --agent claude-code --no-git-hooks --no-honeytokens`
+(`machine setup` also installs global git hooks and plants a honeytoken unless
+those flags switch them off; leave them on only if the user wants them).
+ggshield appends one `.*`-matcher entry to `PreToolUse` and `PostToolUse` and
+adds a `UserPromptSubmit` entry. It does not merge into or replace any
+repo-aegis entry, and a second run changes nothing.
+
+Ordering caveat: Claude Code runs all matching hooks of an event in parallel, so
+neither tool runs before the other; a block from either stops the call. Never
+tell the user one runs first. The other install order (ggshield first, then
+`install claude-md`) was checked only by reading the merge code, not run. The
+ggshield hook command holds the absolute path of the `ggshield` binary, so it
+breaks if that binary moves. Afterwards, confirm with
+`repo-aegis doctor` that `GUARD_HOOK_UNREGISTERED` is not reported, and tell the
+user the ggshield side was not tested in a live session. Source:
+`doc/plan-landscape-recommendations.md`, section 5.
+
 ## Common pitfalls
 
 ### "I see `customer-coupled with no engagement` errors after `classify --apply`"

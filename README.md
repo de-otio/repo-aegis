@@ -155,6 +155,36 @@ By hand:
 Optional add-ons: [packages/llm](packages/llm/README.md) (local-LLM marker suggestions and a
 semantic audit sweep; never part of the blocking checks) and [packages/mcp](packages/mcp/README.md).
 
+## Companion tools
+
+repo-aegis is not a general secret scanner. Its small built-in secret-shape check
+(`hook scan-bash-output`) is frozen: no new secret types will be added. Run a
+dedicated scanner next to it:
+
+| Tool | What it covers | Notes |
+| --- | --- | --- |
+| [ggshield](https://docs.gitguardian.com/ggshield-docs/integrations/ai-coding-tools/secret-scanning-for-ai-coding-tools) (GitGuardian) | Secrets in prompts, tool calls and tool output through AI coding hooks, plus git pre-commit and pre-push hooks | Scanning needs a GitGuardian account (SaaS). Installing the hooks did not need one. |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | Secrets in a working tree and in git history, as a pre-commit hook and a CI step | Local, no account. Already a common choice. |
+
+They answer a different question from repo-aegis. A secret scanner asks "does this
+text look like a credential?". repo-aegis asks "should this customer's name, or this
+command, go to that place, as that account?": engagement scoping (one customer's
+markers must not reach another's repo or a public one), destination (where a `git
+push` or `gh` call sends bytes) and identity (which GitHub account runs it). Use
+both; neither replaces the other.
+
+**Coexistence with Claude Code hooks.** Checked with ggshield 1.56.1 in a scratch
+home: `ggshield machine setup --agent claude-code --no-git-hooks --no-honeytokens`
+(or `ggshield install -m global -t claude-code`, now deprecated) adds its own
+`PreToolUse`, `PostToolUse` and `UserPromptSubmit` entries with a `.*` matcher,
+after the existing ones, and leaves every repo-aegis entry untouched. Re-running
+it changes nothing. Ordering caveat: Claude Code runs all matching hooks of an
+event in parallel, so neither tool runs before the other and a block from either
+one stops the call; do not rely on an order. This was verified for the file
+contents only, not in a live session, and only with repo-aegis installed first;
+see [doc/plan-landscape-recommendations.md](doc/plan-landscape-recommendations.md)
+(section 5). Run `repo-aegis doctor` after installing either one.
+
 ## Uninstalling
 
 ```sh

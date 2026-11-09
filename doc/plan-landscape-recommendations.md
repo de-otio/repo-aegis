@@ -360,3 +360,73 @@ files.
 ## 5. Phase 0 findings
 
 _To be filled in by the Phase 0 spike._
+
+### T0b ggshield coexistence
+
+Question: do GitGuardian ggshield's AI hooks and repo-aegis's Claude Code hooks
+coexist in one `settings.json`?
+
+**Result: they coexist at the file level. ggshield appends its own entries and
+leaves every foreign entry untouched.** The install step needed no GitGuardian
+login or API key. Nothing was scanned (a scan needs the SaaS account); only the
+installer and the resulting `settings.json` were checked.
+
+Setup (all in a throwaway `HOME` under the session scratchpad, never the real
+home; ggshield installed into a venv inside the worktree, since removed):
+
+- ggshield 1.56.1 (`uv pip install ggshield` into a venv; `pip` itself failed
+  inside the sandbox on a macOS certificate-trust error, `uv` did not).
+- `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` pointed into
+  the scratch directory, with the working directory outside any git repository.
+- A starting `~/.claude/settings.json` with the same event/matcher shape that
+  `install claude-md` writes (`claude-hook-specs.ts`), the commands replaced by
+  `true # repo-aegis hook <name>`: `PreToolUse` `Write|Edit|MultiEdit` and
+  `Bash`; `PostToolUse` `Write|Edit|MultiEdit` and `Bash` (two commands);
+  `SessionStart` `*`; plus one `permissions.deny` rule.
+
+Commands and observations:
+
+1. `ggshield install -m global -t claude-code` printed a deprecation warning
+   (use `ggshield machine setup`) and "Claude Code hooks successfully added".
+2. `GGSHIELD_NO_ENDPOINT_REGISTRATION=1 ggshield machine setup --no-git-hooks
+   --no-honeytokens --agent claude-code` on a fresh copy of the starting file
+   gave a byte-identical result to (1). `machine setup` also installs global git
+   hooks, plants a honeytoken and registers the machine on the Endpoints page
+   unless those are switched off, so the flags above matter; those parts were
+   not exercised. A second run printed "already installed" and changed nothing
+   (idempotent).
+
+What changed in `settings.json`:
+
+- Every repo-aegis entry, the `permissions.deny` rule and their order are
+  unchanged.
+- ggshield added one entry `{"matcher": ".*", "hooks": [{"type": "command",
+  "command": "<abs path>/ggshield secret scan ai-hook"}]}` at the END of
+  `PreToolUse`, at the END of `PostToolUse`, and as a new `UserPromptSubmit`
+  array. It never merges into an existing matcher entry (its `.*` differs from
+  `Bash`, `Write|Edit|MultiEdit` and `*`), so it replaces nothing.
+- The ggshield command is `ggshield secret scan ai-hook` with the absolute path
+  of the binary that ran the install.
+
+Caveats:
+
+- Both ggshield (`.*`) and repo-aegis (`Bash`, `Write|Edit|MultiEdit`) match the
+  same tool call, so two hooks fire per event. Claude Code runs the matching
+  hooks of an event in parallel, so neither tool can rely on running before or
+  after the other; a block from either one stops the tool call. No ordering
+  dependency exists, and none should be documented as a guarantee.
+- Only one install order was tested (repo-aegis entries first, ggshield second).
+  The reverse follows from reading `mergeHookOnEvent` and `placeHookCommand` in
+  `install-claude-md.ts`: repo-aegis adds or replaces only commands recognised as
+  its own and finds its matcher entry by exact matcher, so a ggshield `.*` entry
+  is left alone. It was not run, because the repo-aegis CLI was not built in
+  this worktree and `install claude-md` writes to the real home.
+- repo-aegis's uninstall removes only commands it recognises as its own
+  (`repo-aegis` plus the hook name), so ggshield's entries survive it. The
+  reverse (ggshield's own uninstall leaving repo-aegis's entries) was not run.
+- The ggshield hook command embeds the absolute path of the binary, so moving
+  or removing the venv/package breaks the hook (Claude Code reports a missing
+  command as a non-blocking error).
+- Whether ggshield's hooks scan correctly alongside repo-aegis's in a live
+  Claude Code session, and what a scan costs per tool call, was not tested
+  (needs a GitGuardian account).

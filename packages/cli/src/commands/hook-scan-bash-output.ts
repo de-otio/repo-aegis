@@ -23,6 +23,12 @@
 // Universal markers: pattern set lives in `core/src/secret-markers.ts`
 // and is not configurable. Engagement-scoped customer markers continue
 // to flow through the existing file-write hook.
+//
+// FROZEN: the universal secret-shape set is closed. New secret types
+// belong in a dedicated scanner such as ggshield or gitleaks, not here.
+// repo-aegis's job is engagement scoping, destination and identity; it
+// is not a general secret scanner. See doc/design/README.md and the
+// "Companion tools" section of README.md.
 import { readHookStdin } from "./hook-input.js";
 import {
   scanForSecrets,
