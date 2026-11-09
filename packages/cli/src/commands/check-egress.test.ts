@@ -166,6 +166,10 @@ describe("check --remote-url — CROSS_ORG_PUSH", () => {
     assert.equal(j.code, "CROSS_ORG_PUSH");
     assert.match(j.error, /customer-a-org\/svc/);
     assert.equal(j.details.destination, "customer-a-org/svc");
+    // U7: the cause (the classification sets the boundary), the one fix line, and that no approval widens a boundary.
+    assert.match(j.error, /the boundary comes from how this repository is classified, which a person set with `repo-aegis classify`/);
+    assert.match(j.error, /a person runs, from a terminal: repo-aegis classify \(it re-classifies this repository/);
+    assert.match(j.error, /No approval covers this: an approval cannot widen a trust boundary/);
     // The boundary's owners can be customer orgs: they are not enumerated
     // (plan §8.4 F12), in the text or in the details. Only the destination is named.
     assert.doesNotMatch(j.error, /acme/);

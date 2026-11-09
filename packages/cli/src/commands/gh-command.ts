@@ -158,6 +158,8 @@ function refusalLine(code: string, reason: string, verb: string): string {
 }
 
 const NO_APPROVAL = "No approval covers this.";
+/** For the refusals about an identity that could not be chosen or a token that could not be minted (rule 4 of the U7 audit). */
+const NO_APPROVAL_IDENTITY = "No approval covers this: an approval cannot stand in for an identity that could not be chosen or a token that could not be minted.";
 
 /** A refusal this command builds itself (codes core's `chooseIdentity` does not produce). */
 function ownRefusal(
@@ -187,6 +189,28 @@ const SETTING_APPROVAL =
   "No approval covers this yet. An account-bound approval does: a person runs `repo-aegis approve <owner>/<repo>` " +
   "(or `<owner>/*`) from a terminal, for an owner with a mapped GitHub account, and the same call then runs " +
   "for the life of that approval. A `*` approval and one with no recorded account do not.";
+
+/**
+ * The fix line for a repository git setting refused as GH_IDENTITY_ARG_UNSAFE. A person runs it; an agent never does.
+ * Only a key repo-aegis itself names (`core.*` or `http.*`, from gitSpawnViolation's fixed phrases) in the
+ * repository's own scope becomes a command, so nothing from the repository's configuration is interpolated into
+ * text a person is told to paste. Any other hit (a `url.<base>.insteadOf` rewrite, a credential helper, a remote's
+ * proxy, a worktree or command scope) gets a step that says where to look.
+ */
+function settingFix(hit: string): RefusalFix {
+  const m = /^(core\.[A-Za-z]+|http\.[A-Za-z]+) (?:is|are) (?:set|off) in local scope$/.exec(hit);
+  if (m !== null) {
+    return {
+      by: "person",
+      command: `git config --local --unset-all ${m[1]!}`,
+      note: `it only stops that setting applying to this checkout, so read its value first with \`git config --local --get-all ${m[1]!}\``,
+    };
+  }
+  return {
+    by: "person",
+    step: "finds the setting with `git config --list --show-origin` and removes it from the file it names (it only stops applying to this checkout or account, so read its value first)",
+  };
+}
 
 /** `core.hooksPath (local scope)` out of gitSpawnViolation's phrase `core.hooksPath is set in local scope`; the phrase itself when it has another shape. */
 function settingOf(hit: string): string {
@@ -350,7 +374,7 @@ function decideIdentity(
     if (presence() === "person") return { kind: "plain", note: "the registry could not be read, so no GitHub identity was chosen" };
     const named = targetsInfo();
     if (named.targets.length === 0 && !named.foreignHost) return { kind: "plain" };
-    return refuseUnavailable("the registry could not be read, so repo-aegis cannot tell whether this owner has a GitHub identity", verb, home, isWrite);
+    return refuseUnavailable("the registry in the pinned home could not be read (it is encrypted or damaged; repo-aegis did not change it), so repo-aegis cannot tell whether this owner has a GitHub identity", verb, home, isWrite);
   }
   if (!hasMapping) return { kind: "plain" };
 
@@ -367,7 +391,7 @@ function decideIdentity(
     // M5: without the egress parse nobody knows what this call publishes; an agent's call for a mapped owner
     // does not proceed on a guess. A person at a terminal keeps warn-and-run.
     if (intents === null && presence() !== "person") {
-      return refuseUnavailable("the egress decision for this call could not be made, so repo-aegis will not run it as a mapped identity", verb, home, isWrite, choice);
+      return refuseUnavailable("the egress decision for this call could not be made (the command line could not be taken apart; nothing repo-aegis wrote caused it), so repo-aegis will not run it as a mapped identity", verb, home, isWrite, choice);
     }
     // H1: for the agent column, the repository's own git configuration is judged before a token is minted, for
     // the verbs whose gh spawns git in this directory.
@@ -397,14 +421,23 @@ function decideIdentity(
               reason: ownRefusal(
                 "GH_IDENTITY_ARG_UNSAFE",
                 "this gh call",
-                `it runs git in this directory with a token, and ${hit}, which could run a program or send the token elsewhere`,
-                [
-                  { by: "agent", command: "the same call from a checkout whose local git configuration sets none of core.hooksPath, core.fsmonitor, core.sshCommand, url.*.insteadOf, credential.helper or http.proxy-style options" },
-                  { by: "person", step: "removes that setting from the repository's configuration" },
-                  { by: "person", command: "repo-aegis approve <owner>/<repo>   (account-bound: it covers this setting; run it from a terminal)" },
-                ],
+                judged === null
+                  ? "it runs git in this directory with a token, and the git configuration could not be read (an unreadable or corrupt config file, or git failing to start), so repo-aegis cannot rule out a setting that runs a program or sends the token elsewhere"
+                  : `it runs git in this directory with a token, and ${hit}, which could run a program or send the token elsewhere; repo-aegis did not set it (its own hooks directory, written by \`install hooks --local\`, is exempt)`,
+                judged === null
+                  ? [
+                      { by: "agent", command: "the same call from a checkout whose git configuration can be read" },
+                      { by: "person", command: "git config --list --show-origin", note: "it shows which file fails to read; repair or remove that file" },
+                    ]
+                  : [
+                      { by: "agent", command: "the same call from a checkout whose local git configuration sets none of core.hooksPath, core.fsmonitor, core.sshCommand, url.*.insteadOf, credential.helper or http.proxy-style options" },
+                      settingFix(hit),
+                      { by: "person", command: "repo-aegis approve <owner>/<repo>", note: "account-bound: it covers this setting for the approval's lifetime, without changing the configuration" },
+                    ],
                 choice,
-                SETTING_APPROVAL,
+                judged === null
+                  ? "No approval covers this: a git configuration that could not be read is not something an approval can vouch for."
+                  : SETTING_APPROVAL,
               ),
             },
             home,
@@ -424,9 +457,10 @@ function decideIdentity(
           reason: ownRefusal(
             "GH_BINARY_UNTRUSTED",
             "this gh call",
-            `there is no gh repo-aegis may hand a token (${trusted.reason})`,
-            [{ by: "person", step: "fixes PATH so a package-manager gh is the first one, or installs gh into a root-owned directory" }],
+            `there is no gh repo-aegis may hand a token (${trusted.reason}); repo-aegis did not put that gh there, it only refuses to trust it`,
+            [{ by: "person", command: "repo-aegis doctor", note: "it names which gh is first on PATH and why it is untrusted; then put a package-manager gh (for example Homebrew's) first, or install gh into a root-owned directory" }],
             choice,
+            "No approval covers this: an approval cannot make a gh binary trustworthy.",
           ),
         },
         home,
@@ -435,7 +469,7 @@ function decideIdentity(
     }
     const socket = runGhAsNobody(trusted.path, ["config", "get", "http_unix_socket"], callerEnv, trust);
     if (socket === null) {
-      return refuseUnavailable("gh's http_unix_socket setting could not be read", verb, home, isWrite, choice);
+      return refuseUnavailable("gh's http_unix_socket setting could not be read (the trusted gh failed to run `gh config get`; repo-aegis did not set it)", verb, home, isWrite, choice);
     }
     if (socket.trim() !== "") {
       choice = chooseIdentity({ ...input, redirect: "http_unix_socket" });
@@ -526,8 +560,9 @@ function refuseUnavailable(
         "GH_IDENTITY_UNAVAILABLE",
         "this gh call",
         why,
-        [{ by: "person", step: "checks the identity with `repo-aegis status` and `repo-aegis doctor`, then re-runs the command" }],
+        [{ by: "person", command: "repo-aegis doctor", note: "it reports the registry and the mapped account (`repo-aegis status` shows the mapping); then re-run the command" }],
         dest,
+        NO_APPROVAL_IDENTITY,
       ),
     },
     home,
@@ -629,8 +664,8 @@ function obtainToken(
     why,
     reason: dest =>
       ownRefusal("GH_IDENTITY_UNAVAILABLE", "this gh call", why, [
-        { by: "person", step: "checks the identity with `repo-aegis doctor`, then re-runs the command" },
-      ], dest),
+        { by: "person", command: "repo-aegis doctor", note: "it reports why the mapped account cannot be used; then re-run the command" },
+      ], dest, NO_APPROVAL_IDENTITY),
   });
   if (identity.kind === "gh-login") {
     const token = fetchLoginToken(ghPath, identity.login, callerEnv, trust);
@@ -649,11 +684,11 @@ function obtainToken(
   const f = minted.failure;
   const fixes: readonly RefusalFix[] =
     f.code === "GH_IDENTITY_INSTALLATION_MISMATCH"
-      ? [{ by: "person", step: "checks which App the registry maps to this owner" }]
+      ? [{ by: "person", command: "repo-aegis status", note: "it shows which App the registry maps to this owner; that App must be installed on the owner's own account" }]
       : f.code === "GH_IDENTITY_UNAVAILABLE"
-        ? [{ by: "person", step: "checks the identity with `repo-aegis doctor`, then re-runs the command" }]
-        : [{ by: "person", step: "installs taaad v0.6.0 or later and re-runs `repo-aegis install shim`" }];
-  return { kind: "refuse", code: f.code, why: f.why, reason: dest => ownRefusal(f.code, "this gh call", f.why, fixes, dest) };
+        ? [{ by: "person", command: "repo-aegis doctor", note: "it reports why a token cannot be minted; then re-run the command" }]
+        : [{ by: "person", step: "installs taaad v0.6.0 or later and re-runs `repo-aegis install shim` (repo-aegis pins taaad only at that step, so none is pinned yet or the pin was removed)" }];
+  return { kind: "refuse", code: f.code, why: f.why, reason: dest => ownRefusal(f.code, "this gh call", f.why, fixes, dest, NO_APPROVAL_IDENTITY) };
 }
 
 // ---------------------------------------------------------------------------
@@ -772,9 +807,9 @@ function runPinned(
       ? {
           kind: "refuse",
           code: "GH_IDENTITY_UNAVAILABLE",
-          reason: ownRefusal("GH_IDENTITY_UNAVAILABLE", "this gh call", "repo-aegis faulted while preparing the GitHub identity for a mapped owner, and will not run it as the active account", [
-            { by: "person", step: "checks the identity with `repo-aegis doctor`, then re-runs the command" },
-          ]),
+          reason: ownRefusal("GH_IDENTITY_UNAVAILABLE", "this gh call", "repo-aegis hit an internal error while preparing the GitHub identity for a mapped owner (not a setting you made, and not one repo-aegis wrote), and will not run it as the active account", [
+            { by: "person", command: "repo-aegis doctor", note: "it reports whether the registry and the mapped account are usable; then re-run the command" },
+          ], undefined, NO_APPROVAL_IDENTITY),
         }
       : { kind: "plain", note: "repo-aegis faulted while choosing a GitHub identity" };
   }

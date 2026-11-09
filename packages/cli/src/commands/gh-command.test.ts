@@ -555,6 +555,10 @@ describe("repo-aegis gh: refusals never run gh", () => {
     assert.equal(refusalCode(r), "GH_BINARY_UNTRUSTED", r.err);
     assert.equal(existsSync(join(w.root, "never.log")), false);
     assert.deepEqual(mainCalls(r), []);
+    // U7: no pin is a state `install shim` creates; the fix line is that command, and no approval covers it.
+    assert.match(r.err, /repo-aegis pins taaad only at that step/);
+    assert.match(r.err, /A person installs taaad v0\.6\.0 or later and re-runs `repo-aegis install shim`/);
+    assert.match(r.err, /No approval covers this: an approval cannot stand in for an identity that could not be chosen or a token that could not be minted/);
   });
 
   it("under the real policy an untrusted gh is still refused before any mint (a non-root-owned taaad no longer is: plan §2.1, Q5)", () => {
@@ -564,6 +568,11 @@ describe("repo-aegis gh: refusals never run gh", () => {
     assert.equal(refusalCode(r), "GH_BINARY_UNTRUSTED", r.err);
     assert.deepEqual(r.taaadArgv, []);
     assert.deepEqual(mainCalls(r), []);
+    // U7: the cause, who put it there, the one fix line, and whether an approval covers it.
+    assert.match(r.err, /the gh first on PATH is not in a trusted location/);
+    assert.match(r.err, /repo-aegis did not put that gh there, it only refuses to trust it/);
+    assert.match(r.err, /A person runs, from a terminal: repo-aegis doctor \(it names which gh is first on PATH/);
+    assert.match(r.err, /No approval covers this: an approval cannot make a gh binary trustworthy/);
   });
 
   it("T1: a mapped person whose gh account has no token on this machine is GH_IDENTITY_UNAVAILABLE; the call and `auth switch` never run", () => {
@@ -1083,6 +1092,17 @@ describe("U5: an account-bound approval covers a repository git setting", () => 
     assert.match(r.err, /repo-aegis approve <owner>\/<repo>/);
   });
 
+  it("U7: the setting refusal names the setting, says repo-aegis did not set it, gives the unset line, and keeps the trailer", () => {
+    const w = worldWithHooksPath();
+    const r = run(w, CHECKOUT, { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE");
+    assert.match(r.err, /core\.hooksPath is set in local scope/);
+    assert.match(r.err, /repo-aegis did not set it \(its own hooks directory, written by `install hooks --local`, is exempt\)/);
+    assert.match(r.err, /A person runs, from a terminal: git config --local --unset-all core\.hooksPath \(it only stops that setting applying to this checkout/);
+    assert.match(r.err, /A person runs, from a terminal: repo-aegis approve <owner>\/<repo> \(account-bound: it covers this setting/);
+    assert.match(r.err, /Agents: do not run that yourself, retry or reroute; report this to your human\./);
+  });
+
   it("the approval covers only the git setting: an unsafe ARGUMENT (an editor option) still refuses", () => {
     const w = makeWorld();
     mintApproval({ target: dest, login: "alice", path: approvalsPath(w.home) });
@@ -1246,7 +1266,7 @@ describe("M1: verbs that read tokens are refused without a person whatever the r
       assert.equal(refusalCode(r), undefined);
       const warn = r.err.split("\n").filter(l => l.includes("GH_IDENTITY_UNAVAILABLE"));
       assert.equal(warn.length, 1, r.err);
-      assert.match(warn[0]!, /^repo-aegis gh: GH_IDENTITY_UNAVAILABLE: the registry could not be read.*so this read runs as the active gh account; proceeding$/);
+      assert.match(warn[0]!, /^repo-aegis gh: GH_IDENTITY_UNAVAILABLE: the registry in the pinned home could not be read.*so this read runs as the active gh account; proceeding$/);
     }
   });
 

@@ -381,8 +381,8 @@ function authVerbRefusal(args: readonly string[]): IdentityChoice | null {
   return refuse(
     "GH_AUTH_NEEDS_HUMAN",
     `gh ${group}`,
-    "it reads a token or changes which account or program gh uses, and no person is at this terminal",
-    NO_APPROVAL,
+    "it reads a token or changes which account or program gh uses, and no person is at this terminal (the command itself is the cause; no repo-aegis setting or install step created this condition)",
+    "No approval covers this: an approval never lets an agent read a token or change which account or program gh uses.",
     [TERMINAL_FIX],
   );
 }
@@ -438,8 +438,8 @@ function unsafeArgRefusal(dest: { owner: string; repo: string | null } | undefin
   return refuse(
     "GH_IDENTITY_ARG_UNSAFE",
     "this gh call",
-    "its arguments (an editor or browser option, another host or a full-URL endpoint, git options for a clone such as `--`, `--template` or `-c`, or a command that is not a built-in gh group) could hand a token to another program or host",
-    NO_APPROVAL,
+    "its arguments (an editor or browser option, another host or a full-URL endpoint, git options for a clone such as `--`, `--template` or `-c`, or a command that is not a built-in gh group) could hand a token to another program or host; the arguments are the cause, and no repo-aegis setting created this",
+    "No approval covers this: for this code an approval covers a repository git setting, never these arguments.",
     [{ by: "agent", command: "the same call on github.com only, without --editor/-e, --web/-w or --hostname, using a built-in gh command" }],
     dest,
   );
@@ -493,9 +493,12 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
         return refuse(
           "GH_IDENTITY_UNMAPPED_OWNER",
           "a gh write",
-          "the registry requires every registered owner to have a GitHub identity, and this owner has none",
-          NO_APPROVAL,
-          [{ by: "person", command: "repo-aegis engagements set-identity <id> --person <name>, or personal-org set-identity for a personal org" }],
+          "the registry has `requireIdentity` set (a person turned it on; the first identity mapping does), and this owner is registered but has no GitHub identity mapped",
+          "No approval covers this: an approval cannot add an identity.",
+          [
+            { by: "person", command: "repo-aegis engagements set-identity <id> --person <name>", note: "`--personal-org <org>` in place of `<id>` for a personal org" },
+            { by: "person", when: "If the requirement itself is unwanted", command: "repo-aegis identity require --off", note: "this lifts it for every owner" },
+          ],
           { owner: bad, repo: bad === owner ? repo : null },
         );
       }
@@ -519,9 +522,9 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
     return refuse(
       "GH_IDENTITY_PRESENCE_UNKNOWN",
       "this gh call",
-      "repo-aegis cannot tell whether a person or an agent is running it, so it will not choose between the person's account and the agent's",
-      NO_APPROVAL,
-      [{ by: "person", step: "runs it from a terminal they opened themselves" }],
+      "repo-aegis cannot tell whether a person or an agent is running it (the terminal check found no usable process ancestry; a sandbox that blocks the process list is a common cause, and repo-aegis did not create it), so it will not choose between the person's account and the agent's",
+      "No approval covers this: an approval is only consulted once repo-aegis knows an agent is running.",
+      [{ by: "person", step: "runs the original command from a terminal they opened themselves, or lets it run outside the sandbox" }],
       dest,
     );
   }
@@ -565,9 +568,9 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
       return refuse(
         "GH_IDENTITY_UNAVAILABLE",
         "this gh call",
-        "the registry's agent identity for this owner is not a GitHub App, so no narrowed token can be minted for it",
-        NO_APPROVAL,
-        [{ by: "person", step: "checks the registry with `repo-aegis status`" }],
+        "the registry maps this owner's agent column to a GitHub login, not a GitHub App, so no narrowed token can be minted for it (a person made that mapping; repo-aegis maps none by itself)",
+        "No approval covers this: an approval cannot turn a login into a GitHub App.",
+        [{ by: "person", command: "repo-aegis engagements set-identity <id> --agent <app-name>", note: "`repo-aegis status` shows the current mapping; changing it affects only this owner's agent calls" }],
         dest,
       );
     }
@@ -593,7 +596,7 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
     return refuse(
       "GH_IDENTITY_WRITE_NEEDS_HUMAN",
       "a gh write",
-      "it would write as a person's GitHub account, this owner has no agent identity, and no person has approved a write as that account here",
+      "it would write as a person's GitHub account, this owner has no agent identity (none is mapped, and repo-aegis maps none by itself), and no person has approved a write as that account here",
       "Only an approval minted for this owner and repository, for that account, covers this; a '*' approval does not.",
       [{ by: "person", command: "repo-aegis approve <owner>/<repo> (it records the account), or run the original command yourself" }],
       dest,
@@ -613,9 +616,9 @@ export function chooseIdentity(input: ChooseIdentityInput): IdentityChoice {
     return refuse(
       "GH_IDENTITY_UNAVAILABLE",
       "this gh call",
-      "repo-aegis could not judge its arguments or the registry safely",
-      NO_APPROVAL,
-      [{ by: "person", step: "checks the registry with `repo-aegis status` and re-runs the command" }],
+      "repo-aegis hit an internal error while judging the arguments or reading the registry (nothing in your configuration is known to have caused it, and repo-aegis created no setting for it)",
+      "No approval covers this: an approval cannot stand in for a judgement that could not be made.",
+      [{ by: "person", command: "repo-aegis doctor", note: "it shows whether the registry reads; then re-run the command" }],
     );
   }
 }

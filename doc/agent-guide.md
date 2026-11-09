@@ -987,7 +987,14 @@ Every CLI failure with exit 2 emits a JSON error payload (under
 
 Codes you should recognise and act on (refusals from the egress guard and the
 owner gates end with `[<CODE>, see doc/agent-guide.md#<code>]`, which points at
-the row below):
+the row below). A refusal on the publish path that sends you to your human
+carries four things in its own text, so you can relay it without reading this
+table: the setting, file or environment condition that caused it; whether
+repo-aegis itself created that condition; the one command a person runs; and
+whether an approval (`repo-aegis approve <owner>/<repo>`) covers it. Of the
+git-credential-helper and gh-identity refusals, only `AGENT_PUSH_CHAIN_UNREADABLE`, the repository-git-setting form of
+`GH_IDENTITY_ARG_UNSAFE` and `GH_IDENTITY_WRITE_NEEDS_HUMAN` (in `repo-aegis
+gh`) are covered by an approval; the rest say "No approval covers this":
 
 | Code | Meaning | Recovery |
 |---|---|---|

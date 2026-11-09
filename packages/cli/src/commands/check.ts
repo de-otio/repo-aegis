@@ -640,8 +640,8 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
             parsed,
             ref,
             `This repository's trust boundary does not include the owner "${parsed.org}", so a push there would ` +
-              `carry its content across the boundary`,
-            "No approval covers this",
+              `carry its content across the boundary (the boundary comes from how this repository is classified, which a person set with \`repo-aegis classify\`)`,
+            "No approval covers this: an approval cannot widen a trust boundary",
             [
               {
                 by: "agent",
@@ -653,7 +653,8 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
               {
                 by: "person",
                 when: "If this repository was classified wrongly",
-                step: "re-classifies it from a terminal (repo-aegis classify) so its boundary matches where it should publish",
+                command: "repo-aegis classify",
+                note: "it re-classifies this repository so its boundary matches where it should publish; the new class applies to every later push too",
               },
             ],
           ),
@@ -746,8 +747,8 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
               "AGENT_PUSH_NEEDS_APP",
               parsed,
               ref,
-              "This owner has a GitHub App identity for agents, and an SSH push goes out as the person's SSH key instead of the App; only an HTTPS push gets the App's narrowed token",
-              "No approval covers this",
+              "This owner has a GitHub App identity for agents (a person mapped it; repo-aegis maps none by itself), and this push's remote is an SSH one, which goes out as the person's SSH key instead of the App; only an HTTPS push gets the App's narrowed token",
+              "No approval covers this: an approval cannot make an SSH push use the App's token",
               httpsForm === null ? [] : [{ by: "agent", command: httpsForm }],
             ),
             details: { destination: `${parsed.org}/${parsed.repo}`, ref },
@@ -766,13 +767,14 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
               "GIT_CREDENTIAL_HELPER_ORDER",
               parsed,
               ref,
-              "This owner has a GitHub App identity for agents, but the repo-aegis git credential helper is not the first helper git runs for https://github.com (or git's configuration cannot be read), so this push was authenticated with some other credential",
-              "No approval covers this",
+              "This owner has a GitHub App identity for agents, but the repo-aegis git credential helper is not the first helper git runs for https://github.com (or git's configuration cannot be read), so this push was authenticated with some other credential; repo-aegis puts its helper first only when `install git-credential` runs, so it was never installed or another helper was added ahead of it afterwards",
+              "No approval covers this: an approval cannot change which helper git asks first",
               [
                 {
                   by: "person",
                   when: "To fix the helper order",
                   command: "repo-aegis install git-credential",
+                  note: "it adds only repo-aegis's own helper entry, so re-running it is safe; if another helper still comes first, `repo-aegis doctor` names it",
                 },
               ],
             ),
