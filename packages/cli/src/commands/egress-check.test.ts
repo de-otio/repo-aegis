@@ -493,7 +493,7 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
     // PR 2a: a repository that is not a literal owner/repo is an UNRESOLVED destination (`*`), never a named one.
     assert.equal(p.details.destination?.org, "*");
-    // The hostile string contains `| sh` inside a substitution: since the backstop, a shell reading a pipe is itself
+    // The hostile string contains `| sh` inside a substitution: a shell reading a pipe is itself
     // unresolved, and its intent is reported first. Either unresolved text is the right outcome; what matters is that nothing leaks.
     assert.match(p.error, /not a literal <owner>\/<repo>|could not take this command line apart/);
     for (const frag of ["evil.example", "$(", "engagements add", "repo-aegis approve"]) {

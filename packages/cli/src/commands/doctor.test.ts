@@ -795,6 +795,28 @@ describe("doctor — egress checks: shim and guard hook", () => {
     assert.doesNotMatch(stdout, /GUARD_HOOK_UNREGISTERED/);
   });
 
+  it("SHIM_NOT_FIRST is a FAIL (exit 1): the shim is the only guard for a gh call the hook does not parse", () => {
+    const name = "shim-not-first";
+    // Another `gh` precedes the shim on PATH.
+    const shadow = fakeGh(join(root, name, "shadow-bin"), "echo real gh");
+    const fx = makeFixture(name, {
+      PATH: [shadow, join(root, name, "home", "bin"), process.env["PATH"] ?? ""].join(delimiter),
+    });
+    writeGlobalPushDefaultNothing(fx);
+    healthyRepo(fx, "repo-a");
+
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
+      );
+    });
+
+    assert.equal(exitCode, 1);
+    assert.match(stdout, /FAIL SHIM_NOT_FIRST/);
+    assert.doesNotMatch(stdout, /WARN SHIM_NOT_FIRST/);
+  });
+
   it("GUARD_HOOK_UNREGISTERED fires when the Claude home has no guard-egress entry", () => {
     const fx = makeFixture("guard-unregistered", {}, { guardHook: false });
     writeGlobalPushDefaultNothing(fx);

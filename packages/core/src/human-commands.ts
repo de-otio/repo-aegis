@@ -11,7 +11,7 @@
 // terminal situation: an agent never mints its own go-ahead, even with a real
 // TTY. Refusal code: `AGENT_RAN_HUMAN_COMMAND`.
 //
-// This is a text-level check, in the spirit of the egress parser's backstop. It
+// This is a text-level check (the egress parser no longer reads text this way). It
 // finds the repo-aegis program word (`repo-aegis`, a path to it, `npx
 // @de-otio/repo-aegis`, `dist/index.js`, or a name this command line defines as
 // an alias, function or variable holding one of those) and then looks at the

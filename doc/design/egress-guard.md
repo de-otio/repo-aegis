@@ -148,7 +148,7 @@ exception is rule h, which fails closed on a write whose owner it cannot name
 | # | Kind | Rule | Decision | Code |
 |---|---|---|---|---|
 | D2 | shape | a recognised `dot gh` call (below) that is a write, with no person present and no leading `--as bot` (evaluated before everything else, so its agent-side fix is named first) | deny | `DOT_GH_WRITE_NEEDS_BOT` |
-| pty | shape | the egress runs under a pty wrapper, such as `script`, `unbuffer`, `expect`, `socat`, `ssh -t`, `tmux`, `screen`, or an interpreter's pty module (evaluated before a) | deny | `EGRESS_PTY_WRAPPER` |
+| pty | shape | a parsed egress intent runs under a pty wrapper, such as `script`, `unbuffer`, `expect`, `socat`, `ssh -t`, `tmux`, `screen`, or an interpreter's pty module (evaluated before a). Since the word backstop went, that is only a wrapper the parser reads through a variable or substitution (`S=script; $S … git push …`); `script -q /dev/null gh …` written out is no intent at the hook | deny | `EGRESS_PTY_WRAPPER` |
 | a | shape | `git push` with no `<remote> <refspec>` | deny | `PUSH_IMPLICIT_TARGET` |
 | b | shape | egress verb with `precededByCd` | deny | `EGRESS_AFTER_CD` |
 | c | shape | egress verb with `joinedBy === ";"` (or `\|\|`) | deny | `EGRESS_UNGUARDED_CHAIN` |
@@ -174,8 +174,9 @@ destination, because an agent that can write the file could otherwise switch
 the rule off with one bad line of YAML. A person at a terminal still passes.
 
 **`dot gh` is the one wrapper the parser reads** (doc/plan-recognise-dot-gh.md).
-Every other wrapper (an interpreter, a script) is an `unparsed-shape`, which
-rule h refuses as an owner it cannot name. The recognised shape is one shell
+Every other wrapper (an interpreter, a script) is not recognised: a segment the
+parser cannot read as `git push` / `gh <write>` is no intent at the hook, and
+the `gh` shim judges the `gh` call it ends up making. The recognised shape is one shell
 segment, after the existing handling of `cd`, `&&`, env assignments and
 redirections:
 
@@ -298,15 +299,40 @@ Destination resolution is **offline**, and since 0.11.0 it names the owner
   classified; a shell alias or an extension the guard cannot expand is an
   unresolved intent.
 
-The governing rule: a parser that lists the shapes it understands will always
-miss some, so any segment that invokes `gh` or `git push` and whose verb or
-target the parser cannot fully determine yields an **unresolved** intent, never
-"no intent". A raw-text scan of the whole command (heredocs and interpreter
-text included) catches a `gh` or `git push` mention that no parsed intent
-accounts for; its accepted false positive is a quoted mention such as `echo
-"gh issue create"`, refused only for a caller with no person present. A
-resolved or unresolved destination is then judged by rule h before anything
-else.
+The governing rule: any segment the parser recognises as invoking `gh <write>`
+or `git push` (directly, or through a wrapper, reserved word, shell `-c` or
+`eval` text, a heredoc or here-string fed to a shell, an alias or a
+substitution) whose verb or target it cannot fully determine yields an
+**unresolved** intent, never "no intent". The parser does **not** read a
+command's text for stray mentions: a segment it does not recognise as
+`git push` / `gh <write>` is not egress at the hook. A `sed` replacement
+(`sed -i 's/x/gh auth token/' doc.md`), `echo "git push"`, a heredoc fed to
+`cat`, and an interpreter's program text (`python3 -c "os.system('gh pr create')"`)
+are data to it. A word-level re-read of the command used to catch
+`find -exec gh …`, `parallel gh …`, `case` bodies and interpreter text, and its false
+positives landed on `sed`, `echo` and heredocs; it was removed (P1-C of the
+complexity review) because the layer below already judges those shapes when
+they actually run: the `gh` shim sees the real argument vector of every `gh`
+call on this machine however it was spawned, and the pre-push hook sees every
+push made here. That makes the shim, first on `PATH`, the only guard for those
+shapes (`doctor` reports `SHIM_NOT_FIRST` as a failure). It does not reach a
+command that runs somewhere else: see the remote and container runners in the
+known gaps below, which the parser reads as a shape for exactly that reason. A
+resolved or unresolved destination is judged by rule h before anything else.
+
+**Remote and container execution.** The shim and the pre-push hook exist only
+on this machine, so a `git push` or `gh <write>` run through `ssh host …`,
+`docker|podman|nerdctl exec|run …`, `docker compose exec|run`, `kubectl|oc exec`,
+`devcontainer exec`, `nix-shell --run`, `nix develop|shell -c`, `vagrant ssh -c`,
+`wsl`, `distrobox enter -- …` or `toolbox run` has no layer below the hook. The
+parser reads these runners as a shape (the runner's own options and its host,
+container or pod are skipped by arity; what follows, a `-c` / `--run` text or
+the exec'd words, is parsed as a command of its own). If that command is a
+`git push` or `gh <write>`, the result is one **unresolved** intent, so rule h
+refuses or asks as for any unnameable destination. This is a parse, not a scan
+of text: `ssh host ls`, `docker exec ctr cat file` and `ssh host 'echo git push'`
+are no intent. What it cannot see (a script already on the remote host or in
+the image that publishes, or a runner that is not listed) is not guarded.
 
 Known gaps, stated so nobody assumes coverage: the fork parent that `gh` can
 pick through the API for a `gh` write verb other than `gh pr create` (R5; D10
@@ -315,7 +341,11 @@ resolve through remotes, but that is not proven); a `GH_REPO` exported from a
 shell startup file, which the hook cannot see and only the shim reads (R8, see
 `doctor`'s `SHELL_STARTUP_OVERRIDES`); and, on hook-only installs, an ssh
 redirect from a persistent change the hook cannot see, which the pre-push hook
-still refuses (R11, `PREPUSH_HOOK_MISSING`). Owners whose names contain `_`
+still refuses (R11, `PREPUSH_HOOK_MISSING`); and execution on another host or in
+a container, where neither the shim nor the pre-push hook exists (the runners
+listed above are read as a shape; any other way to get a command onto a remote
+machine, or a publish that a remote script performs by itself, is not guarded).
+Owners whose names contain `_`
 (Enterprise Managed Users) cannot be registered, so rule h refuses them
 permanently for an agent. Visibility from the
 `repo-aegis.visibility` cache. Class from `readRepoConfig(cwd)` when the

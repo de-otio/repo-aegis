@@ -189,7 +189,7 @@ describe("rule h — hostile destination names never reach pasteable text (revie
       // Since PR 2a the parser reports a repository holding a shell substitution as UNRESOLVED
       // (`opaque-repo`) instead of handing the resolver a hostile name: same invariants, the
       // unresolved wording.
-      // The hostile string contains `| sh` inside a substitution: since the backstop, a shell reading a pipe is itself
+      // The hostile string contains `| sh` inside a substitution: a shell reading a pipe is itself
       // unresolved, and its intent is reported first. Either unresolved text is the right outcome; what matters is that nothing leaks.
       assert.ok(out.destination?.unresolved === "opaque-repo" || out.destination?.unresolved === "unparsed-shape");
       assert.match(out.reason, /not a literal <owner>\/<repo>|could not take this command line apart/);

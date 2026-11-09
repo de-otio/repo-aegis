@@ -628,7 +628,7 @@ const WRAPPER_SPECS = new Map<string, WrapperSpec>([
     "sudo",
     {
       value: new Set([
-        "-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-T", "-U",
+        "-u", "-g", "-p", "-C", "-D", "-r", "-t", "-T", "-U",
         "--user", "--group", "--host", "--prompt", "--close-from", "--chdir", "--role", "--type",
       ]),
     },
@@ -641,7 +641,7 @@ const WRAPPER_SPECS = new Map<string, WrapperSpec>([
   ["caffeinate", { value: new Set(["-t", "-w"]) }],
   // `busybox sh -c …`: the applet name follows.
   ["busybox", { value: NO_VALUE_FLAGS }],
-  ["watch", { value: new Set(["-n", "--interval", "-p"]) }],
+  ["watch", { value: new Set(["-n", "--interval"]) }],
   ["flock", { value: new Set(["-w", "-E", "--timeout", "--wait", "--conflict-exit-code"]), positionals: 1 }],
   [
     "xargs",
@@ -653,6 +653,181 @@ const WRAPPER_SPECS = new Map<string, WrapperSpec>([
     },
   ],
 ]);
+
+/**
+ * A bundle of short flags (`env -iC /tmp git push`) whose value-taking flag is its LAST letter takes the next
+ * token as its value; anywhere earlier, the rest of the bundle is the value (`-uNAME`).
+ */
+function bundledFlagTakesNext(spec: WrapperSpec, t: string): boolean {
+  if (t.length < 3 || t[1] === "-") return false;
+  const bundle = t.slice(1);
+  for (let k = 0; k < bundle.length; k++) {
+    if (spec.value.has(`-${bundle[k]!}`)) return k === bundle.length - 1;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Remote and container runners
+// ---------------------------------------------------------------------------
+
+/**
+ * A program that runs a command somewhere the `gh` shim and the pre-push hook do not exist (another host, a
+ * container, a pod, a nix environment): `ssh host git push …`, `docker exec ctr gh pr create …`. The command
+ * word is the runner, so the hook would see nothing, and no layer below judges it either.
+ */
+interface RemoteRunnerSpec {
+  /** The first positional must be one of these (`docker exec|run`, `kubectl exec`, `nix develop`); absent: no subcommand. */
+  sub?: ReadonlySet<string>;
+  /** Words that may come before the subcommand (`docker container exec`, `docker compose run`). */
+  prefix?: ReadonlySet<string>;
+  /** Flags that take a value (the next word, unless it is attached with `=`). */
+  value: ReadonlySet<string>;
+  /** Flags whose value is itself a command line: `vagrant ssh -c TEXT`, `nix-shell --run TEXT`. */
+  text?: ReadonlySet<string>;
+  /** Flags after which every remaining word is the command: `nix develop -c gh pr create`. */
+  command?: ReadonlySet<string>;
+  /** Positional words between the options and the command (the host, the container, the pod). 99: the command is only ever behind `--` or a flag. */
+  positionals: number;
+  /** The words after the options are a command to run (false: only `text` / `command` flags run something). */
+  exec: boolean;
+}
+
+const set = (...w: string[]): ReadonlySet<string> => new Set(w);
+
+const DOCKER_SPEC: RemoteRunnerSpec = {
+  sub: set("exec", "run"),
+  prefix: set("container", "compose"),
+  value: set(
+    "-H", "--host", "-c", "--context", "--config", "-l", "--log-level",
+    "-e", "--env", "-u", "--user", "-w", "--workdir", "-v", "--volume", "--name", "-p", "--publish", "--entrypoint",
+    "--network", "--net", "--label", "--env-file", "--mount", "--platform", "--hostname", "-h", "--cpus", "-m", "--memory",
+    "--pull", "--restart", "--security-opt", "--cap-add", "--cap-drop", "--add-host", "--detach-keys", "-a", "--attach",
+    "--log-driver", "--tmpfs", "--device", "--group-add", "--ipc", "--pid", "--shm-size", "--dns", "--profile", "-f", "--file",
+    "-p", "--project-name",
+  ),
+  positionals: 1,
+  exec: true,
+};
+
+const REMOTE_RUNNERS = new Map<string, RemoteRunnerSpec>([
+  [
+    "ssh",
+    {
+      value: set("-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-E", "-e", "-S", "-W", "-w", "-O", "-B", "-I", "-m", "-Q"),
+      positionals: 1,
+      exec: true,
+    },
+  ],
+  ["docker", DOCKER_SPEC],
+  ["podman", DOCKER_SPEC],
+  ["nerdctl", DOCKER_SPEC],
+  [
+    "kubectl",
+    {
+      sub: set("exec"),
+      value: set("-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-s", "--server", "--as", "--cluster", "-f", "--filename", "--pod-running-timeout", "--request-timeout", "--user", "--token"),
+      positionals: 1,
+      exec: true,
+    },
+  ],
+  [
+    "oc",
+    {
+      sub: set("exec", "rsh"),
+      value: set("-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-s", "--server", "--as", "--cluster", "--user", "--token"),
+      positionals: 1,
+      exec: true,
+    },
+  ],
+  [
+    "devcontainer",
+    {
+      sub: set("exec"),
+      value: set("--workspace-folder", "--config", "--container-id", "--id-label", "--remote-env", "--user", "--log-level", "--docker-path", "--override-config"),
+      positionals: 0,
+      exec: true,
+    },
+  ],
+  ["wsl", { value: set("-d", "--distribution", "-u", "--user", "--cd", "--distribution-id"), positionals: 0, exec: true }],
+  ["wsl.exe", { value: set("-d", "--distribution", "-u", "--user", "--cd", "--distribution-id"), positionals: 0, exec: true }],
+  ["distrobox", { sub: set("enter"), value: set("-n", "--name"), positionals: 99, exec: true }],
+  ["distrobox-enter", { value: set("-n", "--name"), positionals: 99, exec: true }],
+  ["toolbox", { sub: set("run"), value: set("-c", "--container", "-d", "--distro", "-r", "--release"), positionals: 0, exec: true }],
+  ["vagrant", { sub: set("ssh"), value: set("-p", "--plugin-version"), text: set("-c", "--command"), positionals: 99, exec: false }],
+  ["nix-shell", { value: set("-p", "--packages", "-I", "--arg", "--argstr", "--attr", "-A"), text: set("--run", "--command"), positionals: 99, exec: false }],
+  [
+    "nix",
+    {
+      sub: set("develop", "shell"),
+      value: set("-f", "--file", "--override-input", "--inputs-from", "-I", "--profile", "--expr"),
+      command: set("-c", "--command"),
+      positionals: 99,
+      exec: false,
+    },
+  ],
+]);
+
+/** The command lines a runner is handed, each to be parsed as a command of its own (parser-shaped: option arity, subcommand, position; never a scan of the text). */
+function remoteCommandLines(spec: RemoteRunnerSpec, args: readonly string[]): string[] {
+  const lines: string[] = [];
+  const asLines = (words: readonly string[]): void => {
+    if (words.length === 1) lines.push(words[0]!);
+    else if (words.length > 1) lines.push(words.map(quoteWord).join(" "));
+  };
+  const flagName = (t: string): { name: string; attached: string | undefined } => {
+    const eq = t.indexOf("=");
+    return t.startsWith("--") && eq > 0 ? { name: t.slice(0, eq), attached: t.slice(eq + 1) } : { name: t, attached: undefined };
+  };
+  const isFlag = (t: string): boolean => t.startsWith("-") && t !== "-";
+
+  // Flags whose value is a command line, or after which the command follows: wherever they sit.
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i]!;
+    if (t === "--" || !isFlag(t)) continue;
+    const { name, attached } = flagName(t);
+    if (spec.text?.has(name)) {
+      const v = attached ?? args[i + 1];
+      if (v !== undefined) lines.push(v);
+    } else if (spec.command?.has(name)) {
+      asLines(attached !== undefined ? [attached, ...args.slice(i + 1)] : args.slice(i + 1));
+    }
+  }
+  if (!spec.exec) return lines;
+
+  let i = 0;
+  const skipFlag = (): void => {
+    const { name, attached } = flagName(args[i]!);
+    i += spec.value.has(name) && attached === undefined ? 2 : 1;
+  };
+  if (spec.sub !== undefined) {
+    while (i < args.length && isFlag(args[i]!)) skipFlag();
+    if (spec.prefix?.has(args[i] ?? "") === true) {
+      i++;
+      while (i < args.length && isFlag(args[i]!)) skipFlag();
+    }
+    if (i >= args.length || !spec.sub.has(args[i]!)) return lines;
+    i++;
+  }
+  let positionals = 0;
+  while (i < args.length) {
+    const t = args[i]!;
+    if (t === "--") {
+      asLines(args.slice(i + 1));
+      return lines;
+    }
+    if (isFlag(t)) {
+      skipFlag();
+    } else if (positionals < spec.positionals) {
+      positionals++;
+      i++;
+    } else {
+      break;
+    }
+  }
+  asLines(args.slice(i));
+  return lines;
+}
 
 const SHELL_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"]);
 
@@ -677,8 +852,6 @@ interface ResolvedCommand {
    * of `eval`. The caller parses it as a command line of its own.
    */
   nestedText?: string;
-  /** Index (in `tokens`) of the first token that is part of `nestedText`; those tokens are parsed as text, not scanned. */
-  nestedFrom?: number;
   /**
    * `sh -c 'TEXT' ARG0 ARG1 …`: the words after TEXT. They become `$0`, `$1`, … of TEXT, so `"$@"` in it runs
    * them (C1). Absent for `eval`, whose arguments are all TEXT.
@@ -770,7 +943,7 @@ function resolveCommand(input: string[], assigns: Assignment[] = [], envFlags: s
           envFlags.push("env -C");
         }
       }
-      i += spec.value.has(t) ? 2 : 1;
+      i += spec.value.has(t) || bundledFlagTakesNext(spec, t) ? 2 : 1;
     }
     if (restart) continue;
     // `env - cmd`: a lone dash is `-i`.
@@ -783,7 +956,7 @@ function resolveCommand(input: string[], assigns: Assignment[] = [], envFlags: s
   if (!settled) return { tokens, start: tokens.length, viaXargs, isEval: false, exhausted: true };
   const word = i < tokens.length ? baseName(tokens[i]!) : "";
   if (word === "eval") {
-    return { tokens, start: i, viaXargs, nestedText: tokens.slice(i + 1).join(" "), nestedFrom: i + 1, isEval: true, exhausted: false };
+    return { tokens, start: i, viaXargs, nestedText: tokens.slice(i + 1).join(" "), isEval: true, exhausted: false };
   }
   if (SHELL_INTERPRETERS.has(word)) {
     for (let j = i + 1; j < tokens.length; j++) {
@@ -797,7 +970,6 @@ function resolveCommand(input: string[], assigns: Assignment[] = [], envFlags: s
             start: i,
             viaXargs,
             nestedText: text,
-            nestedFrom: j + 1,
             nestedArgs: tokens.slice(j + 2),
             isEval: false,
             exhausted: false,
@@ -2274,11 +2446,6 @@ interface ParseCtx {
   /** Names (aliases, functions, variables, copied binaries) this line bound to a pty wrapper; shared by every nested parse. */
   ptyNames: Map<string, string>;
   /**
-   * This text is the RESULT of a command substitution that becomes a command word or `eval` / `sh -c` text
-   * (`eval "$(cat <<'EOF' … EOF)"`): a heredoc inside it is a program, not data.
-   */
-  heredocsAreCode: boolean;
-  /**
    * Shape rule b′: labels of the overriding variables and `env` flags in force for this text (assigned by
    * the enclosing command's prefix or by an earlier `export` / assignment). Flows DOWN into nested text.
    */
@@ -2337,25 +2504,18 @@ function memoDirLoader(
  * Tokenise (quote-aware), split on shell operators, classify each segment.
  * Pure. Non-egress commands yield an empty list.
  *
- * This parser FAILS CLOSED, in two layers.
+ * What it recognises is a segment that runs `gh <write>` or `git push` (also `send-pack`, `http-push`),
+ * directly or through a wrapper, reserved word, shell `-c` / `eval` text, a heredoc or here-string fed to a
+ * shell, alias or substitution. When such a segment's verb or target cannot be fully determined (a variable
+ * command word, a shell alias, a wrapper chain over the cap, an unreadable alias table, an exception while
+ * parsing a line that mentions `gh` or `git push`) the intent has `unresolved` set; it is never an empty list.
  *
- * 1. Every segment that runs `gh`, or `git push` (also `send-pack`, `http-push`), directly or through a
- *    wrapper, reserved word, interpreter, alias or substitution, and whose verb or target cannot be fully
- *    determined, yields an intent with `unresolved` set — never an empty list. An exception while parsing a
- *    line that mentions `gh` or `git push` yields such an intent too.
- * 2. A BACKSTOP then reads the command's text again. Every mention of `gh <group>` (a built-in gh command
- *    word within a few words of a `gh` word, however it is spelled: `gh`, `"gh"`, `g\h`, `/usr/bin/gh`) or
- *    `git push|send-pack|http-push`, wherever it sits — an interpreter's `-c`/`-e` text, a `find -exec`
- *    or `parallel` argument, a `case` pattern body, a function body, a heredoc fed to a shell or an
- *    interpreter, a `<(…)` process substitution — that no intent accounts for becomes an `unparsed-shape`
- *    intent at that position.
- *
- * The accepted false positive: a LITERAL mention in a quoted argument, such as `echo "gh issue create"`,
- * `printf '%s' 'git push'` or `python3 -c "print('gh pr list')"`, is reported too. (Searches such as
- * `grep "git push" docs/`, the message of a `git commit -m`, and the value of any flag of a command that
- * the parser understood (`gh pr create --body "… git push …"`) are not mentioned: those words are data.)
- * Aliases and functions defined in the user's shell profile are invisible to a pre-command hook; the `gh`
- * shim, which sees the real argument vector, covers them.
+ * It does NOT read a command's text for stray mentions. A segment it does not recognise as `git push` /
+ * `gh <write>` is not egress at the hook: `sed -i 's/x/gh auth token/' doc.md`, `echo "git push"`, a
+ * heredoc fed to `cat`, or an interpreter's `-c` text (`python3 -c "os.system('gh pr create')"`, `find -exec
+ * gh …`, `parallel gh …`) yields no intent. When such a command does run `gh` or `git push`, the `gh` shim or
+ * the pre-push hook judges it, because they see the real argument vector. Aliases and functions defined in
+ * the user's shell profile are invisible to a pre-command hook for the same reason.
  */
 export function parseEgressIntents(command: string, opts: ParseEgressOptions = {}): EgressIntent[] {
   try {
@@ -2368,7 +2528,6 @@ export function parseEgressIntents(command: string, opts: ParseEgressOptions = {
       inheritedEnvRepo: undefined,
       tainted: new Map(),
       ptyNames: new Map(),
-      heredocsAreCode: false,
       dangerEnv: new Set(),
       state: { change: undefined, strong: undefined },
       expansion: { bytes: 0 },
@@ -2468,7 +2627,7 @@ function braceCandidates(word: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// The backstop: read the text again
+// Word helpers: reading a variable command word's arguments and an alias value
 // ---------------------------------------------------------------------------
 
 /**
@@ -2521,92 +2680,8 @@ function flattenWords(tokens: readonly string[]): string[] {
   return words;
 }
 
-/** The `gh <group>` and `git push` mentions in a word list. Linear: each word looks at a bounded window. */
-function countMentions(words: readonly string[]): { gh: number; git: number } {
-  let gh = 0;
-  let git = 0;
-  for (let i = 0; i < words.length; i++) {
-    const w = words[i]!;
-    if (isGhWord(w)) {
-      if (findAfter(words, i, x => GH_BUILTIN_COMMANDS.has(x))) gh++;
-    } else if (isGitWord(w)) {
-      if (findAfter(words, i, x => GIT_PUSH_LIKE.has(x))) git++;
-    }
-  }
-  return { gh, git };
-}
-
-/** Commands whose arguments are text to search, never to run. */
-const SEARCH_COMMANDS = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack"]);
-
-/** Interpreters that read a program from stdin: a heredoc fed to one is scanned, not skipped. */
+/** Interpreters that read a program from stdin. */
 const SCRIPT_INTERPRETER_RE = /^(?:python[\d.]*|perl|ruby|node|nodejs|php|lua|Rscript|osascript|tclsh|expect|awk|gawk)$/;
-
-/**
- * Flags whose value is a message or a posted field — text, never a command. `git -c`, `--exec`, `-x`,
- * `--upload-pack`, `--receive-pack`, `-O`, `--extcmd` and the like are NOT here: those values run.
- */
-const GH_DATA_FLAGS = new Set([
-  "-b", "--body", "-t", "--title", "-n", "--notes", "-d", "--description", "--subject", "--comment",
-  "--message", "-m", "-f", "-F", "--field", "--raw-field",
-]);
-// (`--grep`, `-S`, `-G` and the like take a search pattern; `git log --grep='git push'` is a search.)
-const GIT_DATA_FLAGS = new Set(["-m", "--message", "--grep", "-S", "-G", "--author", "--committer", "--since", "--until"]);
-
-/** How a token relates to a message flag of `cmd`: its value is the NEXT token, is ATTACHED to it, or it is no message flag. */
-function messageFlag(cmd: "gh" | "git", t: string): "next" | "attached" | null {
-  const flags = cmd === "gh" ? GH_DATA_FLAGS : GIT_DATA_FLAGS;
-  if (flags.has(t)) return "next";
-  const eq = t.indexOf("=");
-  if (t.startsWith("--") && eq > 0 && flags.has(t.slice(0, eq))) return "attached";
-  if (!t.startsWith("--") && t.length > 2) {
-    // `-mTEXT` (attached); and for git a group ending in `m` (`-am TEXT`).
-    if (flags.has(t.slice(0, 2)) && t[1] !== undefined) return "attached";
-    if (cmd === "git" && /^-[A-Za-z]+m$/.test(t)) return "next";
-  }
-  return null;
-}
-
-/** Search commands: only these flags can run something, and only these values. */
-const SEARCH_RUN_FLAGS = new Set(["--pager", "--pre"]);
-
-/**
- * The tokens of a segment the backstop reads. Everything is read, except:
- *
- * - for `gh` and `git`, the value of a MESSAGE flag (`-m`, `--message`, `--body`, `--title`, …), which is
- *   text; the value of `-c`, `--config-env`, `--exec`, `-x`, `-O`, `--extcmd`, `--upload-pack`, … is a command
- *   in disguise and is read;
- * - for a search (`grep`, `rg`, `ag`, `ack`), the positional pattern and path arguments, but not the flags
- *   or the values of `--pager` / `--pre`, which run a command.
- *
- * `nestedFrom` onwards is parsed as a command line of its own.
- */
-function scanTokens(tokens: readonly string[], start: number, cmd: string, nestedFrom: number | undefined): string[] {
-  const end = nestedFrom ?? tokens.length;
-  if (SEARCH_COMMANDS.has(cmd)) {
-    const out = tokens.slice(0, Math.min(start + 1, end));
-    for (let k = start + 1; k < end; k++) {
-      const t = tokens[k]!;
-      if (!t.startsWith("-")) continue;
-      out.push(t);
-      if (SEARCH_RUN_FLAGS.has(t) && k + 1 < end) out.push(tokens[++k]!);
-    }
-    return out;
-  }
-  if (cmd !== "gh" && cmd !== "git") return tokens.slice(0, end);
-  const out = tokens.slice(0, start + 1);
-  for (let k = start + 1; k < end; k++) {
-    const t = tokens[k]!;
-    const kind = t.startsWith("-") ? messageFlag(cmd, t) : null;
-    if (kind === "attached") continue;
-    if (kind === "next") {
-      k++;
-      continue;
-    }
-    out.push(t);
-  }
-  return out;
-}
 
 /** Single-quote one word for the tokeniser (the same way a shell would read it back). */
 function quoteWord(w: string): string {
@@ -2709,15 +2784,6 @@ function hiddenCommandKind(args: readonly string[]): "gh" | "git" | null {
   if (findAfter(words, 0, a => GIT_PUSH_LIKE.has(a))) return "git";
   return null;
 }
-
-/** True when the whole token is one command substitution (`$(…)` or `` `…` ``), so its result IS the word. */
-function isWholeSubstitution(word: string): boolean {
-  const { texts, rest } = splitSubstitutions(word);
-  return texts.length > 0 && rest.trim() === "";
-}
-
-/** Commands that run a program read from stdin, whatever fed it. */
-const STDIN_RUNNERS = new Set(["source", ".", "make", "gmake", "at", "batch"]);
 
 /** A shell invoked with no `-c` and no script argument reads its commands from stdin. */
 function readsCommandsFromStdin(args: readonly string[]): boolean {
@@ -3253,11 +3319,9 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
     const rawTokens = seg.funcDef ? seg.tokens.slice(1) : seg.tokens;
     const strings = hereStrings(rawTokens);
     const tokens = stripRedirections(rawTokens);
-    /** This segment's command word already got a fail-closed intent for what it hides. */
-    let hidden = false;
 
     /** Parse `text` as a command line of its own; its intents take this segment's place in the chain. */
-    const nest = (text: string, envRepo: string | undefined, code = false): void => {
+    const nest = (text: string, envRepo: string | undefined): void => {
       // Caught by this segment's catch below, which emits the fail-closed intent for its own words.
       ctx.expansion.bytes += text.length;
       if (ctx.expansion.bytes > PARSE_EXPANSION_BUDGET) throw new ExpansionLimitError();
@@ -3271,16 +3335,39 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
         depth: ctx.depth + 1,
         envOverridden,
         inheritedEnvRepo: envRepo,
-        heredocsAreCode: code,
         dangerEnv: segDanger,
       };
       for (const i of parseUnsafe(text, child)) {
         intents.push({ ...i, segmentIndex, joinedBy: i.joinedBy ?? seg.joinedBy, precededByCd: i.precededByCd || precededByCd });
       }
     };
+    /** The kind of publish a runner's command lines contain, parsed on their own (no state is shared with this line), or null. */
+    const remoteRunKind = (lines: readonly string[], envRepo: string | undefined): "gh" | "git" | null => {
+      for (const text of lines) {
+        ctx.expansion.bytes += text.length;
+        if (ctx.expansion.bytes > PARSE_EXPANSION_BUDGET) throw new ExpansionLimitError();
+        let found: EgressIntent[];
+        if (ctx.depth >= MAX_NEST_DEPTH) {
+          const s = sentinelFor(text, base);
+          found = s === null ? [] : [s];
+        } else {
+          found = parseUnsafe(text, {
+            ...ctx,
+            depth: ctx.depth + 1,
+            envOverridden,
+            inheritedEnvRepo: envRepo,
+            dangerEnv: segDanger,
+            tainted: new Map(ctx.tainted),
+            ptyNames: new Map(ctx.ptyNames),
+            state: { change: undefined, strong: undefined },
+          });
+        }
+        if (found.length > 0) return found.some(i => i.verb === "git-push") ? "git" : "gh";
+      }
+      return null;
+    };
     /** Emit a fail-closed intent for what this segment hides. */
     const sentinel = (kind: "gh" | "git"): void => {
-      hidden = true;
       emit(kind === "gh" ? unresolvedIntent(base, "gh-unknown", "unparsed-shape") : unresolvedGitIntent(base));
     };
 
@@ -3300,9 +3387,7 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
       // of `bash -c` / `eval` is parsed whole below, substitutions included.)
       if (resolved.nestedText === undefined) {
         for (const w of tokens) {
-          // A substitution that IS the command word runs its output: a heredoc inside it is a program.
-          const code = isWholeSubstitution(w) && w === toks[resolved.start];
-          for (const inner of substitutionTexts(w)) nest(inner, envRaw, code);
+          for (const inner of substitutionTexts(w)) nest(inner, envRaw);
         }
       }
 
@@ -3326,7 +3411,6 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
       pendingState = stateChangeLabel(rawTokens, cmd, args, [...seg.heredocs, ...strings]);
 
       // `sh -c '"$@"' sh gh issue create …`: the words after the text are `$0`, `$1`, … of the text (C1).
-      let positionalsRun = false;
       /** This segment is a recognised `dot gh` call: its `gh` word is accounted for by the intent (or by dot gh refusing to run). */
       let dotGh: DotGhCall | null = null;
       if (resolved.nestedText !== undefined) {
@@ -3334,7 +3418,6 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
           resolved.nestedArgs !== undefined && resolved.nestedArgs.length > 0
             ? substitutePositionals(resolved.nestedText, resolved.nestedArgs)
             : null;
-        positionalsRun = substituted !== null;
         nest(substituted ?? resolved.nestedText, envRaw);
       } else if (cmd === "alias") {
         // `alias gh2='gh issue create'`: later uses of the name cannot be read. (Aliases from the user's
@@ -3365,7 +3448,13 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
             if (inner !== null) intent = { ...inner, wrapper: { kind: "dot-gh", as: dotGh.as } };
           }
         } else if (cmd === "npm" || cmd === "pnpm" || cmd === "yarn") intent = classifyNpm(cmd, args, base);
-        else if (hasExpansion(word)) {
+        else if (REMOTE_RUNNERS.has(cmd)) {
+          // `ssh host git push …`, `docker exec ctr gh pr create …`: the command runs where neither the gh shim nor
+          // the pre-push hook exists. Parse what the runner is handed as a command of its own; if it is a
+          // `git push` or a `gh <write>`, that publish is unjudged, so it is an unresolved intent.
+          const kind = remoteRunKind(remoteCommandLines(REMOTE_RUNNERS.get(cmd)!, args), envRaw);
+          if (kind !== null) sentinel(kind);
+        } else if (hasExpansion(word)) {
           // `$GH issue create`, `$(which gh) pr comment 5`: the command is whatever the expansion yields.
           const kind = hiddenCommandKind(args);
           if (kind !== null) sentinel(kind);
@@ -3382,19 +3471,11 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
         }
       }
 
-      // Text fed to this command on stdin. A shell runs it as commands. It is also read (for mentions) when
-      // the command is a script interpreter or a runner of stdin (`source`, `make`, `at`, `batch`), when the
-      // segment pipes onward (`cat <<EOF | sh`, `tee >(sh) <<EOF`), or when this whole text is a command
-      // substitution's result that becomes a command word or `eval` / `sh -c` text. Otherwise a heredoc is data
-      // (`cat <<EOF > notes.md`, `git commit -F - <<EOF`, `git commit -m "$(cat <<EOF … EOF)"`).
+      // Text fed to this command on stdin. A shell runs it as commands; a heredoc fed to anything else is data
+      // (`cat <<EOF > notes.md`, `git commit -F - <<EOF`, `python3 <<EOF …`).
       const stdinTexts = [...seg.heredocs, ...strings];
-      const scriptTexts: string[] = [];
-      if (stdinTexts.length > 0 && resolved.nestedText === undefined) {
-        const pipesOnward = segments[segmentIndex + 1]?.joinedBy === "|";
-        if (SHELL_INTERPRETERS.has(cmd)) for (const t of stdinTexts) nest(t, envRaw);
-        else if (ctx.heredocsAreCode || pipesOnward || STDIN_RUNNERS.has(cmd) || SCRIPT_INTERPRETER_RE.test(cmd)) {
-          scriptTexts.push(...stdinTexts);
-        }
+      if (stdinTexts.length > 0 && resolved.nestedText === undefined && SHELL_INTERPRETERS.has(cmd)) {
+        for (const t of stdinTexts) nest(t, envRaw);
       }
       // A shell that reads its commands from a pipe: whatever feeds it can be anything.
       if (
@@ -3405,27 +3486,6 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
         readsCommandsFromStdin(args)
       ) {
         sentinel("gh");
-      }
-
-      // --- the backstop ---------------------------------------------------------------------------
-      // Re-read this segment's text. A mention of `gh <group>` / `git push` that the parser did not turn
-      // into an intent of its own (the command word's own mention is the one it did) is reported.
-      if (!hidden) {
-        // `GIT_PAGER='gh …' git log`: a variable assigned for this command can name a program too.
-        // A recognised `dot gh` is read as the `gh` call it makes: its `gh` word is the mention the intent covers.
-        const found = countMentions(
-          flattenWords([
-            ...(dotGh !== null
-              ? scanTokens(toks, dotGh.ghIdx, "gh", resolved.nestedFrom)
-              : scanTokens(toks, resolved.start, cmd, resolved.nestedFrom)),
-            // The words after `-c TEXT` that TEXT does not run are still words of this command line.
-            ...(positionalsRun ? [] : (resolved.nestedArgs ?? [])),
-            ...assigns.map(a => a.value),
-            ...scriptTexts,
-          ]),
-        );
-        if (found.gh > (cmd === "gh" || dotGh !== null ? 1 : 0)) sentinel("gh");
-        if (found.git > (cmd === "git" ? 1 : 0)) sentinel("git");
       }
 
       if (mutatesGhRepo(tokens, resolved, assigns)) envOverridden = true;
@@ -3448,18 +3508,6 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
 
   // A nested parse already flagged its own intents; they now carry this segment's index.
   if (!ptyBySegment.some(p => p !== null)) return intents;
-  // A pty-wrapped segment that mentions gh / git push in a shape the parser and its backstop did not read
-  // (`socat - EXEC:'gh …',pty`) still gets a fail-closed intent, so the wrapper is refused.
-  ptyBySegment.forEach((pty, idx) => {
-    if (pty === null || intents.some(i => i.segmentIndex === idx)) return;
-    const seg = segments[idx]!;
-    try {
-      const s = sentinelFor([...seg.tokens, ...seg.heredocs].join(" "), { precededByCd: false, joinedBy: seg.joinedBy, segmentIndex: idx });
-      if (s !== null) intents.push(s);
-    } catch {
-      /* the sentinel is best-effort */
-    }
-  });
   return intents.map(i => {
     const pty = ptyBySegment[i.segmentIndex];
     return pty != null && i.ptyWrapper === undefined ? { ...i, ptyWrapper: pty } : i;

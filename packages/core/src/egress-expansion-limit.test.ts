@@ -65,7 +65,7 @@ describe("positional expansion is bounded (F1)", () => {
 
   it("a capped line keeps an unconditional shape-rule label (pty wrapper)", () => {
     // 12^3 plain intents first, the pty-wrapped one LAST: a plain "first N" cut would drop it.
-    const value = parseEgressIntents(`${nested(12, 3, "gh issue create --repo acme/x")}; script -q /dev/null gh issue create --repo acme/y`);
+    const value = parseEgressIntents(`${nested(12, 3, "gh issue create --repo acme/x")}; S=script; $S -q /dev/null gh issue create --repo acme/y`);
     assert.ok(value.length > MAX_INTENTS_PER_LINE, "the cap was reached");
     assert.ok(value.length <= 2 * MAX_INTENTS_PER_LINE + 1);
     assert.ok(value.some(i => i.ptyWrapper !== undefined), "EGRESS_PTY_WRAPPER still fires");

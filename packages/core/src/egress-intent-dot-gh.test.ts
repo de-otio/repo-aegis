@@ -3,7 +3,8 @@
 //
 // `dot gh` recognition (doc/plan-recognise-dot-gh.md §3.1, D1, D4, D5): the parser reads
 // `node <path>/dot.mjs gh [--as <id>] [--explain] <gh args…>` and `dot gh …` as the `gh` call they make,
-// and carries dot gh's own `--as` on the intent. Every other wrapper shape stays an `unparsed-shape`.
+// and carries dot gh's own `--as` on the intent. Every other wrapper shape is not recognised, so it is no
+// intent at the hook (the `gh` shim judges the `gh` call it ends up making).
 // The fixtures (T-numbers are the plan's §4) are placeholders: `o/r`, `/p/scripts/dot.mjs`, `/s/b.md`.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -18,11 +19,9 @@ function only(command: string): EgressIntent {
   return intents[0]!;
 }
 
-/** The command was not recognised: one fail-closed `unparsed-shape` intent, no wrapper. */
-function assertUnparsed(command: string): void {
-  const i = only(command);
-  assert.equal(i.unresolved, "unparsed-shape", command);
-  assert.equal(i.wrapper, undefined, command);
+/** The command was not recognised as a `dot gh` call: no intent at the hook (the `gh` shim judges what it runs). */
+function assertNotRecognised(command: string): void {
+  assert.deepEqual(parseEgressIntents(command), [], command);
 }
 
 describe("dot gh — recognised shape (§3.1)", () => {
@@ -100,12 +99,9 @@ describe("dot gh — recognised shape (§3.1)", () => {
     assert.equal(i.verb, "gh-pr-create");
   });
 
-  it("a second gh mention in the same segment is still reported (the backstop is not switched off)", () => {
+  it("a gh mention among the arguments of a recognised read is its argument: no intent (no word backstop)", () => {
     const intents = parseEgressIntents(`${NODE_DOT} --as bot pr view 1 --repo o/r bash -c 'gh issue create --repo o/r'`);
-    assert.ok(
-      intents.some(i => i.unresolved === "unparsed-shape"),
-      JSON.stringify(intents),
-    );
+    assert.deepEqual(intents, [], JSON.stringify(intents));
   });
 
   it("T14: after a cd it is the same intent, flagged precededByCd (the policy refuses it as it does a plain gh)", () => {
@@ -140,41 +136,41 @@ describe("dot gh refuses its own malformed options and runs no gh, so there is n
   });
 });
 
-describe("any other wrapper shape stays an unparsed-shape (D5)", () => {
+describe("any other wrapper shape is not recognised, so it is no intent at the hook (D5)", () => {
   it("T11: node options before the script", () => {
-    assertUnparsed(`node --require x /p/dot.mjs gh --as bot ${CREATE}`);
-    assertUnparsed(`node -r x /p/dot.mjs gh --as bot ${CREATE}`);
-    assertUnparsed(`node --import x /p/dot.mjs gh --as bot ${CREATE}`);
-    assertUnparsed(`node -e 'x' /p/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`node --require x /p/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`node -r x /p/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`node --import x /p/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`node -e 'x' /p/dot.mjs gh --as bot ${CREATE}`);
   });
 
   it("T11: NODE_OPTIONS or NODE_PATH set on the segment, by prefix, env or an earlier export", () => {
-    assertUnparsed(`NODE_OPTIONS=--require=x node /p/dot.mjs gh --as bot ${CREATE}`);
-    assertUnparsed(`NODE_PATH=/x node /p/dot.mjs gh --as bot ${CREATE}`);
-    assertUnparsed(`env NODE_OPTIONS=--require=x node /p/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`NODE_OPTIONS=--require=x node /p/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`NODE_PATH=/x node /p/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`env NODE_OPTIONS=--require=x node /p/dot.mjs gh --as bot ${CREATE}`);
     const exported = parseEgressIntents(`export NODE_OPTIONS=--require=x && node /p/dot.mjs gh --as bot ${CREATE}`);
-    assert.ok(exported.length > 0 && exported.every(i => i.wrapper === undefined), JSON.stringify(exported));
+    assert.ok(exported.every(i => i.wrapper === undefined), JSON.stringify(exported));
   });
 
   it("T11: a script not named dot.mjs", () => {
-    assertUnparsed(`node /p/other.mjs gh --as bot ${CREATE}`);
-    assertUnparsed(`node /p/dot.mjs.evil gh --as bot ${CREATE}`);
+    assertNotRecognised(`node /p/other.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`node /p/dot.mjs.evil gh --as bot ${CREATE}`);
   });
 
   it("T11: a script in a variable, a substitution or a glob", () => {
-    assertUnparsed(`node "$S" gh --as bot ${CREATE}`);
-    assertUnparsed(`node $(which dot)/dot.mjs gh --as bot ${CREATE}`);
-    assertUnparsed(`node /p/scripts/*.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`node "$S" gh --as bot ${CREATE}`);
+    assertNotRecognised(`node $(which dot)/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`node /p/scripts/*.mjs gh --as bot ${CREATE}`);
   });
 
   it("node as a relative path, and another program named dot.mjs's neighbour", () => {
-    assertUnparsed(`./node /p/dot.mjs gh --as bot ${CREATE}`);
-    assertUnparsed(`bun /p/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`./node /p/dot.mjs gh --as bot ${CREATE}`);
+    assertNotRecognised(`bun /p/dot.mjs gh --as bot ${CREATE}`);
   });
 
   it("a path to dot, or the word dot with another first word, is not recognised", () => {
-    assertUnparsed(`/p/bin/dot gh --as bot ${CREATE}`);
-    assertUnparsed(`dot --as bot gh ${CREATE}`);
+    assertNotRecognised(`/p/bin/dot gh --as bot ${CREATE}`);
+    assertNotRecognised(`dot --as bot gh ${CREATE}`);
   });
 });
 

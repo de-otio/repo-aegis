@@ -764,7 +764,7 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
       assert.ok(!text.includes("$("), text);
       assert.ok(!text.includes("engagements add"), text);
     }
-    // The hostile string contains `| sh` inside a substitution: since the backstop, a shell reading a pipe is itself
+    // The hostile string contains `| sh` inside a substitution: a shell reading a pipe is itself
     // unresolved, and its intent is reported first. Either unresolved text is the right outcome; what matters is that nothing leaks.
     assert.match(p.error, /not a literal <owner>\/<repo>|could not take this command line apart/);
   });

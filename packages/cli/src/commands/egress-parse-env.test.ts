@@ -220,9 +220,31 @@ describe("agent hook — the same parser, the hook's own environment", { skip: !
     }
   });
 
-  it("the backstop reaches the hook: a python -c text that runs gh is not silent", () => {
+  it("no word backstop at the hook: a python -c text that mentions gh is silent (the gh shim judges what it runs)", () => {
     const r = hook(`python3 -c "import os; os.system('gh issue create -R stranger/r -b x')"`);
-    assert.notEqual(r.stdout + r.stderr, "");
-    assert.match(r.stdout + r.stderr, /unparsed-shape|could not take this command line apart/);
+    assert.equal(r.stdout + r.stderr, "");
+  });
+
+  it("no word backstop at the hook: a sed replacement, an echo and a heredoc that merely mention gh / git push are allowed", () => {
+    for (const c of [
+      "sed -i 's/x/gh auth token/' doc.md",
+      'echo "git push"',
+      "cat <<'EOF'\nrun gh pr create --repo o/r when ready\nEOF",
+      "cat <<EOF > notes.md\nrun gh pr create --repo o/r when ready\nEOF",
+    ]) {
+      const r = hook(c);
+      assert.equal(r.stdout + r.stderr, "", c);
+    }
+  });
+
+  it("…while real `git push` and `gh pr create --repo o/r` commands are still judged", () => {
+    assert.match(hook("git push").stdout + hook("git push").stderr, /PUSH_IMPLICIT_TARGET/);
+    const r = hook("gh pr create --repo stranger/r --title t --body b");
+    assert.match(r.stdout + r.stderr, /stranger\/r/);
+  });
+
+  it("…while the same command run as itself is judged", () => {
+    const r = hook("gh issue create -R stranger/r -b x");
+    assert.match(r.stdout + r.stderr, /stranger\/r/);
   });
 });

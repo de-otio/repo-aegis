@@ -14,6 +14,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `engines` field, so nothing changes at install time.
 - This repo's own `leak-scan` and `leak-scan-strict` workflows install repo-aegis 0.13.1 (they
   were pinned to 0.10.2), and `dependabot-auto-merge.yml` is deleted.
+- **The egress hook no longer reads a command's text for stray `gh` / `git push` mentions.** The
+  "word backstop" re-scanned every command for `gh <group>` and `git push` words and reported any
+  that the parser had not turned into an intent. Its false positives landed on `sed`, `echo` and
+  heredocs: `sed -i 's/x/gh auth token/' doc.md`, `echo "git push"` and a heredoc that mentions
+  `gh pr create` are now allowed. A segment the parser does not recognise as `git push` or
+  `gh <write>` is not egress at the hook. Plain `git push origin main` and
+  `gh pr create --repo o/r` are judged as before, and so are the shapes the parser follows (shell
+  `-c` and `eval` text, heredocs and here-strings fed to a shell, wrappers, aliases, `$VAR gh …`).
+- **Shapes that only the word backstop caught are now judged one layer down.** `find -exec gh …`,
+  `parallel gh …`, `case` bodies, an interpreter's `-c` text or heredoc that runs `gh`, and a pty
+  wrapper written out in full (`script -q /dev/null gh …`) are no intent at the hook. When they
+  actually run `gh`, the `gh` shim judges the call; when they run `git push`, the pre-push hook
+  does. The shim therefore needs to be first on `PATH` for those shapes (`repo-aegis doctor`,
+  `SHIM_NOT_FIRST`). `EGRESS_PTY_WRAPPER` is still refused where the parser sees the wrapper
+  through a variable or a substitution.
+- **Remote and container runners are read as a shape, because no layer below them exists.** The shim and
+  the pre-push hook run only on this machine, so `ssh host 'git push …'`, `ssh host gh pr create …`,
+  `docker|podman exec|run … git push`, `kubectl exec pod -- gh …`, `devcontainer exec`,
+  `nix-shell --run`, `nix develop -c`, `vagrant ssh -c`, `wsl`, `distrobox enter --` and `toolbox run`
+  are now an unresolved intent when what they run is a `git push` or a `gh <write>`, so rule h refuses
+  or asks as before. It is a parse of the runner's options and the command it is handed, not a scan of
+  text: `ssh host ls`, `docker exec ctr cat file` and `ssh host 'echo git push'` stay allowed.
+- `sudo -h` and `watch -p` take no value (they were skipped over the command): `sudo -h git push origin main`
+  and `watch -p git push` now resolve to the push.
+- `SHIM_NOT_FIRST` is a stated FAIL in `doctor` (it already failed by default; the severity is now
+  explicit and pinned by a test). The shim is the only guard for the shapes the hook no longer reads.
+- A bundle of short flags that ends in a value-taking flag is now read as taking the next word:
+  `env -iC /tmp git push origin main` and `sudo -Eu root git push …` resolve to the push, so rule b′
+  and the destination checks still see it.
 
 ### Removed
 
