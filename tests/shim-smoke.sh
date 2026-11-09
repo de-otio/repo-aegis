@@ -308,6 +308,34 @@ if grep -q "gh argv: pr view" "${WORK}/h.out"; then fail "h) the real gh RAN"; e
 rm -f "${REPO_AEGIS_HOME}/engagements.yaml"
 
 # ---------------------------------------------------------------------------
+# i) the shim judges a `gh` write however it was spawned (P1-C, F8)
+# ---------------------------------------------------------------------------
+# The egress hook no longer reads a command's text for `gh` mentions, so `find -exec gh …`, `case` bodies,
+# and an interpreter's `os.system('gh …')` are no intent THERE (`sh -c '"$@"'` and `xargs` are parsed, and are
+# here as controls). The shim sees the real argv of every `gh` call, so the same mode-dependent body path as in (b) is refused (PAYLOAD_MODE_DEPENDENT_PATH)
+# and the real gh never runs, whichever way `gh` was reached. (find and sh report 0 for a failed child, so
+# the proof is the refusal on stderr and the absence of `gh argv:` on stdout, not the exit status.)
+GH_WRITE="gh pr create --title t --body-file /var/folders/xx/pr.md"
+i_check() {
+  label="$1"
+  shift
+  (cd "${REPO}" && run_with_timeout 30 "$@") >"${WORK}/i.out" 2>"${WORK}/i.err" || true
+  if grep -q "PAYLOAD_MODE_DEPENDENT_PATH" "${WORK}/i.err"; then
+    pass "i) ${label}: the shim judged the write"
+  else
+    fail "i) ${label}: no PAYLOAD_MODE_DEPENDENT_PATH on stderr: $(cat "${WORK}/i.err")"
+  fi
+  if grep -q "gh argv" "${WORK}/i.out"; then fail "i) ${label}: the real gh RAN"; else pass "i) ${label}: the real gh never ran"; fi
+}
+i_check "find -exec gh" find . -maxdepth 0 -exec ${GH_WRITE} \;
+i_check "case body" sh -c "case x in x) ${GH_WRITE};; esac"
+i_check "sh -c with forwarded arguments" sh -c '"$@"' sh ${GH_WRITE}
+i_check "xargs" sh -c "echo x | xargs -I{} ${GH_WRITE}"
+if command -v python3 >/dev/null 2>&1; then
+  i_check "python os.system" python3 -c "import os; os.system('${GH_WRITE}')"
+fi
+
+# ---------------------------------------------------------------------------
 # d) the shim never resolves to itself
 # ---------------------------------------------------------------------------
 d_rc=0

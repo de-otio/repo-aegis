@@ -1333,8 +1333,8 @@ context rules fail open (except rule h), and no layer ever rewrites a command:
 
 | # | Rule | Code | Decision |
 |---|---|---|---|
-| D2 | a write through `dot gh` (`node <path>/dot.mjs gh …` or `dot gh …`) with no person present and no leading `--as bot`; evaluated first. Any other wrapper is an unparsed shape, refused by rule h | `DOT_GH_WRITE_NEEDS_BOT` | deny |
-| pty | the publish runs under a pty wrapper (`script`, `unbuffer`, `expect`, `socat`, `ssh -t`, `tmux`, `screen`, an interpreter's pty module) | `EGRESS_PTY_WRAPPER` | deny |
+| D2 | a write through `dot gh` (`node <path>/dot.mjs gh …` or `dot gh …`) with no person present and no leading `--as bot`; evaluated first. Any other wrapper is not recognised: it is no intent at the hook, and the `gh` shim judges the `gh` call it makes | `DOT_GH_WRITE_NEEDS_BOT` | deny |
+| pty | a publish the parser recognises runs under a pty wrapper (`script`, `unbuffer`, `expect`, `socat`, `ssh -t`, `tmux`, `screen`, an interpreter's pty module) that it can see only through a variable or a substitution (`S=script; $S … git push …`); a wrapper written out in full is no intent at the hook | `EGRESS_PTY_WRAPPER` | deny |
 | a | `git push` without both `<remote>` and `<refspec>` | `PUSH_IMPLICIT_TARGET` | deny |
 | b | egress after a `cd` / `pushd` earlier in the same command | `EGRESS_AFTER_CD` | deny |
 | c | egress joined to earlier segments with `;`, `\|\|` or `&` | `EGRESS_UNGUARDED_CHAIN` | deny |

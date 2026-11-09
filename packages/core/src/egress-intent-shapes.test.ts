@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 //
-// Issue #151, PR 2a, second review round: the BACKSTOP. After normal parsing the parser reads the command's
-// text again; a `gh <group>` or `git push|send-pack|http-push` mention that no intent accounts for becomes
-// an `unparsed-shape` intent at its position. Plus reserved words, runners, an expansion as the command
-// word, shell alias taint, git aliases and plumbing, the gh api path rules, the read lists of the
-// unmodelled groups, and aliases under read groups.
+// Issue #151, PR 2a, second review round: the shapes the parser follows. Reserved words, runners, an
+// expansion as the command word, shell alias taint, git aliases and plumbing, the gh api path rules, the
+// read lists of the unmodelled groups, and aliases under read groups.
+//
+// The word backstop (a second read of the command's text for `gh <group>` / `git push` mentions) is gone:
+// a segment the parser does not recognise as `git push` / `gh <write>` is no intent at the hook. The shapes
+// it used to catch (`find -exec gh …`, `parallel gh …`, an interpreter's `-c` text, `case` bodies) are
+// pinned below as "no intent here"; that they are still judged when they actually run `gh` / `git push` is
+// tested at the layer below (tests/shim-smoke.sh and the pre-push hook tests).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -76,17 +80,17 @@ describe("reserved words are transparent: the command they run resolves, it is n
     assert.equal(only("f () { gh issue create -R stranger/r -b x; }").repoFlag, "stranger/r");
   });
 
-  it("case … esac has no reserved-word shape the parser follows: the backstop reports its body", () => {
-    unresolved("case x in x) gh issue create -R stranger/r -b x;; esac");
-    unresolved("case x in x) git push https://github.com/stranger/r main;; esac");
+  it("case … esac has no reserved-word shape the parser follows: its body is no intent at the hook (the shim and pre-push judge it)", () => {
+    assert.deepEqual(all("case x in x) gh issue create -R stranger/r -b x;; esac"), []);
+    assert.deepEqual(all("case x in x) git push https://github.com/stranger/r main;; esac"), []);
   });
 });
 
-describe("runners and interpreters: the text is read again", () => {
-  it("find -exec, parallel: reported", () => {
-    unresolved("find . -exec gh issue create -R stranger/r -b x \\;");
-    unresolved("find . -name x -exec git push https://github.com/stranger/r main ';'");
-    unresolved("parallel gh issue create -R stranger/r -b x ::: a b");
+describe("runners and interpreters: not modelled, so no intent at the hook (the layer below judges what they run)", () => {
+  it("find -exec, parallel: no intent", () => {
+    assert.deepEqual(all("find . -exec gh issue create -R stranger/r -b x \\;"), []);
+    assert.deepEqual(all("find . -name x -exec git push https://github.com/stranger/r main ';'"), []);
+    assert.deepEqual(all("parallel gh issue create -R stranger/r -b x ::: a b"), []);
   });
 
   it("watch and flock run their command: it resolves", () => {
@@ -98,14 +102,25 @@ describe("runners and interpreters: the text is read again", () => {
     assert.equal(only("flock -w 5 /tmp/l gh issue create -R stranger/r -b x").repoFlag, "stranger/r");
   });
 
-  it("python, perl, node, ruby, awk -c/-e text", () => {
-    unresolved(`python3 -c "import os; os.system('gh issue create -R stranger/r -b x')"`);
-    unresolved(`python -c "import subprocess; subprocess.run(['git','push','https://github.com/stranger/r','main'])"`);
-    unresolved(`perl -e 'system("gh issue create -R stranger/r -b x")'`);
-    unresolved(`node -e "require('child_process').execSync('gh issue create -R stranger/r -b x')"`);
-    unresolved(`ruby -e 'system("gh issue create -R stranger/r -b x")'`);
-    unresolved(`awk 'BEGIN { system("gh issue create -R stranger/r -b x") }'`);
-    unresolved(`php -r 'system("gh pr comment 5 -b x");'`);
+  it("python, perl, node, ruby, awk -c/-e text: no intent", () => {
+    for (const c of [
+      `python3 -c "import os; os.system('gh issue create -R stranger/r -b x')"`,
+      `python -c "import subprocess; subprocess.run(['git','push','https://github.com/stranger/r','main'])"`,
+      `perl -e 'system("gh issue create -R stranger/r -b x")'`,
+      `node -e "require('child_process').execSync('gh issue create -R stranger/r -b x')"`,
+      `ruby -e 'system("gh issue create -R stranger/r -b x")'`,
+      `awk 'BEGIN { system("gh issue create -R stranger/r -b x") }'`,
+      `php -r 'system("gh pr comment 5 -b x");'`,
+    ]) {
+      assert.deepEqual(all(c), [], c);
+    }
+  });
+
+  it("a bundle of short flags ending in a value-taking flag takes the next word: the command still resolves", () => {
+    assert.equal(only("env -iC /tmp git push origin main").verb, "git-push");
+    assert.equal(only("sudo -Eu root git push origin main").verb, "git-push");
+    assert.equal(only("env -uFOO git push origin main").verb, "git-push"); // value attached: nothing is skipped
+    assert.equal(only("sudo -u root -E gh issue create -R stranger/r -b x").repoFlag, "stranger/r");
   });
 
   it("busybox sh -c is a shell -c: it resolves", () => {
@@ -178,9 +193,9 @@ describe("stdin-fed shells", () => {
     assert.equal(only(`sh <<EOF\ncd /x\n${body}\nEOF`).repoFlag, "stranger/r");
   });
 
-  it("a heredoc fed to a script interpreter is read for mentions", () => {
-    unresolved(`python3 - <<EOF\nimport os\nos.system('${body}')\nEOF`);
-    unresolved(`node <<EOF\nrequire('child_process').execSync('${body}')\nEOF`);
+  it("a heredoc fed to a script interpreter is its program, not shell commands: no intent at the hook", () => {
+    assert.deepEqual(all(`python3 - <<EOF\nimport os\nos.system('${body}')\nEOF`), []);
+    assert.deepEqual(all(`node <<EOF\nrequire('child_process').execSync('${body}')\nEOF`), []);
   });
 
   it("a heredoc fed to anything else is data", () => {
@@ -188,10 +203,11 @@ describe("stdin-fed shells", () => {
     assert.deepEqual(all(`tee notes.md <<EOF\n${body}\nEOF`), []);
   });
 
-  it("echo … | sh: the text is in the line, and a shell reading a pipe is unresolved: both are reported", () => {
+  it("echo … | sh: a shell reading a pipe is unresolved, whatever feeds it", () => {
     for (const c of [`echo ${q(body)} | sh`, `printf '%s\\n' ${q(body)} | bash`]) {
       const intents = all(c);
-      assert.ok(intents.length >= 1 && intents.every(i => i.unresolved === "unparsed-shape"), c);
+      assert.equal(intents.length, 1, c);
+      assert.equal(intents[0]!.unresolved, "unparsed-shape", c);
     }
   });
 
@@ -268,9 +284,9 @@ describe("git aliases and plumbing", () => {
   });
 
   it("git -c alias.X='!shell' X, and --config-env alias, are unresolved", () => {
-    // (The `-c` value of the first also names a push, which the backstop reports as well.)
     const shell = all("git -c alias.p='!git push https://github.com/stranger/r main' p");
-    assert.ok(shell.length >= 1 && shell.every(i => i.unresolved === "unparsed-shape"));
+    assert.equal(shell.length, 1);
+    assert.equal(shell[0]!.unresolved, "unparsed-shape");
     assert.equal(only("git --config-env=alias.p=PUSHCMD p").unresolved, "unparsed-shape");
     assert.equal(only("git --config-env alias.p=PUSHCMD p").unresolved, "unparsed-shape");
   });
@@ -486,8 +502,8 @@ describe("the wrapper loop's guard", () => {
   });
 });
 
-describe("backstop accounting: a mention is not double-counted, and data is not a mention", () => {
-  it("a command the parser understood is not also reported for its own words", () => {
+describe("accounting: one command, one intent; a command's own words are never a second intent", () => {
+  it("a command the parser understood yields exactly one intent", () => {
     for (const c of ["gh issue create -R stranger/r -b x", "git push https://github.com/stranger/r main", "sudo gh pr merge 5", "gh api -X POST repos/a/b/issues -f x=y"]) {
       assert.equal(all(c).length, 1, c);
     }
@@ -504,10 +520,11 @@ describe("backstop accounting: a mention is not double-counted, and data is not 
     assert.equal(all("gh issue create -R a/b -b x && git push https://github.com/a/b main").length, 2);
   });
 
-  it("a second, hidden mention inside a command the parser understood is reported", () => {
+  it("a later gh mention among a recognised command's arguments is its argument, not a second command", () => {
     const intents = all("gh issue create -R acme/x -b x gh pr comment 5");
-    // positional text after the flags: `gh pr` is an unaccounted mention
-    assert.ok(intents.some(i => i.unresolved === "unparsed-shape"), JSON.stringify(intents));
+    assert.equal(intents.length, 1, JSON.stringify(intents));
+    assert.equal(intents[0]!.verb, "gh-issue-create");
+    assert.equal(intents[0]!.unresolved, undefined);
   });
 
   it("substitution text is parsed once, not also scanned", () => {
@@ -527,7 +544,7 @@ describe("backstop accounting: a mention is not double-counted, and data is not 
   });
 });
 
-describe("the backstop stays linear on adversarial text", () => {
+describe("the parser stays linear on adversarial text", () => {
   it("long repetitive inputs finish quickly", () => {
     const N = 200_000;
     const inputs = [

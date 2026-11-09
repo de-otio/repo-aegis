@@ -51,18 +51,33 @@ describe("parseEgressIntents — non-egress commands yield nothing", () => {
   }
 });
 
-describe("parseEgressIntents — the one accepted false positive: a literal mention in a quoted argument", () => {
-  // The backstop reads the command's text again and cannot tell `echo "gh issue create"` (data) from
-  // `echo "gh issue create" | sh` (a program), so a literal quoted mention is reported. Documented in
-  // parseEgressIntents. What is NOT reported: a comment, a heredoc that feeds nothing that runs it, a
-  // search, a commit message, and the value of any flag of a command the parser understood.
-  for (const c of ["echo 'git push origin main'", 'printf "%s" "gh pr create --body-file x"', 'echo "gh issue create"']) {
-    it(`${JSON.stringify(c)} is reported as unparsed-shape`, () => {
-      const intents = parseEgressIntents(c);
-      assert.equal(intents.length, 1);
-      assert.equal(intents[0]!.unresolved, "unparsed-shape");
+describe("parseEgressIntents — a mention of gh / git push that nothing runs is no intent (no word backstop)", () => {
+  // A segment the parser does not recognise as `git push` / `gh <write>` is not egress at the hook: it does
+  // not read a command's text for stray mentions. A quoted literal, a `sed` replacement, a heredoc, an
+  // interpreter's program text are all data to the hook. When such text does run gh, the `gh` shim judges it.
+  for (const c of [
+    "echo 'git push origin main'",
+    'echo "git push"',
+    'printf "%s" "gh pr create --body-file x"',
+    'echo "gh issue create"',
+    "sed -i 's/x/gh auth token/' doc.md",
+    'sed -i "s/old/git push origin main/" notes.md',
+    "cat <<EOF > doc.md\nrun gh pr create --repo o/r when ready\nEOF",
+    "cat <<'EOF'\nrun gh pr create --repo o/r when ready\nEOF",
+    "python3 - <<EOF\nprint('gh pr create --repo o/r')\nEOF",
+  ]) {
+    it(`${JSON.stringify(c)} → []`, () => {
+      assert.deepEqual(parseEgressIntents(c), []);
     });
   }
+
+  it("the same words as a real command are still judged", () => {
+    assert.equal(only("git push origin main").verb, "git-push");
+    assert.equal(only("gh pr create --repo o/r --title t --body b").verb, "gh-pr-create");
+    assert.equal(only("echo ok && gh pr create --repo o/r --title t --body b").verb, "gh-pr-create");
+    assert.equal(only("bash -c 'gh pr create --repo o/r --title t --body b'").verb, "gh-pr-create");
+    assert.equal(only("bash <<EOF\ngh pr create --repo o/r --title t --body b\nEOF").verb, "gh-pr-create");
+  });
 
   for (const c of [
     "grep -rn 'git push' docs/",
