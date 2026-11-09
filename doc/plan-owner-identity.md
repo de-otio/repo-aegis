@@ -1,14 +1,11 @@
 # Plan: the identity follows the target owner
 
-Status (2026-11-08, handoff): **implemented as phases 2–4 on draft PR #170** (branch `feat/owner-identity`, worktree `../repo-aegis-wt-owner-identity`). The full suite was green before the last commit, which makes a non-root-owned taaad a `doctor` warning (Q5 revised under §2.1). Next:
-1. Confirm the full suite and CI on #170 pass, then mark it ready and merge.
-2. Release repo-aegis (version to be decided).
-3. Clean up the worktrees `repo-aegis-wt-{registry-v3,identity-choice,hook-rules,gh-cli,git-helper,cleanup,codeql,owner-identity}`.
+Status (2026-11-09): **done.** Phases 2–4 merged in #170 and released in repo-aegis v0.12.0 (#171, which also carries #169).
 
-Related:
-- #169, the code-scanning cleanup, is open.
-- taaad `mint` is merged (taaad PR #4). Another session is preparing taaad v0.5.6 (branch `fix/pem-keychain-acl-v0.5.6`); its tag is the owner's call.
-- Agreed with that session: `taaad mint` exit code 3 = prompt limit, 4 = prompt declined.
+Where the text below differs from what shipped, the shipped behaviour is:
+- **A non-root-owned taaad is a `doctor` warning** (`TAAAD_AGENT_WRITABLE`), not a refusal (Q5 revised under §2.1). A missing taaad pin still refuses `github-app` identities.
+- **App identities need taaad v0.6.0 or later**, the first tagged release with `taaad mint` (taaad v0.5.6 was never tagged on its own). taaad's `mint.py` is authoritative: exit code 3 = rate-limited, 4 = presence denied, 1 = everything else.
+- **The PEM ACL (Q5 step 2, §8.4) is solved in taaad, not in repo-aegis.** taaad v0.6.0's optional, notarised macOS helper `taaad-signer` holds the PEM where the interpreter cannot read it, and asks for Touch ID before each fresh token. repo-aegis does not implement `APP_PEM_ACL_WEAK`; `taaad doctor` reports the ACL.
 
 Branch `plan/owner-identity`. Revives and extends `doc/plan-gh-identity-selection.md` (parked 2026-11-04 on branch `plan/gh-identity-selection`), whose decisions and security review (H1–H5, M1–M5) are carried over here and referenced by their ids. Changes the stance of `doc/plan-recognise-dot-gh.md` §0 for this one concern (§2). Security review of this spec: §12.
 
@@ -335,7 +332,7 @@ The reason texts follow the existing five-part `refusal()` style and never conta
 - **Spawning `gh` (A2):** the allowlisted environment of §12.1 A2 exactly, plus the `GIT_CONFIG_COUNT` overrides.
 - **Faults:** any throw between choosing and spawning on a mapped owner is `GH_IDENTITY_UNAVAILABLE`, and `gh` is not run (D4). An unmapped call keeps today's warn-and-run.
 - **`install shim`:**
-  - It also pins taaad: the realpaths of the launcher, its interpreter and its package directory. If any of them is not root-owned and root-only-writable, `github-app` injection is refused with `TAAAD_AGENT_WRITABLE`, and `doctor` reports it as a failure.
+  - It also pins taaad: the realpaths of the launcher, its interpreter and its package directory. If any of them is not root-owned and root-only-writable, `doctor` warns with `TAAAD_AGENT_WRITABLE` (as shipped; this draft refused injection and made it a failure, revised under §2.1).
   - The shim `exec`s `repo-aegis gh` for every verb except `--version`, `help` and `completion` (D1), with no shell code after the `exec`.
 
 ### 13.3a Contract changes after building (2026-11-08)
@@ -378,7 +375,7 @@ An independent review (Fable `security-reviewer`) of the first draft found five 
 ### 12.2 Questions the review adds for the owner
 
 - **Q4** (A3). **Decided 2026-11-08, narrower than the review proposed.** `requireIdentity: true` is set by the first `set-identity` and can be cleared by a person (TTY-gated). While it is set, an agent write to a registered owner with **no identity entry at all** is refused (`GH_IDENTITY_UNMAPPED_OWNER`), and `OWNER_IDENTITY_UNMAPPED` is a `doctor` failure. An owner with only a `person` identity keeps N3 (login-bound approval for agent writes). The reviewer's version refused every owner without an `agent` App; it is not adopted, because organisations the user does not control (engagement orgs) usually cannot have the user's App installed, so agents could never write there, even with approval. The narrower rule still catches a lost mapping, which is what H-3 is about.
-- **Q5** (A4). **Decided 2026-11-08: yes, in two steps.**
+- **Q5** (A4). **Decided 2026-11-08: yes, in two steps.** *Revised the same day (§2.1): step 1 is a `doctor` warning only; step 2 is done by taaad v0.6.0's `taaad-signer` (see Status).*
   1. Now, independent of this plan: taaad moves to a root-owned install (`sudo pipx install --global taaad`, under `/opt/pipx`, on `PATH` through `/usr/local/bin`), and the user-level copy is removed. Today any agent that can write the home directory can edit taaad's code and capture every App token `dot gh --as bot` mints. A4's `TAAAD_AGENT_WRITABLE` check enforces this from phase 3.
   2. Follow-up, required before `github-app` identities count as protected: root ownership protects taaad's *code*, not its PEM. macOS keychain ACLs trust the *binary* that asks, and the PEM item most likely trusts the Python interpreter that created it (to be confirmed by `taaad doctor`, §8.3). Any script run by that interpreter (`python3 -c 'import keyring; …'`) would then read the PEM without a prompt, however taaad is installed, and on Apple Silicon `/opt/homebrew` is user-owned too. The fix is a mint that needs proof of presence or a binary that can only mint: a Touch ID / user-presence keychain item with taaad caching the one-hour token after the prompt (ties in with issue #154), or a small compiled `taaad-mint` helper that is the only ACL entry. Until then `APP_PEM_ACL_WEAK` is a `doctor` failure, not a warning.
 - **Q6** (A9). Ship the `github-app` path only after taaad's narrowed `mint` (§8.1)? Recommended: yes. Phase 3 can ship `gh-login` identities (the person column, plus N3 reads) first.
