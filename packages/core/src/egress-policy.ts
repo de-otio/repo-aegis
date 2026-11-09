@@ -1814,7 +1814,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         reason,
         ...(shownDestination && { destination: shownDestination }),
         intent,
-        asked: [{ intent, destination }],
+        // Only a name that may be printed travels here too: the decision is serialised by some callers, and an invalid
+        // name could never be bound to a prompt approval anyway.
+        asked: [{ intent, destination: destination !== null && isPrintableDestination(destination) ? destination : null }],
       };
     }
     return deny(

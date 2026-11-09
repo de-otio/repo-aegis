@@ -407,10 +407,12 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   // `error` verdict through the adapter (the host's fail-open answer), never
   // an uncaught exception, which commander turns into exit 1 (and Copilot
   // fails CLOSED on exit 1). The outcome is computed first and emitted after.
-  let outcome = outcomeOrError(decision, { registryNote, ruleH, humanPresent });
+  const ctx = { registryNote, ruleH, humanPresent };
+  let outcome = outcomeOrError(decision, ctx);
   if (outcome.stderr !== undefined) process.stderr.write(outcome.stderr);
   // Only for an `ask` that is going out as one (not an `error`): record what a yes at the host's prompt may
-  // carry down to pre-push and the `gh` shim, and say so in the prompt. The hook never READS these records.
+  // carry down to pre-push and the `gh` shim, and say so in the prompt (the sentence goes before the parenthesised
+  // registry notes). The hook never READS these records.
   if (outcome.verdict.action === "ask" && decision.action === "ask" && host !== undefined) {
     const carried = writePromptApprovals(decision, {
       agent: adapter.name,
@@ -419,9 +421,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
       cwd: host.cwd,
     });
     if (carried.stderr !== undefined) process.stderr.write(carried.stderr);
-    if (carried.sentence !== undefined) {
-      outcome = { ...outcome, verdict: { action: "ask", reason: `${outcome.verdict.reason} ${carried.sentence}` } };
-    }
+    if (carried.sentence !== undefined) outcome = outcomeOrError(decision, { ...ctx, askNote: carried.sentence });
   }
   emit(adapter, outcome.verdict);
 }
@@ -453,6 +453,8 @@ interface OutcomeContext {
   registryNote: string | undefined;
   ruleH: RuleHStatus;
   humanPresent: boolean;
+  /** For an `ask` only: one fixed sentence (what a yes at the host's prompt carries), added after the reason. */
+  askNote?: string;
 }
 
 function planOutcome(
@@ -477,7 +479,8 @@ function planOutcome(
       ? ruleHSkipNote(ctx.ruleH)
       : null;
   const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);
-  const reason = notes.length === 0 ? decision.reason : `${decision.reason} (${notes.join("; ")})`;
+  const base = decision.action === "ask" && ctx.askNote !== undefined ? `${decision.reason} ${ctx.askNote}` : decision.reason;
+  const reason = notes.length === 0 ? base : `${base} (${notes.join("; ")})`;
 
   if (decision.action === "ask") return { verdict: { action: "ask", reason } };
 

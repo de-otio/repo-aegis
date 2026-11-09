@@ -99,9 +99,11 @@ describe("the hook never honours a prompt record (F1)", () => {
   it("a record for ANOTHER command to the same repository does not turn this ask into an allow either", () => {
     withHome(() => {
       record({ verb: "git-push", org: "acme", repo: "repo", ref: "main" });
-      assert.equal(decide(PR_CMD, publicDest("acme", "repo")).action, "ask");
+      assert.equal(decide(PR_CMD, publicDest("acme", "repo")).action, "ask", "a push record, then a PR");
+    });
+    withHome(() => {
       record({ verb: "gh-release-create", org: "acme", repo: "repo" });
-      assert.equal(decide("git push origin main", publicDest("acme", "repo")).action, "ask");
+      assert.equal(decide("git push origin main", publicDest("acme", "repo")).action, "ask", "a release record, then a push");
     });
   });
 

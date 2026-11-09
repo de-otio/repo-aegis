@@ -139,6 +139,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "--range",
       "--redact-attribution",
       "--remote",
+      "--remote-ref",
       "--remote-url",
       "--require-deny-set",
       "--since",
