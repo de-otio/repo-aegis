@@ -24,6 +24,10 @@ their own or open-source work) on one machine.
 can be bypassed (`git commit --no-verify`), so for a hard guarantee also run its CI checks on the
 server (`repo-aegis install ci`).
 
+**Background:** the layered approach this tool automates in part (identity separation, removing
+ambient coupling, marker gates, agent hooks, audits, and what none of them catch) is written up
+in [doc/guide-data-leak-prevention.md](doc/guide-data-leak-prevention.md).
+
 ## Concepts in one minute
 
 - **Engagement:** one client relationship, for example `customer-a`. It lists the GitHub orgs
@@ -148,6 +152,7 @@ By hand:
 | [doc/configuration.md](doc/configuration.md) | The registry, GitHub identities, the Claude Code settings file, overrides |
 | [doc/cli-reference.md](doc/cli-reference.md) | Every command: flags, exit codes, JSON output                           |
 | [doc/why-ai-coding.md](doc/why-ai-coding.md) | Why the checks are shaped the way they are                              |
+| [doc/guide-data-leak-prevention.md](doc/guide-data-leak-prevention.md) | Background: the layered approach to client-data leaks that this tool automates in part |
 | [doc/github-action.md](doc/github-action.md) | The CI workflows and GitHub Actions                                     |
 | [doc/architecture.md](doc/architecture.md)   | Packages and how they fit together                                      |
 | [doc/design/](doc/design/)                   | Design notes and threat model                                           |
