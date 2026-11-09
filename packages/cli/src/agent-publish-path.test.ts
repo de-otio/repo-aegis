@@ -14,8 +14,7 @@
 //   - a person ran `repo-aegis approve example-org/*`, so an approval bound to `alice` is live;
 //   - the process list cannot be read (the default Claude Code sandbox blocks it).
 //
-// Assertions (a) to (c) FAIL on v0.12.2 and are marked `todo` so the suite stays green until Phase U lands; remove
-// the `todo` option once U1, U4 and U5 are integrated. They fail with:
+// Assertions (a) to (c) FAILED on v0.12.2 (Phase U exit criterion) with:
 //   (a) AGENT_PUSH_CHAIN_UNREADABLE          (fixed by U5, and by U2's wording only if it were not a refusal)
 //   (b) GH_IDENTITY_ARG_UNSAFE                (fixed by U1 and/or U5)
 //   (c) GH_IDENTITY_UNAVAILABLE for a read    (fixed by U4)
@@ -44,7 +43,6 @@ import { readCredentialConfig } from "./git-credential-config.js";
 import type { TaaadPin } from "./commands/taaad-pin.js";
 
 const TOKEN_BOT = "ghs_STUBexamplebot0123456789abcdef";
-const TODO = { todo: "Phase U: U1/U5/U4" } as const;
 
 const REGISTRY = `schemaVersion: 3
 identities:
@@ -217,12 +215,14 @@ function helper(w: World, how: Unreadable, presence: IdentityPresence = "agent")
 describe("Phase U exit criterion: an agent publishes under one account-bound approval, in a sandbox", () => {
   for (const how of ["null", "throws"] as const) {
     describe(`(a) git push over HTTPS, process list unreadable (${how})`, () => {
-      it("the helper returns the App's credential, not AGENT_PUSH_CHAIN_UNREADABLE", TODO, () => {
+      it("the helper returns the App's credential, not AGENT_PUSH_CHAIN_UNREADABLE", () => {
         const w = makeWorld();
         const r = helper(w, how);
         assert.ok(!r.stderr.includes("AGENT_PUSH_CHAIN_UNREADABLE"), `refused: ${r.stderr}`);
         assert.match(r.stdout, /^username=x-access-token\npassword=ghs_STUBexamplebot0123456789abcdef\n/, `stdout: ${r.stdout}\nstderr: ${r.stderr}`);
-        assert.equal(r.stderr, "", "nothing on stderr, the token least of all");
+        // Exactly the U5 notice naming the approval, and never the token.
+        assert.match(r.stderr, /^repo-aegis: approval [0-9a-f]+ covers an unreadable process list for example-org\/svc\n$/, `stderr: ${r.stderr}`);
+        assert.ok(!r.stderr.includes("ghs_"), "the token never reaches stderr");
         // Narrowed to exactly this repository, for a push.
         assert.deepEqual(lines(join(w.stubs, "taaad.argv")), ["mint --app example-bot --repo example-org/svc --permissions contents-write --json"]);
       });
@@ -323,7 +323,7 @@ describe("Phase U exit criterion: an agent publishes under one account-bound app
   const PR_VIEW = ["pr", "view", "1", "--repo", "example-org/svc"];
 
   describe("(b) gh pr create, repo-local core.hooksPath equal to repo-aegis's own hooks directory", () => {
-    it("runs as the App instead of refusing GH_IDENTITY_ARG_UNSAFE", TODO, () => {
+    it("runs as the App instead of refusing GH_IDENTITY_ARG_UNSAFE", () => {
       const w = makeWorld({ localHooksPath: "own" });
       const r = runGh(w, PR_CREATE);
       assert.notEqual(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", r.err);
@@ -334,7 +334,7 @@ describe("Phase U exit criterion: an agent publishes under one account-bound app
       assert.match(r.err, /^PUBLISHED → example-org\/svc/m);
     });
 
-    it("also runs for a FOREIGN repo-local core.hooksPath, because the account-bound approval covers it (U5)", TODO, () => {
+    it("also runs for a FOREIGN repo-local core.hooksPath, because the account-bound approval covers it (U5)", () => {
       const w = makeWorld({ localHooksPath: "foreign" });
       const r = runGh(w, PR_CREATE);
       assert.notEqual(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", r.err);
@@ -370,7 +370,7 @@ describe("Phase U exit criterion: an agent publishes under one account-bound app
   });
 
   describe("(c) a read whose identity cannot be minted", () => {
-    it("gh pr view runs as the active account with one warning line, not GH_IDENTITY_UNAVAILABLE", TODO, () => {
+    it("gh pr view runs as the active account with one warning line, not GH_IDENTITY_UNAVAILABLE", () => {
       const w = makeWorld();
       writeFileSync(join(w.stubs, "taaad.fail"), "");
       const r = runGh(w, PR_VIEW);
