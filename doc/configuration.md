@@ -316,9 +316,10 @@ URL, a `repos/<owner>/<repo>/…` endpoint, `GH_REPO` or the working directory's
   records it), else `GH_IDENTITY_WRITE_NEEDS_HUMAN`.
 - A token you already hold in `GH_TOKEN` / `GITHUB_TOKEN` is not used for a mapped owner:
   refused for an agent, compared with the mapped account's token for a person.
-- If the identity cannot be used (no token, taaad failing, an untrusted `gh`), the call is refused
+- If the identity cannot be used (no token, taaad failing, an untrusted `gh`), a write is refused
   (`GH_IDENTITY_UNAVAILABLE`, `GH_BINARY_UNTRUSTED`); it never silently runs as whichever account is
-  active.
+  active. A read whose identity is merely unavailable (`GH_IDENTITY_UNAVAILABLE`) runs as the active
+  account with one warning line on stderr, and carries no token.
 
 Every injecting call prints `repo-aegis: as <identity> (<kind>) for <owner>/<repo>` and appends
 a record (never the token) to `<home>/state/gh-decisions.jsonl`.

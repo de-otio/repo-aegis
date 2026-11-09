@@ -48,8 +48,8 @@ import { checkLabel, isFailure, isReportable, PERSON_RUNS_THIS, type DoctorCheck
 import { checkShim } from "./install-shim.js";
 import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
 import { gitCredentialOrderChecks } from "./doctor-git-credential-checks.js";
-import { ghOwnerChecks, ownerIdentityChecks, registryStateChecks, taaadChecks, type DoctorRegistryState, type GhCheckOptions } from "./doctor-owner-checks.js";
-import { checkPrePushHook, checkShellStartupOverrides, checkSshGithubRedirect } from "./doctor-env-checks.js";
+import { agentRemoteSshCheck, ghOwnerChecks, ownerIdentityChecks, registryStateChecks, taaadChecks, type DoctorRegistryState, type GhCheckOptions } from "./doctor-owner-checks.js";
+import { checkLocalHooksPathDuplicate, checkPrePushHook, checkShellStartupOverrides, checkSshGithubRedirect } from "./doctor-env-checks.js";
 import { enforcementPinChecks } from "./doctor-pin-checks.js";
 import { managedDropinChecks, readDropInSettings, userSettingsEnforcementCheck } from "./doctor-managed-checks.js";
 import { resolveManagedEnv, type ManagedEnv } from "./managed-privileged.js";
@@ -293,6 +293,16 @@ function repoEgressChecks(wt: string, registry: Registry | null): DoctorCheck[] 
       : "no explicit class and/or no cached GitHub visibility, so every destination-aware check is inert in this repo",
     ...(resolved ? {} : { fix: "repo-aegis classify --apply && repo-aegis status  (run in that repo)" }),
   });
+
+  if (registry !== null) {
+    // U3: an owner whose agent identity is a GitHub App needs an HTTPS push URL (person-run fix).
+    const sshOrigin = agentRemoteSshCheck(wt, org, registry);
+    if (sshOrigin !== null) out.push(sshOrigin);
+  }
+
+  // U1: a local core.hooksPath equal to the global one is removable.
+  const duplicateHooksPath = checkLocalHooksPathDuplicate(wt);
+  if (duplicateHooksPath !== null) out.push(duplicateHooksPath);
 
   if (registry !== null) {
     const known =

@@ -56,7 +56,15 @@ import { spawnSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
-import { registeredOwners, repoAegisHome, type Registry } from "@de-otio/repo-aegis-core";
+import {
+  classifyRemoteUrl,
+  parseRemoteUrlResolved,
+  registeredOwners,
+  repoAegisHome,
+  resolvePushUrls,
+  safeDestination,
+  type Registry,
+} from "@de-otio/repo-aegis-core";
 import { PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { checkShim } from "./install-shim.js";
 import { readPinnedTaaad, taaadTrustProblem } from "./taaad-pin.js";
@@ -148,6 +156,50 @@ export function ownerIdentityChecks(registry: Registry): DoctorCheck[] {
         `repo-aegis engagements set-identity (<engagement-id> | --personal-org <org>) --person <name>   (${PERSON_RUNS_THIS})`,
     },
   ];
+}
+
+/**
+ * `AGENT_REMOTE_IS_SSH` (warn), per repository (doc/plan-landscape-recommendations.md U3): the owner's AGENT
+ * identity is a GitHub App, and `origin`'s push URL is SSH. An agent's SSH push goes out as the person's key,
+ * not the App, so `git push origin` is refused (`AGENT_PUSH_NEEDS_APP`); only an HTTPS push gets the App's
+ * narrowed token. The fix is one person-run line that moves ONLY the push URL, so a person's fetches and own
+ * pushes keep their SSH remote:
+ * `git remote set-url --push origin https://github.com/<org>/<repo>.git`.
+ *
+ * Null (nothing to say) when the owner has no App agent identity, when `origin` has no push URL, or when every
+ * push URL is already HTTPS. The owner and repository are named in `fix` only, like every owner name here
+ * (`detail` is the line that gets copied out of a terminal). Never throws; `resolve` is a seam for the push URLs.
+ */
+export function agentRemoteSshCheck(
+  wt: string,
+  org: string,
+  registry: Registry,
+  resolve: (cwd: string, remote: string) => string[] | null = resolvePushUrls,
+): DoctorCheck | null {
+  try {
+    if (registry.identityMap?.get(org.toLowerCase())?.agent?.kind !== "github-app") return null;
+    const urls = resolve(wt, "origin");
+    const ssh = urls?.find(u => {
+      const c = classifyRemoteUrl(u);
+      return c.kind === "github" ? c.transport === "ssh" : c.kind === "alias";
+    });
+    if (ssh === undefined) return null;
+    const parsed = parseRemoteUrlResolved(ssh);
+    const safe = parsed === null ? null : safeDestination(parsed.org, parsed.repo);
+    const target = safe === null ? `${org.toLowerCase()}/<repo>` : `${safe.org}/${safe.repo}`;
+    return {
+      code: "AGENT_REMOTE_IS_SSH",
+      ok: false,
+      severity: "warn",
+      detail:
+        "this owner has a GitHub App identity for agents, and origin's push URL is SSH, which goes out as the person's SSH key instead of the App, " +
+        "so an agent's `git push origin` is refused; only an HTTPS push gets the App's narrowed token. A person runs the fix: " +
+        "it changes the push URL only, so fetches and the person's own pushes are unaffected",
+      fix: `git remote set-url --push origin https://github.com/${target}.git`,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**

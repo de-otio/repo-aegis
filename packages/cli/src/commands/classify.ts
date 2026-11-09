@@ -22,6 +22,8 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { cacheVisibility, probeGithubVisibility, type VisibilityProbe } from "../visibility.js";
+import type { DoctorCheck } from "./doctor-checks.js";
+import { agentRemoteSshCheck } from "./doctor-owner-checks.js";
 
 // --------------------------------------------------------------------------
 // Types and schema
@@ -236,6 +238,17 @@ function classifyFromRegistry(remote: string): RegistryMatch | null {
   return null;
 }
 
+/** `AGENT_REMOTE_IS_SSH` for this checkout, or null: no registry, an unattributable remote or nothing to report. */
+function agentRemoteSshFor(cwd: string, remote: string): DoctorCheck | null {
+  const parsed = parseRemoteUrl(remote);
+  if (parsed === null) return null;
+  try {
+    return agentRemoteSshCheck(cwd, parsed.org, loadRegistry());
+  } catch {
+    return null;
+  }
+}
+
 // --------------------------------------------------------------------------
 // Main export
 // --------------------------------------------------------------------------
@@ -358,6 +371,17 @@ export function classify(opts: ClassifyOptions): void {
           (legacy.rule.engagement ? `, engagement=${legacy.rule.engagement}` : "") +
           `). Add this org to the engagement registry to remove the dependency on classify.yml.`,
       );
+    }
+  }
+
+  // U3: `--apply` is the moment a repo is being onboarded, so say now when its owner's agent identity is a GitHub
+  // App and `origin` pushes over SSH (an agent's push would be refused). Reported, never applied: the fix edits
+  // the repository's remote and a person runs it. The same finding `doctor` makes (AGENT_REMOTE_IS_SSH).
+  if (opts.apply) {
+    const sshOrigin = agentRemoteSshFor(cwd, remote);
+    if (sshOrigin !== null) {
+      warnings.push(`${sshOrigin.code}: ${sshOrigin.detail}`);
+      if (sshOrigin.fix !== undefined) warnings.push(`fix: ${sshOrigin.fix}`);
     }
   }
 

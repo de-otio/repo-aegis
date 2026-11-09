@@ -8,14 +8,16 @@
 // developer's real dotfiles, ssh config or registry.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { pinnedHookCommand, renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
+import { loadRegistry, pinnedHookCommand, renderHookScript, type HookName, type Registry } from "@de-otio/repo-aegis-core";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { doctor } from "./doctor.js";
+import { agentRemoteSshCheck } from "./doctor-owner-checks.js";
 import {
+  checkLocalHooksPathDuplicate,
   checkPrePushHook,
   checkShellStartupOverrides,
   checkSshGithubRedirect,
@@ -400,5 +402,167 @@ describe("doctor — R8/R9/R11 end to end", () => {
     assert.match(res.stdout, /WARN /);
     assert.doesNotMatch(res.stdout, /all clean/);
     assert.match(res.stdout, /doctor: no failures \(\d+ warning, info or skipped finding\(s\) above\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HOOKS_PATH_LOCAL_DUPLICATE (Phase U, U1)
+// ---------------------------------------------------------------------------
+
+describe("checkLocalHooksPathDuplicate", () => {
+  const same = "/opt/aegis-test/hooks";
+
+  it("is an info finding, with the person-run unset line, when the local value equals the global one", () => {
+    const c = checkLocalHooksPathDuplicate(tmpDir("dup-wt"), () => same, () => same);
+    assert.ok(c);
+    assert.equal(c.code, "HOOKS_PATH_LOCAL_DUPLICATE");
+    assert.equal(c.ok, false);
+    assert.equal(c.severity, "info");
+    assert.equal(c.fix, "git config --local --unset core.hooksPath");
+  });
+
+  it("is silent when the local value is unset, the global value is unset, or the two differ", () => {
+    const wt = tmpDir("dup-quiet");
+    assert.equal(checkLocalHooksPathDuplicate(wt, () => same, () => null), null);
+    assert.equal(checkLocalHooksPathDuplicate(wt, () => null, () => same), null);
+    assert.equal(checkLocalHooksPathDuplicate(wt, () => same, () => "/opt/aegis-test/other-hooks"), null);
+  });
+
+  it("compares by real path: a symlink to the global directory, and a trailing slash, are the same directory", () => {
+    const wt = tmpDir("dup-real");
+    const dir = join(tmpDir("dup-dir"), "hooks");
+    mkdirSync(dir, { recursive: true });
+    const link = join(tmpDir("dup-link"), "hooks-link");
+    symlinkSync(dir, link);
+    assert.ok(checkLocalHooksPathDuplicate(wt, () => dir, () => link));
+    assert.ok(checkLocalHooksPathDuplicate(wt, () => dir, () => `${dir}/`));
+  });
+
+  it("reads the real scopes: a local value equal to the global one is found, a differing local one is not", () => {
+    const w = makeRepoWorld("dup-real-git");
+    const dir = join(w.aegisHome, "hooks");
+    mkdirSync(dir, { recursive: true });
+    withWorld(w, () => execFileSync("git", ["config", "--global", "core.hooksPath", dir]));
+    withWorld(w, () => execFileSync("git", ["config", "--local", "core.hooksPath", dir], { cwd: w.repo }));
+    assert.ok(withWorld(w, () => checkLocalHooksPathDuplicate(w.repo)));
+    const other = tmpDir("dup-other");
+    withWorld(w, () => execFileSync("git", ["config", "--local", "core.hooksPath", other], { cwd: w.repo }));
+    assert.equal(withWorld(w, () => checkLocalHooksPathDuplicate(w.repo)), null);
+  });
+
+  it("doctor lists it for the repository, with the fix line", () => {
+    const w = makeRepoWorld("dup-doctor");
+    const dir = join(w.aegisHome, "hooks");
+    installHooks(w); // local core.hooksPath = <home>/hooks
+    withWorld(w, () => execFileSync("git", ["config", "--global", "core.hooksPath", dir]));
+    const res = withWorld(w, () =>
+      captureOutput(() =>
+        doctor({
+          scanRoot: [w.scanRoot],
+          claudeHome: w.claudeHome,
+          homeDir: w.userHome,
+          sshDir: join(w.userHome, ".ssh"),
+          json: true,
+          ghOptions: { policy: "permissive" as const, confirm: () => false },
+          readGlobalHooksPath: () => dir,
+        }),
+      ),
+    );
+    const parsed = JSON.parse(res.stdout) as { results: Array<{ checks: Array<{ code: string; severity?: string; fix?: string }> }> };
+    const dup = parsed.results.flatMap(r => r.checks).filter(c => c.code === "HOOKS_PATH_LOCAL_DUPLICATE");
+    assert.equal(dup.length, 1, res.stdout);
+    assert.equal(dup[0]!.severity, "info");
+    assert.equal(dup[0]!.fix, "git config --local --unset core.hooksPath");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AGENT_REMOTE_IS_SSH (Phase U, U3)
+// ---------------------------------------------------------------------------
+
+describe("agentRemoteSshCheck", () => {
+  const REG = `schemaVersion: 3
+identities:
+  acme-bot: { kind: github-app, app: acme-bot }
+  alice: { kind: gh-login, login: alice }
+personalOrgs:
+  - { name: acme, person: alice, agent: acme-bot }
+  - { name: person-only, person: alice }
+  - plain-org
+engagements: []
+`;
+
+  function registry(): Registry {
+    const path = join(tmpDir("ssh-reg"), "engagements.yaml");
+    writeFileSync(path, REG);
+    return loadRegistry(path);
+  }
+
+  it("flags an SSH push URL for an owner whose agent identity is a GitHub App, with the person-run set-url --push line", () => {
+    const c = agentRemoteSshCheck(tmpDir("ssh-wt"), "acme", registry(), () => ["git@github.com:acme/x.git"]);
+    assert.ok(c);
+    assert.equal(c.code, "AGENT_REMOTE_IS_SSH");
+    assert.equal(c.ok, false);
+    assert.equal(c.severity, "warn");
+    assert.equal(c.fix, "git remote set-url --push origin https://github.com/acme/x.git");
+    assert.ok(!c.detail.includes("acme"), "the owner is named in `fix` only");
+  });
+
+  it("covers the ssh:// form, an ssh-config alias, and a second push URL that is SSH while the first is HTTPS", () => {
+    const wt = tmpDir("ssh-forms");
+    for (const urls of [
+      ["ssh://git@github.com/acme/x.git"],
+      ["git@github.com-work:acme/x.git"],
+      ["https://github.com/acme/x.git", "git@github.com:acme/x.git"],
+    ]) {
+      const c = agentRemoteSshCheck(wt, "acme", registry(), () => urls);
+      assert.ok(c, urls.join(" "));
+      assert.match(c.fix ?? "", /^git remote set-url --push origin https:\/\/github\.com\/acme\/x\.git$/);
+    }
+  });
+
+  it("is silent for an HTTPS push URL, an owner with no agent identity, an agent identity that is not an App, and no push URL", () => {
+    const wt = tmpDir("ssh-quiet");
+    const ssh = () => ["git@github.com:acme/x.git"];
+    assert.equal(agentRemoteSshCheck(wt, "acme", registry(), () => ["https://github.com/acme/x.git"]), null);
+    assert.equal(agentRemoteSshCheck(wt, "person-only", registry(), ssh), null);
+    assert.equal(agentRemoteSshCheck(wt, "plain-org", registry(), ssh), null);
+    assert.equal(agentRemoteSshCheck(wt, "unknown-org", registry(), ssh), null);
+    assert.equal(agentRemoteSshCheck(wt, "acme", registry(), () => null), null);
+    assert.equal(agentRemoteSshCheck(wt, "acme", registry(), () => []), null);
+  });
+
+  it("an owner named in a different case is the same owner", () => {
+    assert.ok(agentRemoteSshCheck(tmpDir("ssh-case"), "ACME", registry(), () => ["git@github.com:acme/x.git"]));
+  });
+
+  it("reads the real push URL: an SSH origin is flagged, and after `set-url --push` to HTTPS it is not", () => {
+    const w = makeRepoWorld("ssh-real-git");
+    const reg = registry();
+    assert.ok(withWorld(w, () => agentRemoteSshCheck(w.repo, "acme", reg)));
+    withWorld(w, () => execFileSync("git", ["remote", "set-url", "--push", "origin", "https://github.com/acme/x.git"], { cwd: w.repo }));
+    assert.equal(withWorld(w, () => agentRemoteSshCheck(w.repo, "acme", reg)), null);
+  });
+
+  it("doctor lists it for the repository, with the fix line", () => {
+    const w = makeRepoWorld("ssh-doctor");
+    writeFileSync(join(w.aegisHome, "engagements.yaml"), REG);
+    const res = withWorld(w, () =>
+      captureOutput(() =>
+        doctor({
+          scanRoot: [w.scanRoot],
+          claudeHome: w.claudeHome,
+          homeDir: w.userHome,
+          sshDir: join(w.userHome, ".ssh"),
+          json: true,
+          ghOptions: { policy: "permissive" as const, confirm: () => false },
+          readGlobalHooksPath: () => null,
+        }),
+      ),
+    );
+    const parsed = JSON.parse(res.stdout) as { results: Array<{ checks: Array<{ code: string; severity?: string; fix?: string }> }> };
+    const hits = parsed.results.flatMap(r => r.checks).filter(c => c.code === "AGENT_REMOTE_IS_SSH");
+    assert.equal(hits.length, 1, res.stdout);
+    assert.equal(hits[0]!.fix, "git remote set-url --push origin https://github.com/acme/x.git");
   });
 });
