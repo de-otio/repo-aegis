@@ -37,7 +37,7 @@ a path containing a quote ends your quoting and the remainder is executed.
 
 ```yaml
 # WRONG — a file path can close the quote and run commands
-- run: echo '${{ steps.scan.outputs.hits-json }}'
+- run: echo '${{ steps.scan.outputs.some-scan-output }}'
 
 # RIGHT — read the file the action wrote
 - uses: actions/github-script@<sha>
@@ -48,9 +48,8 @@ a path containing a quote ends your quoting and the remainder is executed.
       const raw = require('fs').readFileSync(process.env.RESULTS_FILE, 'utf8');
 ```
 
-`results-file` exists for this. `hits-json` is deprecated; it was announced
-for removal in 0.9.0 but the action still emits it, so do not rely on it
-going away or staying.
+`results-file` exists for this. The action has no output that carries the
+scan payload as a string.
 
 ### 2. Never publish un-redacted findings
 
@@ -118,9 +117,8 @@ file is the control for such changes.
 |------|---------|-------------|
 | `command` | `audit` | Subcommand to invoke (`audit`, `check`, `status`, …). |
 | `args` | `''` | Extra CLI args, space-separated, passed verbatim after the subcommand. |
-| `registry` | `''` | Path to a custom `engagements.yaml`. Exported as `REPO_AEGIS_REGISTRY`. **Known issue:** see [Registry availability](#registry-availability). |
 | `fail-on-hits` | `'true'` | Fail the workflow on a non-zero CLI exit. |
-| `require-deny-set` | `'true'` | Fail when the computed deny set is empty. See below. |
+| `require-deny-set` | `'true'` | Fail when the computed deny set is empty. The action takes no registry, so set `'false'` on a hosted runner. See below. |
 | `min-patterns` | `'0'` | Stronger floor: fail unless the deny set has at least N patterns. Overrides `require-deny-set` when > 0. |
 | `redact-attribution` | `'true'` | Strip engagement ids from output. See rule 2. |
 | `version` | the action's own version | npm version of `@de-otio/repo-aegis` to install. **Not `latest`** — a compromised publish would otherwise reach every consumer's gate on the next run. Pass `latest` explicitly to opt into floating. |
@@ -133,7 +131,6 @@ file is the control for such changes.
 |------|-------------|
 | `exit-code` | `0` clean, `1` hit, `2` the scan could not run (usage error, or the deny-set floor was not met). |
 | `results-file` | Path under `RUNNER_TEMP` holding the JSON output. **Use this.** |
-| `hits-json` | DEPRECATED (announced for removal in 0.9.0, still emitted) — the JSON as a string. See rule 1. |
 
 ---
 
@@ -147,7 +144,7 @@ indistinguishable from a real pass. That happens on:
 
 - a fork PR (secrets are not exposed to `pull_request` runs from forks);
 - a renamed, rotated, or mistyped secret;
-- a `registry` input pointing at a path that does not exist;
+- a registry path that does not exist;
 - a registry that loaded but whose engagements no longer resolve to any active
   marker file (use `min-patterns` for this one).
 
@@ -165,47 +162,40 @@ or an OSS repo with no markers of its own.
 
 ## Registry availability
 
-The action does **not** ship an engagement registry. It is private to the
-operator and must be made available to the workflow:
+**The Action takes no registry.** It used to have a `registry` input, but that
+only exported `REPO_AEGIS_REGISTRY`, and `check` and `audit` build the deny set
+from *rendered marker files*, so the input never produced a deny set. It was
+removed. On a hosted runner the Action therefore scans with an empty deny set:
+the marker scan reports `skipped` and only the deny-set-independent checks run
+(lockfile and private-registry egress, visibility, remote consistency). Pass
+`require-deny-set: 'false'` for that, or the default floor fails the run with
+exit 2. A self-hosted runner that already has rendered markers keeps the
+default.
 
-- **Checked into the consuming repo** at `.repo-aegis-registry/engagements.yaml`,
-  passed via the `registry` input. Only appropriate when the registry is
-  non-confidential — e.g. a single-engagement OSS project. (See the known
-  issue below before relying on this.)
-- **Restored from secrets** at workflow time (see below). One multi-line secret
-  containing the YAML.
-- **Restored from an age-encrypted blob** committed to the repo and decrypted
-  with a key from `secrets.*`. Avoids storing plaintext as a GitHub secret; see
-  `repo-aegis registry encrypt`.
-- **Cache-restored** from a job that decrypted it.
+If a workflow needs a registry, it must be made available to the job and
+rendered before the scan. The registry is private to the operator, so restore
+it from a secret (or an age-encrypted blob, see `repo-aegis registry encrypt`),
+and render it under `RUNNER_TEMP`, never the workspace, where an artifact upload
+or a `git add` could pick the markers up:
 
 ```yaml
-- name: Restore engagements registry
+- name: Scan with a registry
   env:
     REGISTRY_YAML: ${{ secrets.REPO_AEGIS_ENGAGEMENTS_YAML }}
   run: |
-    mkdir -p "${RUNNER_TEMP}/repo-aegis"
-    # Via env, never `printf '%s' '${{ secrets.* }}'` — see rule 1. A secret
+    # Via env, never `printf '%s' '${{ secrets.* }}'`: see rule 1. A secret
     # spliced into a script is both an injection vector and a log-leak risk.
-    printf '%s' "$REGISTRY_YAML" > "${RUNNER_TEMP}/repo-aegis/engagements.yaml"
-
-- uses: de-otio/repo-aegis@<sha> # v0.12.1
-  with:
-    registry: ${{ runner.temp }}/repo-aegis/engagements.yaml
+    home="$(mktemp -d "${RUNNER_TEMP}/repo-aegis-home.XXXXXX")"
+    printf '%s' "$REGISTRY_YAML" > "${home}/engagements.yaml"
+    export REPO_AEGIS_HOME="$home"
+    # The render summary names engagements: keep it out of the job log.
+    repo-aegis render >/dev/null 2>&1 || { echo "render failed" >&2; exit 2; }
+    repo-aegis audit --json --redact-attribution --min-patterns 1
 ```
 
-With `require-deny-set` on (the default), a failure of any of the above is now
-a red job rather than a silent pass.
-
-> **Known issue: the `registry` input does not yet produce a deny set.** The
-> action only exports `REPO_AEGIS_REGISTRY`. `check` and `audit` build the deny
-> set from the **rendered marker files**, and nothing in the action renders
-> them from the registry. So with the `registry` input alone the computed deny
-> set is empty: the job **fails red** (exit 2) under the default
-> `require-deny-set` floor, and with `require-deny-set: 'false'` it **passes
-> with an empty deny set** (the marker scan reports `skipped`; the
-> deny-set-independent checks still run). Tracked; no verified workaround is
-> documented here yet.
+(The CLI must be installed first, from outside the checkout with
+`--ignore-scripts`, as `action.yml` does.) With a floor in place, a failure of
+any of the causes above is a red job rather than a silent pass.
 
 ---
 
