@@ -157,9 +157,10 @@ export function taaadChecks(registry: Registry, home: string = repoAegisHome()):
     e => e.person?.kind === "github-app" || e.agent?.kind === "github-app",
   );
   const pin = readPinnedTaaad(home);
-  const fix =
-    "install taaad into a root-owned prefix (for example `sudo pipx install --global taaad`), remove any user-level copy, " +
-    "then re-run `repo-aegis install shim`";
+  const fix = "install taaad v0.6.0 or later, then re-run `repo-aegis install shim`";
+  const hardenFix =
+    "optional: install taaad into a root-owned prefix (for example `sudo pipx install --global taaad`), remove any " +
+    "user-level copy, then re-run `repo-aegis install shim`";
   if (pin === null) {
     if (!appMapped) return [];
     return [
@@ -186,7 +187,7 @@ export function taaadChecks(registry: Registry, home: string = repoAegisHome()):
       detail:
         `taaad is pinned (${where}) but is not root-only-writable: ${problem}. ` +
         "App identities still work; an agent that edits taaad's code could capture the tokens it mints",
-      fix,
+      fix: hardenFix,
     },
   ];
 }

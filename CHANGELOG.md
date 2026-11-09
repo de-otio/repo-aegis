@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — docs and `doctor` text for identities
+
+- `doc/agent-guide.md`: the `dot gh` section said always `--as bot` and never plain `gh`, which
+  contradicted `DOT_GH_OWNER_MAPPED`. For an owner mapped in the registry, agents use plain `gh`.
+- `doc/configuration.md`: new "Setting up identities" walkthrough. It covers which owners can have
+  an App (a private App installs only on its own account), and the person-only mapping for orgs you
+  do not administer. A stale "in a later phase" note about `requireIdentity` is corrected: the
+  refusal shipped in 0.12.0 (`GH_IDENTITY_UNMAPPED_OWNER`).
+- `doctor`: `TAAAD_AGENT_WRITABLE` with no taaad pinned now says to install taaad v0.6.0 or later.
+  The fix for a taaad that is not root-owned is marked optional.
+- README: covers identities, the managed drop-in, approvals by org and TTL, and rule h.
+
 ## [0.12.0] - 2026-11-08
 
 **Upgrade:** re-run `repo-aegis install shim` (`doctor` reports `SHIM_STALE` until you do), and

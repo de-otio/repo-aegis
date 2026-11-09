@@ -14,9 +14,9 @@ marker list when working on customer-A's own code.
   customer-identifying strings, scoped per-repo so customer-A's
   markers don't false-positive inside customer-A's own repo.
 - **Deterministic gate at every write path.** Pre-commit, pre-push,
-  and a Claude Code PostToolUse hook all run the same scanner; same
+  and the Claude Code write hooks all run the same scanner; same
   JSON output, same exit codes (0 = clean, 1 = hit, 2 = error).
-- **Path-aware cross-repo writes.** The PostToolUse hook resolves
+- **Path-aware cross-repo writes.** The write hook resolves
   the destination working tree from the written path, scans against
   _that_ repo's rules, and refuses with `CROSS_ORG_WRITE` when the
   trust boundaries don't overlap.
@@ -49,15 +49,30 @@ marker list when working on customer-A's own code.
   `publish`), refuse a cross-org destination, and scan a PR body
   against the *destination's* deny set. Decision-only: the guard never
   rewrites a command. When the human wants an agent to publish anyway,
-  `repo-aegis approve <org>/<repo>` from a terminal mints a scoped,
-  15-minute approval every layer honours — an agent's shell has no TTY
-  and cannot mint one. `selfIdentity` markers cover the inverse
+  `repo-aegis approve <org>/<repo>` (or `<org>/*`) from a terminal mints
+  a scoped approval every layer honours (15 minutes by default,
+  `--ttl` up to 24 hours) — an agent's shell has no TTY and cannot mint
+  one. An agent's publish to an owner the registry does not know is
+  refused outright (rule h); no approval lifts that. `selfIdentity` markers cover the inverse
   direction — the operator's own project names and session links
   entering a customer's repository.
+- **The GitHub identity follows the target owner.** The registry can map
+  each owner to a person (a `gh` login) and an agent (a GitHub App via
+  taaad). Plain `gh … --repo <owner>/<repo>` and agent HTTPS pushes then run
+  as that identity, so several agents can work for different accounts at
+  once without anyone switching the active `gh` account. Setup:
+  [doc/configuration.md](doc/configuration.md#setting-up-identities-a-walkthrough).
+- **Hooks an agent cannot switch off.** `install claude-md` writes the
+  Claude Code hooks and deny rules to a root-owned managed-settings
+  drop-in (it shows a diff, asks `[y/N]` and runs `sudo`), and every
+  hook runs a pinned node and CLI by absolute path, never a
+  `repo-aegis` found on `PATH`. `--user-settings` writes
+  `~/.claude/settings.json` instead, for machines without `sudo`.
 - **Engagement-scoped CLI verbs.** `allow`, `deny`, `status`,
-  `check`, `classify`, `audit`, `engagements add | end | show`,
-  `markers test`, `suggest-markers`, `uninstall`. Stable JSON
-  shapes everywhere.
+  `check`, `classify`, `audit`, `doctor`, `approve`,
+  `engagements add | end | show | set-identity`, `identity`,
+  `upstreams`, `markers test`, `suggest-markers`, `install …`,
+  `uninstall`. Stable JSON shapes everywhere.
 - **Server-side CI enforcement.** The client-side gate is advisory
   by construction — `--no-verify` bypasses it and a fresh clone has
   no hooks. `repo-aegis install ci --profile all` generates hardened
@@ -88,6 +103,7 @@ Prefer a manual install? The minimum is:
 ```sh
 npm install -g @de-otio/repo-aegis
 repo-aegis init                                  # bootstrap registry, hooks, Claude Code wiring
+                                                 # (the managed drop-in: asks [y/N], then sudo)
 repo-aegis install shim                          # gh wrapper for the egress guard; then put
                                                  # ~/.config/repo-aegis/bin FIRST on PATH (it prints the line),
                                                  # and restart the shell AND any agent host — PATH is per-process,
@@ -99,6 +115,10 @@ repo-aegis classify --apply                      # set repo-aegis.class + repo-a
 repo-aegis status                                # confirm class and deny set
 repo-aegis doctor                                # machine-wide: push.default, shim first on PATH, hooks current
 ```
+
+Optional: map each owner to the GitHub account (and App) that should act
+for it, so agents stop depending on whichever `gh` account is active. See
+[Setting up identities](doc/configuration.md#setting-up-identities-a-walkthrough).
 
 `init` does not install the shim: it writes a file into a directory
 that must precede the real `gh` on `PATH`, and only you can edit your
@@ -131,7 +151,7 @@ For the longer argument and the full set of design decisions, see
 | -------------------------------------------- | ----------------------------------------------------------------- |
 | [doc/agent-guide.md](doc/agent-guide.md)     | Coding agents driving repo-aegis (Claude Code, Cursor, …)         |
 | [doc/cli-reference.md](doc/cli-reference.md) | Per-subcommand flags, behaviour, exit codes, JSON shapes          |
-| [doc/configuration.md](doc/configuration.md) | Per-line allowlist comments, `.repo-aegis.yml` override, env vars |
+| [doc/configuration.md](doc/configuration.md) | Registry (incl. GitHub identities), managed drop-in, allowlist comments, `.repo-aegis.yml`, env vars |
 | [doc/architecture.md](doc/architecture.md)   | Workspace packages, how it composes, roadmap                      |
 | [doc/why-ai-coding.md](doc/why-ai-coding.md) | Why the deterministic gate is shaped the way it is                |
 | [doc/github-action.md](doc/github-action.md) | The composite GitHub Actions, generated workflows, CI hardening    |
@@ -144,7 +164,8 @@ Per-package READMEs:
 ## Uninstalling
 
 `repo-aegis uninstall` reverses every `install …` step in one shot —
-hooks, gitignore, claude-md, ci, and the `gh` shim — (dry-run by
+hooks, gitignore, claude-md (including the managed drop-in), ci, the
+`gh` shim and the git credential helper — (dry-run by
 default; `--yes` to apply). Opt-in `--purge-repos`
 walks `~/repos` / `~/code` / `~/src` / `~/projects` and unsets
 `repo-aegis.*` git config in every classified repo. Opt-in
