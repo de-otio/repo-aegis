@@ -15,10 +15,7 @@ of that value, or just working on that customer's code — sits at the
 top of the agent's attention and gets emitted by reflex when a
 "concrete example" is needed.
 
-This is the failure mode repo-aegis was built after: the author hit it
-repeatedly in day-to-day multi-customer work. There is no published
-measurement of how common it is, so treat it as an observation, not a
-ranking. It compounds three other AI-specific dynamics:
+It compounds three other AI-specific dynamics:
 
 - **Agents write fast.** A leak that lands between "agent generates"
   and "human notices" has a much shorter window than for hand-written

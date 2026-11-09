@@ -19,8 +19,7 @@ OSS repository — without forcing the user to delete those strings from
 their own engagement registry while they're still working on that
 engagement's code.
 
-The failure mode it was built for (observed in the author's own work,
-not measured) is AI-coding-agent recency pressure: a customer-derived string mentioned ten times in the current
+The failure mode it addresses is AI-coding-agent recency pressure: a customer-derived string mentioned ten times in the current
 session sits at the top of the agent's attention and gets emitted by
 reflex when a "concrete example" is needed, even when a `CLAUDE.md`
 rule says otherwise. A deterministic gate (pre-commit hook,
