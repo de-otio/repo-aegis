@@ -21,8 +21,10 @@
 import { basename, isAbsolute, join } from "node:path";
 import {
   appendAuditRecord,
+  approvalsPath,
   checkTerminal,
   chooseIdentity,
+  findAccountBoundApproval,
   identityPresence,
   loadRegistry,
   readProcessAncestry,
@@ -31,6 +33,7 @@ import {
   RegistryNotFoundError,
   type AncestorInfo,
   type AncestryChain,
+  type EgressApproval,
   type IdentityPresence,
   type IdentityScope,
   type Registry,
@@ -279,6 +282,35 @@ function refuse(code: string, why: string, dest?: { owner: string; repo: string 
   return { stdout: QUIT, stderr: `repo-aegis git-credential: ${reason}\n` };
 }
 
+/**
+ * `AGENT_PUSH_CHAIN_UNREADABLE` with no approval to cover it (doc/plan-landscape-recommendations.md, U2). The usual
+ * cause is a sandbox that blocks the process list (the default Claude Code sandbox does), so the text says so and
+ * names the three ways out, every one of them a person's step: an agent must not take the third by itself, because
+ * leaving a sandbox is a decision for whoever owns it. The approval remedy is only offered when the path named a
+ * usable `<owner>/<repo>`; the command is built from the validated names only.
+ */
+function refuseChainUnreadable(dest: { owner: string; repo: string } | null): GitCredentialResult {
+  const target = dest === null ? null : `${dest.owner.toLowerCase()}/${dest.repo}`;
+  const reason = refusal({
+    code: "AGENT_PUSH_CHAIN_UNREADABLE",
+    ...(dest !== null && { destination: { verb: "git push", org: dest.owner, repo: dest.repo } }),
+    what: "a git credential request for github.com",
+    why: "repo-aegis could not read the process list to confirm that git's HTTPS remote helper asked, so no credential is given; a sandbox that blocks the process list (the default Claude Code sandbox does) is the likely cause",
+    approval:
+      target === null
+        ? "No approval covers this."
+        : `An approval for ${target} from a person covers this when the owner has a person identity mapped.`,
+    fixes: [
+      { by: "person", step: "runs the push from a terminal" },
+      ...(target === null
+        ? []
+        : [{ by: "person" as const, command: `repo-aegis approve ${target}`, note: "agents may then push to it for the approval's lifetime" }]),
+      { by: "person", step: "lets the agent's command run outside the sandbox" },
+    ],
+  });
+  return { stdout: QUIT, stderr: `repo-aegis git-credential: ${reason}\n` };
+}
+
 function refuseText(code: string, reason: string): GitCredentialResult {
   return { stdout: QUIT, stderr: `repo-aegis git-credential: ${reason.includes(code) ? reason : `${reason} [${code}]`}\n` };
 }
@@ -319,10 +351,21 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   if (parent.kind === "direct") {
     return refuse("AGENT_CREDENTIAL_DIRECT_FILL", "the request does not come from git's HTTPS remote helper (for example `git credential fill` was run directly), so no credential is given");
   }
+  // U5: a person's approval for `<owner>/<repo>` (or `<owner>/*`), bound to the owner's person account and
+  // unexpired, also covers "the process list cannot be read", so an agent can push from inside a sandbox. It
+  // covers only "cannot tell": a chain that WAS read and shows another caller is `direct`, refused above whatever
+  // is approved. The store is read from the pinned home, as the registry is, never from the caller's environment.
+  // Everything below still applies (one path, the identity choice, A5 configuration, the mint).
+  let covered: EgressApproval | null = null;
   if (parent.kind === "unreadable") {
-    return refuse("AGENT_PUSH_CHAIN_UNREADABLE", "repo-aegis could not read the process list to confirm that git's HTTPS remote helper asked, so no credential is given");
+    const approvalTarget = request.mixed || request.paths.length > 1 || request.firstPath === null ? null : ownerRepoOf(request.firstPath);
+    covered =
+      approvalTarget === null ? null : findAccountBoundApproval({ org: approvalTarget.owner, repo: approvalTarget.repo }, approvalsPath(home));
+    if (covered === null) return refuseChainUnreadable(approvalTarget);
   }
-  const chain = parent.kind === "push";
+  // An unreadable chain cannot tell a push from a fetch: it is treated as a push (the wider scope), which is what
+  // the approval authorises.
+  const chain = parent.kind === "push" || covered !== null;
   if (request.mixed) {
     return refuse("AGENT_PUSH_CREDENTIAL_PATH", "the request names more than one protocol or host, so repo-aegis cannot tell where the credential would go");
   }
@@ -360,7 +403,11 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
     registeredOwner: o => owners.has(o.toLowerCase()),
   });
 
-  if (choice.kind === "none") return NOTHING;
+  if (choice.kind === "none") {
+    // An unmapped owner falls through to the person's own helper, but only for a request known to come from git;
+    // an unreadable chain is not known, so the covered case keeps its refusal.
+    return covered === null ? NOTHING : refuseChainUnreadable(dest);
+  }
   if (choice.kind === "refuse") return refuseText(choice.code, choice.reason);
   // An agent that may only read as the person (N3): the next helper answers, but only for a subcommand known to
   // read. An alias or an unreadable subcommand could be a push, and a push as the person needs a login-bound approval.
@@ -403,6 +450,8 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
     return refuse("GH_BINARY_UNTRUSTED", "no pinned taaad is known to use (run `repo-aegis install shim`)", dest);
   }
   const scope: IdentityScope = chain ? "contents-write" : "read";
+  // The audit record names the approval that let an unreadable process list through (the id, never its login).
+  const coveredBy = covered === null ? {} : { approval: covered.id, covers: "AGENT_PUSH_CHAIN_UNREADABLE" };
   let minted: MintedToken;
   try {
     minted = deps.mint({ taaadPath, slug: choice.identity.app, owner: dest.owner, repo: dest.repo, scope });
@@ -421,13 +470,23 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
       outcome: "refused",
       code,
       reason: err instanceof MintError ? err.reason : "failed",
+      ...coveredBy,
     });
     return refuse(code, err instanceof MintError ? err.message : "the token could not be minted", dest);
   }
-  auditBestEffort({ identity: choice.identity.name, kind: "github-app", owner: dest.owner, repo: dest.repo, scope, verb: chain ? "push" : "fetch" });
+  auditBestEffort({
+    identity: choice.identity.name,
+    kind: "github-app",
+    owner: dest.owner,
+    repo: dest.repo,
+    scope,
+    verb: chain ? "push" : "fetch",
+    ...coveredBy,
+  });
   return {
     stdout: `username=x-access-token\npassword=${minted.token}\n${expiryLine(minted.expiresAt)}`,
-    stderr: "",
+    // One line, so a person reading the push output can see why an unreadable process list did not stop it.
+    stderr: covered === null ? "" : `repo-aegis: approval ${covered.id} covers an unreadable process list for ${dest.owner}/${dest.repo}\n`,
   };
 }
 
