@@ -6,12 +6,12 @@
   },
   "{\"input\":\"this is not json {{{\",\"agent\":null,\"human\":false,\"shim\":false,\"cwd\":\"<TMP>\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"input\":\"\",\"agent\":null,\"human\":false,\"shim\":false,\"cwd\":\"<TMP>\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"input\":\"{\\\"tool_name\\\":\\\"Write\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"git push\\\"}}\",\"agent\":null,\"human\":false,\"shim\":false,\"cwd\":\"<TMP>\"}#1": {
@@ -20,6 +20,11 @@
     "code": 0
   },
   "{\"input\":\"{\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{}}\",\"agent\":null,\"human\":false,\"shim\":false,\"cwd\":\"<TMP>\"}#1": {
+    "stdout": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (a shell tool is named but the payload has no command field where this --agent reads one); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"input\":\"{}\",\"agent\":null,\"human\":false,\"shim\":false,\"cwd\":\"<TMP>\"}#1": {
     "stdout": "",
     "stderr": "",
     "code": 0
@@ -361,7 +366,7 @@
   },
   "{\"input\":\"}{\",\"agent\":null,\"human\":false,\"shim\":false,\"cwd\":\"<TMP>\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"input\":\"{\\\"session_id\\\":\\\"test\\\",\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"SRT_SSH_PROXY_COMMAND=hunter2 git push origin main\\\",\\\"description\\\":\\\"a command\\\"}}\",\"agent\":null,\"human\":false,\"shim\":false,\"cwd\":\"<TMP>\"}#1": {

@@ -12,6 +12,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ADAPTERS, adapterFor, type HookVerdict, type HostAdapter } from "./index.js";
 import { FIXTURE_CWD, loadFixture, loadFixtureIndex, withCommand } from "./_fixtures.js";
+import type { EgressDecision } from "@de-otio/repo-aegis-core";
+import { outcomeOrError } from "../hook-guard-egress.js";
 
 /** Seeded PRNG (same as the repo's other property tests): no flakiness. */
 function mulberry32(seed: number): () => number {
@@ -126,7 +128,44 @@ describe("host adapters — the PreToolUse family (claude, codex, gemini)", () =
     assert.equal(adapterFor("gemini").hasAsk, false);
     assert.equal(adapterFor("some-other-agent").hasAsk, false);
     assert.equal(adapterFor("").hasAsk, false, "an empty --agent is unknown, not claude");
-    assert.equal(adapterFor("Claude").hasAsk, false, "names are exact: a host that cannot ask must not get one by case");
+  });
+
+  it("names are matched case-insensitively: `Claude`, `CODEX`, `Antigravity` are the adapters, not the fallback", () => {
+    assert.equal(adapterFor("Claude").name, "claude");
+    assert.equal(adapterFor("Claude").hasAsk, true);
+    assert.equal(adapterFor("CODEX").name, "codex");
+    assert.equal(adapterFor("CODEX").hasAsk, false);
+    assert.equal(adapterFor("Antigravity").name, "antigravity");
+    assert.equal(adapterFor("Cursor").name, "cursor");
+    assert.equal(adapterFor("Copilot").name, "copilot");
+    // The deny shape is the host's own, which is the observable difference from the fallback.
+    assert.equal(adapterFor("Antigravity").render({ action: "deny", reason: "r" }).stdout, '{"decision":"deny","reason":"r"}\n');
+  });
+
+  it("an unknown name tries every known shape in turn; its rendering is the no-ask PreToolUse family", () => {
+    const a = adapterFor("some-other-agent");
+    const payloads: ReadonlyArray<readonly [string, unknown, string]> = [
+      ["PreToolUse tool_input.command", { tool_name: "Bash", tool_input: { command: "git push" }, cwd: "/w" }, "/w"],
+      ["Copilot toolArgs (a JSON string)", { toolName: "bash", toolArgs: '{"command":"git push"}', cwd: "/w" }, "/w"],
+      ["Copilot toolArgs (an object)", { toolName: "bash", toolArgs: { command: "git push" }, cwd: "/w" }, "/w"],
+      ["root command", { command: "git push", cwd: "/w" }, "/w"],
+      ["Antigravity toolCall", { toolCall: { name: "run_command", args: { CommandLine: "git push", Cwd: "/c" } } }, "/c"],
+    ];
+    for (const [label, payload, cwd] of payloads) {
+      assert.deepEqual(a.parse(JSON.stringify(payload)), { kind: "command", command: "git push", cwd }, label);
+    }
+    assert.equal(a.hasAsk, false);
+    assert.deepEqual(a.render({ action: "deny", reason: "r" }), adapterFor("codex").render({ action: "deny", reason: "r" }));
+    // A non-shell tool in any host's spelling is skipped; a named shell tool with no command is visible.
+    assert.deepEqual(a.parse(JSON.stringify({ toolName: "edit", toolArgs: '{"command":"git push"}' })), { kind: "skip" });
+    assert.deepEqual(a.parse(JSON.stringify({ toolCall: { name: "view_file", args: { CommandLine: "git push" } } })), { kind: "skip" });
+    assert.equal(a.parse(JSON.stringify({ tool_name: "Bash", tool_input: {} })).kind, "malformed");
+    assert.deepEqual(a.parse("{}"), { kind: "skip" });
+    // Oversized: proceeds only when the prefix names a non-shell tool in some host's key.
+    const pad = "x".repeat(5000);
+    assert.equal(a.oversized('{"toolName": "edit", "toolArgs": "' + pad), "proceed");
+    assert.equal(a.oversized('{"toolCall": {"name": "view_file", "args": {"x": "' + pad), "proceed");
+    assert.equal(a.oversized('{"toolCall": {"name": "run_command", "args": {"CommandLine": "' + pad), "refuse");
   });
 
   for (const a of [adapterFor("claude"), adapterFor("codex"), adapterFor("gemini")]) {
@@ -170,8 +209,27 @@ describe("host adapters — the PreToolUse family (claude, codex, gemini)", () =
       for (const t of ["Write", "Edit", "Read", "bash2", "run_command"]) {
         assert.deepEqual(a.parse(JSON.stringify({ tool_name: t, tool_input: { command: "git push" } })), { kind: "skip" }, t);
       }
-      assert.deepEqual(a.parse(JSON.stringify({ tool_name: "Bash", tool_input: {} })), { kind: "skip" });
       assert.deepEqual(a.parse("{}"), { kind: "skip" });
+      // An empty command is nothing to judge, not a misconfiguration.
+      assert.deepEqual(a.parse(JSON.stringify({ tool_name: "Bash", tool_input: { command: "" } })), { kind: "skip" });
+    });
+
+    it(`${a.name}: parse — a shell tool with no command, or a command in another host's shape, is malformed, not skip`, () => {
+      const noCommand = a.parse(JSON.stringify({ tool_name: "Bash", tool_input: {} }));
+      assert.equal(noCommand.kind, "malformed");
+      assert.equal(a.parse(JSON.stringify({ tool_name: "Bash" })).kind, "malformed");
+      // Copilot camelCase and Antigravity payloads under a PreToolUse-family --agent.
+      for (const payload of [
+        { toolName: "bash", toolArgs: '{"command":"git push"}' },
+        { toolCall: { name: "run_command", args: { CommandLine: "git push" } } },
+      ]) {
+        const p = a.parse(JSON.stringify(payload));
+        assert.equal(p.kind, "malformed", JSON.stringify(payload));
+        if (p.kind === "malformed") assert.ok(!p.reason.includes("git push"), "the reason carries no payload text");
+      }
+      // A non-shell tool stays a silent skip, whatever its fields.
+      assert.deepEqual(a.parse(JSON.stringify({ tool_name: "Write", tool_input: {} })), { kind: "skip" });
+      assert.deepEqual(a.parse(JSON.stringify({ toolName: "edit", toolArgs: '{"command":"git push"}' })), { kind: "skip" });
     });
 
     it(`${a.name}: oversized — proceeds only on a named non-shell tool inside the first 4 KiB`, () => {
@@ -180,6 +238,33 @@ describe("host adapters — the PreToolUse family (claude, codex, gemini)", () =
       assert.equal(a.oversized('{"session": "' + "x".repeat(5000) + '", "tool_name": "Write"'), "refuse", "past 4 KiB is not read");
     });
   }
+});
+
+describe("hook guard-egress — rendering a decision that throws becomes the host's fail-open answer", () => {
+  const deny = { action: "deny", code: "PUSH_IMPLICIT_TARGET", reason: "r", intent: { verb: "git-push" } } as unknown as EgressDecision;
+  const ctx = { registryNote: undefined, ruleH: "applied", humanPresent: false } as const;
+
+  it("a well-formed deny is planned as a deny with the structured refusal on stderr", () => {
+    const o = outcomeOrError(deny, ctx);
+    assert.deepEqual(o.verdict, { action: "deny", reason: "r" });
+    assert.deepEqual(JSON.parse(o.stderr!), { code: "PUSH_IMPLICIT_TARGET", error: "r", details: { verb: "git push" } });
+  });
+
+  it("a decision whose rendering throws (here: no intent) is the `error` verdict, never an uncaught exception", () => {
+    const broken = { action: "deny", code: "PUSH_IMPLICIT_TARGET", reason: "r" } as unknown as EgressDecision;
+    const o = outcomeOrError(broken, ctx);
+    assert.deepEqual(o.verdict, { action: "error" });
+    assert.match(o.stderr!, /^repo-aegis: hook guard-egress failed, command not evaluated: /);
+  });
+
+  it("the error verdict renders as every host's fail-open answer: Copilot exits 0 (it fails closed on 1), nobody exits 2 or denies", () => {
+    assert.deepEqual(adapterFor("copilot").render({ action: "error" }), { stdout: "", exitCode: 0 });
+    for (const a of ALL) {
+      const out = a.render({ action: "error" });
+      assert.notEqual(out.exitCode, 2, a.name);
+      assert.doesNotMatch(out.stdout, /deny/, a.name);
+    }
+  });
 });
 
 describe("host adapters — fixtures", () => {

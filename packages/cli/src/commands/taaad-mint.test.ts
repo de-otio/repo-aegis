@@ -91,6 +91,13 @@ describe("classifyMintFailure: taaad's exit-1 texts become a fixed reason (stder
       ["keychain", "signer"],
       ["widened", "signer"],
       ["usage", "signer"],
+      ["github", "signer"],
+      ["missing", "signer"],
+      ["protocol", "signer"],
+      ["internal", "signer"],
+      ["not-found", "signer"],
+      ["exists", "signer"],
+      ["bad-key", "signer"],
     ];
     for (const [code, reason] of table) {
       const m = classifyMintFailure(1, `taaad: error=${code}`, false);
@@ -117,6 +124,35 @@ describe("classifyMintFailure: taaad's exit-1 texts become a fixed reason (stder
     assert.doesNotMatch(classifyMintFailure(1, "taaad: error=widened", true).message, /sandbox/);
     assert.doesNotMatch(classifyMintFailure(1, "app example-bot has no install_id yet", true).message, /sandbox/);
     assert.match(classifyMintFailure(1, "something new", false).message, /exit status 1/);
+  });
+
+  it("the sandbox hint is added only for the codes a sandbox could explain (github, missing, protocol, internal, keychain)", () => {
+    for (const code of ["github", "missing", "protocol", "internal", "keychain"]) {
+      assert.match(classifyMintFailure(1, `taaad: error=${code}`, true).message, /inside the agent's sandbox/, code);
+    }
+    for (const code of ["not-found", "exists", "bad-key", "widened", "usage"]) {
+      assert.doesNotMatch(classifyMintFailure(1, `taaad: error=${code}`, true).message, /sandbox/, code);
+    }
+  });
+
+  it("trailing whitespace after the code line (CRLF, blank lines) still parses it as the last line", () => {
+    assert.equal(classifyMintFailure(1, "noise\ntaaad: error=keychain\r\n\n  \t", false).reason, "signer");
+    assert.match(classifyMintFailure(1, "noise\ntaaad: error=keychain\r\n\n  \t", false).message, /error=keychain/);
+  });
+
+  it("the DEFAULT inSandbox follows SANDBOX_RUNTIME in the environment: set, even empty, is inside; unset is not", () => {
+    const saved = process.env["SANDBOX_RUNTIME"];
+    try {
+      process.env["SANDBOX_RUNTIME"] = "1";
+      assert.match(classifyMintFailure(1, "taaad: error=keychain").message, /inside the agent's sandbox/);
+      process.env["SANDBOX_RUNTIME"] = "";
+      assert.match(classifyMintFailure(1, "taaad: error=keychain").message, /inside the agent's sandbox/);
+      delete process.env["SANDBOX_RUNTIME"];
+      assert.doesNotMatch(classifyMintFailure(1, "taaad: error=keychain").message, /sandbox/);
+    } finally {
+      if (saved === undefined) delete process.env["SANDBOX_RUNTIME"];
+      else process.env["SANDBOX_RUNTIME"] = saved;
+    }
   });
 
   it("the exit code wins over stderr for 3 and 4", () => {

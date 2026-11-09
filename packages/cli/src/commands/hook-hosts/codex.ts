@@ -6,6 +6,11 @@
 // older builds sent `shell`. Both are in SHELL_TOOL_NAMES. No "ask": Codex
 // marks a hook that answers `ask` as failed and runs the tool, so `ask`
 // must reach Codex as a deny.
+//
+// Known limit: Codex's `write_stdin` (text typed into a running exec session;
+// its field name is not in the hook docs this adapter was built from) is
+// skipped like any other non-shell tool, so a command typed into an open
+// session is not judged. Copilot and Antigravity input tools are judged.
 import { oversizedByToolName, parsePreToolUse, renderPreToolUse } from "./pre-tool-use.js";
 import type { HostAdapter } from "./types.js";
 

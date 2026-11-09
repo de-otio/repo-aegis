@@ -65,6 +65,13 @@ export function parseHookWriteFields(text: string, shape: HookWriteShape = "clau
   }
   const cwd = root["cwd"];
   if (typeof cwd === "string" && cwd.length > 0) out.cwd = cwd;
+  // Cursor `afterFileEdit` states no `cwd`: its common fields name the project in `workspace_roots`,
+  // so the first root is the directory the edit belongs to.
+  if (out.cwd === undefined && shape === "cursor") {
+    const roots = root["workspace_roots"];
+    const first = Array.isArray(roots) ? roots[0] : undefined;
+    if (typeof first === "string" && first.length > 0) out.cwd = first;
+  }
   return out;
 }
 

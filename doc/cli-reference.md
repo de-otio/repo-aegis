@@ -1223,7 +1223,8 @@ node and CLI, by absolute path, exit 2 if either is gone) rather than by bin
 name.
 
 `--agent cursor` reads Cursor's `afterFileEdit` payload instead (`file_path`
-and `cwd` at the root of the JSON). That event cannot block, so the check is
+at the root of the JSON; the working directory is the payload's `cwd` when it
+has one, otherwise the first entry of `workspace_roots`). That event cannot block, so the check is
 detection only: a non-zero answer carries a `note` saying the edit has already
 happened and the pre-commit hook is the gate. Any other `--agent` value is the
 Claude Code shape.
@@ -1432,8 +1433,27 @@ but the digest covers the script's text, so the same reinstall applies.)
 The pre-command hook. Reads the host's JSON on stdin (the host adapter picked
 by `--agent` finds the command and the `cwd`), parses the command, runs
 `decideEgress` with `capabilities.ask` true for hosts that can ask and false
-otherwise, and answers in the host's own shape. An unknown `--agent` value is
-treated as a host that cannot ask (`ask` becomes `deny`), never as `claude`.
+otherwise, and answers in the host's own shape. `--agent` is matched without
+regard to case. An unknown value is treated as a host that cannot ask (`ask`
+becomes `deny`), never as `claude`; it answers in the PreToolUse shape and
+reads the command from whichever known payload shape arrives
+(`tool_input.command`, Copilot `toolArgs`, a root `command`, Antigravity
+`toolCall.args.CommandLine`).
+
+**A payload that was not judged is not silent.** The hook still fails open
+(the host's allow), but when the payload names a shell tool and has no command
+where this `--agent` reads one, or carries a command in another host's shape
+(a Claude- or Gemini-shaped payload under `--agent antigravity`, a Cursor
+`preToolUse` payload under `--agent cursor`), or is not JSON at all, it prints
+one fixed line on stderr, `repo-aegis: guard-egress: this payload was not
+judged (<reason>); check that the hook is registered with the right --agent
+and event`, and writes a `guard-egress-malformed` record when the audit log is
+on. The reason is fixed text, never payload bytes. A payload for a tool that is
+not a shell stays `skip` and silent. Text typed into an open shell session is
+judged as a command where the host's payload says so: Copilot `write_bash` /
+`write_powershell` (`input`) and Antigravity `send_command_input` (`Input`).
+Codex `write_stdin` is not judged (a known limit, see
+[design/egress-guard.md](design/egress-guard.md)).
 
 | `--agent` | Event / matcher | Command field | `ask` | Allow (no publishing op) |
 |---|---|---|---|---|
@@ -1442,7 +1462,7 @@ treated as a host that cannot ask (`ask` becomes `deny`), never as `claude`.
 | `gemini` (legacy) | `BeforeTool` / `run_shell_command` | `tool_input.command` | no: degrades to `deny` | nothing, exit 0 |
 | `copilot` | `preToolUse` / `bash` (also `PreToolUse`) | `toolArgs` (a JSON-encoded string) `.command`; or `tool_input.command` | yes in the interactive CLI; the cloud agent and autopilot treat it as a deny | nothing, exit 0. **Never exits 1**: Copilot fails closed on a non-zero exit other than 2, so an internal error is rendered as an allow |
 | `cursor` | `beforeShellExecution`, and `afterFileEdit` for the write scan | root `command` | yes, on `beforeShellExecution` only | `{"permission":"allow"}` |
-| `antigravity` | `PreToolUse` / `run_command` | `toolCall.args.CommandLine` | yes | `{"decision":"allow"}` |
+| `antigravity` (unverified) | `PreToolUse` / `run_command` | `toolCall.args.CommandLine` | no: degrades to `deny` | `{"decision":"allow"}` |
 
 Registration is by hand for every host but Claude Code; the snippets, each
 marked doc-derived and not exercised in a live session, are in
@@ -1454,8 +1474,10 @@ marked doc-derived and not exercised in a live session, are in
 | ask | 0 | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":…}}` | — |
 | deny | 2 | the same shape with `"deny"` | `{ code, error, details: { verb, destination? } }` |
 
-Copilot's answer is the bare `{"permissionDecision":"ask"|"deny","permissionDecisionReason":…}`
-(exit 0 for ask, 2 for deny, the structured refusal on stderr as above).
+Copilot's answer carries the decision in both places its two events read, in
+one object: `{"permissionDecision":"ask"|"deny","permissionDecisionReason":…,"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":…,"permissionDecisionReason":…}}`
+(top level for camelCase `preToolUse`, `hookSpecificOutput` for PascalCase
+`PreToolUse`; exit 0 for ask, 2 for deny, the structured refusal on stderr as above).
 
 It never emits `updatedInput`. A registry that is missing, encrypted or
 unreadable does not disable the shape rules (an encrypted or unparseable one
@@ -1494,7 +1516,8 @@ real host; plan §5):
 Allow is never empty for these two (Cursor blocks on invalid output;
 Antigravity requires a `decision`). Cursor's `ask` is enforced only on
 `beforeShellExecution`, so the Cursor adapter does not judge a `preToolUse`
-payload: register the hook on `beforeShellExecution`. Antigravity's exit codes
+payload (it fails open and prints the one "not judged" line above): register
+the hook on `beforeShellExecution`. Antigravity's exit codes
 are undocumented, so every answer exits 0 and a deny is carried by the JSON.
 
 The hook also reads its **own** `PATH` — the one its host will hand the

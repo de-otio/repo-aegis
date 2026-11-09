@@ -141,37 +141,37 @@
   },
   "{\"label\":\"as-captured\",\"agent\":\"cursor\",\"input\":\"{\\\"conversation_id\\\":\\\"<ID>-0000-4000-8000-000000000002\\\",\\\"generation_id\\\":\\\"<ID>-0000-4000-8000-000000000003\\\",\\\"model\\\":\\\"example-model\\\",\\\"hook_event_name\\\":\\\"preToolUse\\\",\\\"cursor_version\\\":\\\"0.0.0\\\",\\\"workspace_roots\\\":[\\\"<TMP>/repo\\\"],\\\"user_em…sha256:31589872e75e032116534d8f5147a84ab7112cb616a0f7ee161e490e9b80e8f3#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"non-egress\",\"agent\":\"cursor\",\"input\":\"{\\\"conversation_id\\\":\\\"<ID>-0000-4000-8000-000000000002\\\",\\\"generation_id\\\":\\\"<ID>-0000-4000-8000-000000000003\\\",\\\"model\\\":\\\"example-model\\\",\\\"hook_event_name\\\":\\\"preToolUse\\\",\\\"cursor_version\\\":\\\"0.0.0\\\",\\\"workspace_roots\\\":[\\\"<TMP>/repo\\\"],\\\"user_ema…sha256:7e399b88801c68b3c524d856b3d3d8ab5d7f5ca9da817bed9f9d808b3d15b91f#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"bare push (shape deny)\",\"agent\":\"cursor\",\"input\":\"{\\\"conversation_id\\\":\\\"<ID>-0000-4000-8000-000000000002\\\",\\\"generation_id\\\":\\\"<ID>-0000-4000-8000-000000000003\\\",\\\"model\\\":\\\"example-model\\\",\\\"hook_event_name\\\":\\\"preToolUse\\\",\\\"cursor_version\\\":\\\"0.0.0\\\",\\\"workspace_roots\\\":[\\\"<TMP>/repo\\\"…sha256:b733e70f359abf1ae1a2df2a2a20a96d0dcf5833a544e4c5f2c7fb8c50fba0fe#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"egress after cd (shape deny)\",\"agent\":\"cursor\",\"input\":\"{\\\"conversation_id\\\":\\\"<ID>-0000-4000-8000-000000000002\\\",\\\"generation_id\\\":\\\"<ID>-0000-4000-8000-000000000003\\\",\\\"model\\\":\\\"example-model\\\",\\\"hook_event_name\\\":\\\"preToolUse\\\",\\\"cursor_version\\\":\\\"0.0.0\\\",\\\"workspace_roots\\\":[\\\"<TMP>/…sha256:f22f0baa17c39cbc513389fe776ae4a9ebfe8f81829651ec9c4e70c037353e74#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"explicit push to a public destination (ask, or deny without ask)\",\"agent\":\"cursor\",\"input\":\"{\\\"conversation_id\\\":\\\"<ID>-0000-4000-8000-000000000002\\\",\\\"generation_id\\\":\\\"<ID>-0000-4000-8000-000000000003\\\",\\\"model\\\":\\\"example-model\\\",\\\"hook_event_name\\\":\\\"preToolUse\\\",\\\"cursor_version\\\":\\\"0…sha256:6fd44340836fd57ddf24fa5160adaa8c07a9e054454192da6caef33cb4830167#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"human-only command\",\"agent\":\"cursor\",\"input\":\"{\\\"conversation_id\\\":\\\"<ID>-0000-4000-8000-000000000002\\\",\\\"generation_id\\\":\\\"<ID>-0000-4000-8000-000000000003\\\",\\\"model\\\":\\\"example-model\\\",\\\"hook_event_name\\\":\\\"preToolUse\\\",\\\"cursor_version\\\":\\\"0.0.0\\\",\\\"workspace_roots\\\":[\\\"<TMP>/repo\\\"],\\\"…sha256:b9c9c68e65504205196dd0cd9f792edf4266843a60d27defdc8d02f6d91b911f#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"raw API write (R6)\",\"agent\":\"cursor\",\"input\":\"{\\\"conversation_id\\\":\\\"<ID>-0000-4000-8000-000000000002\\\",\\\"generation_id\\\":\\\"<ID>-0000-4000-8000-000000000003\\\",\\\"model\\\":\\\"example-model\\\",\\\"hook_event_name\\\":\\\"preToolUse\\\",\\\"cursor_version\\\":\\\"0.0.0\\\",\\\"workspace_roots\\\":[\\\"<TMP>/repo\\\"],\\\"…sha256:2ac37dfec195040b09d403f9484388a00fcf7490e264e21e20dacd57d206b95e#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"as-captured\",\"agent\":\"cursor\",\"input\":\"{\\\"conversation_id\\\":\\\"<ID>-0000-4000-8000-000000000002\\\",\\\"generation_id\\\":\\\"<ID>-0000-4000-8000-000000000003\\\",\\\"model\\\":\\\"example-model\\\",\\\"hook_event_name\\\":\\\"afterFileEdit\\\",\\\"cursor_version\\\":\\\"0.0.0\\\",\\\"workspace_roots\\\":[\\\"<TMP>/repo\\\"],\\\"user…sha256:c88588b742ad386158b91078865a9707ce54152b39096068eae70546c4c48deb#1": {
@@ -190,27 +190,27 @@
     "code": 0
   },
   "{\"label\":\"bare push (shape deny)\",\"agent\":\"copilot\",\"input\":\"{\\\"sessionId\\\":\\\"example-session\\\",\\\"timestamp\\\":1704614400000,\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"toolName\\\":\\\"bash\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"command\\\\\\\":\\\\\\\"git push\\\\\\\",\\\\\\\"description\\\\\\\":\\\\\\\"Print hello\\\\\\\"}\\\"}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}\n",
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}}\n",
     "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
     "code": 2
   },
   "{\"label\":\"egress after cd (shape deny)\",\"agent\":\"copilot\",\"input\":\"{\\\"sessionId\\\":\\\"example-session\\\",\\\"timestamp\\\":1704614400000,\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"toolName\\\":\\\"bash\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"command\\\\\\\":\\\\\\\"cd sub && git push origin main\\\\\\\",\\\\\\\"description\\\\\\\":\\\\\\\"Print hello\\\\\\\"}\\\"}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"git push after a `cd` in the same command: `cd` does not persist between tool calls, and a `cd` that failed leaves the egress running in the wrong checkout. Use `git -C <abs-path>` or `gh --repo <org>/<repo>` and give the egress its own call.\"}\n",
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"git push after a `cd` in the same command: `cd` does not persist between tool calls, and a `cd` that failed leaves the egress running in the wrong checkout. Use `git -C <abs-path>` or `gh --repo <org>/<repo>` and give the egress its own call.\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"git push after a `cd` in the same command: `cd` does not persist between tool calls, and a `cd` that failed leaves the egress running in the wrong checkout. Use `git -C <abs-path>` or `gh --repo <org>/<repo>` and give the egress its own call.\"}}\n",
     "stderr": "{\n  \"code\": \"EGRESS_AFTER_CD\",\n  \"error\": \"git push after a `cd` in the same command: `cd` does not persist between tool calls, and a `cd` that failed leaves the egress running in the wrong checkout. Use `git -C <abs-path>` or `gh --repo <org>/<repo>` and give the egress its own call.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
     "code": 2
   },
   "{\"label\":\"explicit push to a public destination (ask, or deny without ask)\",\"agent\":\"copilot\",\"input\":\"{\\\"sessionId\\\":\\\"example-session\\\",\\\"timestamp\\\":1704614400000,\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"toolName\\\":\\\"bash\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"command\\\\\\\":\\\\\\\"git push origin main\\\\\\\",\\\\\\\"description\\\\\\\":\\\\\\\"Print hello\\\\\\\"}\\\"}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"git push: PUBLIC destination — main → acme/svc (unknown, public-eligible), from a non-interactive shell. A person must approve this, or mint an approval first: `repo-aegis approve acme/svc` from a terminal. (rule h (unregistered-owner check) skipped: the registry declares no owners)\"}\n",
+    "stdout": "{\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"git push: PUBLIC destination — main → acme/svc (unknown, public-eligible), from a non-interactive shell. A person must approve this, or mint an approval first: `repo-aegis approve acme/svc` from a terminal. (rule h (unregistered-owner check) skipped: the registry declares no owners)\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"git push: PUBLIC destination — main → acme/svc (unknown, public-eligible), from a non-interactive shell. A person must approve this, or mint an approval first: `repo-aegis approve acme/svc` from a terminal. (rule h (unregistered-owner check) skipped: the registry declares no owners)\"}}\n",
     "stderr": "",
     "code": 0
   },
   "{\"label\":\"human-only command\",\"agent\":\"copilot\",\"input\":\"{\\\"sessionId\\\":\\\"example-session\\\",\\\"timestamp\\\":1704614400000,\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"toolName\\\":\\\"bash\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"command\\\\\\\":\\\\\\\"repo-aegis approve '*'\\\\\\\",\\\\\\\"description\\\\\\\":\\\\\\\"Print hello\\\\\\\"}\\\"}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"repo-aegis approve: refused. This command is how a person vouches for a publish or an owner, so it counts only when a person decides to run it; an agent that ran it would be vouching for itself, with or without a terminal attached. No approval covers this, and a terminal, wrapper or alias does not change who runs it. A person runs it in their own terminal: repo-aegis approve <owner>/<repo>   (or <owner>/*). Agents: do not run that yourself, retry or reroute; report this to your human. [AGENT_RAN_HUMAN_COMMAND, see doc/agent-guide.md#agent_ran_human_command]\"}\n",
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"repo-aegis approve: refused. This command is how a person vouches for a publish or an owner, so it counts only when a person decides to run it; an agent that ran it would be vouching for itself, with or without a terminal attached. No approval covers this, and a terminal, wrapper or alias does not change who runs it. A person runs it in their own terminal: repo-aegis approve <owner>/<repo>   (or <owner>/*). Agents: do not run that yourself, retry or reroute; report this to your human. [AGENT_RAN_HUMAN_COMMAND, see doc/agent-guide.md#agent_ran_human_command]\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"repo-aegis approve: refused. This command is how a person vouches for a publish or an owner, so it counts only when a person decides to run it; an agent that ran it would be vouching for itself, with or without a terminal attached. No approval covers this, and a terminal, wrapper or alias does not change who runs it. A person runs it in their own terminal: repo-aegis approve <owner>/<repo>   (or <owner>/*). Agents: do not run that yourself, retry or reroute; report this to your human. [AGENT_RAN_HUMAN_COMMAND, see doc/agent-guide.md#agent_ran_human_command]\"}}\n",
     "stderr": "{\n  \"code\": \"AGENT_RAN_HUMAN_COMMAND\",\n  \"error\": \"repo-aegis approve: refused. This command is how a person vouches for a publish or an owner, so it counts only when a person decides to run it; an agent that ran it would be vouching for itself, with or without a terminal attached. No approval covers this, and a terminal, wrapper or alias does not change who runs it. A person runs it in their own terminal: repo-aegis approve <owner>/<repo>   (or <owner>/*). Agents: do not run that yourself, retry or reroute; report this to your human. [AGENT_RAN_HUMAN_COMMAND, see doc/agent-guide.md#agent_ran_human_command]\",\n  \"details\": {\n    \"command\": \"approve\"\n  }\n}\n",
     "code": 2
   },
   "{\"label\":\"raw API write (R6)\",\"agent\":\"copilot\",\"input\":\"{\\\"sessionId\\\":\\\"example-session\\\",\\\"timestamp\\\":1704614400000,\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"toolName\\\":\\\"bash\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"command\\\\\\\":\\\\\\\"curl -X POST https://api.github.com/repos/acme/svc/issues -d @body.json\\\\\\\",\\\\\\\"description\\\\\\\":\\\\\\\"Print hello\\\\\\\"}\\\"}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"curl → the GitHub API (write): refused. Writing to the GitHub API with a raw HTTP client reaches any owner and carries a token that repo-aegis does not scope, so it cannot tell where the bytes go or check the owner the way it does for gh. No approval covers this. To write to a repository, re-issue as: gh api -X <METHOD> repos/<owner>/<repo>/… (or a gh verb with --repo <owner>/<repo>) (gh writes are checked like any other publish). A person runs the original command, from a terminal. Agents: do not run that yourself, retry or reroute; report this to your human. [GITHUB_API_VIA_HTTP_CLIENT, see doc/agent-guide.md#github_api_via_http_client]\"}\n",
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"curl → the GitHub API (write): refused. Writing to the GitHub API with a raw HTTP client reaches any owner and carries a token that repo-aegis does not scope, so it cannot tell where the bytes go or check the owner the way it does for gh. No approval covers this. To write to a repository, re-issue as: gh api -X <METHOD> repos/<owner>/<repo>/… (or a gh verb with --repo <owner>/<repo>) (gh writes are checked like any other publish). A person runs the original command, from a terminal. Agents: do not run that yourself, retry or reroute; report this to your human. [GITHUB_API_VIA_HTTP_CLIENT, see doc/agent-guide.md#github_api_via_http_client]\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"curl → the GitHub API (write): refused. Writing to the GitHub API with a raw HTTP client reaches any owner and carries a token that repo-aegis does not scope, so it cannot tell where the bytes go or check the owner the way it does for gh. No approval covers this. To write to a repository, re-issue as: gh api -X <METHOD> repos/<owner>/<repo>/… (or a gh verb with --repo <owner>/<repo>) (gh writes are checked like any other publish). A person runs the original command, from a terminal. Agents: do not run that yourself, retry or reroute; report this to your human. [GITHUB_API_VIA_HTTP_CLIENT, see doc/agent-guide.md#github_api_via_http_client]\"}}\n",
     "stderr": "{\n  \"code\": \"GITHUB_API_VIA_HTTP_CLIENT\",\n  \"error\": \"curl → the GitHub API (write): refused. Writing to the GitHub API with a raw HTTP client reaches any owner and carries a token that repo-aegis does not scope, so it cannot tell where the bytes go or check the owner the way it does for gh. No approval covers this. To write to a repository, re-issue as: gh api -X <METHOD> repos/<owner>/<repo>/… (or a gh verb with --repo <owner>/<repo>) (gh writes are checked like any other publish). A person runs the original command, from a terminal. Agents: do not run that yourself, retry or reroute; report this to your human. [GITHUB_API_VIA_HTTP_CLIENT, see doc/agent-guide.md#github_api_via_http_client]\",\n  \"details\": {\n    \"verb\": \"(raw network call)\"\n  }\n}\n",
     "code": 2
   },
@@ -225,27 +225,27 @@
     "code": 0
   },
   "{\"label\":\"bare push (shape deny)\",\"agent\":\"copilot\",\"input\":\"{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"example-session\\\",\\\"timestamp\\\":\\\"<TS>\\\",\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"git push\\\",\\\"description\\\":\\\"Print hello\\\"}}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}\n",
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}}\n",
     "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
     "code": 2
   },
   "{\"label\":\"egress after cd (shape deny)\",\"agent\":\"copilot\",\"input\":\"{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"example-session\\\",\\\"timestamp\\\":\\\"<TS>\\\",\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"cd sub && git push origin main\\\",\\\"description\\\":\\\"Print hello\\\"}}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"git push after a `cd` in the same command: `cd` does not persist between tool calls, and a `cd` that failed leaves the egress running in the wrong checkout. Use `git -C <abs-path>` or `gh --repo <org>/<repo>` and give the egress its own call.\"}\n",
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"git push after a `cd` in the same command: `cd` does not persist between tool calls, and a `cd` that failed leaves the egress running in the wrong checkout. Use `git -C <abs-path>` or `gh --repo <org>/<repo>` and give the egress its own call.\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"git push after a `cd` in the same command: `cd` does not persist between tool calls, and a `cd` that failed leaves the egress running in the wrong checkout. Use `git -C <abs-path>` or `gh --repo <org>/<repo>` and give the egress its own call.\"}}\n",
     "stderr": "{\n  \"code\": \"EGRESS_AFTER_CD\",\n  \"error\": \"git push after a `cd` in the same command: `cd` does not persist between tool calls, and a `cd` that failed leaves the egress running in the wrong checkout. Use `git -C <abs-path>` or `gh --repo <org>/<repo>` and give the egress its own call.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
     "code": 2
   },
   "{\"label\":\"explicit push to a public destination (ask, or deny without ask)\",\"agent\":\"copilot\",\"input\":\"{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"example-session\\\",\\\"timestamp\\\":\\\"<TS>\\\",\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"git push origin main\\\",\\\"description\\\":\\\"Print hello\\\"}}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"git push: PUBLIC destination — main → acme/svc (unknown, public-eligible), from a non-interactive shell. A person must approve this, or mint an approval first: `repo-aegis approve acme/svc` from a terminal. (rule h (unregistered-owner check) skipped: the registry declares no owners)\"}\n",
+    "stdout": "{\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"git push: PUBLIC destination — main → acme/svc (unknown, public-eligible), from a non-interactive shell. A person must approve this, or mint an approval first: `repo-aegis approve acme/svc` from a terminal. (rule h (unregistered-owner check) skipped: the registry declares no owners)\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"git push: PUBLIC destination — main → acme/svc (unknown, public-eligible), from a non-interactive shell. A person must approve this, or mint an approval first: `repo-aegis approve acme/svc` from a terminal. (rule h (unregistered-owner check) skipped: the registry declares no owners)\"}}\n",
     "stderr": "",
     "code": 0
   },
   "{\"label\":\"human-only command\",\"agent\":\"copilot\",\"input\":\"{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"example-session\\\",\\\"timestamp\\\":\\\"<TS>\\\",\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"repo-aegis approve '*'\\\",\\\"description\\\":\\\"Print hello\\\"}}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"repo-aegis approve: refused. This command is how a person vouches for a publish or an owner, so it counts only when a person decides to run it; an agent that ran it would be vouching for itself, with or without a terminal attached. No approval covers this, and a terminal, wrapper or alias does not change who runs it. A person runs it in their own terminal: repo-aegis approve <owner>/<repo>   (or <owner>/*). Agents: do not run that yourself, retry or reroute; report this to your human. [AGENT_RAN_HUMAN_COMMAND, see doc/agent-guide.md#agent_ran_human_command]\"}\n",
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"repo-aegis approve: refused. This command is how a person vouches for a publish or an owner, so it counts only when a person decides to run it; an agent that ran it would be vouching for itself, with or without a terminal attached. No approval covers this, and a terminal, wrapper or alias does not change who runs it. A person runs it in their own terminal: repo-aegis approve <owner>/<repo>   (or <owner>/*). Agents: do not run that yourself, retry or reroute; report this to your human. [AGENT_RAN_HUMAN_COMMAND, see doc/agent-guide.md#agent_ran_human_command]\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"repo-aegis approve: refused. This command is how a person vouches for a publish or an owner, so it counts only when a person decides to run it; an agent that ran it would be vouching for itself, with or without a terminal attached. No approval covers this, and a terminal, wrapper or alias does not change who runs it. A person runs it in their own terminal: repo-aegis approve <owner>/<repo>   (or <owner>/*). Agents: do not run that yourself, retry or reroute; report this to your human. [AGENT_RAN_HUMAN_COMMAND, see doc/agent-guide.md#agent_ran_human_command]\"}}\n",
     "stderr": "{\n  \"code\": \"AGENT_RAN_HUMAN_COMMAND\",\n  \"error\": \"repo-aegis approve: refused. This command is how a person vouches for a publish or an owner, so it counts only when a person decides to run it; an agent that ran it would be vouching for itself, with or without a terminal attached. No approval covers this, and a terminal, wrapper or alias does not change who runs it. A person runs it in their own terminal: repo-aegis approve <owner>/<repo>   (or <owner>/*). Agents: do not run that yourself, retry or reroute; report this to your human. [AGENT_RAN_HUMAN_COMMAND, see doc/agent-guide.md#agent_ran_human_command]\",\n  \"details\": {\n    \"command\": \"approve\"\n  }\n}\n",
     "code": 2
   },
   "{\"label\":\"raw API write (R6)\",\"agent\":\"copilot\",\"input\":\"{\\\"hook_event_name\\\":\\\"PreToolUse\\\",\\\"session_id\\\":\\\"example-session\\\",\\\"timestamp\\\":\\\"<TS>\\\",\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"curl -X POST https://api.github.com/repos/acme/svc/issues -d @body.json\\\",\\\"description\\\":\\\"Print hello\\\"}}\"}#1": {
-    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"curl → the GitHub API (write): refused. Writing to the GitHub API with a raw HTTP client reaches any owner and carries a token that repo-aegis does not scope, so it cannot tell where the bytes go or check the owner the way it does for gh. No approval covers this. To write to a repository, re-issue as: gh api -X <METHOD> repos/<owner>/<repo>/… (or a gh verb with --repo <owner>/<repo>) (gh writes are checked like any other publish). A person runs the original command, from a terminal. Agents: do not run that yourself, retry or reroute; report this to your human. [GITHUB_API_VIA_HTTP_CLIENT, see doc/agent-guide.md#github_api_via_http_client]\"}\n",
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"curl → the GitHub API (write): refused. Writing to the GitHub API with a raw HTTP client reaches any owner and carries a token that repo-aegis does not scope, so it cannot tell where the bytes go or check the owner the way it does for gh. No approval covers this. To write to a repository, re-issue as: gh api -X <METHOD> repos/<owner>/<repo>/… (or a gh verb with --repo <owner>/<repo>) (gh writes are checked like any other publish). A person runs the original command, from a terminal. Agents: do not run that yourself, retry or reroute; report this to your human. [GITHUB_API_VIA_HTTP_CLIENT, see doc/agent-guide.md#github_api_via_http_client]\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"curl → the GitHub API (write): refused. Writing to the GitHub API with a raw HTTP client reaches any owner and carries a token that repo-aegis does not scope, so it cannot tell where the bytes go or check the owner the way it does for gh. No approval covers this. To write to a repository, re-issue as: gh api -X <METHOD> repos/<owner>/<repo>/… (or a gh verb with --repo <owner>/<repo>) (gh writes are checked like any other publish). A person runs the original command, from a terminal. Agents: do not run that yourself, retry or reroute; report this to your human. [GITHUB_API_VIA_HTTP_CLIENT, see doc/agent-guide.md#github_api_via_http_client]\"}}\n",
     "stderr": "{\n  \"code\": \"GITHUB_API_VIA_HTTP_CLIENT\",\n  \"error\": \"curl → the GitHub API (write): refused. Writing to the GitHub API with a raw HTTP client reaches any owner and carries a token that repo-aegis does not scope, so it cannot tell where the bytes go or check the owner the way it does for gh. No approval covers this. To write to a repository, re-issue as: gh api -X <METHOD> repos/<owner>/<repo>/… (or a gh verb with --repo <owner>/<repo>) (gh writes are checked like any other publish). A person runs the original command, from a terminal. Agents: do not run that yourself, retry or reroute; report this to your human. [GITHUB_API_VIA_HTTP_CLIENT, see doc/agent-guide.md#github_api_via_http_client]\",\n  \"details\": {\n    \"verb\": \"(raw network call)\"\n  }\n}\n",
     "code": 2
   },
@@ -286,152 +286,267 @@
   },
   "{\"label\":\"malformed: empty stdin\",\"agent\":\"claude\",\"input\":\"\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: not JSON\",\"agent\":\"claude\",\"input\":\"this is not json\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: truncated JSON\",\"agent\":\"claude\",\"input\":\"{\\\"tool_name\\\": \\\"Bash\\\", \\\"tool_input\\\": {\\\"command\\\": \\\"git pu\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON array\",\"agent\":\"claude\",\"input\":\"[1,2,3]\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON string\",\"agent\":\"claude\",\"input\":\"\\\"git push\\\"\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: empty stdin\",\"agent\":\"codex\",\"input\":\"\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: not JSON\",\"agent\":\"codex\",\"input\":\"this is not json\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: truncated JSON\",\"agent\":\"codex\",\"input\":\"{\\\"tool_name\\\": \\\"Bash\\\", \\\"tool_input\\\": {\\\"command\\\": \\\"git pu\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON array\",\"agent\":\"codex\",\"input\":\"[1,2,3]\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON string\",\"agent\":\"codex\",\"input\":\"\\\"git push\\\"\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: empty stdin\",\"agent\":\"gemini\",\"input\":\"\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: not JSON\",\"agent\":\"gemini\",\"input\":\"this is not json\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: truncated JSON\",\"agent\":\"gemini\",\"input\":\"{\\\"tool_name\\\": \\\"Bash\\\", \\\"tool_input\\\": {\\\"command\\\": \\\"git pu\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON array\",\"agent\":\"gemini\",\"input\":\"[1,2,3]\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON string\",\"agent\":\"gemini\",\"input\":\"\\\"git push\\\"\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: empty stdin\",\"agent\":\"cursor\",\"input\":\"\"}#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: not JSON\",\"agent\":\"cursor\",\"input\":\"this is not json\"}#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: truncated JSON\",\"agent\":\"cursor\",\"input\":\"{\\\"tool_name\\\": \\\"Bash\\\", \\\"tool_input\\\": {\\\"command\\\": \\\"git pu\"}#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON array\",\"agent\":\"cursor\",\"input\":\"[1,2,3]\"}#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON string\",\"agent\":\"cursor\",\"input\":\"\\\"git push\\\"\"}#1": {
     "stdout": "{\"permission\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: empty stdin\",\"agent\":\"copilot\",\"input\":\"\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: not JSON\",\"agent\":\"copilot\",\"input\":\"this is not json\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: truncated JSON\",\"agent\":\"copilot\",\"input\":\"{\\\"tool_name\\\": \\\"Bash\\\", \\\"tool_input\\\": {\\\"command\\\": \\\"git pu\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON array\",\"agent\":\"copilot\",\"input\":\"[1,2,3]\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON string\",\"agent\":\"copilot\",\"input\":\"\\\"git push\\\"\"}#1": {
     "stdout": "",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: empty stdin\",\"agent\":\"antigravity\",\"input\":\"\"}#1": {
     "stdout": "{\"decision\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: not JSON\",\"agent\":\"antigravity\",\"input\":\"this is not json\"}#1": {
     "stdout": "{\"decision\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: truncated JSON\",\"agent\":\"antigravity\",\"input\":\"{\\\"tool_name\\\": \\\"Bash\\\", \\\"tool_input\\\": {\\\"command\\\": \\\"git pu\"}#1": {
     "stdout": "{\"decision\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not JSON); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON array\",\"agent\":\"antigravity\",\"input\":\"[1,2,3]\"}#1": {
     "stdout": "{\"decision\":\"allow\"}\n",
-    "stderr": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
     "code": 0
   },
   "{\"label\":\"malformed: JSON string\",\"agent\":\"antigravity\",\"input\":\"\\\"git push\\\"\"}#1": {
     "stdout": "{\"decision\":\"allow\"}\n",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (stdin is not a JSON object); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"label\":\"misrouted: a Claude-shaped payload under --agent antigravity\",\"agent\":\"antigravity\",\"input\":\"{\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"git push\\\"},\\\"cwd\\\":\\\"/w\\\"}\"}#1": {
+    "stdout": "{\"decision\":\"allow\"}\n",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (payload has no toolCall, so it is not an Antigravity payload); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"label\":\"misrouted: an Antigravity payload under --agent claude\",\"agent\":\"claude\",\"input\":\"{\\\"toolCall\\\":{\\\"name\\\":\\\"run_command\\\",\\\"args\\\":{\\\"CommandLine\\\":\\\"git push\\\"}}}\"}#1": {
+    "stdout": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"label\":\"misrouted: an Antigravity payload under --agent gemini\",\"agent\":\"gemini\",\"input\":\"{\\\"toolCall\\\":{\\\"name\\\":\\\"run_command\\\",\\\"args\\\":{\\\"CommandLine\\\":\\\"git push\\\"}}}\"}#1": {
+    "stdout": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"label\":\"misrouted: a Copilot camelCase payload under --agent codex\",\"agent\":\"codex\",\"input\":\"{\\\"toolName\\\":\\\"bash\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"command\\\\\\\":\\\\\\\"git push\\\\\\\"}\\\",\\\"cwd\\\":\\\"/w\\\"}\"}#1": {
+    "stdout": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"label\":\"misrouted: a Cursor preToolUse payload under --agent cursor\",\"agent\":\"cursor\",\"input\":\"{\\\"hook_event_name\\\":\\\"preToolUse\\\",\\\"tool_name\\\":\\\"Shell\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"git push\\\"},\\\"cwd\\\":\\\"/w\\\"}\"}#1": {
+    "stdout": "{\"permission\":\"allow\"}\n",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"label\":\"misrouted: a Claude-shaped payload under --agent cursor\",\"agent\":\"cursor\",\"input\":\"{\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"git push\\\"},\\\"cwd\\\":\\\"/w\\\"}\"}#1": {
+    "stdout": "{\"permission\":\"allow\"}\n",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"label\":\"misrouted: an Antigravity payload under --agent copilot\",\"agent\":\"copilot\",\"input\":\"{\\\"toolCall\\\":{\\\"name\\\":\\\"run_command\\\",\\\"args\\\":{\\\"CommandLine\\\":\\\"git push\\\"}}}\"}#1": {
+    "stdout": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (the payload carries a command in another host's shape); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"label\":\"non-shell: claude\",\"agent\":\"claude\",\"input\":\"{\\\"tool_name\\\":\\\"Write\\\",\\\"tool_input\\\":{\\\"file_path\\\":\\\"/x\\\",\\\"content\\\":\\\"y\\\"}}\"}#1": {
+    "stdout": "",
     "stderr": "",
+    "code": 0
+  },
+  "{\"label\":\"non-shell: codex\",\"agent\":\"codex\",\"input\":\"{\\\"tool_name\\\":\\\"apply_patch\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"git push\\\"}}\"}#1": {
+    "stdout": "",
+    "stderr": "",
+    "code": 0
+  },
+  "{\"label\":\"non-shell: gemini\",\"agent\":\"gemini\",\"input\":\"{\\\"tool_name\\\":\\\"read_file\\\",\\\"tool_input\\\":{\\\"absolute_path\\\":\\\"/x\\\"}}\"}#1": {
+    "stdout": "",
+    "stderr": "",
+    "code": 0
+  },
+  "{\"label\":\"non-shell: copilot\",\"agent\":\"copilot\",\"input\":\"{\\\"toolName\\\":\\\"edit\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"path\\\\\\\":\\\\\\\"/x\\\\\\\"}\\\"}\"}#1": {
+    "stdout": "",
+    "stderr": "",
+    "code": 0
+  },
+  "{\"label\":\"non-shell: cursor\",\"agent\":\"cursor\",\"input\":\"{\\\"hook_event_name\\\":\\\"preToolUse\\\",\\\"tool_name\\\":\\\"Write\\\",\\\"tool_input\\\":{\\\"file_path\\\":\\\"/x\\\"}}\"}#1": {
+    "stdout": "{\"permission\":\"allow\"}\n",
+    "stderr": "",
+    "code": 0
+  },
+  "{\"label\":\"non-shell: antigravity\",\"agent\":\"antigravity\",\"input\":\"{\\\"toolCall\\\":{\\\"name\\\":\\\"view_file\\\",\\\"args\\\":{\\\"AbsolutePath\\\":\\\"/x\\\"}}}\"}#1": {
+    "stdout": "{\"decision\":\"allow\"}\n",
+    "stderr": "",
+    "code": 0
+  },
+  "{\"label\":\"input tool: copilot\",\"agent\":\"copilot\",\"input\":\"{\\\"sessionId\\\":\\\"s\\\",\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"toolName\\\":\\\"write_bash\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"input\\\\\\\":\\\\\\\"git push\\\\\\\\n\\\\\\\"}\\\"}\"}#1": {
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}}\n",
+    "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
+    "code": 2
+  },
+  "{\"label\":\"input tool: copilot\",\"agent\":\"copilot\",\"input\":\"{\\\"sessionId\\\":\\\"s\\\",\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"toolName\\\":\\\"write_powershell\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"input\\\\\\\":\\\\\\\"git push\\\\\\\\n\\\\\\\"}\\\"}\"}#1": {
+    "stdout": "{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}}\n",
+    "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
+    "code": 2
+  },
+  "{\"label\":\"input tool: antigravity\",\"agent\":\"antigravity\",\"input\":\"{\\\"toolCall\\\":{\\\"name\\\":\\\"send_command_input\\\",\\\"args\\\":{\\\"Input\\\":\\\"git push\\\\n\\\",\\\"Cwd\\\":\\\"<TMP>/repo\\\"}}}\"}#1": {
+    "stdout": "{\"decision\":\"deny\",\"reason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}\n",
+    "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
+    "code": 0
+  },
+  "{\"label\":\"unknown agent\",\"agent\":\"not-a-host\",\"input\":\"{\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"command\\\":\\\"git push\\\"},\\\"cwd\\\":\\\"/w\\\"}\"}#1": {
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}}\n",
+    "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
+    "code": 2
+  },
+  "{\"label\":\"unknown agent\",\"agent\":\"not-a-host\",\"input\":\"{\\\"toolCall\\\":{\\\"name\\\":\\\"run_command\\\",\\\"args\\\":{\\\"CommandLine\\\":\\\"git push\\\"}}}\"}#1": {
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}}\n",
+    "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
+    "code": 2
+  },
+  "{\"label\":\"unknown agent\",\"agent\":\"not-a-host\",\"input\":\"{\\\"toolName\\\":\\\"bash\\\",\\\"toolArgs\\\":\\\"{\\\\\\\"command\\\\\\\":\\\\\\\"git push\\\\\\\"}\\\",\\\"cwd\\\":\\\"/w\\\"}\"}#1": {
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}}\n",
+    "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
+    "code": 2
+  },
+  "{\"label\":\"unknown agent\",\"agent\":\"not-a-host\",\"input\":\"{\\\"command\\\":\\\"git push\\\"}\"}#1": {
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}}\n",
+    "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
+    "code": 2
+  },
+  "{\"label\":\"audit\",\"agent\":\"claude\",\"input\":\"{\\\"tool_name\\\":\\\"Bash\\\",\\\"tool_input\\\":{\\\"note\\\":\\\"customer-a-payload-text\\\"}}\"}#1": {
+    "stdout": "",
+    "stderr": "repo-aegis: guard-egress: this payload was not judged (a shell tool is named but the payload has no command field where this --agent reads one); check that the hook is registered with the right --agent and event\n",
+    "code": 0
+  },
+  "{\"label\":\"audit-skip\",\"agent\":\"claude\",\"input\":\"{\\\"tool_name\\\":\\\"Write\\\",\\\"tool_input\\\":{}}\"}#1": {
+    "stdout": "",
+    "stderr": "",
+    "code": 0
+  },
+  "{\"label\":\"case\",\"agent\":\"Antigravity\",\"input\":\"{\\\"toolCall\\\":{\\\"name\\\":\\\"run_command\\\",\\\"args\\\":{\\\"CommandLine\\\":\\\"git push\\\"}}}\"}#1": {
+    "stdout": "{\"decision\":\"deny\",\"reason\":\"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\"}\n",
+    "stderr": "{\n  \"code\": \"PUSH_IMPLICIT_TARGET\",\n  \"error\": \"`git push` without an explicit <remote> <refspec>: a bare push resolves its target from the current checkout's branch config, which is how a private branch reached a public remote. Re-issue as `git push <remote> <branch>`; the command is never rewritten for you.\",\n  \"details\": {\n    \"verb\": \"git push\"\n  }\n}\n",
     "code": 0
   }
 }

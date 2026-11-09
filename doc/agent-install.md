@@ -744,31 +744,65 @@ Doc-derived, not exercised in a live session.
 }
 ```
 
-On Codex and Gemini CLI, **`ask` degrades to `deny`** — never to `allow`.
-Neither framework is assumed to have an "ask" decision, so a case Claude
-Code would put in front of the user (a public destination with no human
-present) becomes a refusal whose reason says to have a human run or approve
-the command. That is the conservative direction, and it is deliberate: a
-guard that silently allowed what it could not ask about would be worse than
-no guard, because the operator would believe they had one. Cursor,
-Copilot CLI and Antigravity CLI do have an `ask`; each adapter uses it only
-where the host enforces it (see the per-host notes above), and an `ask`
-that a host treats as a deny is the same safe direction.
+On Codex, Antigravity CLI and Gemini CLI, **`ask` degrades to `deny`** —
+never to `allow`. None of these is assumed to have an "ask" decision (Codex
+treats an `ask` as a failed hook and runs the tool; Antigravity's `ask` is
+unverified), so a case Claude Code would put in front of the user (a public
+destination with no human present) becomes a refusal whose reason says to
+have a human run or approve the command. That is the conservative
+direction, and it is deliberate: a guard that silently allowed what it could
+not ask about would be worse than no guard, because the operator would
+believe they had one. Cursor and Copilot CLI do have an `ask`; each adapter
+uses it only where the host enforces it (see the per-host notes above), and
+an `ask` that a host treats as a deny is the same safe direction.
 
-The hook reads stdin tolerantly and exits 0 on anything it cannot parse, so
-registering it against a tool that sends a different payload shape is
-harmless — but it also means a misregistration is silent. Test it once:
+Typed input is judged where the host says what it is: Copilot CLI's
+`write_bash` / `write_powershell` (`input`) and Antigravity's
+`send_command_input` (`Input`) are read as the command, since a push typed
+into an open session is a push. Codex's `write_stdin` is **not** judged (see
+the known limits in [design/egress-guard.md](design/egress-guard.md)).
+
+On Cursor, `afterFileEdit` runs after the file is written, so its non-zero
+answer is detection only. Cursor probably shows the hook's output only in its
+hooks log, not in the agent's conversation, so do not count on the agent (or
+a person) seeing it: the pre-commit hook is the gate.
+
+The hook reads stdin tolerantly and **fails open**: a payload it cannot read
+is allowed, never blocked. Where the payload names a shell tool but has no
+command where this `--agent` reads one, or carries a command in another
+host's shape (a Claude- or Gemini-shaped payload under `--agent
+antigravity`, a Cursor `preToolUse` payload under `--agent cursor`), the hook
+says so once on stderr (`repo-aegis: guard-egress: this payload was not
+judged (…); check that the hook is registered with the right --agent and
+event`) and, when the audit log is on, writes a `guard-egress-malformed`
+record. A payload for a non-shell tool stays silent. `--agent` is matched
+without regard to case. An unknown name is judged in any known payload shape
+and answered as a host without an `ask`. Test your registration once. The
+first block is for Claude Code, Codex and Gemini CLI (deny is exit 2); the
+others answer a deny on stdout:
 
 ```sh
 echo '{"tool_name":"Bash","tool_input":{"command":"git push"}}' | repo-aegis hook guard-egress
-echo $?    # 2, with a PUSH_IMPLICIT_TARGET reason on stderr
+echo $?    # 2, with PUSH_IMPLICIT_TARGET on stderr
 ```
 
 For Copilot CLI, whose command sits in a JSON string, the same check is:
 
 ```sh
 echo '{"toolName":"bash","toolArgs":"{\"command\":\"git push\"}"}' | repo-aegis hook guard-egress --agent copilot
-echo $?    # 2, with {"permissionDecision":"deny",…} on stdout
+echo $?    # 2, with "permissionDecision":"deny" on stdout
+```
+
+For Cursor and Antigravity CLI the deny is on stdout and the exit code is 0:
+
+```sh
+echo '{"hook_event_name":"beforeShellExecution","command":"git push"}' | repo-aegis hook guard-egress --agent cursor
+echo $?    # 0, with "permission":"deny" on stdout
+```
+
+```sh
+echo '{"toolCall":{"name":"run_command","args":{"CommandLine":"git push"}}}' | repo-aegis hook guard-egress --agent antigravity
+echo $?    # 0, with "decision":"deny" on stdout
 ```
 
 ### Caveat: Claude Code's `ask` is not yet empirically verified

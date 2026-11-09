@@ -574,7 +574,7 @@ export async function buildProgram(): Promise<Command> {
   hook
     .command("guard-egress")
     .description("PreToolUse(Bash): read the pending shell command on stdin and allow / ask / deny its publishing operations (git push, gh pr|issue|release|repo|api, npm publish); exit 2 blocks")
-    .option("--agent <name>", "hook framework shape: claude (default; supports ask) | cursor (supports ask; beforeShellExecution) | copilot (supports ask) | codex | antigravity (unverified) | gemini (legacy) (ask degrades to deny)")
+    .option("--agent <name>", "hook framework shape: claude (default; supports ask) | cursor (supports ask; beforeShellExecution) | copilot (supports ask) | codex | antigravity (unverified) | gemini (legacy): no ask, ask degrades to deny")
     .action(async (opts, cmd) => {
       const { hookGuardEgress } = await import("./commands/hook-guard-egress.js");
       await hookGuardEgress(withGlobals(opts, cmd));

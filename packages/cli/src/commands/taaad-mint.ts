@@ -100,7 +100,7 @@ export function classifyMintFailure(
   // `taaad: error=<code> status=<n>` (n an HTTP status, 100–599). The code is copied verbatim only when it is in
   // the known vocabulary; an unknown code is treated as `internal` and NOT echoed (taaad's README: "treat an
   // unknown code like internal"). Nothing else from stderr is ever copied.
-  const lastLine = stderr.replace(/\s+$/, "").split("\n").pop() ?? "";
+  const lastLine = stderr.trimEnd().split("\n").pop() ?? "";
   const coded = /^taaad: error=([a-z][a-z-]{0,31})(?: status=([1-5]\d\d))?$/.exec(lastLine);
   if (coded !== null) {
     const known = TAAAD_CODES.has(coded[1]!);

@@ -78,8 +78,14 @@ describe("hook guard-egress --agent copilot — regression: toolArgs payloads ar
     const r = run(payload, agent);
     assert.equal(r.code, 2, `stdout=${r.stdout} stderr=${r.stderr}`);
     const out = JSON.parse(r.stdout) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(out).sort(), ["permissionDecision", "permissionDecisionReason"]);
+    // One object serves both events: top-level for camelCase, hookSpecificOutput for PascalCase.
+    assert.deepEqual(Object.keys(out).sort(), ["hookSpecificOutput", "permissionDecision", "permissionDecisionReason"]);
     assert.equal(out["permissionDecision"], "deny");
+    assert.deepEqual(out["hookSpecificOutput"], {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: out["permissionDecisionReason"],
+    });
     assert.match(String(out["permissionDecisionReason"]), /git push/);
     assert.match(r.stderr, /PUSH_[A-Z_]+/);
     assert.doesNotMatch(r.stdout + r.stderr, /modifiedArgs|updatedInput|toolArgs/);
@@ -114,12 +120,41 @@ describe("hook guard-egress --agent copilot — regression: toolArgs payloads ar
     assert.match(r.stderr, /GITHUB_API_VIA_HTTP_CLIENT/);
   });
 
-  it("a non-shell tool and unusable payloads still fail open, silently", () => {
+  it("a non-shell tool fails open, silently", () => {
     const edit = JSON.stringify({ sessionId: "s", cwd: repo, toolName: "edit", toolArgs: JSON.stringify({ command: "git push" }) });
-    for (const input of [edit, "", "not json", '{"toolName":"bash","toolArgs":"not json"}', '{"toolName":"bash","toolArgs":[1]}']) {
+    assert.deepEqual(run(edit, "copilot"), { stdout: "", stderr: "", code: 0 });
+  });
+
+  it("unusable payloads fail open (exit 0, no stdout) but say, once, that nothing was judged", () => {
+    for (const input of ["", "not json", '{"toolName":"bash","toolArgs":"not json"}', '{"toolName":"bash","toolArgs":[1]}', '{"toolName":"bash"}']) {
       const r = run(input, "copilot");
-      assert.deepEqual(r, { stdout: "", stderr: "", code: 0 }, input);
+      assert.equal(r.code, 0, input);
+      assert.equal(r.stdout, "", input);
+      assert.match(r.stderr, /^repo-aegis: guard-egress: this payload was not judged \([^)]+\); check that the hook is registered with the right --agent and event\n$/, input);
     }
+  });
+
+  it("an Antigravity-shaped payload under --agent copilot is not judged, visibly", () => {
+    const r = run(JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine: "git push" } } }), "copilot");
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /was not judged/);
+  });
+
+  it("write_bash: a push typed into an open session is judged (denied)", () => {
+    const r = run(JSON.stringify({ sessionId: "s", cwd: repo, toolName: "write_bash", toolArgs: JSON.stringify({ sessionId: "sh1", input: "git push\n" }) }), "copilot");
+    assert.equal(r.code, 2, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /"permissionDecision":"deny"/);
+  });
+
+  it("PascalCase PreToolUse: an ask carries the decision in the top level AND hookSpecificOutput, exit 0", () => {
+    const [, agent, payload] = shapes("git push origin main")[1]!;
+    const r = run(payload, agent);
+    const out = JSON.parse(r.stdout) as { permissionDecision: string; hookSpecificOutput: { permissionDecision: string; hookEventName: string } };
+    assert.equal(out.permissionDecision, "ask", r.stdout);
+    assert.equal(out.hookSpecificOutput.permissionDecision, "ask");
+    assert.equal(out.hookSpecificOutput.hookEventName, "PreToolUse");
+    assert.equal(r.code, 0);
   });
 });
 
