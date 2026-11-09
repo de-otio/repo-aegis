@@ -736,7 +736,7 @@ and points `core.hooksPath` at that directory.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--global` | **on** (since 0.7) | write `core.hooksPath` in the global git config, covering every repo on the machine |
-| `--local` | off | write `core.hooksPath` in this repo's local git config only (the pre-0.7 default) |
+| `--local` | off | write `core.hooksPath` in this repo's local git config only (the pre-0.7 default). When the global value already points at repo-aegis's hooks directory it writes nothing (a local value equal to the global one adds nothing) and says so; the hook scripts are still refreshed |
 | `--unset-local` | off | clear a repo-local `core.hooksPath` that would shadow the global value just installed, in one step |
 | `--force` | off | overwrite a conflicting `core.hooksPath` in the scope being written |
 | `--uninstall` | off | unset `core.hooksPath` in **both** global and local scope, and remove pre-commit/pre-push from `<home>/hooks` |
@@ -1571,8 +1571,25 @@ kind, owner/repo, verb, approval id; never the token) to `<home>/state/gh-decisi
 whatever the audit log's setting; refusals are recorded too.
 
 Any fault between choosing and spawning on a mapped owner is `GH_IDENTITY_UNAVAILABLE` and `gh`
-does not run (never a call as the active account). On an unmapped call a fault warns and `gh` runs
-unchanged. Exit status is `gh`'s own.
+does not run for a **write** (never a call as the active account). A **read** (a call the egress
+parser finds no publish in) whose identity cannot be produced (no token, a failed mint, an unreadable
+registry, a fault) runs as the active `gh` account instead, with one stderr line:
+`repo-aegis gh: GH_IDENTITY_UNAVAILABLE: <reason>, so this read runs as the active gh account; proceeding`.
+No token of any kind is attached, and the decision log records `fallback`. Findings about the
+identity itself (`GH_IDENTITY_INSTALLATION_MISMATCH`, `GH_BINARY_UNTRUSTED`) still refuse a read.
+On an unmapped call a fault warns and `gh` runs unchanged. Exit status is `gh`'s own.
+
+For a verb that runs `git` here (`pr checkout`, `pr create`, `repo sync`, a clone,
+`issue develop --checkout`) with no person present, the repository's own git configuration is
+judged first (`GH_IDENTITY_ARG_UNSAFE`). A repo-local `core.hooksPath` that resolves (realpath) to
+repo-aegis's own `<home>/hooks` directory, which `install hooks --local` writes, is accepted; any
+other value, and every other setting, still refuses. An **account-bound** approval for the owner
+(`repo-aegis approve <owner>/<repo>` or `<owner>/*`, for an owner with a mapped GitHub account, so
+the approval records a login) covers that refusal for its scope and lifetime: the call runs, stderr
+gets `repo-aegis: approval <id> covers <setting> for <owner>/<repo>`, and the decision log and the
+audit log (when on) record the approval id. An approval without a login, a `*` approval, an
+approval for another repository or owner, a ref-limited one and an expired one do not cover it.
+Unsafe arguments (`--editor`, `--hostname`, `--template` and the like) are not covered by an approval.
 
 Installing is not enabling: the shim only guards once `<home>/bin`
 precedes the real `gh` on `PATH`, which this command prints (also as
@@ -1726,6 +1743,8 @@ now reports, unless `--no-egress-checks`:
 | `PREPUSH_HOOK_MISSING` (warn) | the egress guard hook is registered but the **global** `core.hooksPath` is unset or not the repo-aegis hooks directory, so a repo that does not set it locally has no `pre-push` hook, the only layer that sees the environment git and ssh really run with | `repo-aegis install hooks` |
 | `SHELL_STARTUP_OVERRIDES` (warn) | `~/.zshenv`, `~/.zshrc`, `~/.zprofile`, `~/.zlogin`, `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` or `~/.profile` sets `GH_REPO`, `GH_HOST`, `GH_CONFIG_DIR`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `SRT_*` or `REPO_AEGIS_*`; reported by name and file, never value | remove the export |
 | `SSH_GITHUB_REDIRECT` (info) | `~/.ssh/config` has a `Host github.com` block whose `HostName` is not GitHub, or that applies a `ProxyCommand` / `ProxyJump` | none if intended |
+| `HOOKS_PATH_LOCAL_DUPLICATE` (info, per repo) | a repo-local `core.hooksPath` names the same directory as the global one, so it adds nothing; older `install hooks --local` runs wrote these. Removing it is safe: the global value takes over | `git config --local --unset core.hooksPath` (in that repo) |
+| `AGENT_REMOTE_IS_SSH` (warn, per repo) | the repo's owner has a GitHub App as its **agent** identity and `origin`'s push URL is SSH, which goes out as the person's SSH key, so an agent's `git push origin` is refused (`AGENT_PUSH_NEEDS_APP`). `classify --apply` prints the same finding | `git remote set-url --push origin https://github.com/<org>/<repo>.git`; a person runs it (it changes the push URL only, fetches and the person's own pushes keep SSH) |
 
 The `gh`-backed checks (`GH_LOGIN_UNREGISTERED`, `GH_MEMBER_ORG_UNREGISTERED`,
 `REGISTERED_ORG_NOT_MEMBER`) cover **every account logged in for

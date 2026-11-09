@@ -595,6 +595,51 @@ engagements: []
     assert.equal(cache.repos["my-handle/dotfiles"]?.visibility, "public");
   });
 
+  // Phase U, U3: --apply says when the owner's agent identity is a GitHub App and origin pushes over SSH.
+  describe("AGENT_REMOTE_IS_SSH", () => {
+    const REG = `schemaVersion: 3
+identities:
+  my-bot: { kind: github-app, app: my-bot }
+personalOrgs:
+  - { name: my-handle, agent: my-bot }
+  - other-handle
+engagements: []
+`;
+
+    function applyWarnings(remoteUrl: string, registry: string, apply = true): string[] {
+      const reg = join(tmp, `reg-ssh-${Math.random().toString(36).slice(2)}.yaml`);
+      writeFileSync(reg, registry);
+      setRemote(gitDir, remoteUrl);
+      resetRepoAegis(gitDir);
+      const gh = fakeGh(join(tmp, `gh-ssh-${Math.random().toString(36).slice(2)}`), "echo PUBLIC");
+      const prev = process.env["GIT_CONFIG_GLOBAL"];
+      process.env["GIT_CONFIG_GLOBAL"] = "/dev/null"; // no user `insteadOf` rewrites in the push URL
+      try {
+        const { stdout } = withFakeGh(gh, () =>
+          withRegistry(reg, () =>
+            captureOutput(() => classify({ cwd: gitDir, apply, json: true, rules: join(rulesDir, "no-rules.yml") })),
+          ),
+        );
+        return (JSON.parse(stdout) as { warnings: string[] }).warnings;
+      } finally {
+        if (prev === undefined) delete process.env["GIT_CONFIG_GLOBAL"];
+        else process.env["GIT_CONFIG_GLOBAL"] = prev;
+      }
+    }
+
+    it("--apply flags an SSH origin for an App-agent owner and prints the person-run set-url --push line", () => {
+      const w = applyWarnings("git@github.com:my-handle/dotfiles.git", REG);
+      assert.ok(w.some(l => l.startsWith("AGENT_REMOTE_IS_SSH:")), w.join("\n"));
+      assert.ok(w.includes("fix: git remote set-url --push origin https://github.com/my-handle/dotfiles.git"), w.join("\n"));
+    });
+
+    it("says nothing for an HTTPS origin, for an owner with no App agent identity, and on a dry run", () => {
+      assert.deepEqual(applyWarnings("https://github.com/my-handle/dotfiles.git", REG).filter(l => l.includes("AGENT_REMOTE_IS_SSH")), []);
+      assert.deepEqual(applyWarnings("git@github.com:other-handle/dotfiles.git", REG).filter(l => l.includes("AGENT_REMOTE_IS_SSH")), []);
+      assert.deepEqual(applyWarnings("git@github.com:my-handle/dotfiles.git", REG, false).filter(l => l.includes("AGENT_REMOTE_IS_SSH")), []);
+    });
+  });
+
   it("engagement.githubOrgs match → customer-coupled with engagement (dry-run)", () => {
     const reg = join(tmp, "reg-engagement.yaml");
     writeFileSync(

@@ -49,7 +49,10 @@ export type DoctorCheckCode =
   // Residual risks R8, R9, R11 (§8.2).
   | "PREPUSH_HOOK_MISSING"
   | "SHELL_STARTUP_OVERRIDES"
-  | "SSH_GITHUB_REDIRECT";
+  | "SSH_GITHUB_REDIRECT"
+  // Phase U (doc/plan-landscape-recommendations.md): a duplicate local hooks path, and an SSH origin where agents need HTTPS.
+  | "HOOKS_PATH_LOCAL_DUPLICATE"
+  | "AGENT_REMOTE_IS_SSH";
 
 /**
  * How loudly a failing check speaks. Only `fail` makes `doctor` exit 1.

@@ -11,12 +11,13 @@
 //                                   HostName to something else.
 //   PREPUSH_HOOK_MISSING (warn)     R11: the guard hook is registered but the global
 //                                   core.hooksPath is not the repo-aegis hooks directory.
+//   HOOKS_PATH_LOCAL_DUPLICATE (info)  a repo-local core.hooksPath equal to the global one.
 //
 // Both file scanners are pure text readers. They never execute or `source` a
 // file, and `SHELL_STARTUP_OVERRIDES` keeps only the variable NAME and the file
 // name: the value of a startup-file assignment can be a token or a path, and
 // doctor output can land in an agent transcript.
-import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -234,5 +235,60 @@ export function checkPrePushHook(
       (actual === null ? "is unset" : "is not the repo-aegis hooks directory") +
       ", so a repo that does not set it locally has no pre-push hook, the only layer that sees the environment git will really run with",
     fix: "repo-aegis install hooks",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// HOOKS_PATH_LOCAL_DUPLICATE (Phase U, U1)
+// ---------------------------------------------------------------------------
+
+/** The repo-LOCAL `core.hooksPath` (`~` expanded by git); null when unset there. */
+function readLocalHooksPathAt(cwd: string): string | null {
+  try {
+    const out = execFileSync("git", ["config", "--local", "--type=path", "--get", "core.hooksPath"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return out === "" ? null : out;
+  } catch {
+    return null;
+  }
+}
+
+function realpathOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * `HOOKS_PATH_LOCAL_DUPLICATE` (info), per repository: a repo-local `core.hooksPath` that names the same
+ * directory as the global one. It changes nothing for git (one hooks directory either way), but a repo-local
+ * value is the shape the `gh` shim's pre-flight and other tools treat as steering, and it is what older
+ * `install hooks --local` runs left behind. Removing it is safe: the global value takes over unchanged.
+ * Silent when the local value is unset or differs from the global one (a differing value is the hook-state
+ * sweep's finding, not this one). `readGlobal` and `readLocal` are seams.
+ */
+export function checkLocalHooksPathDuplicate(
+  wt: string,
+  readGlobal: () => string | null = readGlobalHooksPath,
+  readLocal: (cwd: string) => string | null = readLocalHooksPathAt,
+): DoctorCheck | null {
+  const local = readLocal(wt);
+  if (local === null) return null;
+  const global = readGlobal();
+  if (global === null) return null;
+  if (realpathOr(resolve(wt, local)) !== realpathOr(resolve(wt, global))) return null;
+  return {
+    code: "HOOKS_PATH_LOCAL_DUPLICATE",
+    ok: false,
+    severity: "info",
+    detail:
+      "this repository sets core.hooksPath locally to the same directory the global setting names, so it adds nothing; " +
+      "removing it is safe (the global value takes over) and keeps a local setting out of the way of tools that treat one as a risk",
+    fix: "git config --local --unset core.hooksPath",
   };
 }
