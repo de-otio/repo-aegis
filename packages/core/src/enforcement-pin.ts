@@ -112,15 +112,19 @@ export function parsePinFromScript(text: string): EnforcementPin | null {
  * command would otherwise exit 127, which Claude Code treats as a non-blocking
  * hook error: the hook would simply not run and the tool call would proceed.
  * Exit 2 blocks. `exec` hands stdin (the tool call) straight to the CLI.
+ *
+ * `failOpen` is for the one hook that must NEVER block: the UserPromptSubmit hook that revokes prompt approvals (exit 2
+ * there would swallow the person's own message, leaving them unable to ask for the fix). It exits 0 instead, saying
+ * nothing the host would show. Nothing is lost: with the pin gone the guard hook blocks, so no approval is written.
  */
-export function pinnedHookCommand(pin: EnforcementPin, hookArgs: string): string {
+export function pinnedHookCommand(pin: EnforcementPin, hookArgs: string, opts: { failOpen?: boolean } = {}): string {
   assertPinnable(pin);
   const n = shellQuote(pin.node);
   const c = shellQuote(pin.cli);
   return (
     `if [ -f ${n} ] && [ -x ${n} ] && [ -f ${c} ] && [ -r ${c} ]; then exec ${n} ${c} ${hookArgs}; fi; ` +
     `printf 'repo-aegis: the pinned enforcement binary is missing or not usable (%s, %s); ` +
-    `re-pin it by running: repo-aegis install claude-md\\n' ${n} ${c} >&2; exit 2`
+    `re-pin it by running: repo-aegis install claude-md\\n' ${n} ${c} >&2; exit ${opts.failOpen === true ? 0 : 2}`
   );
 }
 
@@ -130,7 +134,7 @@ export function isPinnedHookCommand(command: string, hookName: string): boolean 
     command.startsWith("if [ -f ") &&
     command.includes("; then exec ") &&
     command.includes(` hook ${hookName}`) &&
-    command.endsWith("; exit 2")
+    (command.endsWith("; exit 2") || command.endsWith("; exit 0"))
   );
 }
 
@@ -149,6 +153,8 @@ export interface ManagedHookContext {
   dropinPath: string;
   /** Test seam: the `id` to run, default {@link MANAGED_ID_PATH}. */
   idPath?: string;
+  /** The hook must never block (see {@link pinnedHookCommand}): a failing `id` or a missing pin exits 0, not 2. */
+  failOpen?: boolean;
 }
 
 /**
@@ -180,11 +186,12 @@ export function managedHookCommand(pin: EnforcementPin, hookArgs: string, ctx: M
     `repo-aegis: the pinned enforcement binary is missing or not usable (${pin.node}, ${pin.cli}); ` +
       `re-pin it by running: repo-aegis install claude-md   or remove this managed hook: ${remove}`,
   );
+  const code = ctx.failOpen === true ? 0 : 2;
   return (
-    `__u=$(${ctx.idPath ?? MANAGED_ID_PATH} -u 2>/dev/null) || { printf '%s\\n' ${idFailed} >&2; exit 2; }; ` +
+    `__u=$(${ctx.idPath ?? MANAGED_ID_PATH} -u 2>/dev/null) || { printf '%s\\n' ${idFailed} >&2; exit ${code}; }; ` +
     `[ "$__u" = ${ctx.uid} ] || exit 0; ` +
     `if [ -f ${n} ] && [ -x ${n} ] && [ -f ${c} ] && [ -r ${c} ]; then exec ${n} ${c} ${hookArgs}; fi; ` +
-    `printf '%s\\n' ${pinMissing} >&2; exit 2`
+    `printf '%s\\n' ${pinMissing} >&2; exit ${code}`
   );
 }
 
@@ -195,6 +202,6 @@ export function isManagedHookCommand(command: string, hookName: string): boolean
     command.includes(" -u 2>/dev/null) || { printf '%s\\n' ") &&
     command.includes("; then exec ") &&
     command.includes(` hook ${hookName}`) &&
-    command.endsWith("; exit 2")
+    (command.endsWith("; exit 2") || command.endsWith("; exit 0"))
   );
 }

@@ -907,6 +907,7 @@ drop-in is verified. `--user-settings` writes `~/.claude/settings.json` instead
 | `PostToolUse` | `Write\|Edit\|MultiEdit` | `repo-aegis hook scan-after-write` |
 | `PostToolUse` | `Bash` | `repo-aegis hook scan-bash-output` |
 | `PostToolUse` | `Bash` | `repo-aegis hook egress-receipt` |
+| `UserPromptSubmit` | `*` | `repo-aegis hook prompt-submit` (revokes prompt approvals when you type; this one exits **0** if the pin is gone, so it can never swallow your message) |
 | `SessionStart` | `*` | `repo-aegis hook first-touch` (only with `--first-touch`) |
 
 Matchers are regular expressions over the tool name (see Claude Code's
@@ -1591,6 +1592,16 @@ push"]` → `git push`); otherwise the elements are joined with spaces.
 The `cwd` used is the harness's root `cwd` — where the command *will*
 run — never the hook process's own working directory.
 
+### `repo-aegis hook prompt-submit`
+
+The UserPromptSubmit hook. It deletes every prompt approval (a person's yes at the
+agent's own permission prompt; see `approve`) when the person types to the agent,
+and nothing else: terminal approvals are untouched. It reads and discards stdin,
+prints nothing (plain stdout on this event would be added to the model's context),
+exits 0 on every path, and never blocks the prompt. With the audit log on, a revoke
+that removed something is an `egress-approval-revoke` record (`source: "prompt"`,
+`layer: "hook prompt-submit"`); the prompt text is never recorded.
+
 ### `repo-aegis hook egress-receipt`
 
 The post-command hook (`PostToolUse` matcher `Bash`). If the command that
@@ -1750,7 +1761,7 @@ The git credential helper itself; git runs it, you do not (`install git-credenti
 
 The pre-push hook adds `AGENT_PUSH_NEEDS_APP`: with no person present, an owner mapped to an agent identity and an SSH push URL (`git@…`, `ssh://…`, or an `~/.ssh/config` alias for github.com) is refused with the HTTPS form; over HTTPS the helper order is re-checked (`GIT_CREDENTIAL_HELPER_ORDER`). The existing destination checks run first and are unchanged.
 
-### `repo-aegis approve <org>/<repo> | <org>/* | * [--ref <ref>] [--ttl <duration>] [--note <text>]`, `approve --list`, `approve --revoke <id|all>`
+### `repo-aegis approve <org>/<repo> | <org>/* | * [--ref <ref>] [--ttl <duration>] [--note <text>]`, `approve --list`, `approve --revoke <id|all|prompt>`
 
 The human's side of rule g. Minting **requires a TTY on stderr that is a
 person's** (no agent host or pty wrapper above the process, no `CLAUDECODE=1`,
@@ -1803,8 +1814,12 @@ approval has an id starting with `p`, is bound to one exact `verb` (and the
 `ref` of a push, or the `endpoint` of a mutating `gh api`) for one repository,
 lives 120 seconds (shown in seconds), and is honoured by the pre-push hook and
 the `gh` shim only, never by the agent hook. They live one file each under
-`$REPO_AEGIS_HOME/prompt-approvals/`; `--revoke p<id>` removes one and
-`--revoke all` removes both kinds. They cannot be minted from the command line. Mint, every use
+`$REPO_AEGIS_HOME/prompt-approvals/`; `--revoke p<id>` removes one,
+`--revoke prompt` removes **only** the prompt approvals (terminal ones stay) and
+`--revoke all` removes both kinds. They cannot be minted from the command line. A
+UserPromptSubmit hook (`hook prompt-submit`, registered by `install claude-md`) does
+the `--revoke prompt` for you whenever you type to the agent, so a yes followed by
+you typing before the push happens means the push asks again. Mint, every use
 (with the layer) and revoke are audit records (`egress-approval-mint`,
 `egress-approval-use`, `egress-approval-revoke`). The agent hook answers
 an approved publish with an explicit `allow` whose reason names the

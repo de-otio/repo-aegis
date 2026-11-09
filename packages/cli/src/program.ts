@@ -604,6 +604,15 @@ export async function buildProgram(): Promise<Command> {
       await hookGuardEgress(withGlobals(opts, cmd));
     });
 
+  // UserPromptSubmit: a person typing ends the life of any prompt approval (egress-guard.md §4a.1). Silent, exit 0.
+  hook
+    .command("prompt-submit")
+    .description("UserPromptSubmit hook: revoke prompt approvals (a yes at the agent's prompt covers one command); silent, never blocks the prompt")
+    .action(async () => {
+      const { hookPromptSubmit } = await import("./commands/hook-prompt-submit.js");
+      await hookPromptSubmit();
+    });
+
   hook
     .command("egress-receipt")
     .description("PostToolUse(Bash): after a command that published, return one line naming the destination (org/repo, visibility, class) as additionalContext")
@@ -734,7 +743,7 @@ export async function buildProgram(): Promise<Command> {
     .option("--ttl <duration>", "how long the approval lives: 15m (default), 2h, 90s, 1d — never more than 24h")
     .option("--note <text>", "why (audit trail only)")
     .option("--list", "list live approvals instead of minting one")
-    .option("--revoke <id|all>", "revoke one approval by id, or every one")
+    .option("--revoke <id|all|prompt>", "revoke one approval by id, every one, or only the prompt approvals (a yes at the agent's prompt; terminal approvals stay)")
     .action(async (target: string | undefined, opts, cmd) => {
       const { approve } = await import("./commands/approve.js");
       approve(target, withGlobals(opts, cmd));

@@ -537,6 +537,30 @@ describe("P1: a yes at the agent's prompt carries to the real pre-push hook", { 
     assert.match(other.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/, other.stderr);
   });
 
+  it("a yes, then the person types again (UserPromptSubmit), then the push: refused. The yes covered one command, not the later one", () => {
+    const w = pushWorld();
+    assert.equal(hookAsks(w, "default"), "ask");
+    const submit = spawnSync(process.execPath, [cliPath, "hook", "prompt-submit"], {
+      cwd: w.repo,
+      env: w.env,
+      encoding: "utf8",
+      input: JSON.stringify({ session_id: "sess-p1", hook_event_name: "UserPromptSubmit", prompt: "and now?" }),
+    });
+    assert.deepEqual({ stdout: submit.stdout, stderr: submit.stderr, status: submit.status }, { stdout: "", stderr: "", status: 0 });
+    const r = realPush(w);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/, r.stderr);
+    assert.doesNotMatch(r.stderr, /stands in for a person/);
+    // ...and a terminal approval would have survived it: control that the refusal above is the revoke, not the setup.
+    const w2 = pushWorld();
+    assert.equal(hookAsks(w2, "default"), "ask");
+    mintApproval({ target: { org: "acme", repo: "svc" }, path: approvalsPath(w2.home) });
+    spawnSync(process.execPath, [cliPath, "hook", "prompt-submit"], { cwd: w2.repo, env: w2.env, input: "{}" });
+    const kept = realPush(w2);
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.match(kept.stderr, /human approval [0-9a-f]{8} stands in for a person/, kept.stderr);
+  });
+
   it("auto: nobody answered the prompt, so the same push is refused PUBLIC_PUSH_NEEDS_HUMAN", () => {
     const w = pushWorld();
     assert.equal(hookAsks(w, "auto"), "ask");

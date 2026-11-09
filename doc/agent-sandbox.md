@@ -29,7 +29,20 @@ from vendor documentation and have not been run end to end.
   the pre-push script now passes the ref being updated, and an older script
   cannot honour the yes (`repo-aegis doctor` reports it as a stale hook). A write
   as a person-mapped account still needs an approval minted by a person from a
-  terminal.
+  terminal. The yes also ends the moment the person types anything: a
+  UserPromptSubmit hook (`repo-aegis hook prompt-submit`, registered by
+  `install claude-md`) deletes the prompt approvals then, so a yes followed by the
+  person typing before the push happens means the push asks again.
+- **Scripted `claude -p` runs have nobody to answer.** The hook sees
+  `permission_mode: "default"` there too, and its input has no field that says the
+  run is headless (nothing in the common fields of
+  [the hooks reference](https://code.claude.com/docs/en/hooks) does). repo-aegis
+  does not guess from the process list, because `ps` fails in the sandbox. For
+  a scripted run, pass an explicit `--permission-mode` other than `default` and
+  `acceptEdits` (for example `dontAsk` or `bypassPermissions`); otherwise prompt
+  approvals are written with nobody to answer the prompt, and a command that
+  repeats the same verb, destination and ref within two minutes passes
+  pre-push and the `gh` shim.
 
 ## What does not work inside the sandbox
 

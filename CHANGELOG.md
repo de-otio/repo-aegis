@@ -24,6 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `repo-aegis check --remote-ref <ref>`: the ref git will update on the remote, which pre-push passes
   on both of its paths.
 - `Edit(<home>/prompt-approvals/**)` joins the `permissions.deny` rules `install claude-md` writes.
+- **A yes ends when the person types.** `install claude-md` registers a UserPromptSubmit hook,
+  `repo-aegis hook prompt-submit`, in the managed drop-in or in `settings.json` (`--uninstall` removes it).
+  It deletes every prompt approval when the person types to the agent, is silent, exits 0 and never
+  blocks the prompt (its pinned command exits 0, not 2, if the pinned binary is gone). So a yes followed
+  by the person typing before the push, and a "no" followed by the person's next message, both mean the
+  push asks again. `repo-aegis approve --revoke prompt` does the same by hand and leaves terminal
+  approvals alone. Re-run `repo-aegis install claude-md` once to register it; with the managed drop-in,
+  `doctor` reports `MANAGED_DROPIN_STALE` until you do.
+- Prompt approvals bind more exactly: a mutating `gh api` binds the HTTP method as well as the endpoint
+  (a yes to a PATCH is not a yes to a DELETE); `gh pr|issue edit|merge|comment|review <n>` and
+  `gh release create|edit|upload <tag>` bind the number or tag when one is given (no target: the
+  repository only, as before); `git push --delete` / `-d` binds nothing; and a record dated more than 5 s
+  ahead of the reader's clock is ignored.
+- Documented: for scripted `claude -p` runs, pass an explicit `--permission-mode` other than
+  `default`/`acceptEdits`. The hook input has no headless indicator, and `permission_mode` reads
+  `default` there too.
 
 ### Changed
 

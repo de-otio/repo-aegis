@@ -4,7 +4,17 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { renderHookScript } from "./hook-scripts.js";
-import { parsePinFromScript, pinProblem, shellQuote, shellUnquote, type EnforcementPin } from "./enforcement-pin.js";
+import {
+  isManagedHookCommand,
+  isPinnedHookCommand,
+  managedHookCommand,
+  parsePinFromScript,
+  pinnedHookCommand,
+  pinProblem,
+  shellQuote,
+  shellUnquote,
+  type EnforcementPin,
+} from "./enforcement-pin.js";
 
 const AWKWARD = [
   "/plain/path/node",
@@ -67,5 +77,34 @@ describe("parsePinFromScript", () => {
 
   it("returns null when a pin line is not a single quoted word", () => {
     assert.equal(parsePinFromScript("__ra_node=/bare/node\n__ra_cli='/c.js'\n"), null);
+  });
+});
+
+describe("pinnedHookCommand / managedHookCommand: failOpen (the UserPromptSubmit revoker)", () => {
+  const pin = { node: "/no/such/node", cli: "/no/such/cli.js" };
+  const run = (command: string) => spawnSync("sh", ["-c", command], { encoding: "utf8" });
+
+  it("a guard with the pin gone exits 2 (blocks); the fail-open form exits 0 and prints nothing the host acts on", () => {
+    assert.equal(run(pinnedHookCommand(pin, "hook guard-egress")).status, 2);
+    const open = run(pinnedHookCommand(pin, "hook prompt-submit", { failOpen: true }));
+    assert.equal(open.status, 0);
+    assert.equal(open.stdout, "");
+  });
+
+  it("both forms are recognised as pinned hooks by name, and the fail-open one is not mistaken for another hook", () => {
+    assert.ok(isPinnedHookCommand(pinnedHookCommand(pin, "hook prompt-submit", { failOpen: true }), "prompt-submit"));
+    assert.ok(isPinnedHookCommand(pinnedHookCommand(pin, "hook guard-egress"), "guard-egress"));
+    assert.ok(!isPinnedHookCommand(pinnedHookCommand(pin, "hook prompt-submit", { failOpen: true }), "guard-egress"));
+  });
+
+  it("the managed form: a failing id and a missing pin exit 0 when fail-open, 2 otherwise; another uid is 0 either way", () => {
+    const uid = String(process.getuid?.() ?? 501);
+    const ctx = { uid, dropinPath: "/x/drop-in.json" };
+    assert.equal(run(managedHookCommand(pin, "hook guard-egress", ctx)).status, 2);
+    assert.equal(run(managedHookCommand(pin, "hook prompt-submit", { ...ctx, failOpen: true })).status, 0);
+    assert.equal(run(managedHookCommand(pin, "hook guard-egress", { ...ctx, idPath: "/nonexistent/id" })).status, 2);
+    assert.equal(run(managedHookCommand(pin, "hook prompt-submit", { ...ctx, idPath: "/nonexistent/id", failOpen: true })).status, 0);
+    assert.equal(run(managedHookCommand(pin, "hook guard-egress", { ...ctx, uid: String(Number(uid) + 1) })).status, 0);
+    assert.ok(isManagedHookCommand(managedHookCommand(pin, "hook prompt-submit", { ...ctx, failOpen: true }), "prompt-submit"));
   });
 });

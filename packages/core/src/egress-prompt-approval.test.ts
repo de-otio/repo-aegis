@@ -29,7 +29,9 @@ import {
   promptApprovalsDir,
   promptBindingOf,
   recordPromptApproval,
+  revokeAllPromptApprovals,
   revokeApprovals,
+  listApprovals,
   type PromptBinding,
 } from "./egress-approval.js";
 import { parseEgressIntents, type EgressIntent } from "./egress-intent.js";
@@ -107,16 +109,19 @@ describe("promptBindingOf: the binding the hook computes", () => {
   });
 
   it("gh api binds the endpoint, minus one leading slash; no endpoint binds nothing", () => {
-    assert.equal(
-      promptBindingOf({ verb: "gh-api-mutating", apiEndpoint: "/repos/o/r/issues" }, dest(), noHead)?.endpoint,
-      "repos/o/r/issues",
-    );
-    assert.equal(
-      promptBindingOf({ verb: "gh-api-mutating", apiEndpoint: "repos/o/r/issues" }, dest(), noHead)?.endpoint,
-      "repos/o/r/issues",
-    );
+    const api = (apiEndpoint: string, apiMethod = "POST") =>
+      promptBindingOf({ verb: "gh-api-mutating", apiEndpoint, apiMethod }, dest(), noHead);
+    assert.equal(api("/repos/o/r/issues")?.endpoint, "repos/o/r/issues");
+    assert.equal(api("repos/o/r/issues")?.endpoint, "repos/o/r/issues");
+    assert.equal(api("repos/o/r/issues", "PATCH")?.method, "PATCH");
     assert.equal(promptBindingOf({ verb: "gh-api-mutating" }, dest(), noHead), null);
-    assert.equal(promptBindingOf({ verb: "gh-api-mutating", apiEndpoint: "/" }, dest(), noHead), null);
+    assert.equal(promptBindingOf({ verb: "gh-api-mutating", apiEndpoint: "/", apiMethod: "POST" }, dest(), noHead), null);
+    assert.equal(
+      promptBindingOf({ verb: "gh-api-mutating", apiEndpoint: "repos/o/r/issues" }, dest(), noHead),
+      null,
+      "a gh api binding with no method binds nothing",
+    );
+    assert.equal(api("repos/o/r/issues", "GET"), null, "a method that is not a mutation is never bound");
   });
 
   it("nothing is bound for an unresolved or wildcard destination, an unresolved intent, or a verb without a repository", () => {
@@ -169,7 +174,7 @@ describe("recordPromptApproval: the permission-mode allowlist (F9)", () => {
   });
 
   it("an invalid binding writes nothing", () => {
-    for (const b of [
+    const invalid: PromptBinding[] = [
       bind({ org: "*" }),
       bind({ repo: "*" }),
       bind({ org: "Bad Org" }),
@@ -178,10 +183,17 @@ describe("recordPromptApproval: the permission-mode allowlist (F9)", () => {
       bind({ ref: "" }),
       bind({ ref: "a b" }),
       { verb: "gh-api-mutating", org: "o", repo: "r" } as PromptBinding, // no endpoint
+      { verb: "gh-api-mutating", org: "o", repo: "r", endpoint: "repos/o/r/issues" } as PromptBinding, // no method
+      { verb: "gh-api-mutating", org: "o", repo: "r", endpoint: "repos/o/r/issues", method: "GET" }, // not a mutation
+      { verb: "gh-api-mutating", org: "o", repo: "r", endpoint: "repos/o/r/issues", method: "patch" }, // not upper-case
+      { verb: "git-push", org: "o", repo: "r", ref: "main", method: "POST" } as PromptBinding, // a method on a push
+      { verb: "gh-pr-create", org: "o", repo: "r", target: "12" }, // a target on a verb that takes none
+      { verb: "gh-pr-merge", org: "o", repo: "r", target: "a b" }, // not plain text
       { verb: "gh-pr-create", org: "o", repo: "r", ref: "main" } as PromptBinding, // a ref on a verb that has none
       { verb: "gh-gist-create", org: "o", repo: "r" } as unknown as PromptBinding,
       { verb: "npm-publish", org: "o", repo: "r" } as unknown as PromptBinding,
-    ]) {
+    ];
+    for (const b of invalid) {
       assert.equal(recordPromptApproval({ binding: b, permissionMode: "default", home, now: T0 }), null, JSON.stringify(b));
     }
     assert.equal(existsSync(join(home, PROMPT_APPROVALS_DIR)), false);
@@ -280,11 +292,43 @@ describe("findPromptApproval: exact match, no wildcard", () => {
   });
 
   it("the endpoint is exact", () => {
-    write({ verb: "gh-api-mutating", org: "o", repo: "r", endpoint: "repos/o/r/issues" });
-    assert.ok(findPromptApproval({ verb: "gh-api-mutating", org: "o", repo: "r", endpoint: "repos/o/r/issues" }, home, T0));
-    assert.equal(findPromptApproval({ verb: "gh-api-mutating", org: "o", repo: "r", endpoint: "repos/o/r/pulls" }, home, T0), null);
-    assert.equal(findPromptApproval({ verb: "gh-api-mutating", org: "o", repo: "r", endpoint: "repos/o/r/issues/1" }, home, T0), null);
+    const api = (endpoint: string, method = "PATCH"): PromptBinding => ({ verb: "gh-api-mutating", org: "o", repo: "r", endpoint, method });
+    write(api("repos/o/r/issues/1"));
+    assert.ok(findPromptApproval(api("repos/o/r/issues/1"), home, T0));
+    assert.equal(findPromptApproval(api("repos/o/r/pulls"), home, T0), null);
+    assert.equal(findPromptApproval(api("repos/o/r/issues/1/comments"), home, T0), null);
     assert.equal(findPromptApproval({ verb: "gh-api-mutating", org: "o", repo: "r" } as PromptBinding, home, T0), null);
+  });
+
+  it("the HTTP method is exact: a PATCH approval does not cover a DELETE of the same endpoint (and the reverse)", () => {
+    const api = (method: string): PromptBinding => ({ verb: "gh-api-mutating", org: "o", repo: "r", endpoint: "repos/o/r/issues/1", method });
+    write(api("PATCH"));
+    assert.ok(findPromptApproval(api("PATCH"), home, T0));
+    assert.equal(findPromptApproval(api("DELETE"), home, T0), null);
+    assert.equal(findPromptApproval(api("POST"), home, T0), null);
+    assert.equal(findPromptApproval(api("PUT"), home, T0), null);
+    assert.equal(findPromptApproval({ ...api("PATCH"), method: undefined } as unknown as PromptBinding, home, T0), null);
+  });
+
+  it("the PR, issue or release target is exact, in both directions", () => {
+    const merge = (target?: string): PromptBinding => ({ verb: "gh-pr-merge", org: "o", repo: "r", ...(target !== undefined && { target }) });
+    write(merge("12"));
+    assert.ok(findPromptApproval(merge("12"), home, T0));
+    assert.equal(findPromptApproval(merge("13"), home, T0), null, "another PR");
+    assert.equal(findPromptApproval(merge("120"), home, T0), null, "a longer number");
+    assert.equal(findPromptApproval(merge(), home, T0), null, "a record that names a PR does not cover a command that names none");
+    const h2 = mkdtempSync(join(tmpdir(), "prompt-approval-t-"));
+    try {
+      recordPromptApproval({ binding: merge(), permissionMode: "default", home: h2, now: T0 });
+      assert.ok(findPromptApproval(merge(), h2, T0), "bare binds the repo only, as before");
+      assert.equal(findPromptApproval(merge("12"), h2, T0), null, "a record that names none does not cover a named PR");
+    } finally {
+      rmSync(h2, { recursive: true, force: true });
+    }
+    const release = (target: string): PromptBinding => ({ verb: "gh-release-edit", org: "o", repo: "r", target });
+    write(release("v1.0.0"));
+    assert.ok(findPromptApproval(release("v1.0.0"), home, T0));
+    assert.equal(findPromptApproval(release("v1.0.1"), home, T0), null);
   });
 
   it("at expiresAt it is gone (exp > now, not >=)", () => {
@@ -330,6 +374,10 @@ describe("malformed prompt files are ignored", () => {
       ["git-push without ref", { ...rest, id: "p00000004", ref: undefined }],
       ["a ref on a gh verb", { ...rest, id: "p00000005", verb: "gh-pr-create" }],
       ["gh-api without endpoint", { ...rest, id: "p00000006", verb: "gh-api-mutating", ref: undefined }],
+      ["gh-api with an endpoint but no method", { ...rest, id: "p0000000c", verb: "gh-api-mutating", ref: undefined, endpoint: "repos/o/r/x" }],
+      ["gh-api with a GET method", { ...rest, id: "p0000000d", verb: "gh-api-mutating", ref: undefined, endpoint: "repos/o/r/x", method: "GET" }],
+      ["a target on a verb that takes none", { ...rest, id: "p0000000e", verb: "gh-pr-create", ref: undefined, target: "12" }],
+      ["created 6 s in the future", { ...rest, id: "p0000000f", createdAt: new Date(T0.getTime() + 6000).toISOString(), expiresAt: new Date(T0.getTime() + 6000 + 120_000).toISOString() }],
       ["mode outside the allowlist", { ...rest, id: "p00000007", permissionMode: "auto" }],
       ["mode bypassPermissions", { ...rest, id: "p00000008", permissionMode: "bypassPermissions" }],
       ["no mode", { ...rest, id: "p00000009", permissionMode: undefined }],
@@ -431,5 +479,97 @@ describe("revokeApprovals and listAllApprovals cover both stores", () => {
         [t.id, "terminal"],
       ],
     );
+  });
+});
+
+describe("a record dated ahead of the reader's clock is not honoured", () => {
+  it("5 s of skew is tolerated, 6 s is not (a hand-made file meant to outlive its two minutes)", () => {
+    const a = recordPromptApproval({ binding: bind(), permissionMode: "default", home, now: T0 })!;
+    const file = join(promptApprovalsDir(home), `${a.id}.json`);
+    const dated = (ahead: number) => {
+      const created = new Date(T0.getTime() + ahead);
+      writeFileSync(file, JSON.stringify({ ...a, createdAt: created.toISOString(), expiresAt: new Date(created.getTime() + 120_000).toISOString() }));
+    };
+    dated(4000);
+    assert.equal(listPromptApprovals(home, T0).length, 1);
+    dated(6000);
+    assert.equal(listPromptApprovals(home, T0).length, 0);
+    assert.equal(findPromptApproval(bind(), home, T0), null);
+    // ...and it is honoured once the clock has caught up with it.
+    assert.equal(listPromptApprovals(home, plus(2000)).length, 1);
+  });
+});
+
+describe("what the parser hands the binding: git push --delete, the gh api method, the PR or tag", () => {
+  const bound = (command: string, head: (d: string) => string | null = () => "main") =>
+    promptBindingOf(intentOf(command), dest(), head);
+
+  it("git push --delete / -d binds nothing, however it is spelled (like the :ref form)", () => {
+    assert.equal(bound("git push origin :main"), null);
+    for (const flags of ["--delete", "-d", "-fd", "--dele", "--de", "--delete --force"]) {
+      assert.equal(bound(`git push ${flags} origin main`), null, `git push ${flags} origin main`);
+      assert.equal(bound(`git push origin ${flags} main`), null, `git push origin ${flags} main`);
+    }
+    assert.equal(bound("git push origin --delete refs/heads/feat"), null);
+    assert.equal(bound("git push origin -d main"), null);
+    // the control: the same push without the flag binds
+    assert.equal(bound("git push origin main")?.ref, "main");
+    assert.equal(bound("git push --force-with-lease origin main")?.ref, "main");
+    assert.equal(bound("git push --dry-run origin main")?.ref, "main", "--dry-run is not --delete");
+  });
+
+  it("gh api carries its method: -X, --method, and gh's POST default for fields", () => {
+    const m = (command: string) => bound(command)?.method;
+    assert.equal(m("gh api -X PATCH repos/o/r/issues/1 -f title=x"), "PATCH");
+    assert.equal(m("gh api --method DELETE repos/o/r/issues/1/labels/bug"), "DELETE");
+    assert.equal(m("gh api --method=put repos/o/r/topics -f x=y"), "PUT");
+    assert.equal(m("gh api repos/o/r/issues -f title=x"), "POST");
+    assert.equal(m("gh api repos/o/r/issues --input body.json"), "POST");
+    assert.equal(parseEgressIntents("gh api repos/o/r/issues").length, 0, "a read is not an intent at all");
+  });
+
+  it("gh pr|issue <sub> <n> and release <sub> <tag> bind the number or tag; create verbs and bare commands bind the repo only", () => {
+    const t = (command: string) => bound(command)?.target;
+    assert.equal(t("gh pr merge 12 --repo o/r"), "12");
+    assert.equal(t("gh pr merge --repo o/r 12 --squash"), "12");
+    assert.equal(t("gh pr comment 7 --repo o/r --body x"), "7");
+    assert.equal(t("gh pr edit 7 --repo o/r --title x"), "7");
+    assert.equal(t("gh pr review 7 --repo o/r --approve"), "7");
+    assert.equal(t("gh issue comment 5 --repo o/r --body x"), "5");
+    assert.equal(t("gh issue edit 5 --repo o/r --title x"), "5");
+    assert.equal(t("gh pr merge https://github.com/o/r/pull/9"), "https://github.com/o/r/pull/9");
+    assert.equal(t("gh release create v1.2.3 --repo o/r"), "v1.2.3");
+    assert.equal(t("gh release edit v1.2.3 --repo o/r --notes x"), "v1.2.3");
+    assert.equal(t("gh release upload v1.2.3 dist.tgz --repo o/r"), "v1.2.3");
+    // no target
+    assert.equal(bound("gh pr create --repo o/r --title t")?.verb, "gh-pr-create");
+    assert.equal(t("gh pr create --repo o/r --title t"), undefined);
+    assert.equal(t("gh issue create --repo o/r --title t"), undefined);
+    assert.equal(t("gh pr merge --repo o/r"), undefined, "a bare merge (the current branch) binds the repository only");
+    assert.equal(t("gh repo edit o/r --description x"), undefined);
+    // an expansion in the target is unresolved: nothing is bound
+    assert.equal(bound("gh pr merge $PR --repo o/r"), null);
+  });
+});
+
+describe("revoking prompt approvals only", () => {
+  it('revokeApprovals("prompt") removes every prompt approval and leaves the terminal store byte-identical', () => {
+    const path = approvalsPath(home);
+    mintApproval({ target: { org: "o", repo: "r" }, path, now: T0 });
+    const before = readFileSync(path);
+    recordPromptApproval({ binding: bind(), permissionMode: "default", home, now: T0 });
+    recordPromptApproval({ binding: bind({ ref: "two" }), permissionMode: "default", home, now: T0 });
+    const removed = revokeApprovals("prompt", path);
+    assert.equal(removed.length, 2);
+    assert.ok(removed.every(id => /^p[0-9a-f]{8}$/.test(id)));
+    assert.deepEqual(listPromptApprovals(home, T0), []);
+    assert.deepEqual(readFileSync(path), before, "terminal approvals untouched");
+    assert.equal(listApprovals(path, T0).length, 1);
+  });
+
+  it("revokeAllPromptApprovals never throws, with no directory or a file in its place", () => {
+    assert.deepEqual(revokeAllPromptApprovals(join(home, "nowhere")), []);
+    writeFileSync(join(home, "prompt-approvals"), "in the way");
+    assert.deepEqual(revokeAllPromptApprovals(home), []);
   });
 });

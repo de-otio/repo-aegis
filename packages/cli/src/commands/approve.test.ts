@@ -93,7 +93,7 @@ describe("approve", () => {
       now: T0,
     })!;
     const p2 = recordPromptApproval({
-      binding: { verb: "gh-api-mutating", org: "acme", repo: "svc", endpoint: "repos/acme/svc/issues" },
+      binding: { verb: "gh-api-mutating", org: "acme", repo: "svc", endpoint: "repos/acme/svc/issues", method: "POST" },
       permissionMode: "acceptEdits",
       home,
       now: T0,
@@ -122,6 +122,20 @@ describe("approve", () => {
     assert.equal((JSON.parse(all.stdout) as { revoked: string[] }).revoked.length, 2);
     assert.deepEqual(listPromptApprovals(home, T0), []);
     assert.match(run(undefined, { list: true }).stdout, /no live approvals/);
+  });
+
+  it("--revoke prompt removes the prompt approvals only: terminal ones stay (text and JSON)", () => {
+    const home = join(root, "home");
+    run(undefined, { revoke: "all", json: true });
+    const t = JSON.parse(run("acme/keep", { json: true }).stdout) as { approval: { id: string } };
+    const p1 = recordPromptApproval({ binding: { verb: "gh-pr-create", org: "acme", repo: "svc" }, permissionMode: "default", home, now: T0 })!;
+    const p2 = recordPromptApproval({ binding: { verb: "git-push", org: "acme", repo: "svc", ref: "main" }, permissionMode: "acceptEdits", home, now: T0 })!;
+    const j = JSON.parse(run(undefined, { revoke: "prompt", json: true }).stdout) as { revoked: string[] };
+    assert.deepEqual([...j.revoked].sort(), [p1.id, p2.id].sort());
+    assert.deepEqual(listPromptApprovals(home, T0), []);
+    assert.deepEqual(listApprovals(path, T0).map(a => a.id), [t.approval.id]);
+    assert.match(run(undefined, { revoke: "prompt" }).stdout, /revoked 0 approval\(s\)/);
+    run(undefined, { revoke: "all", json: true });
   });
 
   it("a minted terminal approval is audited with source terminal", () => {

@@ -449,7 +449,7 @@ How it shows up elsewhere:
   `MULTIPLE_INSTALLS` (see `doc/agent-guide.md`).
 - `install claude-md` writes every Claude Code hook command (`check-write`,
   `guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`,
-  `first-touch`) into the [managed drop-in](#the-claude-code-managed-drop-in)
+  `prompt-submit`, `first-touch`) into the [managed drop-in](#the-claude-code-managed-drop-in)
   (or, with `--user-settings`, into `settings.json`) as a pinned one-line `sh`
   command: shell-quoted absolute paths to
   the node and CLI, `exec`'d so the tool call on stdin reaches the CLI, and an
@@ -509,9 +509,9 @@ each Claude Code release (unverified). The hook contract itself (exit codes,
 matchers) is at <https://code.claude.com/docs/en/hooks>.
 
 The path comes from the platform and your uid, never from a stored record. The
-file holds only `hooks` and `permissions.deny`: the five hooks (`check-write`,
-`guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`; plus
-`first-touch` when you asked for it), a SessionStart heartbeat, and the same
+file holds only `hooks` and `permissions.deny`: the six hooks (`check-write`,
+`guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`,
+`prompt-submit`; plus `first-touch` when you asked for it), a SessionStart heartbeat, and the same
 `Edit(//…)` deny rules as before (registry, approvals, hooks, shim, markers, the
 pinned CLI package and the pinned Node).
 

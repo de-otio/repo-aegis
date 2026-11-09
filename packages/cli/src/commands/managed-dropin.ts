@@ -22,6 +22,8 @@ import {
   HOOK_ARGS,
   HOOK_MATCHER,
   MANAGED_HEARTBEAT_HOOK_ARGS,
+  PROMPT_SUBMIT_HOOK_ARGS,
+  PROMPT_SUBMIT_HOOK_MATCHER,
 } from "./claude-hook-specs.js";
 
 /** The file names a drop-in for `uid` uses, and the directories above it (D8.1). */
@@ -79,7 +81,7 @@ export interface DropInSpec {
   denyRules: readonly string[];
 }
 
-export type DropInEvent = "PreToolUse" | "PostToolUse" | "SessionStart";
+export type DropInEvent = "PreToolUse" | "PostToolUse" | "SessionStart" | "UserPromptSubmit";
 
 export interface DropInHook {
   event: DropInEvent;
@@ -87,17 +89,21 @@ export interface DropInHook {
   command: string;
 }
 
-const EVENTS: readonly DropInEvent[] = ["PreToolUse", "PostToolUse", "SessionStart"];
+const EVENTS: readonly DropInEvent[] = ["PreToolUse", "PostToolUse", "SessionStart", "UserPromptSubmit"];
 
 /** Every hook the drop-in registers, in file order, with its rendered command. */
 export function dropInHookCommands(spec: DropInSpec): DropInHook[] {
-  const cmd = (args: string): string => managedHookCommand(spec.pin, args, { uid: spec.uid, dropinPath: spec.file });
+  const cmd = (args: string, failOpen = false): string =>
+    managedHookCommand(spec.pin, args, { uid: spec.uid, dropinPath: spec.file, ...(failOpen && { failOpen }) });
   return [
     { event: "PreToolUse", matcher: HOOK_MATCHER, command: cmd(CHECK_WRITE_HOOK_ARGS) },
     { event: "PreToolUse", matcher: BASH_HOOK_MATCHER, command: cmd(GUARD_EGRESS_HOOK_ARGS) },
     { event: "PostToolUse", matcher: HOOK_MATCHER, command: cmd(HOOK_ARGS) },
     { event: "PostToolUse", matcher: BASH_HOOK_MATCHER, command: cmd(BASH_HOOK_ARGS) },
     { event: "PostToolUse", matcher: BASH_HOOK_MATCHER, command: cmd(EGRESS_RECEIPT_HOOK_ARGS) },
+    // A yes at the prompt carries down for one command: typing again ends it (egress-guard.md §4a.1). Fails OPEN: exit 2 on
+    // this event would swallow the person's own message.
+    { event: "UserPromptSubmit", matcher: PROMPT_SUBMIT_HOOK_MATCHER, command: cmd(PROMPT_SUBMIT_HOOK_ARGS, true) },
     ...(spec.firstTouch ? [{ event: "SessionStart" as const, matcher: FIRST_TOUCH_HOOK_MATCHER, command: cmd(FIRST_TOUCH_HOOK_ARGS) }] : []),
     // D8.12: proof that Claude Code loads this file at all.
     { event: "SessionStart", matcher: FIRST_TOUCH_HOOK_MATCHER, command: cmd(MANAGED_HEARTBEAT_HOOK_ARGS) },

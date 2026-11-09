@@ -314,12 +314,31 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
 
     it("gh api: the exact endpoint is allowed, another endpoint on the same repository is refused", () => {
       const h = promptHome("prompt-api");
-      record(h, { verb: "gh-api-mutating", org: "acme", repo: "svc", endpoint: "repos/acme/svc/issues" });
+      record(h, { verb: "gh-api-mutating", org: "acme", repo: "svc", endpoint: "repos/acme/svc/issues", method: "POST" });
       const api = (endpoint: string) => ["egress-check", "--cwd", "", "--", "api", "-X", "POST", endpoint, "-f", "title=x"];
       assert.equal(shim(h, api("repos/acme/svc/issues")).code, 0);
       assert.equal(shim(h, api("/repos/acme/svc/issues")).code, 0, "one leading slash is the same endpoint");
       assert.equal(shim(h, api("repos/acme/svc/pulls")).code, 2);
       assert.equal(shim(h, api("repos/acme/svc/issues/1/comments")).code, 2);
+    });
+
+    it("gh api: the HTTP method is part of the yes (a PATCH approval does not cover a DELETE or a fields-only POST)", () => {
+      const h = promptHome("prompt-api-method");
+      record(h, { verb: "gh-api-mutating", org: "acme", repo: "svc", endpoint: "repos/acme/svc/issues/1", method: "PATCH" });
+      const call = (...flags: string[]) => ["egress-check", "--cwd", "", "--", "api", ...flags, "repos/acme/svc/issues/1"];
+      assert.equal(shim(h, call("-X", "PATCH", "-f", "state=closed")).code, 0);
+      assert.equal(shim(h, call("--method=patch", "-f", "state=closed")).code, 0, "any spelling of the same method");
+      assert.equal(shim(h, call("-X", "DELETE")).code, 2, "DELETE is not PATCH");
+      assert.equal(shim(h, call("-f", "state=closed")).code, 2, "gh's default for fields is POST");
+    });
+
+    it("gh pr merge: the PR number is part of the yes (12 is not 13, and a bare merge is not 12)", () => {
+      const h = promptHome("prompt-target");
+      record(h, { verb: "gh-pr-merge", org: "acme", repo: "svc", target: "12" });
+      const merge = (...n: string[]) => ["egress-check", "--cwd", "", "--", "pr", "merge", ...n, "--repo", "acme/svc"];
+      assert.equal(shim(h, merge("12")).code, 0);
+      assert.equal(shim(h, merge("13")).code, 2);
+      assert.equal(shim(h, merge()).code, 2);
     });
 
     it("an expired record allows nothing", () => {

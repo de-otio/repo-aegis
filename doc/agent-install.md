@@ -455,6 +455,7 @@ Two more hook entries, alongside the existing ones, both idempotent:
 |---|---|---|
 | `PreToolUse` | `Bash` | `repo-aegis hook guard-egress --agent claude` |
 | `PostToolUse` | `Bash` | `repo-aegis hook egress-receipt` |
+| `UserPromptSubmit` | `*` | `repo-aegis hook prompt-submit` (revokes prompt approvals when you type; never blocks) |
 
 The PostToolUse `Bash` matcher entry now carries **two** repo-aegis hooks —
 `scan-bash-output` and `egress-receipt`. They do different jobs on the same

@@ -221,9 +221,11 @@ export function mintApproval(opts: MintOptions): EgressApproval {
 
 /**
  * Remove one approval by id, or every one with `"all"`, from both stores: a `p…` id is a prompt approval (its file
- * under `prompt-approvals/` next to `path`); anything else is a terminal approval. Returns the ids removed.
+ * under `prompt-approvals/` next to `path`); anything else is a terminal approval. `"prompt"` removes every PROMPT
+ * approval and leaves the terminal store untouched. Returns the ids removed.
  */
 export function revokeApprovals(which: string, path: string = approvalsPath()): string[] {
+  if (which === "prompt") return revokePromptApprovals("all", join(dirname(path), PROMPT_APPROVALS_DIR));
   const store = readApprovalStore(path);
   const keep = which === "all" ? [] : store.approvals.filter(a => a.id !== which);
   const removed = store.approvals.filter(a => !keep.includes(a)).map(a => a.id);
@@ -539,6 +541,14 @@ export interface PromptBinding {
   ref?: string;
   /** `gh-api-mutating` only, required there: the endpoint minus one leading `/`. */
   endpoint?: string;
+  /** `gh-api-mutating` only, required there: the HTTP method, upper-case (`POST`, `PUT`, `PATCH`, `DELETE`). */
+  method?: string;
+  /**
+   * The pull request or issue NUMBER (or URL, as typed) or the release TAG the command acts on, for the verbs that
+   * take one (`gh pr merge 12`, `gh release edit v1`). Absent when the command names none (`gh pr create`, or a
+   * bare `gh pr merge` for the current branch): then the approval binds the repository only. Matched exactly.
+   */
+  target?: string;
 }
 
 export interface PromptApproval {
@@ -550,6 +560,8 @@ export interface PromptApproval {
   repo: string;
   ref?: string;
   endpoint?: string;
+  method?: string;
+  target?: string;
   createdAt: string;
   /** `createdAt` + {@link PROMPT_APPROVAL_TTL_MS}. */
   expiresAt: string;
@@ -564,6 +576,25 @@ const PROMPT_FILE = /^(p[0-9a-f]{8})\.json$/;
 const SESSION_ID = /^[A-Za-z0-9-]{1,64}$/;
 /** A ref or endpoint a prompt approval may carry: visible ASCII, no whitespace or control characters (it is listed in a terminal). */
 const BINDABLE_TEXT = /^[\x21-\x7e]{1,500}$/;
+/** The verbs that act on one numbered or tagged thing, so a prompt approval can bind it. */
+const TARGETED_VERBS: ReadonlySet<PromptVerb> = new Set<PromptVerb>([
+  "gh-pr-edit",
+  "gh-pr-merge",
+  "gh-pr-comment",
+  "gh-pr-review",
+  "gh-issue-edit",
+  "gh-issue-comment",
+  "gh-release-create",
+  "gh-release-edit",
+  "gh-release-upload",
+]);
+/** Whether prompt approvals bind a target number or tag for `verb`. */
+export function isTargetedPromptVerb(verb: string): boolean {
+  return TARGETED_VERBS.has(verb as PromptVerb);
+}
+const API_METHODS: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+/** How far ahead of the reader's clock a record's `createdAt` may be: a record from the future is not honoured. */
+const CREATED_SKEW_MS = 5000;
 const PROMPT_FILE_MAX_BYTES = 4096;
 const PROMPT_MAX_ENTRIES = 256;
 
@@ -576,7 +607,7 @@ export function promptApprovalsDir(home: string = repoAegisHome()): string {
   return join(home, PROMPT_APPROVALS_DIR);
 }
 
-function isPromptApproval(v: unknown): v is PromptApproval {
+function isPromptApproval(v: unknown, now: Date = new Date()): v is PromptApproval {
   if (!v || typeof v !== "object") return false;
   const a = v as Record<string, unknown>;
   const verb = a["verb"];
@@ -596,11 +627,21 @@ function isPromptApproval(v: unknown): v is PromptApproval {
   if (verb === "gh-api-mutating") {
     if (typeof endpoint !== "string" || !BINDABLE_TEXT.test(endpoint)) return false;
   } else if (endpoint !== undefined) return false;
+  const method = a["method"];
+  if (verb === "gh-api-mutating") {
+    if (typeof method !== "string" || !API_METHODS.has(method)) return false;
+  } else if (method !== undefined) return false;
+  const target = a["target"];
+  if (target !== undefined && (!TARGETED_VERBS.has(verb) || typeof target !== "string" || !BINDABLE_TEXT.test(target))) {
+    return false;
+  }
   if (typeof a["createdAt"] !== "string" || !ISO_TIMESTAMP.test(a["createdAt"])) return false;
   if (typeof a["expiresAt"] !== "string" || !ISO_TIMESTAMP.test(a["expiresAt"])) return false;
   const created = Date.parse(a["createdAt"]);
   const expires = Date.parse(a["expiresAt"]);
   if (!Number.isFinite(created) || !Number.isFinite(expires)) return false;
+  // A record dated ahead of this clock (a hand-made file meant to outlive its two minutes) is dropped.
+  if (created > now.getTime() + CREATED_SKEW_MS) return false;
   // A hand-edited long-lived file is dropped, not honoured.
   if (expires - created > PROMPT_APPROVAL_TTL_MS) return false;
   if (typeof a["permissionMode"] !== "string" || !PROMPT_APPROVAL_MODES.has(a["permissionMode"])) return false;
@@ -646,7 +687,7 @@ export function listPromptApprovals(home: string = repoAegisHome(), now: Date = 
         if (!st.isFile() || st.size > PROMPT_FILE_MAX_BYTES) continue;
         const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
         // The file name is the id: a record copied under another name is not trusted.
-        if (!isPromptApproval(parsed) || `${parsed.id}.json` !== name) continue;
+        if (!isPromptApproval(parsed, now) || `${parsed.id}.json` !== name) continue;
         if (isLivePrompt(parsed, now)) out.push(parsed);
       } catch {
         /* unreadable or malformed: no approval */
@@ -673,12 +714,15 @@ export function findPromptApproval(
     const safe = safeDestination(b.org, b.repo);
     if (safe === null || safe.org === "*" || safe.repo === "*") return null;
     if (b.verb === "git-push" && (b.ref === undefined || b.ref === "")) return null;
-    if (b.verb === "gh-api-mutating" && (b.endpoint === undefined || b.endpoint === "")) return null;
+    if (b.verb === "gh-api-mutating" && (b.endpoint === undefined || b.endpoint === "" || b.method === undefined)) return null;
     for (const a of listPromptApprovals(home, now)) {
       if (a.verb !== b.verb) continue;
       if (a.org !== safe.org || a.repo !== safe.repo) continue;
       if (b.verb === "git-push" && a.ref !== b.ref) continue;
-      if (b.verb === "gh-api-mutating" && a.endpoint !== b.endpoint) continue;
+      if (b.verb === "gh-api-mutating" && (a.endpoint !== b.endpoint || a.method !== b.method)) continue;
+      // Exact both ways: a record that names a PR or tag covers only that one, and a record that names none covers only
+      // a command that names none.
+      if (a.target !== b.target) continue;
       return a;
     }
     return null;
@@ -718,6 +762,8 @@ export function recordPromptApproval(opts: RecordPromptOptions): PromptApproval 
       repo: b.repo,
       ...(b.ref !== undefined && { ref: b.ref }),
       ...(b.endpoint !== undefined && { endpoint: b.endpoint }),
+      ...(b.method !== undefined && { method: b.method }),
+      ...(b.target !== undefined && { target: b.target }),
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + PROMPT_APPROVAL_TTL_MS).toISOString(),
       permissionMode: mode as "default" | "acceptEdits",
@@ -778,6 +824,18 @@ export function listAllApprovals(path: string = approvalsPath(), now: Date = new
   const terminal = listApprovals(path, now).map(a => ({ ...a, source: "terminal" as const }));
   const prompt = listPromptApprovals(dirname(path), now);
   return [...terminal, ...prompt].sort((x, y) => y.createdAt.localeCompare(x.createdAt));
+}
+
+/**
+ * Remove every prompt approval under `home` (and nothing else). Best-effort, never throws: the `UserPromptSubmit` hook
+ * calls it, and a hook that can fail a person's prompt is worse than a leftover record that expires in two minutes.
+ */
+export function revokeAllPromptApprovals(home: string = repoAegisHome()): string[] {
+  try {
+    return revokePromptApprovals("all", promptApprovalsDir(home));
+  } catch {
+    return [];
+  }
 }
 
 /** Remove the prompt approval `which` (a `p…` id), or every one with `"all"`. Returns the ids removed. */
@@ -849,7 +907,10 @@ function pushDestinationRef(
  * {@link PromptVerb}; a `git push` whose destination ref cannot be bound; a mutating `gh api` with no endpoint.
  */
 export function promptBindingOf(
-  intent: Pick<EgressIntent, "verb" | "unresolved" | "refspec" | "apiEndpoint" | "cwdOverride">,
+  intent: Pick<
+    EgressIntent,
+    "verb" | "unresolved" | "refspec" | "deletesRef" | "apiEndpoint" | "apiMethod" | "targetRef" | "cwdOverride"
+  >,
   destination: Pick<Destination, "org" | "repo" | "unresolved" | "candidates"> | null | undefined,
   resolveHead: (dir: string) => string | null,
   cwd = "",
@@ -864,12 +925,18 @@ export function promptBindingOf(
   const base = { verb: intent.verb, org: safe.org, repo: safe.repo };
   let binding: PromptBinding;
   if (intent.verb === "git-push") {
+    // `git push --delete <ref>` / `-d <ref>`: the ref is DELETED, never the thing a yes for a push meant.
+    if (intent.deletesRef === true) return null;
     const ref = pushDestinationRef(intent.refspec, intent.cwdOverride ?? cwd, resolveHead);
     if (ref === null) return null;
     binding = { ...base, ref };
   } else if (intent.verb === "gh-api-mutating") {
     if (intent.apiEndpoint === undefined) return null;
-    binding = { ...base, endpoint: intent.apiEndpoint.replace(/^\//, "") };
+    // The method is part of the binding: a yes to a PATCH is not a yes to a DELETE of the same endpoint.
+    if (intent.apiMethod === undefined) return null;
+    binding = { ...base, endpoint: intent.apiEndpoint.replace(/^\//, ""), method: intent.apiMethod };
+  } else if (isTargetedPromptVerb(intent.verb)) {
+    binding = intent.targetRef === undefined ? base : { ...base, target: intent.targetRef };
   } else {
     binding = base;
   }

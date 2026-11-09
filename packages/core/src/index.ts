@@ -456,6 +456,8 @@ export {
   promptApprovalsDir,
   promptBindingOf,
   recordPromptApproval,
+  revokeAllPromptApprovals,
+  isTargetedPromptVerb,
   listPromptApprovals,
   findPromptApproval,
   listAllApprovals,

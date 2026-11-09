@@ -18,7 +18,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { listPromptApprovals, promptApprovalsDir, recordPromptApproval, auditLogPath } from "@de-otio/repo-aegis-core";
+import {
+  approvalsPath,
+  auditLogPath,
+  listApprovals,
+  listPromptApprovals,
+  mintApproval,
+  promptApprovalsDir,
+  recordPromptApproval,
+} from "@de-otio/repo-aegis-core";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { scrubGitEnv } from "../_test-utils.js";
 import { FIXTURE_CWD, loadFixture, loadFixtureIndex, withCommand } from "./hook-hosts/_fixtures.js";
@@ -295,5 +303,87 @@ describe("hook guard-egress: failures and the audit trail", { skip: !cliBuilt() 
     hook(claude(PUSH, "auto"));
     const log = existsSync(auditLogPath(home)) ? readFileSync(auditLogPath(home), "utf8") : "";
     assert.doesNotMatch(log, /egress-approval-mint/);
+  });
+});
+
+describe("hook guard-egress: what the record is bound to, beyond the repository", { skip: !cliBuilt() }, () => {
+  it("a PR number, a release tag and a gh api method are recorded, and bare commands bind the repository only", () => {
+    assert.equal(hook(claude("gh pr merge 12 --repo acme/svc --squash", "default")).decision, "ask");
+    assert.equal(hook(claude("gh release create v1.2.3 --repo acme/svc --notes x", "default")).decision, "ask");
+    assert.equal(hook(claude("gh api -X PATCH repos/acme/svc/issues/1 -f state=closed", "default")).decision, "ask");
+    const by = (verb: string) => records().find(a => a.verb === verb);
+    assert.equal(by("gh-pr-merge")?.target, "12");
+    assert.equal(by("gh-release-create")?.target, "v1.2.3");
+    assert.equal(by("gh-api-mutating")?.method, "PATCH");
+    assert.equal(by("gh-api-mutating")?.endpoint, "repos/acme/svc/issues/1");
+    assert.equal(hook(claude("gh pr create --repo acme/svc --title t --body b", "default")).decision, "ask");
+    assert.equal(by("gh-pr-create")?.target, undefined);
+  });
+
+  it("git push --delete / -d is asked about, but nothing is recorded and the prompt promises nothing", () => {
+    for (const cmd of ["git push origin --delete main", "git push origin -d main", "git push origin :main"]) {
+      const r = hook(claude(cmd, "default"));
+      assert.equal(r.decision, "ask", `${cmd}\n${r.stdout}${r.stderr}`);
+      assert.doesNotMatch(r.reason, /A yes here lets/, cmd);
+    }
+    noDir();
+  });
+});
+
+describe("hook prompt-submit: typing ends every prompt approval", { skip: !cliBuilt() }, () => {
+  function submit(input: string, env: NodeJS.ProcessEnv = {}): { stdout: string; stderr: string; code: number | null } {
+    const e: NodeJS.ProcessEnv = { ...process.env, REPO_AEGIS_HOME: home, REPO_AEGIS_VISIBILITY_LOOKUP: "0", ...env };
+    delete e["REPO_AEGIS_EGRESS_HUMAN"];
+    const r = spawnSync(process.execPath, [cliPath, "hook", "prompt-submit"], { cwd: tmp, env: e, encoding: "utf8", input });
+    return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  }
+  const prompt = JSON.stringify({ session_id: "sess-0123", hook_event_name: "UserPromptSubmit", prompt: "carry on", permission_mode: "default" });
+
+  it("revokes every prompt approval, is silent, and exits 0", () => {
+    assert.equal(hook(claude(PUSH, "default")).decision, "ask");
+    assert.equal(hook(claude(PR, "default")).decision, "ask");
+    assert.equal(records().length, 2);
+    const r = submit(prompt);
+    assert.deepEqual(r, { stdout: "", stderr: "", code: 0 });
+    assert.deepEqual(records(), []);
+  });
+
+  it("leaves terminal approvals alone", () => {
+    const path = approvalsPath(home);
+    mintApproval({ target: { org: "acme", repo: "svc" }, path });
+    const before = readFileSync(path);
+    hook(claude(PUSH, "default"));
+    // the guard hook now finds the terminal approval, so no record is written: seed one directly
+    assert.ok(recordPromptApproval({ binding: { verb: "git-push", org: "acme", repo: "svc", ref: "main" }, permissionMode: "default", home }));
+    assert.equal(submit(prompt).code, 0);
+    assert.deepEqual(records(), []);
+    assert.deepEqual(readFileSync(path), before);
+    assert.equal(listApprovals(path).length, 1);
+  });
+
+  it("never blocks or speaks: empty or garbage input, no home, an unwritable directory, nothing to revoke", () => {
+    for (const input of ["", "not json", "[1,2]", "x".repeat(2 * 1024 * 1024)]) {
+      assert.deepEqual(submit(input), { stdout: "", stderr: "", code: 0 }, input.slice(0, 20));
+    }
+    assert.deepEqual(submit(prompt, { REPO_AEGIS_HOME: join(tmp, "no-such-home") }), { stdout: "", stderr: "", code: 0 });
+    writeFileSync(join(home, "prompt-approvals"), "a file where the directory should be");
+    assert.deepEqual(submit(prompt), { stdout: "", stderr: "", code: 0 });
+  });
+
+  it("audits a revoke only when it removed something, with no prompt text", () => {
+    hook(claude(PUSH, "default"));
+    const secret = "my-secret-prompt-words";
+    submit(JSON.stringify({ prompt: secret }));
+    const log = readFileSync(auditLogPath(home), "utf8");
+    const rev = log
+      .trim()
+      .split("\n")
+      .map(l => JSON.parse(l) as { action: string; details: Record<string, unknown> })
+      .filter(l => l.action === "egress-approval-revoke");
+    assert.equal(rev.length, 1);
+    assert.equal(rev[0]!.details["source"], "prompt");
+    assert.ok(!log.includes(secret));
+    submit(prompt); // nothing left: no second record
+    assert.equal(readFileSync(auditLogPath(home), "utf8").split("egress-approval-revoke").length - 1, 1);
   });
 });

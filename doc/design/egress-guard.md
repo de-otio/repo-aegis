@@ -695,10 +695,18 @@ below the prompt (git's pre-push hook and the `gh` shim) may honour it:
   `git push` binds the **destination** side of the first refspec, normalised:
   `main`, `HEAD:main`, `+feat:refs/heads/rel` and `refs/tags/v1` give `main`,
   `main`, `rel` and `v1`; bare `HEAD` gives the current branch (read with
-  `git symbolic-ref`, only on the ask path). Nothing is written, so nothing below
-  can honour a yes, when the refspec is missing or unparsed, is a delete
-  (`:main`), holds a glob, variable or revision syntax, or names a detached
-  `HEAD`; when the destination is unresolved (GraphQL mutation, opaque URL, your
+  `git symbolic-ref`, only on the ask path). A `gh` verb that acts on one numbered
+  or tagged thing (`gh pr|issue edit|merge|comment|review <n>`, `gh release
+  create|edit|upload <tag>`) also binds that number, URL or tag exactly, so a yes
+  to merging #12 is not a yes to merging #13; a command that names none (`gh pr
+  create`, a bare `gh pr merge`) binds the repository only, and a record that
+  names a target never covers a command that names none, nor the reverse. A
+  mutating `gh api` binds the endpoint **and the HTTP method** (gh's POST for a
+  call with only fields or a body), so a yes to a PATCH is not a yes to a DELETE
+  of the same endpoint. Nothing is written, so nothing below can honour a yes,
+  when the refspec is missing or unparsed, is a delete (`:main`, `--delete`,
+  `-d`, or an unambiguous prefix such as `--dele`), holds a glob, variable or
+  revision syntax, or names a detached `HEAD`; when the destination is unresolved (GraphQL mutation, opaque URL, your
   own account, an ambiguous target), a wildcard, or not a plausible GitHub name;
   for a verb with no repository destination or no layer below the hook (`gh gist
   create`, `npm publish`, an unrecognised `gh` shape); or for a `gh api` with no
@@ -741,10 +749,37 @@ below the prompt (git's pre-push hook and the `gh` shim) may honour it:
   both kinds with their `source`, and `--revoke p…` / `--revoke all` cover prompt
   records.
 
+- **Typing ends it.** `install claude-md` also registers a UserPromptSubmit hook,
+  `repo-aegis hook prompt-submit` (next to the others, in the managed drop-in or in
+  `settings.json`; `--uninstall` removes it). The moment the person types, it
+  deletes every prompt approval (terminal approvals are untouched). It is silent,
+  exits 0 on every path and **never blocks the prompt**: its pinned command fails
+  open (exit 0) where every guard fails closed (exit 2), because exit 2 on this
+  event would swallow the person's own message. `repo-aegis approve --revoke
+  prompt` does the same by hand. So a yes followed by the person typing something
+  before the push happens means **the push asks again**, and so does a "no"
+  followed by the person's next message; only a command that runs straight after
+  the answer, with the person saying nothing in between, can use the yes.
+- **Headless `claude -p` has nobody to answer.** The hook input's
+  `permission_mode` reads `default` there too, and the hook input has no field that
+  tells a headless run from an interactive session (checked against
+  code.claude.com/docs/en/hooks: the common fields are `session_id`, `prompt_id`,
+  `transcript_path`, `cwd`, `scratchpad_dir`, `permission_mode`, `effort`,
+  `hook_event_name`, `agent_id` and `agent_type`; nothing names print mode or the
+  SDK). Process ancestry is not used for this, because `ps` fails inside the
+  sandbox. For scripted `claude -p` runs, pass an explicit `--permission-mode` that
+  is not `default` or `acceptEdits` (for example `dontAsk` or
+  `bypassPermissions`); otherwise prompt approvals are written with nobody to
+  answer the prompt, and the residual below applies to every ask.
+- **Not from the future.** A record whose `createdAt` is more than 5 seconds ahead
+  of the reader's clock is dropped, so a hand-made file cannot outlive its two
+  minutes by being dated ahead.
+
 *Known residual (accepted).* Because the record exists before the answer, a
 command the hook does **not** recognise as egress (a script, a Makefile target,
 any shape the parser drops) could repeat the **identical** verb, destination and
-ref within 120 seconds and pass the lower layers after a "no". It is bounded by
+ref within 120 seconds and pass the lower layers after a "no", **unless the
+person types in between** (the UserPromptSubmit hook above). It is bounded by
 the exact binding and two minutes, and it is not matched on session, because the
 lower layers cannot see one. If the person takes more than 120 seconds to
 answer, or the command runs a long build before `git push`, the record has
@@ -1042,7 +1077,8 @@ every agent and every human, with no repo-aegis involvement at all.
   `egress-policy-prompt-approval.test.ts` (the hook's decision ignores a
   matching record, the shim honours it, `asked`);
   `hook-guard-egress-prompt-approval.test.ts` (the built hook: modes, the
-  never-read invariant after a "no", Copilot/Cursor/Codex, failures, audit);
+  never-read invariant after a "no", Copilot/Cursor/Codex, failures, audit, and
+  `hook prompt-submit`: silent, exit 0, terminal approvals survive);
   `check-egress.test.ts` (pre-push: remote ref, other verb, expiry, old script);
   `egress-check.test.ts` (the shim); `agent-publish-path.test.ts` (a real
   `git push` through the rendered pre-push script: `default` passes, `auto` is
