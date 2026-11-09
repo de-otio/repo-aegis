@@ -18,40 +18,48 @@
 //     `agent_message` (fed to the model).
 //   - Cursor has `ask`, enforced on `beforeShellExecution` ONLY. On
 //     `preToolUse` it is accepted but not enforced, i.e. it would run the
-//     tool. So this adapter judges the `beforeShellExecution` payload and
-//     skips anything else (a `preToolUse` payload has `tool_input.command`
-//     and no root `command`): register the hook on `beforeShellExecution`.
+//     tool. So this adapter judges the `beforeShellExecution` payload only
+//     (a `preToolUse` payload has `tool_input.command` and no root `command`):
+//     register the hook on `beforeShellExecution`. A `preToolUse` payload that
+//     carries a shell command is answered `malformed` (fail open, with the
+//     core's one "not judged" line), so the wrong registration is visible.
 //   - A crash, a timeout and a non-zero exit other than 2 fail OPEN (unless
 //     the hook entry sets `failClosed: true`), so `error` is exit 1 with
 //     nothing on stdout: the guard's own defect must not block the agent.
 //     (Invalid output is the one thing that fails closed, which is why exit 0
 //     with empty stdout would be wrong for `error` and is not what is used.)
 import { oversizedByToolName } from "./pre-tool-use.js";
+import { commandInForeignShape, commandResult, parseRootObject, REASON_FOREIGN_SHAPE, rootCwd } from "./shapes.js";
 import type { HookVerdict, HostAdapter, HostOutput, ParsedHookInput } from "./types.js";
 
 const BEFORE_SHELL_EXECUTION = "beforeShellExecution";
 
 function parseCursor(stdin: string): ParsedHookInput {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdin);
-  } catch {
-    return { kind: "malformed", reason: "stdin is not JSON" };
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { kind: "malformed", reason: "stdin is not a JSON object" };
-  const root = parsed as Record<string, unknown>;
+  const r = parseRootObject(stdin);
+  if ("malformed" in r) return r.malformed;
+  const root = r.root;
 
-  // Another event wired to this hook by mistake is not this hook's business.
+  // Another event is not this hook's business, UNLESS it carries a shell
+  // command in the shape of another event or host (a `preToolUse` payload:
+  // `tool_input.command`). Cursor enforces `ask` on `beforeShellExecution`
+  // only, so judging `preToolUse` would turn an `ask` into a run; instead the
+  // hook says, once per call, that it did not judge it: the registration is
+  // on the wrong event. A non-shell tool, or an event with no command, stays
+  // a silent skip.
   const event = root["hook_event_name"];
-  if (typeof event === "string" && event !== BEFORE_SHELL_EXECUTION) return { kind: "skip" };
+  if (typeof event === "string" && event !== BEFORE_SHELL_EXECUTION) {
+    return commandInForeignShape(root, ["root"]) ? { kind: "malformed", reason: REASON_FOREIGN_SHAPE } : { kind: "skip" };
+  }
 
   const command = root["command"];
-  if (command === undefined) return { kind: "skip" };
+  if (command === undefined) {
+    if (event === BEFORE_SHELL_EXECUTION) return { kind: "malformed", reason: "beforeShellExecution payload has no command" };
+    return commandInForeignShape(root, ["root"]) ? { kind: "malformed", reason: REASON_FOREIGN_SHAPE } : { kind: "skip" };
+  }
   if (typeof command !== "string") return { kind: "malformed", reason: "command is not a string" };
   if (command.length === 0) return { kind: "skip" };
 
-  const cwd = root["cwd"];
-  return typeof cwd === "string" && cwd.length > 0 ? { kind: "command", command, cwd } : { kind: "command", command };
+  return commandResult(command, rootCwd(root));
 }
 
 function permissionJson(permission: "allow" | "ask" | "deny", reason?: string): string {

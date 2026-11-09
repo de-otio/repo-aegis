@@ -22,7 +22,13 @@ describe("copilot adapter — render", () => {
   });
 
   it("exact output for each decision", () => {
-    const json = (d: string, r: string): string => JSON.stringify({ permissionDecision: d, permissionDecisionReason: r }) + "\n";
+    // Both events' places in one object: camelCase reads the top level, PascalCase reads hookSpecificOutput.
+    const json = (d: string, r: string): string =>
+      JSON.stringify({
+        permissionDecision: d,
+        permissionDecisionReason: r,
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: d, permissionDecisionReason: r },
+      }) + "\n";
     assert.deepEqual(copilot.render({ action: "allow" }), { stdout: "", exitCode: 0 });
     assert.deepEqual(copilot.render({ action: "allow", reason: "r1" }), { stdout: json("allow", "r1"), exitCode: 0 });
     assert.deepEqual(copilot.render({ action: "ask", reason: "r2" }), { stdout: json("ask", "r2"), exitCode: 0 });
@@ -98,9 +104,38 @@ describe("copilot adapter — parse", () => {
     for (const t of ["edit", "view", "create", "bash2", "run_command"]) {
       assert.deepEqual(copilot.parse(camel('{"command":"git push"}', { toolName: t })), { kind: "skip" }, t);
     }
-    assert.deepEqual(copilot.parse(camel("{}")), { kind: "skip" });
-    assert.deepEqual(copilot.parse(JSON.stringify({ toolName: "bash" })), { kind: "skip" });
     assert.deepEqual(copilot.parse("{}"), { kind: "skip" });
+    assert.deepEqual(copilot.parse(camel('{"command":""}')), { kind: "skip" });
+  });
+
+  it("a shell tool with no command field, or a command in another host's shape, is malformed (visible), not skip", () => {
+    assert.equal(copilot.parse(camel("{}")).kind, "malformed");
+    assert.equal(copilot.parse(JSON.stringify({ toolName: "bash" })).kind, "malformed");
+    assert.equal(copilot.parse(JSON.stringify({ tool_name: "Bash", tool_input: {} })).kind, "malformed");
+    // An Antigravity payload under --agent copilot.
+    assert.equal(copilot.parse(JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine: "git push" } } })).kind, "malformed");
+    // Not for a non-shell tool.
+    assert.deepEqual(copilot.parse(JSON.stringify({ toolCall: { name: "view_file", args: { CommandLine: "git push" } } })), { kind: "skip" });
+  });
+
+  it("write_bash and write_powershell: the typed `input` is judged as the command", () => {
+    for (const toolName of ["write_bash", "write_powershell", "WRITE_BASH"]) {
+      assert.deepEqual(
+        copilot.parse(camel(JSON.stringify({ sessionId: "s1", input: "git push origin main\n", delay: 5 }), { toolName })),
+        { kind: "command", command: "git push origin main\n", cwd: "/w" },
+        toolName,
+      );
+      assert.deepEqual(
+        copilot.parse(JSON.stringify({ tool_name: toolName, tool_input: { input: "git push" }, cwd: "/w" })),
+        { kind: "command", command: "git push", cwd: "/w" },
+        `${toolName} PascalCase`,
+      );
+    }
+    // `command` is bash's field, not the input tools': a write_bash with only `command` has nothing typed.
+    assert.equal(copilot.parse(camel('{"command":"git push"}', { toolName: "write_bash" })).kind, "malformed");
+    // And `input` is not read for bash.
+    assert.equal(copilot.parse(camel('{"input":"git push"}', { toolName: "bash" })).kind, "malformed");
+    assert.equal(copilot.oversized('{"toolName": "write_bash", "toolArgs": "' + "x".repeat(5000)), "refuse");
   });
 
   it("a non-shell tool is skipped even when its toolArgs is not JSON", () => {
@@ -141,6 +176,12 @@ describe("codex adapter — corrections", () => {
 
   it("another Codex tool is skipped", () => {
     assert.deepEqual(codex.parse(JSON.stringify({ tool_name: "apply_patch", tool_input: { command: "git push" } })), { kind: "skip" });
+  });
+
+  it("write_stdin (typed input to a running session) is NOT judged: a documented limit (doc/design/egress-guard.md)", () => {
+    for (const tool_input of [{ chars: "git push\n" }, { input: "git push\n" }, { command: "git push" }]) {
+      assert.deepEqual(codex.parse(JSON.stringify({ tool_name: "write_stdin", tool_input })), { kind: "skip" });
+    }
   });
 
   it("has no ask: ask renders as a deny with the same reason and exit 2, never an allow", () => {

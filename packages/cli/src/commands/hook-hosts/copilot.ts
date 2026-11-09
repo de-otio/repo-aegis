@@ -15,8 +15,13 @@
 //     may itself be a JSON string ("parsed from JSON string when possible").
 //     Both shapes are accepted.
 //   - Answer: `{"permissionDecision": "deny", "permissionDecisionReason": …}`
-//     (the reason is required) or exit 2. Empty stdout with exit 0 is the
+//     (the reason is required) or exit 2, for camelCase `preToolUse`; the
+//     PascalCase `PreToolUse` reads `hookSpecificOutput.permissionDecision`
+//     instead. The render cannot tell which event called, so ONE object
+//     carries the decision in both places. Empty stdout with exit 0 is the
 //     host's normal permission flow, so a plain allow prints nothing.
+//   - Interactive shell input (`write_bash`, `write_powershell`, field
+//     `input`) is judged as the command: typed text can be a push.
 //   - Copilot FAILS CLOSED on a non-zero exit other than 2 ("hook errored"),
 //     so the guard's own internal-error exit 1 would block every command.
 //     `error` therefore renders as an allow: exit 0, empty stdout. This
@@ -25,57 +30,49 @@
 //     treat it as a deny. That is the safe direction (a deny where nobody can
 //     answer), so `hasAsk` is true: an `ask` never reaches an allow on either.
 //   - `modifiedArgs` (a rewrite field) is never emitted: decision-only.
-import { EXIT_BLOCK, flattenCommand, SHELL_TOOL_NAMES } from "./pre-tool-use.js";
+import { EXIT_BLOCK, SHELL_TOOL_NAMES } from "./pre-tool-use.js";
+import { commandResult, decodeObject, noOwnCommand, parseRootObject, readShape, rootCwd, type Field, type ShapeName } from "./shapes.js";
 import type { HookVerdict, HostAdapter, HostOutput, ParsedHookInput } from "./types.js";
 
-/** Copilot's shell tools: the family's names plus `powershell` (its Windows shell tool). */
-const COPILOT_SHELL_TOOLS: ReadonlySet<string> = new Set([...SHELL_TOOL_NAMES, "powershell"]);
+/**
+ * Copilot's interactive shell-input tools: text typed into a running shell
+ * session (`input`). That text is judged as the command: `git push` typed into
+ * a session that is already open is a push like any other.
+ */
+const COPILOT_INPUT_TOOLS: ReadonlySet<string> = new Set(["write_bash", "write_powershell"]);
 
-/** A field that must be a JSON object, given as the object or as a JSON string of one. */
-function asObject(value: unknown): Record<string, unknown> | "wrong-type" {
-  let v = value;
-  if (typeof v === "string") {
-    try {
-      v = JSON.parse(v);
-    } catch {
-      return "wrong-type";
-    }
-  }
-  return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : "wrong-type";
-}
+/** Copilot's shell tools: the family's names, `powershell` (its Windows shell tool) and the input tools. */
+const COPILOT_SHELL_TOOLS: ReadonlySet<string> = new Set([...SHELL_TOOL_NAMES, "powershell", ...COPILOT_INPUT_TOOLS]);
 
 function parseCopilot(stdin: string): ParsedHookInput {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdin);
-  } catch {
-    return { kind: "malformed", reason: "stdin is not JSON" };
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { kind: "malformed", reason: "stdin is not a JSON object" };
-  const root = parsed as Record<string, unknown>;
+  const r = parseRootObject(stdin);
+  if ("malformed" in r) return r.malformed;
+  const root = r.root;
 
   // camelCase `toolName` (preToolUse) or snake_case `tool_name` (PreToolUse).
   const toolName = typeof root["toolName"] === "string" ? root["toolName"] : root["tool_name"];
-  if (typeof toolName === "string" && toolName.length > 0 && !COPILOT_SHELL_TOOLS.has(toolName.toLowerCase())) {
-    return { kind: "skip" };
-  }
+  const named = typeof toolName === "string" && toolName.length > 0;
+  if (named && !COPILOT_SHELL_TOOLS.has(toolName.toLowerCase())) return { kind: "skip" };
+  const key = named && COPILOT_INPUT_TOOLS.has(toolName.toLowerCase()) ? "input" : "command";
 
   // The argument container, by shape: `toolArgs` (string) or `tool_input`
   // (object or string). Whichever is present must decode to an object; a
   // field of the wrong type is `malformed`, never silently "no command".
-  let command: string | undefined;
-  for (const key of ["toolArgs", "tool_input"] as const) {
-    if (!(key in root)) continue;
-    const args = asObject(root[key]);
-    if (args === "wrong-type") return { kind: "malformed", reason: `${key} is not a JSON object or a JSON-encoded object` };
-    command = flattenCommand(args["command"]);
-    if (command !== undefined) break;
+  const own: readonly ShapeName[] = ["toolArgs", "tool_input", "root"];
+  const fields: Field[] = [];
+  for (const shape of ["toolArgs", "tool_input"] as const) {
+    if (!(shape in root)) continue;
+    if (decodeObject(root[shape]) === undefined) return { kind: "malformed", reason: `${shape} is not a JSON object or a JSON-encoded object` };
+    const f = readShape(root, shape, key);
+    if (f.kind === "found") return commandResult(f.command, rootCwd(root));
+    fields.push(f);
   }
-  if (command === undefined) command = flattenCommand(root["command"]);
-  if (command === undefined) return { kind: "skip" };
-
-  const cwd = root["cwd"];
-  return typeof cwd === "string" && cwd.length > 0 ? { kind: "command", command, cwd } : { kind: "command", command };
+  const f = readShape(root, "root");
+  if (f.kind === "found") return commandResult(f.command, rootCwd(root));
+  fields.push(f);
+  // No command: a named shell tool with no command field, or a command in
+  // another host's shape (Antigravity's `toolCall`), is `malformed`.
+  return noOwnCommand(root, own, fields, named);
 }
 
 /**
@@ -90,7 +87,17 @@ function oversizedCopilot(prefix: string): "proceed" | "refuse" {
 }
 
 function decisionJson(permissionDecision: "allow" | "ask" | "deny", reason: string): string {
-  return JSON.stringify({ permissionDecision, permissionDecisionReason: reason }) + "\n";
+  // The two events read different places, and the render does not know which
+  // one called: camelCase `preToolUse` reads the top-level `permissionDecision`,
+  // PascalCase `PreToolUse` reads `hookSpecificOutput`. One object carries
+  // the decision in both, so an `ask` or `deny` lands whichever event is wired.
+  return (
+    JSON.stringify({
+      permissionDecision,
+      permissionDecisionReason: reason,
+      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision, permissionDecisionReason: reason },
+    }) + "\n"
+  );
 }
 
 function renderCopilot(verdict: HookVerdict): HostOutput {

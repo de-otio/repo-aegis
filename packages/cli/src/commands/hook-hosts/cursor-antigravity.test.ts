@@ -78,9 +78,25 @@ describe("cursor adapter (beforeShellExecution)", () => {
     });
   });
 
-  it("the preToolUse fixture is not judged (its `ask` is not enforced by Cursor), nor is afterFileEdit", () => {
-    assert.deepEqual(cursor.parse(JSON.stringify(fixturePayload("cursor.pre-tool-use.json"))), { kind: "skip" });
+  it("the preToolUse fixture is not judged (its `ask` is not enforced by Cursor) and says so (malformed); afterFileEdit is a silent skip", () => {
+    const pre = cursor.parse(JSON.stringify(fixturePayload("cursor.pre-tool-use.json")));
+    assert.equal(pre.kind, "malformed", "a shell command on the wrong event is a visible misconfiguration");
     assert.deepEqual(cursor.parse(JSON.stringify(fixturePayload("cursor.after-file-edit.json"))), { kind: "skip" });
+  });
+
+  it("a preToolUse payload for a non-shell tool, or with no command, stays a silent skip", () => {
+    assert.deepEqual(cursor.parse(JSON.stringify({ hook_event_name: "preToolUse", tool_name: "Write", tool_input: { command: "git push" } })), { kind: "skip" });
+    assert.deepEqual(cursor.parse(JSON.stringify({ hook_event_name: "preToolUse", tool_name: "Shell", tool_input: {} })), { kind: "skip" });
+    assert.equal(cursor.parse(JSON.stringify({ hook_event_name: "preToolUse", tool_name: "Shell", tool_input: { command: "git push" } })).kind, "malformed");
+    // Cursor-shaped payloads from other hosts, with no event name at all.
+    assert.equal(cursor.parse(JSON.stringify({ tool_name: "Bash", tool_input: { command: "git push" } })).kind, "malformed");
+    assert.equal(cursor.parse(JSON.stringify({ toolName: "bash", toolArgs: '{"command":"git push"}' })).kind, "malformed");
+    assert.equal(cursor.parse(JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine: "git push" } } })).kind, "malformed");
+  });
+
+  it("a beforeShellExecution event with no command field is malformed (it names a shell and carries nothing to judge)", () => {
+    assert.equal(cursor.parse(JSON.stringify({ hook_event_name: "beforeShellExecution", cwd: "/w" })).kind, "malformed");
+    assert.deepEqual(cursor.parse(JSON.stringify({ hook_event_name: "beforeShellExecution", command: "" })), { kind: "skip" });
   });
 
   it("a payload with no hook_event_name but a root command is still judged; another event with a command is not", () => {
@@ -129,21 +145,39 @@ describe("antigravity adapter (UNVERIFIED: PreToolUse, run_command)", () => {
     assert.deepEqual(agy.parse(JSON.stringify(noCwd)), { kind: "command", command: "echo hello" });
   });
 
-  it("another tool is skipped even when it carries a CommandLine; a missing toolCall, args or CommandLine is skipped", () => {
+  it("another tool is skipped even when it carries a CommandLine; an empty CommandLine is skipped", () => {
     const payload = fixturePayload("antigravity.pre-tool-use.json");
     for (const name of ["write_to_file", "view_file", "run_command2"]) {
       const p = structuredClone(payload) as { toolCall: { name: string } };
       p.toolCall.name = name;
       assert.deepEqual(agy.parse(JSON.stringify(p)), { kind: "skip" }, name);
     }
-    assert.deepEqual(agy.parse("{}"), { kind: "skip" });
-    assert.deepEqual(agy.parse(JSON.stringify({ toolCall: { name: "run_command" } })), { kind: "skip" });
-    assert.deepEqual(agy.parse(JSON.stringify({ toolCall: { name: "run_command", args: {} } })), { kind: "skip" });
     assert.deepEqual(agy.parse(JSON.stringify({ toolCall: { name: "run_command", args: { CommandLine: "" } } })), { kind: "skip" });
+    // No tool name and no args: nothing names a shell tool.
+    assert.deepEqual(agy.parse(JSON.stringify({ toolCall: {} })), { kind: "skip" });
   });
 
-  it("a gemini-shaped payload is not judged here (skip), so the wrong --agent value is visible, not silently half-working", () => {
-    assert.deepEqual(agy.parse(JSON.stringify({ tool_name: "run_shell_command", tool_input: { command: "git push" } })), { kind: "skip" });
+  it("the shell tool with no args, or args with no CommandLine, is malformed: the payload names a shell and has nothing to judge", () => {
+    assert.equal(agy.parse(JSON.stringify({ toolCall: { name: "run_command" } })).kind, "malformed");
+    assert.equal(agy.parse(JSON.stringify({ toolCall: { name: "run_command", args: {} } })).kind, "malformed");
+    assert.equal(agy.parse(JSON.stringify({ toolCall: { name: "run_command", args: { Command: "git push" } } })).kind, "malformed");
+  });
+
+  it("a payload with no toolCall (a gemini- or Claude-shaped one under --agent antigravity) is malformed, so the wrong --agent value is visible", () => {
+    assert.equal(agy.parse(JSON.stringify({ tool_name: "run_shell_command", tool_input: { command: "git push" } })).kind, "malformed");
+    assert.equal(agy.parse(JSON.stringify({ tool_name: "Bash", tool_input: { command: "git push" } })).kind, "malformed");
+    assert.equal(agy.parse("{}").kind, "malformed");
+  });
+
+  it("send_command_input: the typed Input is judged as the command; a missing Input is malformed", () => {
+    const p = (args: unknown): string => JSON.stringify({ toolCall: { name: "send_command_input", args } });
+    assert.deepEqual(agy.parse(p({ Input: "git push\n", CommandId: "c1" })), { kind: "command", command: "git push\n" });
+    assert.deepEqual(agy.parse(p({ Input: "git push", Cwd: "/w" })), { kind: "command", command: "git push", cwd: "/w" });
+    assert.equal(agy.parse(p({ CommandId: "c1" })).kind, "malformed");
+    assert.deepEqual(agy.parse(p({ Input: "" })), { kind: "skip" });
+    // CommandLine is run_command's field: it is not read for the input tool.
+    assert.equal(agy.parse(p({ CommandLine: "git push" })).kind, "malformed");
+    assert.equal(agy.oversized('{"toolCall": {"name": "send_command_input", "args": {"Input": "' + "x".repeat(5000)), "refuse");
   });
 
   it("wrong types are malformed: toolCall, args, CommandLine", () => {

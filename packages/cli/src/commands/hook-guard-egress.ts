@@ -21,10 +21,17 @@
 //
 //   Claude Code  PreToolUse,  matcher Bash              ask available
 //   Codex CLI    PreToolUse,  matcher Bash (was shell)  no ask
-//   Gemini CLI   BeforeTool,  matcher run_shell_command no ask
+//   Gemini CLI   BeforeTool,  matcher run_shell_command no ask (legacy)
+//   Copilot CLI  preToolUse / PreToolUse, bash          ask available
+//   Cursor       beforeShellExecution                   ask available
+//   Antigravity  PreToolUse,  run_command (unverified)  no ask
 //
 // Where a framework has no "ask", `ask` degrades to `deny` with a
 // "have a human run or approve this" reason — never to `allow`.
+//
+// A payload an adapter cannot read (wrong `--agent` or event, a shell tool with
+// no command field) fails OPEN like the guard's own defects, but says so: one
+// fixed stderr line, and an audit record when the audit log is on.
 //
 // Two invariants that must survive every future edit:
 //
@@ -33,9 +40,11 @@
 //      would rebuild the implicit-destination defect one layer up with the
 //      agent's intent still unexamined. `hook-guard-egress.test.ts` has an
 //      oracle over everything this hook can print.
-//   2. **Cheap and silent on the common case.** Almost every Bash call
-//      carries no egress intent at all; that path must exit 0 with no
-//      output and no registry read.
+//   2. **Cheap on the common case.** Almost every Bash call carries no egress
+//      intent at all; that path does no registry read and no I/O, and prints
+//      the least output the host accepts as "no objection": nothing where the
+//      host allows that, the host's minimal allow where it does not (Cursor,
+//      Antigravity).
 import {
   appendAuditRecord,
   checkNetworkRules,
@@ -71,7 +80,7 @@ import { ghShimIsFirstOnPath } from "./install-shim.js";
 import { adapterFor, type HookVerdict, type HostAdapter } from "./hook-hosts/index.js";
 
 export interface HookGuardEgressOptions {
-  /** The host adapter: `claude` (default) | `codex` | `gemini`; see ./hook-hosts/. Unknown → no ask. */
+  /** The host adapter: `claude` (default) | `codex` | `gemini` | `copilot` | `cursor` | `antigravity`, case-insensitive; see ./hook-hosts/. Unknown → no ask. */
   agent?: string;
   /** Test seam: the environment whose `PATH` decides whether the `gh` shim can run. */
   env?: NodeJS.ProcessEnv;
@@ -106,6 +115,23 @@ function emit(adapter: HostAdapter, verdict: HookVerdict): never {
   const out = adapter.render(verdict);
   if (out.stdout !== "") process.stdout.write(out.stdout);
   process.exit(out.exitCode);
+}
+
+/**
+ * A payload the adapter could not read: ONE fixed stderr line and, when the
+ * audit log is on, a `guard-egress-malformed` record. Both carry the adapter's
+ * fixed reason text and the `--agent` name, never payload bytes. The caller
+ * still answers with the host's allow (fail open).
+ */
+function reportNotJudged(adapter: HostAdapter, reason: string): void {
+  process.stderr.write(
+    `repo-aegis: guard-egress: this payload was not judged (${reason}); check that the hook is registered with the right --agent and event\n`,
+  );
+  try {
+    appendAuditRecord({ action: "guard-egress-malformed", cwd: process.cwd(), details: { agent: adapter.name, reason } });
+  } catch {
+    /* audit must not block the fail-open answer */
+  }
 }
 
 /** The most hook input read; a longer payload is not judged, it is refused (issue #151, final review V1). */
@@ -274,8 +300,13 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   let stdinText: string;
   try {
     const input = await readStdin();
-    if (input.truncated && adapter.oversized(input.text) === "refuse") {
-      deny(adapter, "HOOK_INPUT_TOO_LARGE", HOOK_INPUT_TOO_LARGE_REASON, { verb: "(oversized command)" });
+    if (input.truncated) {
+      if (adapter.oversized(input.text) === "refuse") {
+        deny(adapter, "HOOK_INPUT_TOO_LARGE", HOOK_INPUT_TOO_LARGE_REASON, { verb: "(oversized command)" });
+      }
+      // The prefix already proves a tool that is not a shell: a `skip`, silent like any other. The cut text
+      // cannot be parsed (and must not be reported as an unreadable payload).
+      emit(adapter, { action: "allow" });
     }
     stdinText = input.text;
   } catch (err) {
@@ -291,9 +322,12 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   let humanPresent = false;
   try {
     const parsed = adapter.parse(stdinText);
-    // Not a shell command, or not a payload this adapter understands: fail
-    // open, without touching the registry. (A `malformed` audit record is
-    // plan Phase 1 work, not part of the no-behaviour-change refactor.)
+    // Not a shell command: fail open, silently, without touching the registry.
+    // A payload this adapter could not read is the same fail-open answer, but
+    // NOT silent: most often the hook is registered with the wrong `--agent`
+    // or event, and a guard that quietly judges nothing looks exactly like a
+    // guard that is working.
+    if (parsed.kind === "malformed") reportNotJudged(adapter, parsed.reason);
     if (parsed.kind !== "command") emit(adapter, { action: "allow" });
     const { command, cwd } = parsed;
 
@@ -364,9 +398,53 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     emit(adapter, { action: "error" });
   }
 
+  // Rendering the decision can throw too (describeVerb, destinationDetails,
+  // the audit write): a throw here is the guard's own defect, so it becomes the
+  // `error` verdict through the adapter (the host's fail-open answer), never
+  // an uncaught exception, which commander turns into exit 1 (and Copilot
+  // fails CLOSED on exit 1). The outcome is computed first and emitted after.
+  const outcome = outcomeOrError(decision, { registryNote, ruleH, humanPresent });
+  if (outcome.stderr !== undefined) process.stderr.write(outcome.stderr);
+  emit(adapter, outcome.verdict);
+}
+
+/** What to print and say, computed before anything is written. */
+export interface Outcome {
+  verdict: HookVerdict;
+  /** Written to stderr before the verdict is rendered: the structured refusal of a deny. */
+  stderr?: string;
+}
+
+/**
+ * {@link planOutcome}, with a throw turned into the `error` verdict (and the
+ * same one-line stderr as the guard's other internal failures). Pure apart from
+ * the approval audit record; never throws.
+ */
+export function outcomeOrError(decision: EgressDecision, ctx: OutcomeContext): Outcome {
+  try {
+    return planOutcome(decision, ctx);
+  } catch (err) {
+    return {
+      verdict: { action: "error" },
+      stderr: `repo-aegis: hook guard-egress failed, command not evaluated: ${(err as Error).message}\n`,
+    };
+  }
+}
+
+interface OutcomeContext {
+  registryNote: string | undefined;
+  ruleH: RuleHStatus;
+  humanPresent: boolean;
+}
+
+function planOutcome(
+  decision: EgressDecision,
+  ctx: OutcomeContext,
+): Outcome {
+  let { registryNote } = ctx;
   if (decision.action === "allow") {
-    if (decision.approval !== undefined) emit(adapter, { action: "allow", reason: recordApprovalUse(decision, "hook guard-egress") });
-    emit(adapter, { action: "allow" });
+    if (decision.approval !== undefined) return { verdict: { action: "allow", reason: recordApprovalUse(decision, "hook guard-egress") } };
+    return { verdict: { action: "allow" } };
   }
 
   // Rule h's own refusal already says the registry could not be read and how
@@ -377,24 +455,27 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   // (no destination) or a person at the keyboard gets no extra line. No
   // registry contents, ever.
   const skipNote =
-    !humanPresent && decision.code !== "UNREGISTERED_OWNER_EGRESS" && !SHAPE_RULE_CODES.has(decision.code)
-      ? ruleHSkipNote(ruleH)
+    !ctx.humanPresent && decision.code !== "UNREGISTERED_OWNER_EGRESS" && !SHAPE_RULE_CODES.has(decision.code)
+      ? ruleHSkipNote(ctx.ruleH)
       : null;
   const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);
   const reason = notes.length === 0 ? decision.reason : `${decision.reason} (${notes.join("; ")})`;
 
-  if (decision.action === "ask") emit(adapter, { action: "ask", reason });
+  if (decision.action === "ask") return { verdict: { action: "ask", reason } };
 
   const details: Record<string, unknown> = { verb: describeVerb(decision.intent.verb) };
   const dest = destinationDetails(decision.destination);
   if (dest !== undefined) details["destination"] = dest;
   if (registryNote !== undefined) details["registry"] = registryNote;
-  if (skipNote !== null) details["ruleH"] = ruleH;
+  if (skipNote !== null) details["ruleH"] = ctx.ruleH;
 
   // stderr carries the reason because that is what these frameworks feed
   // back to the model on a non-zero exit (Bug A in
   // doc/bugs/repo-aegis-check-write-flake.md); stdout carries the same
   // decision for frameworks that read the JSON channel instead. stderr gets
   // the bare reason (the notes travel in `details`), stdout the noted one.
-  deny(adapter, decision.code, decision.reason, details, reason);
+  return {
+    verdict: { action: "deny", reason },
+    stderr: JSON.stringify({ code: decision.code, error: decision.reason, details }, null, 2) + "\n",
+  };
 }

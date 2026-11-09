@@ -597,8 +597,13 @@ change. The comparison is opt-in (env-gated), so an intended wording
 change elsewhere does not break unrelated suites. The semantic tests are
 the standing net.
 
-Malformed input is still silent, with no audit record. Adding that record
-is Phase 1 work, and it would change behaviour. T1a did not change it.
+T1a left malformed input silent, with no audit record. That changed after
+review: a `malformed` payload (and a shell tool with no command, or a command
+in another host's shape) still fails open with the host's allow, but now
+prints one fixed stderr line and writes a `guard-egress-malformed` audit
+record when the audit log is on, because a hook registered with the wrong
+`--agent` or event is otherwise indistinguishable from a working one. A
+non-shell tool stays a silent `skip`.
 
 ### 5.3 T1b and T1d: Cursor and Antigravity adapters, Cursor write scan
 
@@ -608,8 +613,9 @@ Built from the §5.1 facts alone; no real host has run any of it (H1).
   `command`, `cwd`). Allow is `{"permission":"allow"}` (empty stdout probably
   blocks), deny and ask are `{"permission", "user_message", "agent_message"}`
   on stdout with exit 0, and a guard error is exit 1 with nothing on stdout
-  (non-zero other than 2 fails open). A `preToolUse` payload is **skipped**,
-  not judged: Cursor accepts `ask` there but does not enforce it, so judging it
+  (non-zero other than 2 fails open). A `preToolUse` payload is **not
+  judged** (reported as `malformed`: fail open with the one "not judged"
+  line): Cursor accepts `ask` there but does not enforce it, so judging it
   would turn an `ask` into a run. Register on `beforeShellExecution` only.
 - **Antigravity** (`hook-hosts/antigravity.ts`, marked unverified): exit codes
   and failure behaviour are undocumented, so every answer exits 0. Deny is the

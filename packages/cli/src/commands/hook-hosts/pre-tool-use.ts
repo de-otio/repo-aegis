@@ -6,7 +6,23 @@
 // and read a `hookSpecificOutput.permissionDecision` answer (Codex and Gemini
 // also honour exit 2 + stderr, which the core writes). The per-host modules
 // differ only in name and `hasAsk`.
+import {
+  ALL_SHAPES,
+  ANY_SHELL_TOOL_NAMES,
+  commandResult,
+  cwdOf,
+  flattenCommand,
+  noOwnCommand,
+  parseRootObject,
+  readShape,
+  rootCwd,
+  toolNameOf,
+  type Field,
+  type ShapeName,
+} from "./shapes.js";
 import type { HookVerdict, HostOutput, ParsedHookInput } from "./types.js";
+
+export { flattenCommand };
 
 // PreToolUse exit-code contract, shared by all three frameworks:
 //   0              → proceed (with the JSON decision, if any, on stdout),
@@ -24,22 +40,6 @@ export const EXIT_INTERNAL_ERROR = 1;
 export const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "shell", "run_shell_command"]);
 
 /**
- * Flatten an argv-style command (`["bash", "-lc", "git push"]`) to the
- * shell text it would run. Harnesses that exec directly rather than through
- * a shell send this shape; the script after `-c` / `-lc` is the part the
- * policy must see.
- */
-export function flattenCommand(value: unknown): string | undefined {
-  if (typeof value === "string") return value.length > 0 ? value : undefined;
-  if (!Array.isArray(value)) return undefined;
-  const parts = value.filter((v): v is string => typeof v === "string");
-  if (parts.length === 0) return undefined;
-  const dashC = parts.findIndex(p => /^-[a-z]*c$/.test(p));
-  if (dashC !== -1 && dashC + 1 < parts.length) return parts[dashC + 1];
-  return parts.join(" ");
-}
-
-/**
  * Tolerant field extraction across the three harness shapes, in the spirit
  * of `hook-scan-bash-output.ts`: the pending command from
  * `tool_input.command` (all three) or a root-level `command`, and the
@@ -51,30 +51,50 @@ export function flattenCommand(value: unknown): string | undefined {
  * spurious `CROSS_ORG_WRITE` blocks (doc/bugs/repo-aegis-check-write-flake.md).
  */
 export function parsePreToolUse(stdin: string): ParsedHookInput {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdin);
-  } catch {
-    return { kind: "malformed", reason: "stdin is not JSON" };
-  }
-  // An array was once read as an object with no fields (→ silent exit 0);
-  // `malformed` renders the same, so this is a naming fix, not a behaviour change.
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { kind: "malformed", reason: "stdin is not a JSON object" };
-  const root = parsed as Record<string, unknown>;
+  const r = parseRootObject(stdin);
+  if ("malformed" in r) return r.malformed;
+  const root = r.root;
 
   const toolName = root["tool_name"];
-  if (typeof toolName === "string" && toolName.length > 0 && !SHELL_TOOL_NAMES.has(toolName.toLowerCase())) {
-    return { kind: "skip" };
+  const named = typeof toolName === "string" && toolName.length > 0;
+  if (named && !SHELL_TOOL_NAMES.has(toolName.toLowerCase())) return { kind: "skip" };
+
+  // `tool_input.command` first, then a root `command`. A command in another
+  // host's shape (Copilot `toolArgs`, Antigravity `toolCall`), or a named
+  // shell tool with no command at all, is `malformed`: the hook is probably
+  // registered with the wrong `--agent`, and that must not be silent.
+  const own: readonly ShapeName[] = ["tool_input", "root"];
+  const fields: Field[] = [];
+  for (const shape of own) {
+    const f = readShape(root, shape);
+    if (f.kind === "found") return commandResult(f.command, rootCwd(root));
+    fields.push(f);
   }
+  return noOwnCommand(root, own, fields, named);
+}
 
-  let command: string | undefined;
-  const ti = root["tool_input"];
-  if (ti && typeof ti === "object") command = flattenCommand((ti as Record<string, unknown>)["command"]);
-  if (command === undefined) command = flattenCommand(root["command"]);
-  if (command === undefined) return { kind: "skip" };
+/**
+ * The fallback for an unknown `--agent` name: try every known shape in turn
+ * (PreToolUse `tool_input.command`, root `command`, Copilot `toolArgs`,
+ * Antigravity `toolCall.args.CommandLine`), so a typo or an unlisted host that
+ * sends a known shape is still judged. Rendering stays the no-ask PreToolUse
+ * family (exit 2 blocks).
+ */
+export function parseAnyShape(stdin: string): ParsedHookInput {
+  const r = parseRootObject(stdin);
+  if ("malformed" in r) return r.malformed;
+  const root = r.root;
 
-  const cwd = root["cwd"];
-  return typeof cwd === "string" && cwd.length > 0 ? { kind: "command", command, cwd } : { kind: "command", command };
+  const toolName = toolNameOf(root);
+  if (toolName !== undefined && !ANY_SHELL_TOOL_NAMES.has(toolName.toLowerCase())) return { kind: "skip" };
+
+  const fields: Field[] = [];
+  for (const shape of ALL_SHAPES) {
+    const f = readShape(root, shape);
+    if (f.kind === "found") return commandResult(f.command, cwdOf(root));
+    fields.push(f);
+  }
+  return noOwnCommand(root, ALL_SHAPES, fields, toolName !== undefined);
 }
 
 /**

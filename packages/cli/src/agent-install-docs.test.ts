@@ -16,10 +16,14 @@
 //     section, and the cli-reference heading lists every registered agent.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ADAPTERS } from "./commands/hook-hosts/index.js";
+import { scrubGitEnv } from "./_test-utils.js";
+import { cliBuilt, cliPath } from "./_subprocess-utils.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** Repo root, reached from `packages/cli/dist`. */
@@ -196,4 +200,60 @@ describe("doc/cli-reference.md", () => {
     const listed = new Set(m[1]!.split("|"));
     for (const name of ADAPTERS.keys()) assert.ok(listed.has(name), `${name} missing from the heading`);
   });
+});
+
+// The self-test blocks in doc/agent-install.md ("Test it once") are claims about behaviour: feed each payload
+// through the BUILT hook, with the documented `--agent`, and assert the documented exit code and output. This
+// replaces reading the prose for words: a doc that says Cursor denies on stdout with exit 0 is run, not parsed.
+describe("doc/agent-install.md self-test blocks run against the built hook", { skip: !cliBuilt() }, () => {
+  interface SelfTest {
+    agent: string | undefined;
+    payload: string;
+    code: number;
+    fragment: string;
+    channel: "stdout" | "stderr";
+  }
+
+  /** Every ```sh block line pair: `echo '<payload>' | repo-aegis hook guard-egress [--agent X]` then `echo $?  # N, with <text> on stdout|stderr`. */
+  function selfTests(text: string): SelfTest[] {
+    const out: SelfTest[] = [];
+    for (const block of text.matchAll(/```sh\n([\s\S]*?)\n```/g)) {
+      const lines = block[1]!.split("\n");
+      lines.forEach((line, i) => {
+        const m = /^echo '(.*)' \| repo-aegis hook guard-egress(?: --agent (\S+))?$/.exec(line);
+        if (m === null) return;
+        const next = /^echo \$\?\s+# (\d+), with (.+) on (stdout|stderr)$/.exec(lines[i + 1] ?? "");
+        assert.ok(next, `self-test line has no documented result on the next line: ${line}`);
+        out.push({ agent: m[2], payload: m[1]!, code: Number(next[1]), fragment: next[2]!, channel: next[3] as "stdout" | "stderr" });
+      });
+    }
+    return out;
+  }
+
+  const tests = selfTests(doc);
+
+  it("documents a self-test for Claude (default agent), Copilot, Cursor and Antigravity", () => {
+    assert.deepEqual(tests.map(t => t.agent ?? "claude").sort(), ["antigravity", "claude", "copilot", "cursor"]);
+  });
+
+  for (const t of tests) {
+    it(`--agent ${t.agent ?? "(default)"}: the documented payload gives exit ${t.code} with ${t.fragment} on ${t.channel}`, () => {
+      const restore = scrubGitEnv();
+      const tmp = mkdtempSync(join(tmpdir(), "repo-aegis-docs-selftest-"));
+      try {
+        const env: NodeJS.ProcessEnv = { ...process.env, REPO_AEGIS_HOME: join(tmp, "aegis"), REPO_AEGIS_VISIBILITY_LOOKUP: "0" };
+        delete env["REPO_AEGIS_EGRESS_HUMAN"];
+        const args = ["hook", "guard-egress", ...(t.agent !== undefined ? ["--agent", t.agent] : [])];
+        const r = spawnSync(process.execPath, [cliPath, ...args], { cwd: tmp, env, input: t.payload + "\n", encoding: "utf8" });
+        assert.equal(r.status, t.code, `stdout=${r.stdout} stderr=${r.stderr}`);
+        const text = t.channel === "stdout" ? r.stdout : r.stderr;
+        assert.ok(text.includes(t.fragment), `${t.channel} should contain ${t.fragment}; got ${text}`);
+        // The documented deny is a real refusal; the structured reason is on stderr for every host.
+        assert.match(r.stderr, /"code": "PUSH_IMPLICIT_TARGET"/);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+        restore();
+      }
+    });
+  }
 });

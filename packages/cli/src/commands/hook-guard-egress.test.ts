@@ -180,19 +180,26 @@ describe("hook guard-egress — silent on everything that is not egress", { skip
     assert.equal(r.stderr, "");
   });
 
-  it("exits 0 on garbage stdin", () => {
+  // A payload that cannot be read fails open (exit 0, no decision on stdout) but is no longer silent: one
+  // fixed stderr line, so a hook registered with the wrong --agent or event does not look like a working one.
+  const NOT_JUDGED_LINE =
+    /^repo-aegis: guard-egress: this payload was not judged \([^)]+\); check that the hook is registered with the right --agent and event\n$/;
+
+  it("exits 0 on garbage stdin, saying once that nothing was judged (and never echoing the input)", () => {
     const home = aegisHome("garbage", EMPTY_REGISTRY);
     const r = runGuard("this is not json {{{", { home });
     assert.equal(r.code, 0);
     assert.equal(r.stdout, "");
-    assert.equal(r.stderr, "");
+    assert.match(r.stderr, NOT_JUDGED_LINE);
+    assert.ok(!r.stderr.includes("this is not json"), "fixed text only, never payload bytes");
   });
 
-  it("exits 0 on empty stdin", () => {
+  it("exits 0 on empty stdin, saying once that nothing was judged", () => {
     const home = aegisHome("empty", EMPTY_REGISTRY);
     const r = runGuard("", { home });
     assert.equal(r.code, 0);
     assert.equal(r.stdout, "");
+    assert.match(r.stderr, NOT_JUDGED_LINE);
   });
 
   it("exits 0 when the tool is not a shell tool, even if the payload mentions a push", () => {
@@ -208,11 +215,20 @@ describe("hook guard-egress — silent on everything that is not egress", { skip
     assert.equal(r.stderr, "");
   });
 
-  it("exits 0 when there is no command field at all", () => {
+  it("exits 0 when a shell tool is named but there is no command field at all, saying once that nothing was judged", () => {
     const home = aegisHome("no-command", EMPTY_REGISTRY);
     const r = runGuard(JSON.stringify({ tool_name: "Bash", tool_input: {} }), { home });
     assert.equal(r.code, 0);
     assert.equal(r.stdout, "");
+    assert.match(r.stderr, NOT_JUDGED_LINE);
+  });
+
+  it("exits 0, silently, when no tool is named and there is no command field", () => {
+    const home = aegisHome("no-command-no-tool", EMPTY_REGISTRY);
+    const r = runGuard("{}", { home });
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, "");
+    assert.equal(r.stderr, "");
   });
 });
 

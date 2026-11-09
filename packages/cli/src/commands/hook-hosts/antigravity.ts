@@ -12,6 +12,11 @@
 //           and, when absent, the policy falls back to the hook's own cwd.
 //   stdout  `{"decision": "allow" | "deny" | "ask", "reason"}`.
 //
+// The interactive tool `send_command_input` (arg `Input`) is judged too: text
+// typed into a running command is a command. A payload with no `toolCall`
+// (another host's shape under this `--agent`) is `malformed`, not `skip`, so
+// the wrong registration is visible.
+//
 // The docs give no exit-code or failure behaviour, and do not say whether
 // empty stdout means proceed. The conservative rendering for such a host:
 //
@@ -27,49 +32,54 @@
 //
 // `--agent gemini` does not work with Antigravity (different config path,
 // event name, payload and answer shape); this is its own adapter.
+import { commandResult, isObject, parseRootObject, REASON_NO_COMMAND_FIELD } from "./shapes.js";
 import type { HookVerdict, HostAdapter, HostOutput, ParsedHookInput } from "./types.js";
 
 /** The shell tool's name in `toolCall.name`. */
 const SHELL_TOOL = "run_command";
+/**
+ * The interactive-input tool: text typed into a running command (arg `Input`).
+ * It is judged as the command: `git push` typed into an open session is a push.
+ */
+const INPUT_TOOL = "send_command_input";
+const SHELL_TOOLS: ReadonlySet<string> = new Set([SHELL_TOOL, INPUT_TOOL]);
 
 function parseAntigravity(stdin: string): ParsedHookInput {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdin);
-  } catch {
-    return { kind: "malformed", reason: "stdin is not JSON" };
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { kind: "malformed", reason: "stdin is not a JSON object" };
-  const call = (parsed as Record<string, unknown>)["toolCall"];
-  if (call === undefined) return { kind: "skip" };
-  if (!call || typeof call !== "object" || Array.isArray(call)) return { kind: "malformed", reason: "toolCall is not an object" };
-  const toolCall = call as Record<string, unknown>;
+  const r = parseRootObject(stdin);
+  if ("malformed" in r) return r.malformed;
+  const call = r.root["toolCall"];
+  // Every Antigravity payload has a `toolCall`. One without it came from a
+  // different host's hook (a Claude- or Gemini-shaped `tool_input`) wired to
+  // `--agent antigravity`: not judged, and said so.
+  if (call === undefined) return { kind: "malformed", reason: "payload has no toolCall, so it is not an Antigravity payload" };
+  if (!isObject(call)) return { kind: "malformed", reason: "toolCall is not an object" };
 
-  const name = toolCall["name"];
-  if (typeof name === "string" && name.length > 0 && name.toLowerCase() !== SHELL_TOOL) return { kind: "skip" };
+  const name = call["name"];
+  const named = typeof name === "string" && name.length > 0;
+  if (named && !SHELL_TOOLS.has(name.toLowerCase())) return { kind: "skip" };
+  const key = named && name.toLowerCase() === INPUT_TOOL ? "Input" : "CommandLine";
 
-  const args = toolCall["args"];
-  if (args === undefined) return { kind: "skip" };
-  if (!args || typeof args !== "object" || Array.isArray(args)) return { kind: "malformed", reason: "toolCall.args is not an object" };
-  const a = args as Record<string, unknown>;
+  const args = call["args"];
+  if (args === undefined) return named ? { kind: "malformed", reason: REASON_NO_COMMAND_FIELD } : { kind: "skip" };
+  if (!isObject(args)) return { kind: "malformed", reason: "toolCall.args is not an object" };
 
-  const command = a["CommandLine"];
-  if (command === undefined) return { kind: "skip" };
-  if (typeof command !== "string") return { kind: "malformed", reason: "CommandLine is not a string" };
+  const command = args[key];
+  if (command === undefined) return named ? { kind: "malformed", reason: REASON_NO_COMMAND_FIELD } : { kind: "skip" };
+  if (typeof command !== "string") return { kind: "malformed", reason: `${key} is not a string` };
   if (command.length === 0) return { kind: "skip" };
 
-  const cwd = a["Cwd"];
-  return typeof cwd === "string" && cwd.length > 0 ? { kind: "command", command, cwd } : { kind: "command", command };
+  const cwd = args["Cwd"];
+  return commandResult(command, typeof cwd === "string" && cwd.length > 0 ? cwd : undefined);
 }
 
 /**
  * `toolCall.name` sits after the payload's own metadata, which can be long
  * (`lastUserInput`). Proceed only if the name is read, inside the first 4 KiB,
- * and is not the shell tool; otherwise refuse.
+ * and is not a shell tool; otherwise refuse.
  */
 function oversizedAntigravity(prefix: string): "proceed" | "refuse" {
   const m = /"toolCall"\s*:\s*\{\s*"name"\s*:\s*"([^"\\]{1,64})"/.exec(prefix.slice(0, 4096));
-  if (m !== null && m[1]!.toLowerCase() !== SHELL_TOOL) return "proceed";
+  if (m !== null && !SHELL_TOOLS.has(m[1]!.toLowerCase())) return "proceed";
   return "refuse";
 }
 
