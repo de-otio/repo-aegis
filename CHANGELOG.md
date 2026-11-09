@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-09
+
+### Changed — an agent can publish under one approval (Phase U of `doc/plan-landscape-recommendations.md`)
+
+Before this release, opening one PR from a sandboxed agent session took five refusals and four
+human round-trips, even with an active approval. Two of the refusals fired on state repo-aegis's
+own installer had created.
+
+- **An account-bound approval covers the deliberate-bypass refusals.** A live
+  `repo-aegis approve <owner>/<repo>` or `<owner>/*` that carries a person login now also covers
+  `AGENT_PUSH_CHAIN_UNREADABLE` (the credential helper can't read the process list, typically
+  inside a sandbox) and `GH_IDENTITY_ARG_UNSAFE` for a repo-local git setting, within that
+  approval's owner, scope and lifetime. Each covered call prints one line naming the approval and
+  writes an audit record. A `*` approval, an approval without a login, a ref-limited approval and
+  an expired one cover nothing. A readable process chain that shows a non-git caller is still
+  refused, and so are unsafe gh ARGUMENTS (`--hostname`, `--editor`, …).
+- **repo-aegis accepts its own hooks directory.** A repo-local `core.hooksPath` that resolves to
+  repo-aegis's pinned hooks directory is no longer "unsafe". `install hooks --local` no longer
+  writes a local value equal to the global one, and `doctor` reports an existing duplicate as
+  `HOOKS_PATH_LOCAL_DUPLICATE` with the one-line fix.
+- **A read falls back instead of refusing.** A read-only gh call whose identity can't be produced
+  (`GH_IDENTITY_UNAVAILABLE`) runs as the active gh account with one warning line. Writes still
+  refuse, and a minted token is never used on the fallback path.
+- **SSH remotes are flagged.** For an owner whose agents push as a GitHub App, `doctor` and
+  `classify --apply` report `AGENT_REMOTE_IS_SSH` with the person-run `git remote set-url --push`
+  fix. An agent's SSH push goes out as the person's key.
+- **Refusals say what caused them.** Every refusal on the agent publish path names its cause, says
+  whether repo-aegis created that condition, gives a fix line, and says whether an approval
+  covers it. Two refusals wrongly claimed an approval covers them; that is corrected.
+- **Inside the agent sandbox, refusals name the sandbox.** `AGENT_PUSH_CHAIN_UNREADABLE` says a
+  sandbox is the likely cause. A failed App-token mint says the sandbox most likely stopped
+  taaad-signer before its presence prompt (`SANDBOX_RUNTIME` is set). See the new
+  `doc/agent-sandbox.md` for what works there and the `sandbox.excludedCommands` route (unverified).
+- **A failed mint names taaad's step.** taaad ≥ 0.7.0's last-line `taaad: error=<code>[ status=<n>]`
+  is mapped (allowlisted codes only, copied verbatim; an unknown code becomes `internal` and is
+  not echoed). With an older taaad, the generic texts now carry taaad's exit status.
+- **taaad's derived read class is accepted** (taaad plan 0004). A read token passes when every
+  permission is at `read`, whatever the key. Write or admin under read is still refused. taaad
+  0.6.0's fixed four keys still pass.
+- The acceptance test `packages/cli/src/agent-publish-path.test.ts` replays the sequence above and
+  must pass. Not yet exercised against a live sandbox with real Touch ID.
+
+### Added — egress guard for more agent hosts
+
+- `hook guard-egress --agent copilot | cursor | antigravity`, with one adapter module per host
+  under `packages/cli/src/commands/hook-hosts/`. Before this release, Copilot CLI (camelCase) and
+  Antigravity CLI payloads were silently allowed even for `git push`, because the hook found no
+  command field in them; they are now judged.
+- `hook scan-after-write --agent cursor` for Cursor's `afterFileEdit`. It is detection only: the
+  edit has already happened, and the pre-commit hook is the gate.
+- Codex's current matcher `Bash` is documented (older builds: `shell`), together with the `/hooks`
+  trust step. `--agent gemini` is legacy: Gemini CLI was replaced by Antigravity CLI.
+- Every non-Claude host is built from vendor documentation and has not been exercised in a live
+  session. `doc/agent-install.md` gives hand-registration snippets labelled that way, and a test
+  keeps them parseable and registered.
+
+### Fixed
+
+- The git credential helper wrote its audit record to the caller's `REPO_AEGIS_HOME` instead of
+  the pinned home.
+
+### Documentation
+
+- New: `doc/guide-data-leak-prevention.md`, the background guide the README promised; a
+  "Companion tools" section (ggshield, gitleaks), plus the result of a ggshield coexistence check:
+  its installer keeps repo-aegis's hooks (file contents only, one install order tested); the
+  universal secret-shape set is frozen; identity-layer non-goals; npm keywords.
+
 ### Documentation — docs corrected against the code
 
 - The docs now describe the force-push scan depth (`--range` for an existing ref, `--push-ref`
