@@ -138,15 +138,20 @@ export function taaadEnv(env: NodeJS.ProcessEnv = process.env): Record<string, s
   };
 }
 
-const READ_KEYS = new Set(["metadata", "contents", "pull_requests", "issues"]);
-
-/** Permissions no wider than `scope` (taaad README: read set / contents:write + metadata:read / the installation's own). */
+/**
+ * Permissions no wider than `scope` (taaad README: read class / contents:write + metadata:read / the installation's own).
+ *
+ * `read` is checked by LEVEL, not by key (taaad plan 0004): taaad ≥ 0.7.0 derives the read class from what the
+ * installation grants (every granted permission at `read`), so an App granted e.g. `security_events: read` can serve
+ * a read. taaad 0.6.0's fixed four keys (metadata, contents, pull_requests, issues) still pass. What a read token must
+ * never carry is a `write` or `admin` level; which keys it reads is the App's grant, already chosen by its owner.
+ */
 function permissionsWithin(scope: IdentityScope, perms: Record<string, string>): boolean {
   const entries = Object.entries(perms);
   if (entries.length === 0) return false;
   switch (scope) {
     case "read":
-      return entries.every(([k, v]) => READ_KEYS.has(k) && v === "read");
+      return entries.every(([, v]) => v === "read");
     case "contents-write":
       return entries.every(([k, v]) => (k === "contents" && v === "write") || (k === "metadata" && v === "read"));
     case "write":

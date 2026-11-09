@@ -1094,11 +1094,18 @@ describe("validateMintOutput (the shared check on taaad's answer)", () => {
     }
   });
 
-  it("scopes: read allows only read levels of metadata, contents, pull_requests, issues; contents-write only metadata and contents; write never admin", () => {
+  it("scopes: read allows any key at read level only (taaad plan 0004); contents-write only metadata and contents; write never admin", () => {
     const perms = (permissions: unknown): string => mintJson({ permissions });
+    // taaad 0.6.0's fixed read class still passes.
     assert.equal(ok(perms({ metadata: "read", contents: "read", pull_requests: "read", issues: "read" }), "read"), true);
+    // taaad ≥ 0.7.0's derived read class: every granted key at read.
+    assert.equal(ok(perms({ metadata: "read", security_events: "read", actions: "read" }), "read"), true);
+    assert.equal(ok(perms({ actions: "read" }), "read"), true);
+    // Never a write or admin level under read, whatever the key.
     assert.equal(ok(perms({ contents: "write" }), "read"), false);
-    assert.equal(ok(perms({ actions: "read" }), "read"), false);
+    assert.equal(ok(perms({ metadata: "read", security_events: "write" }), "read"), false);
+    assert.equal(ok(perms({ metadata: "read", administration: "admin" }), "read"), false);
+    assert.equal(ok(perms({}), "read"), false, "empty");
     assert.equal(ok(perms({ metadata: "read", contents: "write" }), "contents-write"), true);
     assert.equal(ok(perms({ metadata: "write" }), "contents-write"), false);
     assert.equal(ok(perms({ pull_requests: "read" }), "contents-write"), false);
@@ -1106,6 +1113,23 @@ describe("validateMintOutput (the shared check on taaad's answer)", () => {
     assert.equal(ok(perms({ contents: "admin" }), "write"), false);
     assert.equal(ok(perms(null), "write"), false);
     assert.equal(ok(perms(["contents"]), "write"), false);
+  });
+
+  it("property: under read, a permissions map passes iff it is non-empty and every value is read (seeded)", () => {
+    const keys = ["metadata", "contents", "pull_requests", "issues", "actions", "security_events", "checks", "administration"];
+    const levels = ["read", "write", "admin", "none", "", "READ"];
+    let seed = 0x5eed_0004;
+    const next = (n: number): number => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return seed % n;
+    };
+    for (let i = 0; i < 500; i++) {
+      const map: Record<string, string> = {};
+      const size = next(5);
+      for (let j = 0; j < size; j++) map[keys[next(keys.length)]!] = levels[next(levels.length)]!;
+      const expected = Object.keys(map).length > 0 && Object.values(map).every(v => v === "read");
+      assert.equal(ok(mintJson({ permissions: map }), "read"), expected, JSON.stringify(map));
+    }
   });
 
   it("an installation of another account is its own failure kind, case-insensitively matched", () => {
