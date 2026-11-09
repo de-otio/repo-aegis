@@ -51,7 +51,7 @@ rules that follow:
   client environments.
 - Client documents used as test fixtures because they were the easiest source of "real-world"
   examples.
-- Client or former-employer names used as example values in source code, then bundled by the
+- Client or employer names used as example values in source code, then bundled by the
   build tool into a published package, including its sourcemap.
 - A "rename the name" fix applied to the working tree only, which left the original string
   reachable in history and signalled that something had been there.
@@ -104,7 +104,7 @@ anyone remembering a per-repository command.
 ### Organisational responsibility: managed accounts
 
 Everything above assumes the engineer controls their own GitHub setup and applies it
-consistently. The highest-impact failure the author has seen is structural instead: when an
+consistently. A high-impact failure seen in practice is structural instead: when an
 employer provides no managed GitHub accounts, people use individual accounts, and GitHub's
 default visibility for a repository created under an individual account is **Public**. Someone
 creates a repository for work code, does not toggle the visibility, and pushes. The window
@@ -397,7 +397,7 @@ Read this last. It says where not to trust the rest.
   beats a correct global one, and if it points at a directory with no hook scripts, the scan
   silently never runs. Nothing reports it, because "protected and clean" and "not protected at
   all" look the same: no output. In the author's case it was found only because four sibling
-  repositories printed a "clean" line in the same minute and one did not, and most repositories
+  repositories printed a "clean" line in the same minute and one did not, and many repositories
   on the machine turned out to be affected. Make the scanner announce that it ran, check that
   the hook is wired (not merely installed), and when you find a disabled guard, record the
   file's metadata before you repair it, because repair overwrites the evidence.
