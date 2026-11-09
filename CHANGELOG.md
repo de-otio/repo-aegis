@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation — docs corrected against the code
+
+- The docs now describe the force-push scan depth (`--range` for an existing ref, `--push-ref`
+  for a new one), `hook check-write` as the primary write gate, what a CI job without a registry
+  actually scans, the `config-guard` limits and the `main`/`master` push trigger accurately.
+- Instructions that failed as written are fixed: `engagements add` on an existing id, personal-org
+  classification, the global `core.hooksPath` default, JSON examples, and config keys.
+- Undocumented commands and flags are added to `doc/cli-reference.md`. Six plans and notes now
+  name the release they shipped in. External-tool claims are linked or marked unverified, and
+  Gemini CLI is noted as replaced by Antigravity CLI.
+- Known issues are noted, not fixed: the PostToolUse hooks exit 1 on a hit, which may not reach
+  the model (unverified); `allow`/`deny` ignore `--cwd`; the action's `registry` input is not
+  rendered to markers.
+- New: `doc/analysis-landscape-2026-11.md` (is repo-aegis still the right tool?) and
+  `doc/plan-landscape-recommendations.md` (the follow-up plan).
+
 ## [0.12.2] - 2026-11-09
 
 ### Fixed — an App token mint gave up before Touch ID did
