@@ -5,8 +5,10 @@
 // exporting a `HostAdapter` (contract in ./types.ts and plan §5 "T1a adapter
 // contract"), add it to ADAPTERS, add its fixtures to
 // `__fixtures__/hosts/index.json`.
+import { antigravityAdapter } from "./antigravity.js";
 import { claudeAdapter } from "./claude.js";
 import { codexAdapter } from "./codex.js";
+import { cursorAdapter } from "./cursor.js";
 import { geminiAdapter } from "./gemini.js";
 import { oversizedByToolName, parsePreToolUse, renderPreToolUse } from "./pre-tool-use.js";
 import type { HostAdapter } from "./types.js";
@@ -14,7 +16,7 @@ import type { HostAdapter } from "./types.js";
 export type { HookVerdict, HostAdapter, HostOutput, ParsedHookInput } from "./types.js";
 
 export const ADAPTERS: ReadonlyMap<string, HostAdapter> = new Map(
-  [claudeAdapter, codexAdapter, geminiAdapter].map(a => [a.name, a] as const),
+  [claudeAdapter, codexAdapter, geminiAdapter, cursorAdapter, antigravityAdapter].map(a => [a.name, a] as const),
 );
 
 /**

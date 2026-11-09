@@ -21,7 +21,17 @@ interface HookOptions {
   /** When true, do not exit non-zero on hits — return as if clean. Useful
    * for advisory-only configurations (rarely needed; default off). */
   advisory?: boolean;
+  /**
+   * The host whose payload arrives on stdin: `cursor` reads `file_path` from the root of an
+   * `afterFileEdit` payload (plan T1d); anything else is the Claude Code shape (`tool_input.file_path`).
+   */
+  agent?: string;
 }
+
+/** Added to Cursor's non-zero answers (plan T1d). */
+export const CURSOR_DETECTION_ONLY =
+  "repo-aegis: this check ran AFTER Cursor saved the edit (afterFileEdit cannot block it), so it is detection " +
+  "only and the file is already on disk. The pre-commit hook is the gate: the commit is refused until the marker is removed.";
 
 // The payload's fields (hook-input.ts, parseHookWriteFields): `filePath`, the file the agent just
 // wrote/edited, and `cwd`, the session's working directory (the launcher boundary; see the cwd-source
@@ -79,10 +89,16 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
  */
 export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> {
   const input = await readHookStdin(WRITE_HOOK_INPUT_MAX_BYTES);
-  const { filePath, cwd } = parseHookWriteFields(input.text);
+  const cursor = opts.agent === "cursor";
+  const { filePath, cwd } = parseHookWriteFields(input.text, cursor ? "cursor" : "claude");
+  // Cursor's `afterFileEdit` has no output schema and cannot block: say so on every non-zero answer, so
+  // nobody reads a hit as a prevented write.
+  // (The explicit `never` annotation on the binding is what keeps control-flow narrowing after a call.)
+  const emit: (value: unknown, exitCode: number) => never = (value, exitCode) =>
+    emitJsonAndExit(cursor && exitCode !== 0 ? { ...(value as object), note: CURSOR_DETECTION_ONLY } : value, exitCode);
 
   if (!filePath) {
-    if (input.truncated) emitJsonAndExit({ code: "HOOK_INPUT_TOO_LARGE", error: NOT_SCANNED_REASON }, 2);
+    if (input.truncated) emit({ code: "HOOK_INPUT_TOO_LARGE", error: NOT_SCANNED_REASON }, 2);
     process.exit(0);
   }
   if (!existsSync(filePath)) process.exit(0);
@@ -100,7 +116,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
       // were in use; the hook should not block plain installs.
       registry = { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
     } else if (err instanceof RegistryEncryptedError) {
-      emitJsonAndExit(
+      emit(
         {
           code: err.code,
           error: err.message,
@@ -108,7 +124,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
         2,
       );
     } else {
-      emitJsonAndExit(
+      emit(
         {
           code: "REGISTRY_ERROR",
           error: (err as Error).message,
@@ -133,7 +149,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
     // write to the agent — but the file is already on disk, so the
     // recovery is to revert, not to retry. The error message says
     // so explicitly.
-    emitJsonAndExit(
+    emit(
       {
         code: decision.code,
         error:
@@ -159,7 +175,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
 
   if (repo.isGitRepo && repo.class === "customer-coupled" && repo.engagements.length === 0) {
     const err = new CustomerCoupledNoEngagementError();
-    emitJsonAndExit({ code: err.code, error: err.message }, 2);
+    emit({ code: err.code, error: err.message }, 2);
   }
 
   const denySet = computeDenySet(repo);
@@ -173,7 +189,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   }
 
   if (denySet.combinedRegex === "") {
-    emitJsonAndExit(
+    emit(
       {
         hits: [],
         skipped: [],
@@ -196,7 +212,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
     hits = r.hits;
     skipped = r.skipped;
   } catch (err) {
-    emitJsonAndExit({ error: (err as Error).message }, 2);
+    emit({ error: (err as Error).message }, 2);
   }
 
   const repoJson: RepoJson = {
@@ -208,7 +224,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   };
 
   const advisory = repo.class === "scratch" || !!opts.advisory;
-  emitJsonAndExit(
+  emit(
     {
       mode: "path",
       hits,
