@@ -31,7 +31,11 @@ export function lockFilePath(home: string = repoAegisHome()): string {
   return join(statePath(home), ".lock");
 }
 
-export function denySetCachePath(home: string = repoAegisHome()): string {
+/**
+ * Where the deny-set cache used to live. The cache is gone; this path exists
+ * only so it can be deleted (deny-set.ts) and so uninstall can name it.
+ */
+export function legacyDenySetCachePath(home: string = repoAegisHome()): string {
   return join(statePath(home), "deny-set.cache.json");
 }
 

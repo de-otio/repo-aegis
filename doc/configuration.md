@@ -424,12 +424,15 @@ gets one of five states. They cannot disagree about which one applies.
 An error the loader does not recognise counts as `unparseable`: it never reads
 as "no registry".
 
-**Encryption at rest is deprecated** and is removed in 0.15.0. Until then,
-`registry encrypt` still works, but an encrypted registry switches off rule h and
-the GitHub identity mapping (a registry-reading command such as `status` still
-says `REGISTRY_ENCRYPTED`). Marker scanning (`_always` and the engagement marker
-files) is not affected. `registry decrypt --identity <key>` brings the registry
-back; a person runs it.
+**Encryption at rest is removed.** `registry encrypt` no longer exists (it prints a
+removal notice and exits 2); at-rest encryption is not part of accident
+prevention. A registry that an earlier version encrypted still loads as the
+`encrypted` state: it switches off rule h and the GitHub identity mapping (a
+registry-reading command such as `status` still says `REGISTRY_ENCRYPTED`, and
+`doctor` warns with the fix). Marker scanning (`_always` and the engagement marker
+files) is not affected. `repo-aegis registry decrypt --identity <key>` brings the
+registry back; a person runs it. `registry decrypt` stays for at least one
+release so encrypted users can migrate.
 
 The `ask` on an unreadable registry is not a way through for a push: the pre-push
 hook refuses until the registry can be read. When a newer repo-aegis has written

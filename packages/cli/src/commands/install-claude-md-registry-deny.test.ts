@@ -78,7 +78,7 @@ function install(e: Env, opts: Record<string, unknown> = {}): { stdout: string }
 const LEDGER = "state/claude-md-deny-rules.json";
 
 describe("registryDenyPlan", () => {
-  it("denies Edit on the registry, its .age, the approvals store, the destination cache, the two trusted state files, hooks/**, bin/**, markers/** and the pinned code — and nothing else", () => {
+  it("denies Edit on the registry, its .age, the approvals store, the destination cache, the deny-rules ledger, hooks/**, bin/**, markers/** and the pinned code — and nothing else", () => {
     const e = makeEnv("plan");
     const h = e.aegisHome;
     const pin = outsideGitPin();
@@ -88,7 +88,6 @@ describe("registryDenyPlan", () => {
       `Edit(/${h}/engagements.yaml.age)`,
       `Edit(/${h}/egress-approvals.json)`,
       `Edit(/${h}/destinations.json)`,
-      `Edit(/${h}/state/deny-set.cache.json)`,
       `Edit(/${h}/state/claude-md-deny-rules.json)`,
       `Edit(/${h}/hooks/**)`,
       `Edit(/${h}/bin/**)`,
@@ -99,12 +98,11 @@ describe("registryDenyPlan", () => {
     assert.deepEqual(plan.warnings, []);
     // Claude Code never matches a Write(path) rule: none is written.
     assert.ok(plan.rules.every(r => r.startsWith("Edit(")));
-    // The run-time state stays writable (audit log, lock, flags); only the two files an enforcement
-    // path TRUSTS are denied: the deny-set cache (a forged empty entry switches the scanner off) and
-    // the ledger uninstall reads.
+    // The run-time state stays writable (audit log, lock, flags); only the file an enforcement
+    // path TRUSTS is denied: the ledger uninstall reads. (The deny-set cache is gone, so it has no rule.)
     assert.deepEqual(
       plan.rules.filter(r => r.includes("/state")),
-      [`Edit(/${h}/state/deny-set.cache.json)`, `Edit(/${h}/state/claude-md-deny-rules.json)`],
+      [`Edit(/${h}/state/claude-md-deny-rules.json)`],
     );
     assert.ok(plan.rules.every(r => !r.includes("/state/**") && !r.includes("audit")));
     assert.ok(plan.rules.every(r => r !== `Edit(/${h}/**)`), "the whole home must not be denied");
@@ -283,6 +281,27 @@ describe("install claude-md — registry deny rules", () => {
     assert.equal(readSettings(e).permissions, undefined);
   });
 
+  it("upgrade: a deny-set-cache rule an earlier build installed stays recorded, and uninstall still removes it", () => {
+    const e = makeEnv("cache-rule-upgrade");
+    const legacy = `Edit(/${e.aegisHome}/state/deny-set.cache.json)`;
+    const old = [...inEnv(e, () => registryDenyRules()), legacy];
+    writeFileSync(e.settingsPath, JSON.stringify({ permissions: { deny: ["Read(//secrets/**)", ...old] } }));
+    mkdirSync(join(e.aegisHome, "state"), { recursive: true });
+    writeFileSync(join(e.aegisHome, LEDGER), JSON.stringify({ version: 1, settings: { [e.settingsPath]: old } }));
+
+    // This build's plan has no cache rule, so a re-run adds nothing and drops nothing.
+    const out = install(e, { json: true });
+    const parsed = JSON.parse(out.stdout) as { registryDeny: { added: string[] } };
+    assert.deepEqual(parsed.registryDeny.added, []);
+    assert.ok(readSettings(e).permissions!.deny!.includes(legacy));
+    const recorded = (JSON.parse(readFileSync(join(e.aegisHome, LEDGER), "utf8")) as { settings: Record<string, string[]> })
+      .settings[e.settingsPath]!;
+    assert.ok(recorded.includes(legacy), "the legacy rule is still in the ledger");
+
+    install(e, { uninstall: true });
+    assert.deepEqual(readSettings(e).permissions?.deny, ["Read(//secrets/**)"], "nothing of ours is left behind");
+  });
+
   it("a second install keeps remembering what the first added", () => {
     const e = makeEnv("twice");
     install(e);
@@ -371,7 +390,7 @@ describe("denyRuleCoversPath", () => {
     const rules = inEnv(e, () => registryDenyRules());
     const audit = join(e.aegisHome, "state", "audit.log");
     assert.equal(rules.some(r => denyRuleCoversPath(r, audit)), false);
-    assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "state", "deny-set.cache.json"))), true);
+    assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "state", "claude-md-deny-rules.json"))), true);
     assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "destinations.json"))), true);
     assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "state", "leak-context-mode"))), false);
     assert.equal(rules.some(r => denyRuleCoversPath(r, join(e.aegisHome, "hooks", "pre-push"))), true);

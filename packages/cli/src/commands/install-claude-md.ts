@@ -14,7 +14,6 @@ import {
   leakContextFlagPath,
   appendAuditRecord,
   approvalsPath,
-  denySetCachePath,
   destinationCachePath,
   markersDir,
   registryPath,
@@ -402,10 +401,10 @@ function pinnedPackageDir(cli: string): string {
 export function registryDenyPlan(pin: EnforcementPin = currentEnforcementPin()): RegistryDenyPlan {
   const home = repoAegisHome();
   const registry = registryPath(home);
-  // Files an enforcement path trusts. state/deny-set.cache.json is one of them:
-  // it is keyed by a fingerprint an agent can compute, and a forged entry with
-  // empty patterns switches the scanner off. Its write is best-effort, so a
-  // denied write only costs a recompute. The ledger is trusted by uninstall.
+  // Files an enforcement path trusts. The deny-set cache that used to be one of
+  // them is gone (the deny set is computed fresh), so it has no rule; a rule an
+  // older build installed for it stays recorded in the ledger, and uninstall
+  // still removes it. The ledger is trusted by uninstall.
   const files = [
     registry,
     `${registry}.age`,
@@ -415,7 +414,6 @@ export function registryDenyPlan(pin: EnforcementPin = currentEnforcementPin()):
     // would skip rule g's person check. Every writer treats a failed write as a
     // cache miss (recordWorkingTree), so denying it costs nothing.
     destinationCachePath(home),
-    denySetCachePath(home),
     join(statePath(home), DENY_LEDGER_FILE),
   ];
   const warnings: string[] = [];

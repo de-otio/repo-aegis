@@ -175,8 +175,9 @@ operator and must be made available to the workflow:
 - **Restored from secrets** at workflow time (see below). One multi-line secret
   containing the YAML.
 - **Restored from an age-encrypted blob** committed to the repo and decrypted
-  with a key from `secrets.*`. Avoids storing plaintext as a GitHub secret; see
-  `repo-aegis registry encrypt`.
+  with a key from `secrets.*`. Avoids storing plaintext as a GitHub secret.
+  Encrypt it yourself with `age`; repo-aegis no longer has a `registry encrypt`
+  command.
 - **Cache-restored** from a job that decrypted it.
 
 ```yaml

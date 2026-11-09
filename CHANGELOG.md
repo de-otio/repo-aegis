@@ -43,6 +43,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `repo-aegis install claude-md`"). Both now use fixed text for an unparseable registry: the
   parse error, which can name orgs, is no longer echoed by `scan-after-write`.
 
+### Removed
+
+- **The deny-set cache.** The deny set is computed fresh on every call. The cache was keyed on
+  marker-file mtime and size, so it could serve a stale set after an edit that kept both, and a
+  forged entry could switch the scanner off. Fresh computing costs about 2 to 4 ms per call
+  for a few hundred to a thousand patterns (a hook process makes one call), against 1 to 2.5 ms
+  for a cold cached call. The old `state/deny-set.cache.json` is deleted the first time anything
+  computes a deny set (best effort, silent on failure). `install claude-md` no longer writes a
+  `permissions.deny` rule for that file; a rule an earlier install wrote stays in the ledger and
+  `uninstall` still removes it. The `denySetCachePath` export is now `legacyDenySetCachePath`,
+  and the `cachePath` option of `computeDenySet` is gone.
+- **The `re2` dependency and the subprocess ReDoS validator.** Marker patterns are validated
+  in-process: a static check refuses nested unbounded quantifiers (`(a+)+`, `(\w+\s*)*`) without
+  running them, then a CPU-time check on a stress input. That is enough for the mistake it stops,
+  a catastrophic pattern typed by accident that would wedge every hook (a hook timeout lets writes
+  through unscanned). `getRegexBackend`, `setRegexBackendForTesting`, the `{ strict: true }` option
+  of `validatePatterns` and the `regexBackend` field of `status --json` (and its `regex:` line) are
+  gone. A pattern the check refuses now says "pattern has nested unbounded quantifiers (possible
+  catastrophic backtracking; consider re-anchoring)".
+- **`repo-aegis registry encrypt`.** At-rest encryption of the registry is not part of accident
+  prevention. The command now prints `registry encrypt was removed in 0.15.0; at-rest encryption is
+  not part of accident prevention` and exits 2 (`REGISTRY_ENCRYPT_REMOVED`). **`registry decrypt`
+  stays for at least one release** so a registry encrypted by an earlier version can be migrated
+  (`doctor`'s `REGISTRY_ENCRYPTED` warning names it). `age` is still used for the sweep query
+  blobs (`repo-aegis-scan encrypt-query` / `decrypt-query`).
+
 ### Internal
 
 - One non-throwing core loader, `loadRegistryState`, returns the registry's state (`loaded`,

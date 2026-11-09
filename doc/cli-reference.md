@@ -186,7 +186,6 @@ JSON:
   "allowedEngagements": [{ "id": "customer-a", "name": "Customer A", "active": true }],
   "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
   "alwaysBlock": { "patternCount": 3 },
-  "regexBackend": "re2",
   "zeroMarkerEngagements": [],
   "warnings": [],
   "hooks": { /* HookState: effectivePath, origin, expectedPath, scripts, … */ }
@@ -198,10 +197,9 @@ markers (an engagement with nothing to match protects nothing; add markers by
 hand or with [`suggest-markers`](#repo-aegis-suggest-markers)). Ids only, never
 patterns.
 
-`regexBackend` is `"re2"` when the optional `re2` dependency is
-installed and active for pattern validation, or `"in-process"`
-otherwise. See the design doc's locked-decisions row "Regex backend
-(validation)" for what the field means.
+Marker patterns are validated in-process (a static check for nested unbounded
+quantifiers such as `(a+)+`, then a CPU-time check); there is no `re2` backend and
+the `regexBackend` field was removed in 0.15.0.
 
 When the registry defines identities or maps owners to them (schemaVersion 3),
 the JSON also carries `identity`:
@@ -924,10 +922,8 @@ reports the count per event.
    file and its `.age` ciphertext, the approvals store
    (`egress-approvals.json`), the destination cache (`destinations.json`: rules e-g read a cached entry's class and visibility, so a forged "private" entry for a public repo would skip the person check; every writer treats a failed write as a cache miss), `hooks/**` (the git hook scripts), `bin/**`
    (the `gh` shim), `markers/**` (the rendered deny set the write scan and
-   the hooks read; editing it silently drops markers) and two files under
-   `state/` that an enforcement path trusts: `deny-set.cache.json` (an
-   unauthenticated cache; a forged entry with no patterns switches the scanner
-   off) and the uninstall ledger, under `REPO_AEGIS_HOME`
+   the hooks read; editing it silently drops markers) and the uninstall ledger
+   under `state/`, which an enforcement path trusts, under `REPO_AEGIS_HOME`
    (default `~/.config/repo-aegis`; the markers directory follows
    `REPO_AEGIS_MARKERS_DIR`).
    Without them the agent's own file tools can add an owner to
@@ -1977,15 +1973,21 @@ engagement. Off the deterministic gate path; it runs only when invoked. See
 | `--auto-accept-above <n>` | — | auto-accept candidates with confidence at or above `n` (0 to 1) |
 | `--dry-run` | off | print candidates and exit without persisting |
 
-### `repo-aegis registry encrypt --recipient <pubkey>` / `registry decrypt --identity <path>`
+### `repo-aegis registry decrypt --identity <path>`
 
-Encrypts the registry at rest with `age` (`engagements.yaml` becomes
-`engagements.yaml.age`, the plaintext is removed) and reverses it. `encrypt`
-refuses with `REGISTRY_ALREADY_ENCRYPTED` when a ciphertext or the
-`state/registry.encrypted` marker exists; `decrypt` refuses when there is no
-ciphertext. The CLI never decrypts on demand: while the registry is encrypted,
-commands that need it fail with `REGISTRY_ENCRYPTED` until a person runs
-`decrypt`.
+Migration only. Decrypts an `engagements.yaml.age` that an earlier version
+produced back to `engagements.yaml` (mode 600) and removes the ciphertext and the
+`state/registry.encrypted` marker. It refuses when there is no ciphertext
+(`REGISTRY_NOT_ENCRYPTED`) or a plaintext registry is already present. The CLI
+never decrypts on demand: while the registry is encrypted, commands that need it
+fail with `REGISTRY_ENCRYPTED` (and `doctor` warns) until a person runs `decrypt`.
+
+`registry encrypt` was removed in 0.15.0: at-rest encryption is not part of
+accident prevention. It now prints `registry encrypt was removed in 0.15.0;
+at-rest encryption is not part of accident prevention` and exits 2 (code
+`REGISTRY_ENCRYPT_REMOVED`; the old `--recipient` flag is accepted and ignored).
+`registry decrypt` stays for at least one release. `age` is still used for the
+sweep query blobs (`repo-aegis-scan encrypt-query` / `decrypt-query`).
 
 ### `repo-aegis audit-log on | off | show [--all] | path`
 

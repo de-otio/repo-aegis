@@ -334,7 +334,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
     flags: [],
     subcommands: ["decrypt", "encrypt"],
   },
-  { path: "registry encrypt", flags: ["--recipient"], subcommands: [] },
+  { path: "registry encrypt", flags: [], subcommands: [] },
   { path: "registry decrypt", flags: ["--identity"], subcommands: [] },
 
   // ---- hook (Claude Code et al) ----

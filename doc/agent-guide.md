@@ -410,30 +410,23 @@ window, next `render` removes the marker file.
 `--purge` back-dates so markers are removed at next render
 immediately.
 
-### Encrypting the registry
+### Encrypted registries (migration only)
 
-The engagement registry can be encrypted at rest with age:
-
-```sh
-repo-aegis registry encrypt --recipient age1...
-```
-
-This writes `engagements.yaml.age` next to the plaintext, removes the
-plaintext, and writes a marker file at
-`~/.config/repo-aegis/state/registry.encrypted` recording the
-recipient and the timestamp. To resume work the user runs:
+Encrypting the registry at rest is removed: `repo-aegis registry encrypt` was
+removed in 0.15.0 and prints `registry encrypt was removed in 0.15.0; at-rest
+encryption is not part of accident prevention`, then exits 2 (code
+`REGISTRY_ENCRYPT_REMOVED`). Do not suggest it. A registry that an earlier
+version encrypted (`engagements.yaml.age` beside a missing `engagements.yaml`)
+is read as "no registry" by the hooks, pre-push and the `gh` shim, and `doctor`
+warns with `REGISTRY_ENCRYPTED`. The user brings it back with:
 
 ```sh
 repo-aegis registry decrypt --identity /path/to/identity-file
 ```
 
-This restores `engagements.yaml` (chmod 600), removes the ciphertext,
-and removes the marker.
-
-**When the user does this:** between work sessions, when the machine
-will be away from a trusted environment, or when storing the home dir
-on cloud-synced storage. Encryption-at-rest is the *intended* state
-for those periods.
+This restores `engagements.yaml` (chmod 600), removes the ciphertext, and
+removes the `state/registry.encrypted` marker. `registry decrypt` stays for at
+least one release so encrypted users can migrate.
 
 **When you (the agent) hit a `REGISTRY_ENCRYPTED` error:**
 
@@ -462,9 +455,8 @@ Wait for an explicit identity-file path before invoking `registry
 decrypt`. Do not guess (e.g. "tried `~/.ssh/id_ed25519`"); a wrong
 guess at best fails noisily, at worst silently uses the wrong key.
 
-After successful decryption you can re-run the command that failed.
-At end of session, ask the user whether they want to re-encrypt with
-`registry encrypt` before stopping.
+After successful decryption you can re-run the command that failed. Do not offer
+to re-encrypt: that command is gone.
 
 ### Audit log
 
@@ -479,7 +471,7 @@ engagement registry.
 `engagements end` / `engagements remove`, `classify --apply`, `init`,
 `install hooks` / `install claude-md` / `install gitignore` /
 `install ci` / `install shim` / `install git-credential`, `render`,
-`registry encrypt` / `registry decrypt`, `waive` (add and remove),
+`registry decrypt`, `waive` (add and remove),
 `approve` (mint, revoke and use of an egress approval), `suggest-markers`,
 `scan-env`, `doctor` repairs, `uninstall`, and a refused publish
 (`check-egress-refused`). The list grows with the CLI; the source of
@@ -788,7 +780,7 @@ What the steps do:
   every git working tree underneath, and unsets `repo-aegis.class` /
   `repo-aegis.engagement` from each. Idempotent.
 - **`--purge-home`:** deletes `~/.config/repo-aegis/` (the registry,
-  audit log, marker files, deny-set cache, embedding profiles, age
+  audit log, marker files, embedding profiles, age
   ciphertext, leak-context flag). Refused if the home path doesn't
   end in `repo-aegis` (anti-fat-finger guard against a
   `REPO_AEGIS_HOME` pointing somewhere unrelated).
@@ -1044,7 +1036,8 @@ gh`) are covered by an approval; the rest say "No approval covers this":
 | `REGISTRY_NOT_FOUND` | `engagements.yaml` missing | run `repo-aegis init`; user-confirmed if the home is non-default |
 | `REGISTRY_PARSE` | YAML invalid / shape wrong | open the registry, fix YAML; `details` carries the underlying parse error |
 | `REGISTRY_ENCRYPTED` | a registry-reading command (`status`, `engagements list`, `render`, …) found only the ciphertext (`engagements.yaml.age` present, plaintext absent). The hooks, pre-push and the `gh` shim read an encrypted registry as no registry, so they do not raise it; `doctor` reports it as a warning. Encryption at rest is removed in 0.15.0 | surface to user; ask for the age identity-file path; run `repo-aegis registry decrypt --identity <path>`. Do NOT decrypt without an explicit user-supplied path |
-| `REGISTRY_ALREADY_ENCRYPTED` / `REGISTRY_NOT_ENCRYPTED` | `registry encrypt`/`decrypt` would clobber existing state | a stale marker or leftover ciphertext; surface to the user, do not auto-resolve |
+| `REGISTRY_NOT_ENCRYPTED` | `registry decrypt` found no ciphertext, or a plaintext registry is already present and would be clobbered | a leftover marker or ciphertext; surface to the user, do not auto-resolve |
+| `REGISTRY_ENCRYPT_REMOVED` | `registry encrypt` was run; the command was removed in 0.15.0 (at-rest encryption is not part of accident prevention) | none; do not retry. An already-encrypted registry is migrated with `registry decrypt` |
 | `PATTERN_VALIDATION` | a marker pattern failed validation (regex syntax / ReDoS / oversize) | open registry; `details` carries the engagement id and reason but **redacts the literal pattern**. The user runs `repo-aegis render` at a terminal to see the literal |
 | `ENGAGEMENT_EXISTS` | `engagements add` with an id already in use | use `engagements show <id>` to inspect, `engagements end <id>` if outdated |
 | `ENGAGEMENT_NOT_FOUND` | `allow`/`deny`/`engagements end`/`show`/`remove` query didn't match | run `engagements list --json` to see options |
@@ -1295,7 +1288,7 @@ shape we don't model.
 |---|---|---|
 | `allow <id>...` | adds engagement to repo | `action`, `results`, `repo` |
 | `deny <id>...` | removes engagement from repo | `action`, `results`, `repo` |
-| `status` | repo class + allowed engagements | `repo`, `allowedEngagements`, `denySet`, `alwaysBlock`, `regexBackend`, `warnings` |
+| `status` | repo class + allowed engagements | `repo`, `allowedEngagements`, `denySet`, `alwaysBlock`, `warnings` |
 | `check --staged` | scan staged diff | `mode`, `hits`, `skipped`, `repo`, `denySet`, `advisory`, `warnings` |
 | `check --path <f\|dir>` | scan one file, or a directory tree | (same; a directory adds `filesScanned`, `skippedDirs`) |
 | `check --range <r>` | scan commit range | (same) |
@@ -1306,8 +1299,7 @@ shape we don't model.
 | `engagements end <id>` | mark ended | `action`, `id`, `ended`, `purged`, `rendered` |
 | `engagements show <id>` | show one engagement | `action`, `id`, `name`, `started`, `ended`, `active`, `markerCount`, `notes` |
 | `engagements remove <id> --hard` | hard-delete | `action`, `id`, `removed`, `rendered` |
-| `registry encrypt --recipient <pubkey>` | encrypt registry at rest | `action`, `registry`, `recipient`, `marker` |
-| `registry decrypt --identity <path>` | decrypt registry | `action`, `registry`, `identity`, `markerRemoved` |
+| `registry decrypt --identity <path>` | decrypt a registry an earlier version encrypted (migration only) | `action`, `registry`, `identity`, `markerRemoved` |
 | `init` | bootstrap | `action`, `home`, `registry`, `rendered`, `hooks`, `claude` |
 | `classify [--apply]` | auto-detect class | `action`, `remote`, `matched`, `applied`, `before`/`after` |
 | `audit` | composite repo audit | `repo`, `denySet`, `checks` |

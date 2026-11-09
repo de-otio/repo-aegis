@@ -5,7 +5,6 @@ import {
   readRepoConfig,
   computeDenySet,
   isActive,
-  getRegexBackend,
   isPublicFacing,
   resolveHookState,
   appendAuditRecord,
@@ -287,7 +286,6 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
       patternCount: denySet.patterns.length,
     },
     alwaysBlock: { patternCount: alwaysBlockCount },
-    regexBackend: getRegexBackend(),
     zeroMarkerEngagements,
     warnings: denySet.warnings,
     hooks,
@@ -326,7 +324,6 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   );
   emitText(`  blocked:  ${denying.length === 0 ? "(none — marker dir empty)" : denying.join(", ")}`);
   emitText(`  patterns: ${denySet.patterns.length} active (+ ${alwaysBlockCount} always-block)`);
-  emitText(`  regex:    ${getRegexBackend()}`);
   for (const line of identityLines(identitySummary)) emitText(line);
   for (const line of hooksStatusLines(hooks)) emitText(line);
   for (let i = 0; i < visibilityWarnings.length; i++) {

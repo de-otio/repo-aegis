@@ -534,22 +534,30 @@ export async function buildProgram(): Promise<Command> {
     .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
     .action((opts, cmd) => audit(withGlobals(opts, cmd)));
 
-  // `registry` subcommand group — at-rest encryption of the engagement
-  // registry. Lives here so the user can shut a machine down with a
-  // ciphertext-only registry between work sessions, then re-decrypt
-  // before resuming. `loadRegistry` deliberately does NOT auto-decrypt
-  // (it throws `RegistryEncryptedError`); the user must explicitly
-  // run `repo-aegis registry decrypt --identity <path>` first.
-  const registry = program.command("registry").description("manage the engagement registry's at-rest encryption");
+  // `registry` subcommand group. At-rest encryption of the registry is being
+  // removed (it is not part of accident prevention). `encrypt` is gone and only
+  // tells you so; `decrypt` stays for at least one release so an already-encrypted
+  // registry can be migrated. `loadRegistry` deliberately does NOT auto-decrypt
+  // (it throws `RegistryEncryptedError`); a person runs
+  // `repo-aegis registry decrypt --identity <path>`.
+  const registry = program.command("registry").description("migrate an encrypted engagement registry back to plaintext (at-rest encryption is removed)");
 
-  const { registryEncrypt } = await import("./commands/registry-encrypt.js");
   const { registryDecrypt } = await import("./commands/registry-decrypt.js");
 
   registry
     .command("encrypt")
-    .description("encrypt the engagement registry to engagements.yaml.age and remove the plaintext")
-    .requiredOption("--recipient <pubkey>", "age recipient public key (age1... or ssh-ed25519 ...)")
-    .action((opts, cmd) => registryEncrypt(withGlobals(opts, cmd)));
+    .description("removed in 0.15.0; exits 2")
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action((_opts, cmd) => {
+      emitError(
+        {
+          code: "REGISTRY_ENCRYPT_REMOVED",
+          error: "registry encrypt was removed in 0.15.0; at-rest encryption is not part of accident prevention",
+        },
+        withGlobals({}, cmd),
+      );
+    });
 
   registry
     .command("decrypt")
@@ -629,8 +637,7 @@ export async function buildProgram(): Promise<Command> {
   // `audit-log` subcommand group — operator compliance trail. OFF by
   // default; opt-in via `audit-log on`. State-changing operations
   // (allow/deny, engagements add/end/remove, classify --apply, init,
-  // install hooks/claude-md/gitignore/ci, render, registry encrypt/
-  // decrypt) emit one JSONL record per success when enabled. The log
+  // install hooks/claude-md/gitignore/ci, render, registry decrypt) emit one JSONL record per success when enabled. The log
   // never contains literal marker patterns or matched substrings —
   // only structural metadata (engagement ids, counts, paths).
   const auditLog = program
