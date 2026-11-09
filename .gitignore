@@ -18,3 +18,5 @@ bin/
 lib/
 analysis/
 tmp/
+# Agent session notes: local working memory, never published (they can reference private context)
+session-insights/
