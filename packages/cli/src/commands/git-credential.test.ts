@@ -628,6 +628,17 @@ describe("git-credential get: person column answers known reads as the mapped lo
     assert.equal(loginCalls.length, 0, "refused before the token was asked for");
   });
 
+  it("a read is answered under a proxy variable or proxy config (the Claude Code sandbox sets one); a push is still refused", () => {
+    const proxyEnv = { DOCKER_HTTPS_PROXY: "http://localhost:3128", HTTPS_PROXY: "http://localhost:3128" };
+    const proxyCfg = parseShowScopeList("global\thttp.proxy http://localhost:3128");
+    for (const sub of ["fetch", "pull", "clone"]) {
+      loginCalls = [];
+      const r = get(request("p/r.git"), deps({ ancestry: () => remoteChain([sub]), env: proxyEnv, readConfig: () => proxyCfg }));
+      assert.deepEqual(r, { stdout: `username=x-access-token\npassword=${PERSON_TOKEN}\n`, stderr: "" }, sub);
+    }
+    assertRefused(get(request(), deps({ env: proxyEnv })), "AGENT_PUSH_CREDENTIAL_CONFIG", "an App push under the proxy variable is unchanged");
+  });
+
   it("no token for the mapped login: refused with GH_IDENTITY_UNAVAILABLE rather than answered as another account", () => {
     personToken = () => ({ kind: "unavailable" });
     assertRefused(get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"]) })), "GH_IDENTITY_UNAVAILABLE");

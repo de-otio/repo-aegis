@@ -556,7 +556,11 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
       note: "it shows which file fails to read; repair or remove that file",
     });
   }
-  const violation = credentialConfigViolation(entries, matchCtx, deps.env);
+  // A known read publishes nothing, so the proxy/TLS/helper-scope checks (which guard where a push's token could be
+  // captured) do not apply to it: under the Claude Code sandbox a proxy variable is always set, and refusing there
+  // stopped every fetch. 0.13.0 stepped aside on reads; 0.13.1 answered them but kept these checks. The store guard
+  // below still applies: a later helper must not save the person's token.
+  const violation = personRead ? null : credentialConfigViolation(entries, matchCtx, deps.env);
   if (violation !== null) {
     return refuse("AGENT_PUSH_CREDENTIAL_CONFIG", `${violation}, which could redirect or capture the token; repo-aegis did not set it`, dest, configFix(violation));
   }
