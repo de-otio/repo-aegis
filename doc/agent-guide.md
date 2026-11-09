@@ -753,6 +753,36 @@ What the steps do:
   its ledger. This step needs a person at a terminal; run by an agent it is
   reported as not done (`GIT_CREDENTIAL_NEEDS_TTY`). Do not edit
   `~/.gitconfig` to remove it yourself.
+- **Hand-registered agent hooks are not touched.** `repo-aegis uninstall`
+  reverses only what `repo-aegis install …` wrote, and it never wrote the
+  Cursor, Copilot CLI, Antigravity CLI, Codex or Gemini CLI entries from
+  [agent-install.md](agent-install.md#other-agents). The user removes them by
+  hand, deleting exactly the entries whose command is `repo-aegis hook …` and
+  leaving any other entry (another tool's hooks may share the file):
+  - **Cursor:** in `.cursor/hooks.json` (or `~/.cursor/hooks.json`), delete the
+    `beforeShellExecution` entry running `repo-aegis hook guard-egress --agent
+    cursor` and the `afterFileEdit` entry running `repo-aegis hook
+    scan-after-write --agent cursor`.
+  - **Copilot CLI:** delete `~/.copilot/hooks/repo-aegis.json` (or the
+    `preToolUse` entry running `repo-aegis hook guard-egress --agent copilot`
+    if it was added to a file with other hooks, including a repo's
+    `.github/hooks/*.json`).
+  - **Antigravity CLI:** in `~/.gemini/config/hooks.json` (or the project's
+    `.agents/hooks.json`), delete the `repo-aegis` hook group, or its
+    `PreToolUse` entry with matcher `run_command`; `/hooks` in Antigravity
+    shows whether it is still loaded.
+  - **Codex CLI:** in `~/.codex/hooks.json` (or `[hooks]` in
+    `~/.codex/config.toml`, or the same under `<repo>/.codex/`), delete the
+    `PreToolUse` entry with matcher `Bash` running `repo-aegis hook
+    guard-egress --agent codex`. Its `/hooks` trust record goes with it.
+  - **Gemini CLI:** delete the `BeforeTool` entry with matcher
+    `run_shell_command` running `repo-aegis hook guard-egress --agent gemini`.
+
+  A hook left behind after the package is removed fails on a missing command
+  (exit 127). Cursor fails open on that, but Copilot CLI **fails closed** on a
+  non-zero exit other than 2, so a stale Copilot entry blocks every shell
+  command until it is removed. Do not edit these files yourself unless the
+  user asks; surface the list and let them confirm.
 - **`--purge-repos`:** walks `~/repos`, `~/code`, `~/src`, `~/projects`
   by default (override with `--scan-root <path>`, repeatable), finds
   every git working tree underneath, and unsets `repo-aegis.class` /
@@ -830,8 +860,8 @@ Everything above is about *content*. The egress guard is about
 It reaches you through three doors, and you may meet any of them:
 
 - **Your own pre-command hook** (`repo-aegis hook guard-egress`, registered
-  by `install claude-md` on Claude Code; Codex CLI and Gemini CLI have
-  equivalents). This one sees your *whole* compound command before it runs,
+  by `install claude-md` on Claude Code; Codex CLI, Gemini CLI, Cursor,
+  Copilot CLI and Antigravity CLI have hand-registered equivalents). This one sees your *whole* compound command before it runs,
   so it is where the shape rules live.
 - **The git pre-push hook**, which now reads the remote URL git hands it
   (`check --remote-url`). It refuses a cross-org push (`CROSS_ORG_PUSH`)

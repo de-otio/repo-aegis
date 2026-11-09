@@ -528,18 +528,21 @@ state of an agent's shell, not an edge case.
 
 ### 4. Enforcement point: agent pre-command hooks (where offered; richer)
 
-Three agents in current use each expose a pre-command hook that receives the
-pending shell command on stdin and blocks on exit 2:
+Six agents in current use each expose a pre-command hook that receives the
+pending shell command on stdin and blocks on exit 2 (or a deny on stdout):
 
 | Agent | Event | Command field | `ask` available |
 |---|---|---|---|
 | Claude Code | `PreToolUse`, matcher `Bash` | `tool_input.command` | yes — `hookSpecificOutput.permissionDecision: "ask"` asks for a decision, but under Claude Code's auto mode the auto-mode classifier answers it, not a person (§4a, §4b) |
-| Codex CLI | `PreToolUse` | `tool_input.command` | not assumed |
-| Gemini CLI | `BeforeTool`, matcher `run_shell_command` | `tool_input.command` | not assumed |
+| Codex CLI | `PreToolUse`, matcher `Bash` (older builds: `shell`) | `tool_input.command` | no — the hook run is marked failed and the tool runs, so `ask` renders as `deny` |
+| Gemini CLI (legacy) | `BeforeTool`, matcher `run_shell_command` | `tool_input.command` | not assumed |
+| Cursor | `beforeShellExecution` (and observe-only `afterFileEdit` for the write scan) | root `command` | yes on `beforeShellExecution`; accepted but not enforced on `preToolUse` |
+| Copilot CLI | `preToolUse`, matcher `bash` (also `PreToolUse`) | `toolArgs` (a JSON-encoded string) `.command`, or `tool_input.command` | yes in the interactive CLI; a deny in the cloud agent and autopilot. Fails closed on a non-zero exit other than 2, so the adapter never exits 1 |
+| Antigravity CLI | `PreToolUse`, matcher `run_command` | `toolCall.args.CommandLine` | yes |
 
-The Codex and Gemini rows are unverified against those tools' own documentation, and Gemini CLI has since been replaced by Antigravity CLI (<https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/>), whose hook shape this design does not cover.
+Only the Claude Code row has been exercised live. Every other row is doc-derived (vendor documentation read on 2026-11-09; plan `doc/plan-landscape-recommendations.md` §5.1 has the sources and the exact shapes), and each is registered by hand from `doc/agent-install.md`. Gemini CLI was replaced by Antigravity CLI (<https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/>), whose payload and answer shape differ, so it has its own adapter and `--agent gemini` stays for the old shape. Each host is one adapter module under `packages/cli/src/commands/hook-hosts/` (contract in `types.ts`).
 
-One entry point, `repo-aegis hook guard-egress [--agent claude|codex|gemini]`,
+One entry point, `repo-aegis hook guard-egress [--agent claude|codex|gemini|copilot|cursor|antigravity]`,
 reads stdin with the same tolerant field lookup `scan-bash-output` uses, runs
 `decideEgress` with `capabilities.ask` per the table (default: `false`, the
 conservative choice), and emits:
