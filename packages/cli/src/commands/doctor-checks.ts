@@ -36,17 +36,8 @@ export type DoctorCheckCode =
   | "ENFORCEMENT_UNPINNED"
   | "ENFORCEMENT_PIN_MISSING"
   | "MULTIPLE_INSTALLS"
-  // The managed drop-in (doc/plan-pin-enforcement-binary.md D8.6, D8.7, D8.11, D8.12).
-  | "ENFORCEMENT_IN_USER_SETTINGS"
-  | "MANAGED_DROPIN_STALE"
-  | "MANAGED_DROPIN_NOT_ROOT_OWNED"
-  | "MANAGED_DROPIN_UNREADABLE"
-  | "MANAGED_DROPIN_ORPHANED"
-  | "MANAGED_DROPIN_LEDGER_STALE"
-  | "MANAGED_HOOKS_DISABLED"
-  | "MANAGED_HOOKS_NOT_FIRING"
-  | "MANAGED_SOURCE_SHADOWED"
-  | "SUDO_NOPASSWD"
+  // A root-owned managed drop-in written by 0.13 or earlier (legacy-managed-remover: remove in 0.17).
+  | "MANAGED_LEGACY_PRESENT"
   // Residual risks R8, R9, R11 (§8.2).
   | "PREPUSH_HOOK_MISSING"
   | "SHELL_STARTUP_OVERRIDES"

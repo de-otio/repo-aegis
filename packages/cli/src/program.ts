@@ -399,11 +399,11 @@ export async function buildProgram(): Promise<Command> {
 
   install
     .command("claude-md")
-    .description("install the Claude Code hooks and deny rules as a root-owned managed-settings drop-in (asks for your sudo password), plus a CLAUDE.md snippet")
+    .description("install the Claude Code hooks and deny rules into ~/.claude/settings.json, plus a CLAUDE.md snippet")
     .option("--claude-home <dir>", "override default ~/.claude location")
     .option(
       "--user-settings",
-      "write the hooks and deny rules to ~/.claude/settings.json instead of the managed drop-in: for containers and other places without sudo (that file must then stay per machine)",
+      "no-op, kept for one release: writing to ~/.claude/settings.json is now the only mode (the root-owned drop-in was removed)",
     )
     .option("--dry-run", "preview the would-be settings.json + CLAUDE.md additions without writing")
     .option("--print-only", "alias for --dry-run")
@@ -413,7 +413,7 @@ export async function buildProgram(): Promise<Command> {
     )
     .option(
       "--uninstall",
-      "remove the managed drop-in (asks for your sudo password, from a terminal), strip the managed CLAUDE.md block and remove repo-aegis hook entries from settings.json (idempotent). Run this BEFORE `npm rm -g repo-aegis`",
+      "strip the CLAUDE.md block and remove repo-aegis hook entries from settings.json (idempotent); if a legacy root-owned drop-in is still installed, prints the command that removes it. Run this BEFORE `npm rm -g repo-aegis`",
     )
     .action((opts, cmd) => {
       const merged = withGlobals(opts, cmd) as {
@@ -422,6 +422,9 @@ export async function buildProgram(): Promise<Command> {
         userSettings?: boolean;
       };
       if (merged.printOnly) merged.dryRun = true;
+      if (merged.userSettings === true) {
+        process.stderr.write("note: --user-settings is now the only mode; the flag is ignored and will be removed in a later release\n");
+      }
       installClaudeMd(merged);
     });
 
@@ -618,13 +621,13 @@ export async function buildProgram(): Promise<Command> {
       hookFirstTouch(withGlobals(opts, cmd));
     });
 
+  // legacy-managed-remover: remove in 0.17
+  // A root-owned drop-in written by 0.13 or earlier still runs this on SessionStart until its owner removes
+  // it; an unknown command would exit 1 and print a hook error at every session start.
   hook
-    .command("managed-heartbeat")
-    .description("SessionStart (managed drop-in only): record that Claude Code loaded the managed settings, for `doctor`'s MANAGED_HOOKS_NOT_FIRING")
-    .action(async () => {
-      const { hookManagedHeartbeat } = await import("./commands/hook-managed-heartbeat.js");
-      hookManagedHeartbeat();
-    });
+    .command("managed-heartbeat", { hidden: true })
+    .description("no-op: only a legacy managed drop-in calls this (`repo-aegis doctor` reports it as MANAGED_LEGACY_PRESENT)")
+    .action(() => {});
 
   // `audit-log` subcommand group — operator compliance trail. OFF by
   // default; opt-in via `audit-log on`. State-changing operations

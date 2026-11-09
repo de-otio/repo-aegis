@@ -463,11 +463,11 @@ user-authored hook in the same entry.
 
 `repo-aegis install claude-md --print-only` shows exactly what would be
 written without touching disk. `repo-aegis install claude-md --uninstall`
-removes both again. These entries go into a root-owned managed-settings
-drop-in (macOS `/Library/Application Support/ClaudeCode/managed-settings.d/`,
-Linux `/etc/claude-code/managed-settings.d/`) that the person writes from their
-own terminal with `sudo`; `--user-settings` writes `~/.claude/settings.json`
-instead. See [`doc/configuration.md`](configuration.md#the-claude-code-managed-drop-in).
+removes both again. These entries go into `~/.claude/settings.json`; nothing
+needs `sudo`. If `doctor` reports `MANAGED_LEGACY_PRESENT`, an older install left a
+root-owned managed drop-in: tell the person, who removes it from their own
+terminal with the command `doctor` prints (see
+[`doc/configuration.md`](configuration.md#removing-a-legacy-managed-drop-in)). You do not run `sudo`.
 
 It also adds `permissions.deny` **Edit** rules for the registry file and its
 `.age`, the approvals store, the destination cache (`destinations.json`), `hooks/**`, `bin/**`, `markers/**` (the rendered

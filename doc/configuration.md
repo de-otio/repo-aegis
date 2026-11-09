@@ -231,7 +231,7 @@ engagements:
   install first. Every command that raises the version (the first `identity
   add`) checks for that and refuses (`MULTIPLE_INSTALLS`) while a `repo-aegis`
   on `PATH`, or one that an installed git hook, the `gh` shim or a Claude Code
-  hook (the managed drop-in or `settings.json`: the pin that runs `hook
+  hook (`settings.json`: the pin that runs `hook
   check-write`) is pinned to, cannot read version 3. "Cannot read" is judged by the supported version
   read from that install's own core package, never by running it; if that is
   unreadable the package version is compared, and an install whose version is
@@ -496,8 +496,7 @@ How it shows up elsewhere:
   `MULTIPLE_INSTALLS` (see `doc/agent-guide.md`).
 - `install claude-md` writes every Claude Code hook command (`check-write`,
   `guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`,
-  `first-touch`) into the [managed drop-in](#the-claude-code-managed-drop-in)
-  (or, with `--user-settings`, into `settings.json`) as a pinned one-line `sh`
+  `first-touch`) into `settings.json` as a pinned one-line `sh`
   command: shell-quoted absolute paths to
   the node and CLI, `exec`'d so the tool call on stdin reaches the CLI, and an
   exit **2** with the fix on stderr if either file is missing. A missing command
@@ -512,181 +511,73 @@ How it shows up elsewhere:
   package directory and the pinned Node executable, so an agent cannot overwrite
   the code the pin points at. A package directory inside a git work tree (a
   development checkout) is not denied; the install prints a warning instead.
-- Because of the two points above, whatever file holds the Claude Code hooks
-  holds paths that are specific to one machine. By default that is the
-  [managed drop-in](#the-claude-code-managed-drop-in), which belongs to the
-  machine, so `~/.claude/settings.json` can stay portable. With
-  `--user-settings` it is `settings.json` itself, and then that file must stay
-  per machine: do not sync it, or symlink it from a repository that other
-  machines check out. Every hook would exit 2 on a machine where the paths do
-  not exist, and each machine's install would overwrite the file for all the
-  others. `doctor` warns (`ENFORCEMENT_IN_USER_SETTINGS`) while the hooks are in
-  that file.
+- Because of the two points above, `~/.claude/settings.json` holds paths that
+  are specific to one machine, so it must stay per machine: do not sync it, or
+  symlink it from a repository that other machines check out. Every hook would
+  exit 2 on a machine where the paths do not exist, and each machine's install
+  would overwrite the file for all the others.
 
 Not covered: which `gh` binary the shim runs (it still looks for the first `gh`
 on `PATH` that is not itself), and the shim's existing rule that a fault in the
 guard itself (an exit other than 0 or 2) does not block `gh`.
 
-## The Claude Code managed drop-in
+## Removing a legacy managed drop-in
 
-`repo-aegis install claude-md` puts the Claude Code hooks and the
-`permissions.deny` rules in **one root-owned file** instead of your
-`~/.claude/settings.json`:
+Up to 0.13, `repo-aegis install claude-md` could write the Claude Code hooks and
+deny rules into **one root-owned file** instead of `~/.claude/settings.json`.
+That feature was removed (it needed `sudo`, and on a machine where `sudo` takes
+no password it was no stronger than the settings file). `install claude-md` now
+always writes `~/.claude/settings.json`; the `--user-settings` flag is accepted
+and ignored for one release.
+
+If you installed the drop-in, the file is still there, and its hooks still run,
+pinned to whatever Node and CLI it was last written for. repo-aegis finds it but
+never removes it: that needs root, and repo-aegis never runs `sudo`.
 
 | Platform | File |
 |---|---|
 | macOS | `/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-<uid>.json` |
 | Linux | `/etc/claude-code/managed-settings.d/50-repo-aegis-<uid>.json` |
 
-Why: Claude Code merges hook entries and `permissions` lists across all
-settings scopes, and a user or project file cannot remove or disable a managed
-hook. The file is `root:root 0644`, so the agent (which runs as you) cannot
-edit it, which is stronger than a deny rule in a file you own. Your own
-`settings.json` then holds only portable preferences and may be synced.
+(An earlier build wrote `50-repo-aegis.json`, with no uid. It is found and
+reported too.) Three places tell you, each with the exact line to run:
 
-Sources for the Claude Code behaviour this relies on: the
-[settings page](https://code.claude.com/docs/en/settings) (precedence across
-scopes; list keys such as `permissions` merge across files) and the
-[managed settings page](https://code.claude.com/docs/en/managed-settings.md)
-(delivery mechanisms; managed settings sit above every user, project and
-local file). That a user or project file cannot disable a managed *hook*, and
-the exact `managed-settings.d` paths in the table above, come from the
-install code and were not re-checked against those pages or re-tested against
-each Claude Code release (unverified). The hook contract itself (exit codes,
-matchers) is at <https://code.claude.com/docs/en/hooks>.
+- `repo-aegis doctor` warns `MANAGED_LEGACY_PRESENT`; the `fix` has the command.
+- `repo-aegis uninstall` (dry run or `--yes`) and `repo-aegis install claude-md
+  --uninstall` print it after their other steps, and `--json` carries it as
+  `legacyManagedDropIn` (`files`, `commands`).
+- `repo-aegis install claude-md` prints it after writing `settings.json`.
 
-The path comes from the platform and your uid, never from a stored record. The
-file holds only `hooks` and `permissions.deny`: the five hooks (`check-write`,
-`guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`; plus
-`first-touch` when you asked for it), a SessionStart heartbeat, and the same
-`Edit(//…)` deny rules as before (registry, approvals, hooks, shim, markers, the
-pinned CLI package and the pinned Node).
-
-**One file per account, and a uid guard.** A managed file applies to every
-account on the machine, but the pin names one account's Node and CLI. Each hook
-command therefore starts with `__u=$(/usr/bin/id -u …)` and does nothing (exit
-0) when the uid is not yours; a failing `id` blocks (exit 2) instead of passing.
-The guard runs before the pin check: on Ubuntu, home directories are `0750`, so
-another account would otherwise see your pin as missing.
-
-### Installing
-
-Run it from your own terminal; it is not something an agent can do for you.
+To migrate, in your own terminal:
 
 ```sh
-command -v repo-aegis && npm ls -g repo-aegis    # check it is the install you expect (below)
-repo-aegis install claude-md                     # add --first-touch for the SessionStart classify hook
+repo-aegis install claude-md          # writes the hooks and deny rules to ~/.claude/settings.json
 ```
 
-It requires an interactive terminal, shows the target path, byte count,
-sha256 and a diff against the current file, and asks `[y/N]`. Only then does
-`sudo` ask for **your password**; that prompt is the control (a terminal check
-can be faked with a pty). The only commands that run as root are fixed ones,
-each by absolute path (`/usr/bin/sudo`, `install`, `tee`, `/bin/chmod`,
-`chown`, `/bin/mv`, `/bin/rm`, `/bin/rmdir`), with fixed arguments and a
-minimal environment: the content goes in on stdin to a hidden temp name
-(`.50-repo-aegis-<uid>.json.tmp`, which Claude Code ignores), is checked as
-you, and is moved into place atomically, then read back (owner `0:0`, mode
-`0644`, same digest). The installer refuses if `sudo` or one of those tools
-is not a root-owned file that others cannot write, or if the system directory
-or any parent is a symlink, not root-owned or writable by group or others (as
-on WSL, where `/etc/claude-code` is user-writable). Re-running with nothing
-changed runs nothing as root. `--dry-run` prints the drop-in and writes nothing.
+then run the command the output printed. It has this shape:
 
-**Check what you run.** The privileged step is only as trustworthy as the
-`repo-aegis` you launch: a planted fake that asks for your `sudo` password
-cannot be told apart from inside itself. On a machine where an agent has had
-shell access, check `command -v repo-aegis` and `npm ls -g repo-aegis` first.
-
-### Moving from `settings.json`
-
-After the drop-in is written and read back, and only if no other managed source
-outranks it (`MANAGED_HOOKS_DISABLED`, `MANAGED_SOURCE_SHADOWED`) and the
-heartbeat check is not failing (`MANAGED_HOOKS_NOT_FIRING`; "skipped" on a first
-install is fine), the install removes its own earlier hook entries and ledgered
-deny rules from `~/.claude/settings.json` (indentation and trailing newline
-kept; nothing else touched) and tells you to confirm that `/status` in Claude
-Code shows `(drop-ins)` or `(file + drop-ins)`. **Removing anything from that
-file needs a person at a terminal**, even when the drop-in itself is unchanged
-and no root step runs: without one, the install prints what a run from a
-terminal would remove and leaves the file byte-identical. (If you put the
-entries back because the drop-in was shadowed, an agent re-running the install
-cannot strip them again.) The first SessionStart then records a heartbeat that
-`doctor` checks; Claude Code reloads managed files when they change, so this
-takes effect in running sessions. A heartbeat or install time dated in the
-future fails the check, because a rewritten timestamp could hide a drop-in that
-is not loaded.
-
-### Without sudo: `--user-settings`
-
-`repo-aegis install claude-md --user-settings` writes `~/.claude/settings.json`
-as before. Use it in containers and devcontainers, or where there is no managed
-location (it is also what `install claude-md` falls back to, with a note, on an
-unsupported platform, as root, or without `/usr/bin/id`). `init` uses it, because
-`init` runs without a prompt; run `repo-aegis install claude-md` afterwards to
-move the hooks into the drop-in. `doctor` warns (`ENFORCEMENT_IN_USER_SETTINGS`):
-that file holds machine-specific paths and an agent running as you can edit it.
-
-### Recovering from a lockout
-
-A fail-closed hook whose pin is gone (repo-aegis removed with `npm rm -g`, Node
-moved) blocks that account's agent on every call, and you cannot edit a
-root-owned file. The message each blocked call prints names both ways out, with
-the literal path:
-
-```
-re-pin it by running: repo-aegis install claude-md   or remove this managed hook: sudo rm '/etc/claude-code/managed-settings.d/50-repo-aegis-1000.json'
+```sh
+sudo rm '/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-501.json'
 ```
 
-Either run `repo-aegis install claude-md` from your terminal (with a working
-`repo-aegis`), or run that `sudo rm` line yourself. `doctor` says the same
-(`MANAGED_DROPIN_ORPHANED`).
+If repo-aegis had created the `managed-settings.d` directory or its parent
+(the old install recorded this in `state/claude-md-managed.json`), a second line
+`sudo rmdir '<dir>' …` is printed too; `rmdir` removes a directory only when it
+is empty. Remove nothing else in that directory: other files there belong to
+your organisation or to other accounts.
 
-### Uninstalling
+Until the file is removed, its hooks run next to the ones in `settings.json`.
+Once it is gone, `repo-aegis install claude-md --uninstall` (or `uninstall
+--yes`) also deletes the old ledger and heartbeat marker under `state/`.
 
-Run `repo-aegis install claude-md --uninstall` (or `repo-aegis uninstall --yes`)
-**before** `npm rm -g repo-aegis`. npm lifecycle scripts are not relied on: they
-do not run reliably on `npm rm -g` and cannot prompt for `sudo`. Uninstall asks
-for a terminal and `[y/N]`, then removes the drop-in for **your uid** whatever
-the ledger says, then `managed-settings.d/` and the system directory with
-`rmdir` only if they are empty **and** the ledger records that repo-aegis
-created them, then its entries in `settings.json`. It reads back: if the file
-is still there it exits 1 naming the path. It never touches
-`managed-settings.json`, another drop-in, or another uid's drop-in.
-The ledger is `state/claude-md-managed.json` (digest, whether each directory was
-created by repo-aegis, install time); it is written before the privileged write
-and removed only after a verified removal. The ledger is advisory: it sits in
-`state/`, which an agent can write, so it never supplies a path to root. Forging
-it can at most make uninstall remove the legacy `50-repo-aegis.json` (when that
-file exists) or an empty directory.
+If the drop-in's pin points at a Node or CLI that no longer exists, every tool
+call in that account is blocked (exit 2) with a message that names the file and
+the remove line. Run that line from your own terminal; no working `repo-aegis`
+is needed.
 
-### What the drop-in does not guarantee
-
-- **Passwordless `sudo`** (`NOPASSWD`: CI runners, many dev boxes). An agent
-  with a fake terminal (`script`, `expect`, a pty library) can then run install
-  or uninstall end to end, so the drop-in is no stronger than the user file
-  there. `doctor` says so (`SUDO_NOPASSWD`, a warning). The installer runs
-  `sudo -k` first and last, never probes with `sudo -n` to skip a prompt, and
-  the egress guard also refuses an agent's Bash command that runs
-  `install claude-md --uninstall` or `uninstall --yes`, or `sudo rm`, `mv`,
-  `tee` and similar on the managed-settings directory, directly or under
-  `script`/`expect` (`AGENT_RAN_HUMAN_COMMAND`). That layer reads command text;
-  it is not a boundary.
-- **Server-managed settings and MDM.** By default (`first-wins`) any
-  server-managed policy (for example signing in to a Team or Enterprise
-  organisation) or any MDM key makes Claude Code silently ignore every file
-  drop-in, and nothing local shows it. A macOS configuration profile
-  (`com.anthropic.claudecode` under `/Library/Managed Preferences/`) is seen by
-  `doctor` (`MANAGED_SOURCE_SHADOWED`); a server-managed policy is not, which
-  is what the heartbeat is for. If it fires, have the policy's owner add the
-  repo-aegis hooks there, or use `--user-settings`.
-- **Other managed files.** A sibling managed file with `disableAllHooks: true`
-  switches off every managed hook (`MANAGED_HOOKS_DISABLED`).
-- The file is `0644`, so other accounts can read your home path from it.
-  `allowManagedHooksOnly` does not affect repo-aegis, whose hooks are managed.
-  A SessionStart hook that exits 2 is a notice, not a block, so the heartbeat
-  cannot lock anyone out.
-- Systems without `/usr/bin/id` (NixOS, Guix) use `--user-settings`.
+An agent may not run any of this: the egress guard refuses an agent's `sudo` on
+the managed-settings directory and `install claude-md --uninstall`
+(`AGENT_RAN_HUMAN_COMMAND`). This detection code is temporary and goes in 0.17.
 
 ## Environment variables
 

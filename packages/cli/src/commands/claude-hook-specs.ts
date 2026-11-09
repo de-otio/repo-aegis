@@ -2,8 +2,7 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 //
 // The CLI arguments and matchers of the Claude Code hooks `install claude-md`
-// registers. Shared by the user-settings merge (`install-claude-md.ts`) and the
-// managed drop-in renderer (`managed-dropin.ts`), so the two cannot drift.
+// registers into the user's `settings.json` (`install-claude-md.ts`).
 
 /**
  * The CLI arguments of the PostToolUse hook on Write/Edit/MultiEdit. The
@@ -63,8 +62,5 @@ export const GUARD_EGRESS_HOOK_ARGS = "hook guard-egress --agent claude";
  * tool result and neither replaces the other.
  */
 export const EGRESS_RECEIPT_HOOK_ARGS = "hook egress-receipt";
-
-/** The SessionStart hook that records the managed drop-in's heartbeat (D8.12). Drop-in only. */
-export const MANAGED_HEARTBEAT_HOOK_ARGS = "hook managed-heartbeat";
 
 export const HOOK_MATCHER = "Write|Edit|MultiEdit";

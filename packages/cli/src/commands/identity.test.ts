@@ -9,11 +9,9 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addMarkerPatterns, addTopLevelPatterns, loadRegistry, managedHookCommand, pinnedHookCommand, renderHookScript, type Registry } from "@de-otio/repo-aegis-core";
+import { addMarkerPatterns, addTopLevelPatterns, loadRegistry, pinnedHookCommand, renderHookScript, type Registry } from "@de-otio/repo-aegis-core";
 import { captureOutput, captureOutputAsync, withEnv, withEnvAsync } from "../_test-utils.js";
 import { init } from "./init.js";
-import { makeFakeSystem } from "../_managed-test-utils.js";
-import { managedPaths } from "./managed-dropin.js";
 import { engagementsAdd, engagementsEnd, engagementsRemove } from "./engagements-mutate.js";
 import { upstreamsAdd, upstreamsRemove } from "./upstreams.js";
 import { engagementsSetIdentity, identityAdd, identityRemove, identityRequire } from "./identity.js";
@@ -485,31 +483,6 @@ describe("raising the schema version is refused while an install cannot read it 
     assert.equal(code(r), "MULTIPLE_INSTALLS");
     assert.match(r.stderr, /pinned Claude Code hook/);
     assert.equal(read(env), before);
-  });
-
-  it("identity add: the CLI pinned by the managed drop-in is old: refuses; a pin that can read 3 passes", () => {
-    for (const [name, max, refused] of [["drop-old", 2, true], ["drop-new", 3, false]] as const) {
-      const env = setup(V2);
-      const before = read(env);
-      const sys = makeFakeSystem({ platform: "linux", uid: 1000 });
-      const paths = managedPaths("linux", 1000)!;
-      const cli = join(fakeInstall(name, { version: "0.11.4", max }), "index.js");
-      writeFileSync(cli, "// stub\n");
-      const command = managedHookCommand({ node: process.execPath, cli }, "hook check-write", { uid: "1000", dropinPath: paths.file });
-      mkdirSync(sys.at(paths.dropinDir), { recursive: true });
-      writeFileSync(
-        sys.at(paths.file),
-        JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Write|Edit|MultiEdit", hooks: [{ type: "command", command }] }] } }),
-      );
-      const r = add(env, "", { managedEnv: sys.env });
-      if (refused) {
-        assert.equal(code(r), "MULTIPLE_INSTALLS");
-        assert.match(r.stderr, /pinned Claude Code hook/);
-        assert.equal(read(env), before);
-      } else {
-        assert.equal(r.exitCode, undefined, r.stderr);
-      }
-    }
   });
 
   it("--clear is never guarded (it only removes mappings)", () => {

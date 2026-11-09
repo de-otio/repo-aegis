@@ -14,10 +14,8 @@
 // read either is refused (it cannot be shown to be able to read the file).
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, repoAegisHome } from "@de-otio/repo-aegis-core";
-import { readSettingsFile, defaultClaudeHome } from "./install-claude-md.js";
-import { pinsInSettings, readDropInSettings } from "./doctor-managed-checks.js";
-import { resolveManagedEnv, type ManagedEnv } from "./managed-privileged.js";
+import { MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, repoAegisHome, shellUnquote, type EnforcementPin } from "@de-otio/repo-aegis-core";
+import { readSettingsFile, defaultClaudeHome, type SettingsJson } from "./install-claude-md.js";
 import {
   canonical,
   pinnedCliPaths,
@@ -36,22 +34,33 @@ export interface InstallGuardOptions {
   runningVersion?: string;
   /** TEST-ONLY seam: the Claude Code home whose `settings.json` is read (default `~/.claude`). */
   claudeHome?: string;
-  /** TEST-ONLY seam: the managed-settings environment whose drop-in is read (default: the real one). */
-  managedEnv?: ManagedEnv;
+}
+
+/** The (node, cli) pairs the pinned hook commands of a parsed `settings.json` run. */
+export function pinsInSettings(settings: SettingsJson | null): EnforcementPin[] {
+  const out: EnforcementPin[] = [];
+  const re = /; then exec ('(?:[^']|'\\'')*') ('(?:[^']|'\\'')*') hook /;
+  for (const entries of Object.values(settings?.hooks ?? {})) {
+    for (const entry of entries ?? []) {
+      for (const h of entry.hooks ?? []) {
+        const m = typeof h.command === "string" ? re.exec(h.command) : null;
+        if (m === null) continue;
+        const node = shellUnquote(m[1]!);
+        const cli = shellUnquote(m[2]!);
+        if (node !== null && cli !== null && !out.some(p => p.node === node && p.cli === cli)) out.push({ node, cli });
+      }
+    }
+  }
+  return out;
 }
 
 /**
- * The CLIs the Claude Code hooks are pinned to: the managed drop-in's and `settings.json`'s commands. This is
+ * The CLIs the Claude Code hooks in `settings.json` are pinned to. This is
  * the pin that runs `hook check-write`, the one that fails OPEN on a version it cannot read. Best-effort: a
  * missing or unparseable file has no pins.
  */
 function claudeHookCliPaths(opts: InstallGuardOptions): string[] {
   const out: string[] = [];
-  try {
-    out.push(...pinsInSettings(readDropInSettings(opts.managedEnv ?? resolveManagedEnv())).map(p => p.cli));
-  } catch {
-    /* no drop-in, or unreadable */
-  }
   try {
     out.push(...pinsInSettings(readSettingsFile(join(opts.claudeHome ?? defaultClaudeHome(), "settings.json"))).map(p => p.cli));
   } catch {

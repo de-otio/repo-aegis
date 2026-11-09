@@ -20,22 +20,15 @@ import {
   registryPath,
   repoAegisHome,
   statePath,
-  isManagedHookCommand,
   isPinnedHookCommand,
   pinnedHookCommand,
   pinProblem,
-  testSeamsEnabled,
   type EnforcementPin,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { readIfExists } from "../fs-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
-import { applyManagedInstall, chooseTarget, planManagedInstall, uninstallManaged, type ManagedSeams } from "./install-claude-md-managed.js";
-import { managedShadowChecks } from "./managed-shadow-checks.js";
-import { heartbeatCheck } from "./managed-heartbeat-check.js";
-import { readManagedLedger } from "./managed-ledger.js";
-import { isHumanTerminal } from "../require-terminal.js";
-import type { DoctorCheck } from "./doctor-checks.js";
+import { clearLegacyState, detectLegacyDropIn, legacyDropInLines, type LegacyDropIn, type LegacySeams } from "./legacy-managed-remover.js";
 import {
   BASH_HOOK_ARGS,
   BASH_HOOK_MATCHER,
@@ -148,15 +141,10 @@ interface InstallClaudeMdOptions extends OutputOptions {
   uninstall?: boolean;
   /** Test seam: the pin whose CLI package directory and Node executable are denied. Not reachable from the CLI. */
   pin?: EnforcementPin;
-  /**
-   * D8.6: write the hooks and deny rules to the user's `settings.json`, as D7 did,
-   * instead of the root-owned managed drop-in. For containers and devcontainers
-   * (no `sudo`) and unsupported platforms; doctor then warns
-   * `ENFORCEMENT_IN_USER_SETTINGS`, because that file must stay per machine.
-   */
+  /** Accepted and ignored: `settings.json` is the only target now. Kept for one release so existing scripts do not break. */
   userSettings?: boolean;
-  /** Test seam: platform, uid, file system root, the privileged runner and the terminal. Honoured only under the Node test runner. */
-  managed?: ManagedSeams;
+  /** Test seam: where a legacy managed drop-in is looked for. Honoured only under the Node test runner. */
+  legacyManaged?: LegacySeams;
 }
 
 export interface SettingsJson {
@@ -693,16 +681,8 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   }
   const cmd = hookCommands(pin);
 
-  // D8: the hooks and deny rules go in the root-owned managed drop-in, unless the
-  // person asked for the user file (D8.6) or there is no managed location here.
-  const target = chooseTarget(opts);
-  if (target.kind === "managed") {
-    installManagedMode({ claudeHome, claudeMdPath, opts, pin, target });
-    return;
-  }
-
   if (opts.dryRun) {
-    dryRunInstallClaudeMd({ claudeHome, claudeMdPath, settingsPath, opts, pin, cmd, note: target.note });
+    dryRunInstallClaudeMd({ claudeHome, claudeMdPath, settingsPath, opts, pin, cmd });
     return;
   }
 
@@ -813,11 +793,12 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
 
   if (opts.silent) return;
 
+  const legacy = detectLegacyDropIn(opts.legacyManaged);
   if (opts.json) {
     emitJson({
       action: "install-claude-md",
       mode: "user-settings",
-      ...(target.note !== null && { note: target.note }),
+      ...(legacy !== null && { legacyManagedDropIn: legacyJson(legacy) }),
       claudeHome,
       claudeMd: { path: claudeMdPath, appended: claudeMdAppended, alreadyPresent: claudeMdAlreadyPresent },
       hookCommand: cmd.scanAfterWrite,
@@ -862,7 +843,6 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     return;
   }
 
-  if (target.note !== null) emitText(`note: ${target.note}`);
   if (claudeMdAppended) emitText(`appended snippet to ${claudeMdPath}`);
   else emitText(`snippet already present in ${claudeMdPath}`);
   if (checkWriteMerge.added) emitText(`registered PreToolUse(Write|Edit|MultiEdit) hook in ${settingsPath}`);
@@ -898,6 +878,11 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   }
   for (const rule of denyInstall.plan.rules) emitText(`  rule: ${rule}`);
   for (const line of denyAdviceLines(denyInstall.plan)) emitText(`  ${line}`);
+  if (legacy !== null) {
+    emitText("");
+    for (const line of legacyDropInLines(legacy)) emitText(line);
+    emitText("  (until it is removed, its hooks run alongside the ones just written)");
+  }
   if (!strictModeOn) {
     emitText("");
     emitText("note: leak-context strict mode is OFF.");
@@ -905,244 +890,9 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   }
 }
 
-/**
- * JSON text for `value` laid out like `original`: its indent (tab or the first
- * indented line's spaces), compact if it was one line, and its trailing newline or
- * the lack of one. Used where a file is rewritten after removing OUR entries only,
- * so everything else in it keeps its bytes when it was written by a JSON formatter.
- */
-function stringifyLike(original: string, value: unknown): string {
-  const body = original.trimEnd();
-  const trailing = original.slice(body.length);
-  if (!body.includes("\n")) return JSON.stringify(value) + trailing;
-  const m = /^([ \t]+)\S/m.exec(body);
-  const indent: string | number = m === null ? 2 : m[1]!.startsWith("\t") ? "\t" : m[1]!.length;
-  return JSON.stringify(value, null, indent) + (trailing === "" ? "" : "\n");
-}
-
-interface Migration {
-  hooksRemoved: number;
-  rulesRemoved: number;
-}
-
-/**
- * D8.5: remove from the user's `settings.json` the hooks and deny rules that an
- * earlier install (D7) put there. The hooks are recognised by shape, the deny
- * rules by the ledger and the shape of our own rules, so what the person wrote
- * stays. A missing or unparseable file is left alone.
- */
-function migrateUserSettings(settingsPath: string, pin: EnforcementPin, mode: "apply" | "plan" = "apply"): Migration {
-  const none: Migration = { hooksRemoved: 0, rulesRemoved: 0 };
-  let raw: string | null;
-  let settings: SettingsJson;
-  try {
-    raw = readIfExists(settingsPath);
-    if (raw === null) return none;
-    settings = parseSettings(raw, settingsPath);
-  } catch {
-    return none;
-  }
-  const hooks = stripHookEntries(settings);
-  const rules = stripDenyRules(settings, settingsPath, pin);
-  // "plan" counts what "apply" would remove; it only edits the parsed copy in memory.
-  if (mode === "plan") return { hooksRemoved: hooks.removed, rulesRemoved: rules.removed };
-  if (hooks.removed > 0 || rules.removed > 0) {
-    try {
-      writeFileSync(settingsPath, stringifyLike(raw, settings));
-    } catch (err) {
-      emitError({ code: "FS_ERROR", error: `failed to write ${settingsPath}: ${(err as Error).message}` }, {});
-    }
-  }
-  if (rules.hadRecord) {
-    try {
-      writeDenyLedger(settingsPath, []);
-    } catch {
-      /* a stale ledger entry only makes the next uninstall a no-op for rules that are already gone */
-    }
-  }
-  return { hooksRemoved: hooks.removed, rulesRemoved: rules.removed };
-}
-
-interface ManagedModeContext {
-  claudeHome: string;
-  claudeMdPath: string;
-  opts: InstallClaudeMdOptions;
-  pin: EnforcementPin;
-  target: Extract<ReturnType<typeof chooseTarget>, { kind: "managed" }>;
-}
-
-/**
- * `install claude-md` into the managed-settings drop-in (D8). The drop-in goes
- * first and the CLAUDE.md snippet after it: the drop-in is the step that can be
- * refused or declined, and a refused install should leave nothing behind.
- */
-function installManagedMode(ctx: ManagedModeContext): void {
-  const { claudeHome, claudeMdPath, opts, pin, target } = ctx;
-  const { env, paths } = target;
-  const denyPlan = registryDenyPlan(pin);
-  const plan = planManagedInstall(env, paths, { pin, firstTouch: opts.firstTouch === true, denyRules: denyPlan.rules }, opts);
-  const strictModeOn = existsSync(leakContextFlagPath());
-  const managedInfo = {
-    path: paths.file,
-    uid: env.uid,
-    platform: env.platform,
-    digest: plan.digest,
-    bytes: plan.bytes,
-  };
-
-  if (opts.dryRun) {
-    const existing = readIfExists(claudeMdPath) ?? "";
-    const alreadyPresent = existing.includes(CLAUDE_MD_BEGIN);
-    if (opts.silent) return;
-    if (opts.json) {
-      emitJson({
-        action: "install-claude-md",
-        dryRun: true,
-        mode: "managed",
-        claudeHome,
-        claudeMd: { path: claudeMdPath, wouldAppend: !alreadyPresent, alreadyPresent },
-        managed: { ...managedInfo, unchanged: plan.unchanged, contents: plan.text },
-        registryDeny: {
-          rules: denyPlan.rules,
-          warnings: denyPlan.warnings,
-          verifyWith: `touch ${denyPlan.verifyPath}`,
-        },
-        strictModeOn,
-      });
-      return;
-    }
-    emitText("# repo-aegis install claude-md (dry run — nothing written)");
-    emitText("");
-    emitText(`# Managed drop-in (written as root, for uid ${env.uid}): ${paths.file}`);
-    emitText(`#   ${plan.bytes} bytes, sha256 ${plan.digest}${plan.unchanged ? "  (already installed, unchanged)" : ""}`);
-    emitText(`# CLAUDE.md snippet: ${alreadyPresent ? "already present" : `would be appended to ${claudeMdPath}`}`);
-    emitText("# permissions.deny rules protecting the registry, approvals, hooks, shim and pinned code:");
-    for (const rule of denyPlan.rules) emitText(`#   ${rule}`);
-    for (const line of denyAdviceLines(denyPlan)) emitText(`# ${line}`);
-    emitText("");
-    emitText(plan.text.trimEnd());
-    if (!strictModeOn) {
-      emitText("");
-      emitText("# note: leak-context strict mode is OFF.");
-      emitText("#   enable for sensitive sessions: repo-aegis context on");
-    }
-    return;
-  }
-
-  // The drop-in first: the step a person can refuse.
-  const applied = applyManagedInstall(env, paths, plan, opts.managed?.terminal ?? {}, opts);
-
-  // D8.5: the drop-in is in place and read back. Only now, and only if no other
-  // managed source shadows it, do repo-aegis's own earlier entries leave the user file.
-  // The user file is also the fallback a person re-adds when the drop-in is shadowed, so
-  // the migration waits for (a) no shadowing source, (b) a heartbeat that does not fail
-  // (MANAGED_HOOKS_NOT_FIRING; skipped on a first install is fine), and (c) a person at a
-  // terminal whenever it would remove anything: an unchanged drop-in has no root step to
-  // ask for one, and an agent must not be able to strip the fallback by re-running this.
-  const settingsPath = join(claudeHome, "settings.json");
-  const none: Migration = { hooksRemoved: 0, rulesRemoved: 0 };
-  const heartbeat = heartbeatCheck(
-    { claudeHome, ...(testSeamsEnabled() && opts.managed?.sessionBirths !== undefined && { sessionBirths: opts.managed.sessionBirths }) },
-    readManagedLedger()?.installedAt ?? null,
-  );
-  const shadowed: DoctorCheck[] = [...managedShadowChecks(env, paths).filter(c => !c.ok), ...(heartbeat.ok ? [] : [heartbeat])];
-  let migration: Migration = none;
-  let needsTerminal: Migration | null = null;
-  if (shadowed.length === 0) {
-    const wouldRemove = migrateUserSettings(settingsPath, pin, "plan");
-    if (wouldRemove.hooksRemoved + wouldRemove.rulesRemoved > 0) {
-      if (isHumanTerminal(opts.managed?.terminal ?? {})) migration = migrateUserSettings(settingsPath, pin);
-      else needsTerminal = wouldRemove;
-    }
-  }
-
-  try {
-    mkdirSync(claudeHome, { recursive: true });
-  } catch (err) {
-    emitError({ code: "FS_ERROR", error: `failed to create ${claudeHome}: ${(err as Error).message}` }, opts);
-  }
-  const snippet = ensureClaudeMdSnippet(claudeMdPath);
-
-  try {
-    appendAuditRecord({
-      action: "install-claude-md",
-      details: {
-        claudeHome,
-        mode: "managed",
-        claudeMdAppended: snippet.appended,
-        claudeMdAlreadyPresent: snippet.alreadyPresent,
-        managedWritten: applied.wrote,
-        managedDigest: plan.digest,
-        registryDenyRules: denyPlan.rules.length,
-        userFileHooksRemoved: migration.hooksRemoved,
-        userFileDenyRulesRemoved: migration.rulesRemoved,
-        userFileKeptBecauseShadowed: shadowed.map(c => c.code),
-      },
-    });
-  } catch {
-    /* audit log must not break user-facing ops */
-  }
-
-  if (opts.silent) return;
-
-  if (opts.json) {
-    emitJson({
-      action: "install-claude-md",
-      mode: "managed",
-      claudeHome,
-      claudeMd: { path: claudeMdPath, appended: snippet.appended, alreadyPresent: snippet.alreadyPresent },
-      managed: { ...managedInfo, installed: true, unchanged: !applied.wrote, createdDirs: applied.created },
-      migration: {
-        settingsPath,
-        hooksRemoved: migration.hooksRemoved,
-        denyRulesRemoved: migration.rulesRemoved,
-        keptBecause: shadowed.map((c: DoctorCheck) => ({ code: c.code, detail: c.detail })),
-        needsTerminal: needsTerminal === null ? null : { hooksWouldRemove: needsTerminal.hooksRemoved, denyRulesWouldRemove: needsTerminal.rulesRemoved },
-      },
-      registryDeny: {
-        rules: denyPlan.rules,
-        warnings: denyPlan.warnings,
-        verifyWith: `touch ${denyPlan.verifyPath}`,
-      },
-      strictModeOn,
-    });
-    return;
-  }
-
-  emitText(
-    applied.wrote
-      ? `installed the managed drop-in ${paths.file}`
-      : `the managed drop-in ${paths.file} is already installed and unchanged`,
-  );
-  emitText(`  owner 0:0, mode 0644, ${plan.bytes} bytes, sha256 ${plan.digest}`);
-  emitText(`  registers ${plan.spec.firstTouch ? 7 : 6} hooks and ${denyPlan.rules.length} permissions.deny rule(s) for uid ${env.uid}`);
-  emitText(snippet.appended ? `appended snippet to ${claudeMdPath}` : `snippet already present in ${claudeMdPath}`);
-  if (migration.hooksRemoved > 0 || migration.rulesRemoved > 0) {
-    emitText(
-      `removed ${migration.hooksRemoved} hook entr${migration.hooksRemoved === 1 ? "y" : "ies"} and ${migration.rulesRemoved} permissions.deny rule(s) ` +
-        `from ${settingsPath}: the drop-in carries them now, and that file no longer has to stay per machine`,
-    );
-  }
-  if (needsTerminal !== null) {
-    emitText(
-      `a run from a terminal would remove ${needsTerminal.hooksRemoved} hook entr${needsTerminal.hooksRemoved === 1 ? "y" : "ies"} and ${needsTerminal.rulesRemoved} permissions.deny rule(s) ` +
-        `from ${settingsPath}; it was left untouched because removing them needs a person at a terminal (run \`repo-aegis install claude-md\` from your own terminal)`,
-    );
-  }
-  for (const c of shadowed) {
-    emitText(`warning: ${c.code}: ${c.detail}`);
-    emitText(`  repo-aegis's entries in ${settingsPath} were kept, because the drop-in may not apply (${c.fix ?? "see doctor"})`);
-  }
-  if (applied.wrote || migration.hooksRemoved > 0 || migration.rulesRemoved > 0) {
-    emitText("confirm that `/status` in Claude Code shows `(drop-ins)` or `(file + drop-ins)`: the first session after this also records a heartbeat that `repo-aegis doctor` checks (MANAGED_HOOKS_NOT_FIRING)");
-  }
-  for (const rule of denyPlan.rules) emitText(`  rule: ${rule}`);
-  for (const line of denyAdviceLines(denyPlan)) emitText(`  ${line}`);
-  if (!strictModeOn) {
-    emitText("");
-    emitText("note: leak-context strict mode is OFF.");
-    emitText("  enable for sensitive sessions: repo-aegis context on");
-  }
+/** legacy-managed-remover: remove in 0.17. The JSON form of a detected legacy drop-in. */
+function legacyJson(d: LegacyDropIn): { files: string[]; commands: string[] } {
+  return { files: d.files, commands: d.commands };
 }
 
 interface DryRunContext {
@@ -1152,12 +902,10 @@ interface DryRunContext {
   opts: InstallClaudeMdOptions;
   pin: EnforcementPin;
   cmd: ReturnType<typeof hookCommands>;
-  /** Why the user file is the target (a D8.6 fallback), or null when the person chose it. */
-  note: string | null;
 }
 
 function dryRunInstallClaudeMd(ctx: DryRunContext): void {
-  const { claudeHome, claudeMdPath, settingsPath, opts, pin, cmd, note } = ctx;
+  const { claudeHome, claudeMdPath, settingsPath, opts, pin, cmd } = ctx;
 
   // 1. CLAUDE.md — compute would-be additions without writing.
   const existingClaudeMd = readIfExists(claudeMdPath) ?? "";
@@ -1205,7 +953,6 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
       action: "install-claude-md",
       dryRun: true,
       mode: "user-settings",
-      ...(note !== null && { note }),
       claudeHome,
       claudeMd: {
         path: claudeMdPath,
@@ -1254,7 +1001,6 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   }
 
   emitText("# repo-aegis install claude-md (dry run — nothing written)");
-  if (note !== null) emitText(`# note: ${note}`);
   emitText("");
   emitText(`# Would-be CLAUDE.md additions to: ${claudeMdPath}`);
   if (claudeMdAlreadyPresent) {
@@ -1400,9 +1146,10 @@ interface UninstallClaudeMdContext {
 function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
   const { claudeHome, claudeMdPath, settingsPath, opts } = ctx;
 
-  // 0. The managed drop-in (D8.9) first: the step a person can refuse or that can
-  // fail. If it does, nothing else is removed and enforcement stays where it is.
-  const managedRemoval = uninstallManaged(opts);
+  // 0. A legacy root-owned drop-in cannot be removed from here (it needs root, and repo-aegis never runs
+  // sudo): detect it, and print the command below. Its ledger is a plain state file: cleared once it is gone.
+  const legacy = detectLegacyDropIn(opts.legacyManaged);
+  if (legacy === null) clearLegacyState();
 
   // 1. Strip the managed block from CLAUDE.md (if present).
   let claudeMdStripped = false;
@@ -1491,8 +1238,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
         registryDenyRulesRemoved: denyRulesRemoved,
         settingsAbsent,
-        managedDropInRemoved: managedRemoval.removed,
-        managedDirsRemoved: managedRemoval.dirsRemoved.length,
+        legacyManagedDropInPresent: legacy !== null,
       },
     });
   } catch {
@@ -1506,12 +1252,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
       action: "uninstall-claude-md",
       claudeHome,
       claudeMd: { path: claudeMdPath, stripped: claudeMdStripped, absent: claudeMdAbsent },
-      managed: {
-        path: managedRemoval.path,
-        removed: managedRemoval.removed,
-        dirsRemoved: managedRemoval.dirsRemoved,
-        ledgerRemoved: managedRemoval.ledgerRemoved,
-      },
+      legacyManagedDropIn: legacy === null ? null : legacyJson(legacy),
       settings: {
         path: settingsPath,
         absent: settingsAbsent,
@@ -1528,12 +1269,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
     return;
   }
 
-  if (managedRemoval.removed) {
-    emitText(`removed the managed drop-in ${managedRemoval.path}`);
-    for (const d of managedRemoval.dirsRemoved) emitText(`removed the empty directory ${d}, which repo-aegis created`);
-  } else if (managedRemoval.path !== null) {
-    emitText(`no managed drop-in at ${managedRemoval.path}`);
-  }
+  if (legacy !== null) for (const line of legacyDropInLines(legacy)) emitText(line);
   if (claudeMdAbsent) emitText(`${claudeMdPath} not present (nothing to strip)`);
   else if (claudeMdStripped) emitText(`stripped managed block from ${claudeMdPath}`);
   else emitText(`no managed block found in ${claudeMdPath}`);
@@ -1569,10 +1305,10 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
 /** The prefix a registered by-name guard command must start with, whatever `--agent` follows it. */
 const GUARD_EGRESS_COMMAND_PREFIX = "repo-aegis hook guard-egress";
 
-/** True for a registered guard command: the managed drop-in's form, the pinned user-settings form, or the older by-name form. */
+/** True for a registered guard command: the pinned form or the older by-name form. */
 function isGuardEgressCommand(command: string): boolean {
   const c = command.trim();
-  return c.startsWith(GUARD_EGRESS_COMMAND_PREFIX) || isPinnedHookCommand(c, "guard-egress") || isManagedHookCommand(c, "guard-egress");
+  return c.startsWith(GUARD_EGRESS_COMMAND_PREFIX) || isPinnedHookCommand(c, "guard-egress");
 }
 
 /**
@@ -1619,7 +1355,7 @@ export function unpinnedClaudeHooks(claudeHome?: string): string[] {
  * reported as unregistered with the reason, never thrown. `doctor` must
  * survive a machine whose Claude Code config does not exist.
  */
-export function checkGuardHook(claudeHome?: string, managed: SettingsJson | null = null): import("./doctor-checks.js").DoctorCheck[] {
+export function checkGuardHook(claudeHome?: string): import("./doctor-checks.js").DoctorCheck[] {
   const home = claudeHome ?? defaultClaudeHome();
   const settingsPath = join(home, "settings.json");
   const unregistered = (detail: string): import("./doctor-checks.js").DoctorCheck[] => [
@@ -1637,22 +1373,11 @@ export function checkGuardHook(claudeHome?: string, managed: SettingsJson | null
         (entry.hooks ?? []).some(h => typeof h.command === "string" && isGuardEgressCommand(h.command)),
     );
 
-  // The managed drop-in (D8) counts: it is where the guard lives once `install claude-md` has run.
-  if (managed !== null && hasGuard(managed)) {
-    return [
-      {
-        code: "GUARD_HOOK_UNREGISTERED",
-        ok: true,
-        detail: `\`${GUARD_EGRESS_COMMAND_PREFIX}\` is registered as a PreToolUse(Bash) hook in the managed drop-in`,
-      },
-    ];
-  }
-
   let settings: SettingsJson;
   try {
     if (!existsSync(settingsPath)) {
       return unregistered(
-        `no settings.json at ${settingsPath} and no managed drop-in, so the PreToolUse(Bash) egress guard is not registered`,
+        `no settings.json at ${settingsPath}, so the PreToolUse(Bash) egress guard is not registered`,
       );
     }
     settings = readSettings(settingsPath);
@@ -1728,7 +1453,6 @@ export function denyRuleCoversPath(rule: unknown, target: string, home: string =
 export function checkRegistryAgentWritable(
   claudeHome?: string,
   plan: RegistryDenyPlan = registryDenyPlan(),
-  managed: SettingsJson | null = null,
 ): import("./doctor-checks.js").DoctorCheck {
   const home = claudeHome ?? defaultClaudeHome();
   const settingsPath = join(home, "settings.json");
@@ -1747,17 +1471,12 @@ export function checkRegistryAgentWritable(
   try {
     settings = readSettings(settingsPath);
   } catch {
-    // An unparseable user file does not hide the managed drop-in's rules.
-    if (managed === null) {
-      return warn(
-        `settings.json at ${settingsPath} could not be parsed, so a deny rule for the registry files cannot be confirmed`,
-      );
-    }
-    settings = {};
+    return warn(
+      `settings.json at ${settingsPath} could not be parsed, so a deny rule for the registry files cannot be confirmed`,
+    );
   }
 
-  // Claude Code merges permissions.deny across scopes, so the drop-in's rules count with the user file's.
-  const deny = [...denyList(settings), ...(managed === null ? [] : denyList(managed))];
+  const deny = denyList(settings);
   const uncovered = plan.sampleTargets.filter(t => !deny.some(rule => denyRuleCoversPath(rule, t)));
   if (uncovered.length > 0) {
     return warn(

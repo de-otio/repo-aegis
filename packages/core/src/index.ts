@@ -223,16 +223,12 @@ export {
   pinGuard,
   pinnedHookCommand,
   isPinnedHookCommand,
-  managedHookCommand,
-  isManagedHookCommand,
-  MANAGED_ID_PATH,
   PIN_VERSION_PATTERN,
   pinProblem,
   shellQuote,
   shellUnquote,
   type EnforcementPin,
   type FallbackVerdict,
-  type ManagedHookContext,
   type PinGuardOptions,
 } from "./enforcement-pin.js";
 export type { HookName } from "./hook-scripts.js";

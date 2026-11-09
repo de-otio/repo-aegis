@@ -21,8 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a version (an older install) is refused as before (exit 1 for the git hooks, exit 2 for
   the shim and the Claude Code hooks). `PATH` is never consulted while the pin works.
   `ENFORCEMENT_PIN_MISSING` stays a `doctor` failure. **The generated scripts and hook commands
-  changed, so existing installs show as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`,
-  `MANAGED_DROPIN_STALE`) until you re-run `repo-aegis install hooks`, `repo-aegis install shim` and
+  changed, so existing installs show as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`) until you re-run `repo-aegis install hooks`, `repo-aegis install shim` and
   `repo-aegis install claude-md`.**
 - **An encrypted registry is treated as no registry.** Encryption at rest is deprecated and goes
   away in 0.15.0. Until then an encrypted registry no longer refuses every publish or every
@@ -43,8 +42,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `repo-aegis install claude-md`"). Both now use fixed text for an unparseable registry: the
   parse error, which can name orgs, is no longer echoed by `scan-after-write`.
 
+### Removed
+
+- **The root-owned managed drop-in is gone** (about 4,000 lines, one CI job, one `sudo` end-to-end
+  script). `repo-aegis install claude-md` used to write the Claude Code hooks and deny rules to
+  `/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-<uid>.json` (macOS) or
+  `/etc/claude-code/managed-settings.d/…` (Linux) with `sudo`. Its cost was `sudo`, a CI job and a
+  large surface, for a guarantee that was void wherever `sudo` takes no password. `install
+  claude-md` now always writes `~/.claude/settings.json`; `--user-settings` is accepted and
+  ignored (with a one-line note) for one release. Gone with it: the ledger, the SessionStart
+  heartbeat, the privileged helper, and the `doctor` checks `MANAGED_DROPIN_STALE`,
+  `MANAGED_DROPIN_NOT_ROOT_OWNED`, `MANAGED_DROPIN_UNREADABLE`, `MANAGED_DROPIN_ORPHANED`,
+  `MANAGED_DROPIN_LEDGER_STALE`, `MANAGED_HOOKS_DISABLED`, `MANAGED_HOOKS_NOT_FIRING`,
+  `MANAGED_SOURCE_SHADOWED`, `SUDO_NOPASSWD` and `ENFORCEMENT_IN_USER_SETTINGS`, and the refusal
+  codes `MANAGED_NEEDS_TTY`, `MANAGED_NOT_CONFIRMED`, `PRIVILEGED_TOOL_UNSAFE`,
+  `SYSTEM_DIR_UNSAFE` and `DROPIN_INVALID`. `install claude-md --json` no longer has the
+  `managed`, `migration` or `note` fields.
+- **Migration, for one release.** A drop-in already on your machine keeps running its hooks, and
+  repo-aegis never removes it (that needs root). `repo-aegis doctor` warns
+  `MANAGED_LEGACY_PRESENT` with the fix; `install claude-md`, `install claude-md --uninstall` and
+  `uninstall` print the exact `sudo rm '<path>'` line (and a `sudo rmdir` for a directory the old
+  install created); `--json` carries it as `legacyManagedDropIn`. Run `repo-aegis install claude-md`
+  first, so the hooks are in `settings.json`, then remove the file; see
+  [Removing a legacy managed drop-in](doc/configuration.md#removing-a-legacy-managed-drop-in). The
+  detection code (`legacy-managed-remover.ts`, and a hidden no-op `hook managed-heartbeat` so the
+  old drop-in's SessionStart entry does not error) is deleted in 0.17.
+- `install claude-md` no longer moves repo-aegis's entries out of `settings.json`, and the
+  `doctor` guard and deny checks no longer read a drop-in: with only a legacy drop-in installed,
+  `GUARD_HOOK_UNREGISTERED` fails until `install claude-md` is run.
+
 ### Internal
 
+- An import-graph test (`no-managed-dropin.test.ts`) fails if anything imports a deleted module,
+  a deleted file reappears, or `core` exports the managed hook wrapper again.
 - One non-throwing core loader, `loadRegistryState`, returns the registry's state (`loaded`,
   `missing`, `encrypted`, `unparseable`, `newer-schema`); the hook, the shim's egress check,
   pre-push, the `gh` identity layer, the write hooks and `doctor` use it instead of each
