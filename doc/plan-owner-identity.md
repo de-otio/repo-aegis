@@ -11,6 +11,12 @@ Where the text below differs from what shipped, the shipped behaviour is:
 
 Written on branch `plan/owner-identity` (merged in #165; the branch no longer exists). Revives and extends `doc/plan-gh-identity-selection.md` (parked 2026-11-04), whose decisions and security review (H1–H5, M1–M5) are carried over here and referenced by their ids. That file was never merged to `main` (it exists only on the local branch `plan/gh-identity-selection`), so the ids H1–H5, M1–M5, T1–T20 and the parked D1–D12 cannot be looked up in this repository. Where a decision matters here, this file restates it. Changes the stance of `doc/plan-recognise-dot-gh.md` §0 for this one concern (§2). Security review of this spec: §12.
 
+## Non-goals (added 2026-11)
+
+- No general account switcher: repo-aegis chooses an identity per call from the registry; it never switches the global active `gh` account, which other sessions share.
+- No new token sources beyond those v0.12 ships (a person's `gh auth token --user`, and a GitHub App installation token minted by taaad).
+- No hardening against an agent that deliberately sets out to obtain a token; the threat model is accidental leaks (doc/plan-recognise-dot-gh.md §0). Owner-switching helpers already exist, and maintenance cost lands here first.
+
 ## 1. Problem
 
 Several agent sessions run on one machine, and each may need a different GitHub identity: a person's own account for their own org, a work account for an engagement's org, or a bot. `gh` acts as whichever account is *active*, and the active account is shared by every terminal and session, so sessions switch it under each other (`gh auth switch`). The workarounds all put the identity choice into text the agent writes:
