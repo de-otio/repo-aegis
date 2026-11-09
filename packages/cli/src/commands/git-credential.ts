@@ -407,11 +407,22 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   try {
     minted = deps.mint({ taaadPath, slug: choice.identity.app, owner: dest.owner, repo: dest.repo, scope });
   } catch (err) {
-    if (err instanceof MintError && err.kind === "installation-mismatch") {
-      return refuse("GH_IDENTITY_INSTALLATION_MISMATCH", err.message, dest);
-    }
-    const why = err instanceof MintError ? err.message : "the token could not be minted";
-    return refuse("GH_IDENTITY_UNAVAILABLE", `${why} (the App may not be installed on this repository)`, dest);
+    const mismatch = err instanceof MintError && err.kind === "installation-mismatch";
+    const code = mismatch ? "GH_IDENTITY_INSTALLATION_MISMATCH" : "GH_IDENTITY_UNAVAILABLE";
+    // A failed mint is recorded too (the reason is a fixed word, never taaad's output), so a refused push
+    // can be diagnosed after the fact.
+    auditBestEffort({
+      identity: choice.identity.name,
+      kind: "github-app",
+      owner: dest.owner,
+      repo: dest.repo,
+      scope,
+      verb: chain ? "push" : "fetch",
+      outcome: "refused",
+      code,
+      reason: err instanceof MintError ? err.reason : "failed",
+    });
+    return refuse(code, err instanceof MintError ? err.message : "the token could not be minted", dest);
   }
   auditBestEffort({ identity: choice.identity.name, kind: "github-app", owner: dest.owner, repo: dest.repo, scope, verb: chain ? "push" : "fetch" });
   return {

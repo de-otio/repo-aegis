@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mintAppToken, MintError } from "./taaad-mint.js";
+import { classifyMintFailure, mintAppToken, MintError, SPAWN_TIMEOUT_MS, spawnFailure, type MintFailureReason } from "./taaad-mint.js";
 
 let tmp: string;
 before(() => {
@@ -47,5 +47,55 @@ describe("mintAppToken: taaad's refusal exit codes", () => {
   });
   it("taaad's stderr never appears in the message", () => {
     for (const code of [1, 3, 4]) assert.ok(!mintWith(stub(`s${code}`, code)).message.includes("ghs_"));
+  });
+  it("2 says taaad refused a terminal", () => {
+    assert.equal(mintWith(stub("t2", 2)).reason, "tty");
+  });
+});
+
+describe("classifyMintFailure: taaad's exit-1 texts become a fixed reason (stderr matched, never copied)", () => {
+  // taaad v0.6 `taaad mint` stderr lines, with a customer-like owner and a token-like string in them.
+  const cases: ReadonlyArray<readonly [string, MintFailureReason]> = [
+    ["error: taaad mint: taaad-signer: User interaction is not allowed.", "screen-locked"],
+    ["error: taaad mint: taaad-signer: taaad-signer sign timed out after 240s", "timeout"],
+    ["error: taaad mint: taaad-signer: taaad-signer exited 7", "signer"],
+    ["error: taaad mint: app example-bot has no install_id yet", "not-installed"],
+    ["error: taaad mint: repository owner 'customer-a-org' is not the installation account 'example-org'; refusing", "installation-mismatch"],
+    ["error: taaad mint: contents:write is not granted to the installation", "permission-not-granted"],
+    ["error: taaad mint: GitHub 422: There is at least one repository that does not exist or is not accessible to the parent installation.", "repo-not-covered"],
+    ["error: taaad mint: something new", "failed"],
+    ["", "failed"],
+  ];
+  for (const [stderr, reason] of cases) {
+    it(`${reason}: ${stderr.slice(19, 70) || "(empty stderr)"}`, () => {
+      const e = classifyMintFailure(1, `${stderr} ghs_${"A".repeat(36)}`);
+      assert.equal(e.reason, reason);
+      assert.equal(e.kind, reason === "installation-mismatch" ? "installation-mismatch" : "unavailable");
+      for (const leak of ["customer-a-org", "ghs_", "example-bot"]) assert.ok(!e.message.includes(leak), leak);
+    });
+  }
+  it("the exit code wins over stderr for 3 and 4", () => {
+    assert.equal(classifyMintFailure(3, "taaad-signer: User interaction is not allowed").reason, "rate-limited");
+    assert.equal(classifyMintFailure(4, "taaad-signer: User interaction is not allowed").reason, "denied");
+  });
+  it("end to end: a stub taaad that prints the locked-screen text", () => {
+    const p = join(tmp, "locked");
+    writeFileSync(p, `#!/bin/sh\necho "error: taaad mint: taaad-signer: User interaction is not allowed." >&2\nexit 1\n`);
+    chmodSync(p, 0o755);
+    assert.equal(mintWith(p).reason, "screen-locked");
+  });
+});
+
+describe("the spawn: a timeout is reported as a timeout, and outlasts taaad-signer's 240 s prompt", () => {
+  it("SPAWN_TIMEOUT_MS is longer than the signer's presence-prompt wait plus its GitHub calls", () => {
+    assert.ok(SPAWN_TIMEOUT_MS >= 240_000 + 30_000, String(SPAWN_TIMEOUT_MS));
+  });
+  it("ETIMEDOUT is a timeout, not 'could not be run'", () => {
+    const e = spawnFailure(Object.assign(new Error("spawnSync taaad ETIMEDOUT"), { code: "ETIMEDOUT" }));
+    assert.equal(e.reason, "timeout");
+    assert.match(e.message, /did not finish within 300 s/);
+  });
+  it("a launcher that is gone is not-runnable", () => {
+    assert.equal(mintWith(join(tmp, "does-not-exist")).reason, "not-runnable");
   });
 });

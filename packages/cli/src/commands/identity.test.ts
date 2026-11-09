@@ -636,20 +636,23 @@ describe("status and doctor see identities", () => {
     assert.ok(!JSON.stringify(sum).includes("customer-a-org"), "an engagement's org names stay out of status");
   });
 
-  it("OWNER_IDENTITY_UNMAPPED: one warning per unmapped owner, a failure when requireIdentity is set; owners only in names (--json)", () => {
+  it("OWNER_IDENTITY_UNMAPPED: one finding for all unmapped owners, a failure when requireIdentity is set; owners only in names (--json)", () => {
     const warn = ownerIdentityChecks(loadRegistry(setup(V3.replace("requireIdentity: true\n", "")).registryPath));
-    assert.deepEqual(warn.flatMap(c => c.names ?? []), ["customer-b-org", "plain-org"]);
-    for (const c of warn) {
-      assert.equal(c.code, "OWNER_IDENTITY_UNMAPPED");
-      assert.equal(c.ok, false);
-      assert.equal(c.severity, "warn");
-      assert.ok(!c.detail.includes(c.names![0]!), "detail must not name the owner");
-      assert.ok(!c.fix!.includes(c.names![0]!), "fix must not name the owner: text output lands in transcripts");
+    assert.equal(warn.length, 1, "one finding, not one identical line per owner");
+    const w = warn[0]!;
+    assert.deepEqual(w.names, ["customer-b-org", "plain-org"]);
+    assert.equal(w.code, "OWNER_IDENTITY_UNMAPPED");
+    assert.equal(w.ok, false);
+    assert.equal(w.severity, "warn");
+    assert.match(w.detail, /^2 registered owner\(s\) have no identity entry/);
+    for (const owner of w.names!) {
+      assert.ok(!w.detail.includes(owner), "detail must not name an owner");
+      assert.ok(!w.fix!.includes(owner), "fix must not name an owner: text output lands in transcripts");
     }
     const fail = ownerIdentityChecks(loadRegistry(setup(V3).registryPath));
-    assert.equal(fail.length, 2);
-    for (const c of fail) assert.match(c.detail, /^2 registered owner\(s\) are still unmapped/);
-    for (const c of fail) assert.equal(c.severity, undefined, "no severity means fail");
+    assert.equal(fail.length, 1);
+    assert.match(fail[0]!.detail, /^2 registered owner\(s\) are still unmapped/);
+    assert.equal(fail[0]!.severity, undefined, "no severity means fail");
   });
 
   it("a fully mapped registry has no findings; a v2 registry warns for every owner", () => {

@@ -122,27 +122,32 @@ export function registryStateChecks(
 }
 
 /**
- * `OWNER_IDENTITY_UNMAPPED`: one finding per registered owner that has no identity entry (no `person` and no
- * `agent`). A warning, because an unmapped owner keeps passing through unchanged (N11); a FAILURE when the
- * registry sets `requireIdentity`, because then an agent write to it is refused. The owner is named in `fix`
- * and `names` only, never in `detail` (owners can be customer names).
+ * `OWNER_IDENTITY_UNMAPPED`: ONE finding for all registered owners that have no identity entry (no `person`
+ * and no `agent`). A warning, because an unmapped owner keeps passing through unchanged (N11); a FAILURE when
+ * the registry sets `requireIdentity`, because then an agent write to one is refused. The owners are named in
+ * `names` only (`--json`), never in `detail` or `fix` (owners can be customer names). One finding rather than
+ * one per owner: with the owners kept out of the text, per-owner lines read as the same line repeated.
  */
 export function ownerIdentityChecks(registry: Registry): DoctorCheck[] {
   const mapped = registry.identityMap ?? new Map();
   const required = registry.requireIdentity === true;
   const unmapped = [...registeredOwners(registry)].filter(owner => !mapped.has(owner)).sort();
-  return unmapped.map(owner => ({
+  if (unmapped.length === 0) return [];
+  const n = `${unmapped.length} registered owner(s)`;
+  return [
+    {
       code: "OWNER_IDENTITY_UNMAPPED" as const,
       ok: false,
       ...(required ? {} : { severity: "warn" as const }),
-      names: [owner],
+      names: unmapped,
       detail: required
-        ? `${unmapped.length} registered owner(s) are still unmapped, and requireIdentity is set, so an agent write to one with no identity entry is refused`
-        : "a registered owner has no identity entry, so no GitHub identity is recorded for it",
+        ? `${n} are still unmapped (listed in --json), and requireIdentity is set, so an agent write to one with no identity entry is refused`
+        : `${n} have no identity entry (listed in --json), so no GitHub identity is recorded for them`,
       fix:
-        "map the owner to an identity (it is listed in --json): repo-aegis identity add <name> --gh-login <login>, then " +
+        "map each owner to an identity: repo-aegis identity add <name> --gh-login <login>, then " +
         `repo-aegis engagements set-identity (<engagement-id> | --personal-org <org>) --person <name>   (${PERSON_RUNS_THIS})`,
-    }));
+    },
+  ];
 }
 
 /**
