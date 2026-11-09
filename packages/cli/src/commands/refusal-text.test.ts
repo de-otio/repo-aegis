@@ -201,8 +201,8 @@ describe("U7 refusal text: git credential helper", () => {
     return r.stderr;
   };
   const entries = (text: string): ReturnType<typeof parseShowScopeList> => parseShowScopeList(text);
-  /** Every refusal of this helper but the unreadable process list says which one condition an approval covers. */
-  const ONLY_CHAIN = /No approval covers this; only an unreadable process list \(AGENT_PUSH_CHAIN_UNREADABLE\) is covered, by an account-bound `repo-aegis approve <owner>\/<repo>`/;
+  /** No refusal of this helper is covered by an approval: it reads none (P1-A). */
+  const ONLY_CHAIN = /No approval covers this\./;
   const ours = "!'/n' '/c' git-credential --home '/h'";
 
   const rows: Row[] = [];
@@ -215,15 +215,6 @@ describe("U7 refusal text: git credential helper", () => {
         cause: /has no absolute --home/,
         created: /repo-aegis writes that line itself in `install git-credential`/,
         fix: /A person runs, from a terminal: repo-aegis install git-credential \(.*re-running it is safe\)/,
-        approval: ONLY_CHAIN,
-      },
-      {
-        label: "git credential fill run directly",
-        code: "AGENT_CREDENTIAL_DIRECT_FILL",
-        text: refused(req(), deps({ ancestry: () => [{ pid: 8, ppid: 1, comm: "zsh", argv: ["zsh"] }] })),
-        cause: /`git credential fill` was run directly/,
-        created: /no repo-aegis setting created it/,
-        fix: /runs the original `git push` from a terminal/,
         approval: ONLY_CHAIN,
       },
       {
@@ -256,20 +247,11 @@ describe("U7 refusal text: git credential helper", () => {
       {
         label: "the registry cannot be read",
         code: "GH_IDENTITY_UNAVAILABLE",
-        text: refused(req(), deps({ loadRegistry: () => null })),
-        cause: /registry in the pinned home could not be read \(it is encrypted or damaged/,
-        created: /repo-aegis did not change it/,
-        fix: /repo-aegis doctor/,
+        text: refused(req(), deps({ loadRegistry: () => "unreadable" })),
+        cause: /registry in the pinned home exists but cannot be read \(it does not parse, or a newer repo-aegis wrote it\)/,
+        created: /repo-aegis did not change the file/,
+        fix: /repo-aegis doctor \(it says whether to repair the file or upgrade repo-aegis\)/,
         approval: ONLY_CHAIN,
-      },
-      {
-        label: "a person's account, a push",
-        code: "GH_IDENTITY_WRITE_NEEDS_HUMAN",
-        text: refused(req("p/r.git"), deps({ ancestry: () => chainFor("p/r.git") })),
-        cause: /would run as a person's GitHub account, and the git subcommand is not one known to only read/,
-        created: /repo-aegis created no setting for it/,
-        fix: /runs the push from a terminal/,
-        approval: /A login-bound `repo-aegis approve p\/r` \(or `p\/\*`\) run by a person from a terminal covers this/,
       },
       {
         label: "the agent identity is a login, not an App",
@@ -304,10 +286,10 @@ describe("U7 refusal text: git credential helper", () => {
         approval: ONLY_CHAIN,
       },
       {
-        label: "a proxy in the git configuration",
+        label: "a credential helper in the repository's own git configuration",
         code: "AGENT_PUSH_CREDENTIAL_CONFIG",
-        text: refused(req(), deps({ readConfig: () => entries("global\thttp.proxy http://proxy.example:3128") })),
-        cause: /http\.proxy is set in global scope, which could redirect or capture the token/,
+        text: refused(req(), deps({ readConfig: () => entries("global\tcredential.https://github.com.helper !ours\nlocal\tcredential.helper !evil") })),
+        cause: /a credential helper is configured in local scope, which could redirect or capture the token/,
         created: /repo-aegis did not set it/,
         fix: /git config --list --show-origin \(it names the file that sets it; remove the setting there/,
         approval: ONLY_CHAIN,
@@ -381,7 +363,7 @@ describe("U7 refusal text: git credential helper", () => {
 
   // The rows are built in `before`, so the table is checked in one test per row at run time.
   it("every row names its cause, who created it, the fix, and whether an approval covers it", () => {
-    assert.ok(rows.length >= 15, "the table was built");
+    assert.ok(rows.length >= 13, "the table was built");
     for (const r of rows) {
       assert.ok(r.text.includes(r.code), `${r.label}: names its code: ${r.text}`);
       assert.match(r.text, r.cause, `${r.label}: names the cause: ${r.text}`);
@@ -390,12 +372,5 @@ describe("U7 refusal text: git credential helper", () => {
       assert.match(r.text, r.approval, `${r.label}: says whether an approval covers it: ${r.text}`);
       assert.match(r.text, /Agents: do not run that yourself, retry or reroute; report this to your human\./, `${r.label}: keeps the trailer: ${r.text}`);
     }
-  });
-
-  it("AGENT_PUSH_CHAIN_UNREADABLE (left as landed) still says which approval covers it", () => {
-    const text = refused(req(), deps({ ancestry: () => null }));
-    assert.match(text, /AGENT_PUSH_CHAIN_UNREADABLE/);
-    assert.match(text, /a sandbox that blocks the process list \(the default Claude Code sandbox does\) is the likely cause/);
-    assert.match(text, /An approval for o\/r from a person covers this when the owner has a person identity mapped/);
   });
 });

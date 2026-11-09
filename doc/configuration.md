@@ -272,7 +272,7 @@ All of this is run by a person, from their own terminal. Agents cannot run it.
    **The first `set-identity` turns `requireIdentity` on.** From then on an agent's write to a
    registered owner with no mapping at all is refused (`GH_IDENTITY_UNMAPPED_OWNER`). Map every
    owner `doctor` lists under `OWNER_IDENTITY_UNMAPPED`, or run `repo-aegis identity require --off`.
-4. **Optional, for agent pushes as the App:** `repo-aegis install git-credential` (see below).
+4. **Recommended for agent pushes** (as the mapped person account, or as an App you opt in to): `repo-aegis install git-credential` (see below).
    Without it, pushes keep using your own credential; with it, an agent's push to an App-mapped
    owner must use the HTTPS remote.
 5. **Check:** `repo-aegis status` shows the mappings; `repo-aegis doctor` should report no
@@ -342,23 +342,26 @@ do not need taaad. repo-aegis runs `gh` for the call from
 a trusted location only (the same vetting `doctor` applies: not under your home directory, the
 current directory or a temp directory; not group- or world-writable).
 
-### Git pushes as the agent's App (the credential helper)
+### Git pushes by an agent (the credential helper)
 
-For an owner mapped to an `agent` identity (a `github-app`), an agent's HTTPS
-push can carry a token narrowed to that one repository. `repo-aegis install
-git-credential` (a person, at a terminal) puts the repo-aegis helper first in the
-global git config for `https://github.com` and sets
+The helper **only chooses the account**; whether a push may go is decided by the pre-push rules
+(rule g for a public destination, rule h cross-org) and the Bash hook. By default (D1) an owner
+mapped to a `person` identity (a `gh-login`) is pushed as that login. An owner mapped to an `agent`
+identity (a `github-app`) is **opt-in**: the push then carries a token narrowed to that one
+repository. `repo-aegis install git-credential` (a person, at a terminal) puts the repo-aegis helper
+first in the global git config for `https://github.com` and sets
 `credential.https://github.com.useHttpPath=true`; what it added is recorded in
 `<home>/state/git-credential-install.json` and `--uninstall` removes exactly that
 (see [cli-reference.md](cli-reference.md#repo-aegis-install-git-credential---uninstall)).
 
-- With a person present the helper prints nothing and your own helpers answer as before; the same for an owner with no `agent` identity.
-- An agent's push over SSH to such an owner is refused by the pre-push hook (`AGENT_PUSH_NEEDS_APP`): push over HTTPS.
-- The helper needs the pinned taaad: the one `install shim` recorded in the shim at `<home>/bin/gh` (see "Identities in practice"). With none it refuses (`GH_BINARY_UNTRUSTED`).
-- Helper order matters: a reset entry, a system-scope helper such as `osxkeychain`, or `gh auth setup-git` can put another helper first, and that one answers with your credential. The install checks this and refuses with instructions rather than guess; `doctor` fails with `GIT_CREDENTIAL_HELPER_ORDER` when an owner has an agent identity and the order is wrong.
-- **Accepted limit: the process chain is a heuristic, even inside the sandbox.** The helper answers only a request made by git's HTTPS remote helper: `git-remote-https` must be its parent or grandparent (a plain shell may sit between), its argv must be `[git-remote-https, <remote>, https://github.com/<path>]` with the request's path (case and `.git` aside), and no `git credential…` command may sit between. That stops `git credential fill` run by hand and a renamed copy of `sh` posing as the remote helper with a bare name. It does not stop a same-user process that sets its own name and argv to match all of that: the process list is not a security boundary (the same limit as presence detection, `process-ancestry.ts`). The narrowing of the token to one repository and one scope is what bounds the harm.
-- HTTPS pushes to an owner that has only a `person` identity are refused (`GH_IDENTITY_WRITE_NEEDS_HUMAN`) unless a login-bound approval covers them (`repo-aegis approve <owner>/<repo>`, run by a person from a terminal: the same approval `repo-aegis gh` honours). With one, the helper gives git that login's own token from the trusted gh, never the active gh account's, after every check an App token passes. A subcommand known to read (`fetch`, `pull`, `clone`, `ls-remote`, `archive`, `remote`, `submodule`) needs no approval: the helper answers it with that same login's token, so a fetch never runs as whichever account gh or the keychain has active. An alias or an unreadable subcommand is judged as a push. SSH pushes to such an owner are not touched by the helper and go through the pre-push rules as before.
-- Settings that could redirect or capture the token make the helper refuse (`AGENT_PUSH_CREDENTIAL_CONFIG`): a credential helper in the repository's own config, `http.proxy`, `http.sslVerify=false`, `http.sslCAInfo`, `http.extraHeader` or `http.sslBackend` outside system scope, and trace, proxy or TLS variables in the environment. A global proxy or CA bundle you rely on therefore needs to go in the system config, or be given up for agent pushes.
+- With a person present the helper prints nothing and your own helpers answer as before; the same for an unmapped owner, a missing registry, and an encrypted one (which also prints a note on stderr: `repo-aegis registry decrypt` makes it readable). A registry that exists but cannot be read (it does not parse, or a newer repo-aegis wrote it) refuses a push with `GH_IDENTITY_UNAVAILABLE`, because git's next helper would answer with whichever account it holds; `doctor` says whether to repair the file or upgrade.
+- An agent's push over SSH to an owner with an App is refused by the pre-push hook (`AGENT_PUSH_NEEDS_APP`): push over HTTPS.
+- An owner with an App needs the pinned taaad: the one `install shim` recorded in the shim at `<home>/bin/gh` (see "Identities in practice"). With none it refuses (`GH_BINARY_UNTRUSTED`). An App token cannot be minted from inside the Claude Code sandbox (the signer's network connection is blocked; see [agent-sandbox.md](agent-sandbox.md)); a person-mapped owner mints nothing and works there.
+- Helper order matters: a reset entry, a system-scope helper such as `osxkeychain`, or `gh auth setup-git` can put another helper first, and that one answers with your credential. The install checks this and refuses with instructions rather than guess, with one exception: on stock macOS (a system `osxkeychain` and no global entry for github.com yet) it writes an empty reset entry, its own line, and `osxkeychain` back after it, and `--uninstall` removes all three. `doctor` fails with `GIT_CREDENTIAL_HELPER_ORDER` when an owner has an agent identity and the order is wrong.
+- **Accepted limit: the process chain is a heuristic, even inside the sandbox.** It is used only to tell a known read (`fetch`, `pull`, `clone`, `ls-remote`, `archive`, `remote`, `submodule`) from a push: `git-remote-https` must be the helper's parent or grandparent (a plain shell may sit between), its argv must be `[git-remote-https, <remote>, https://github.com/<path>]` with the request's path (case and `.git` aside), and no `git credential…` command may sit between. Anything that does not match, and a process list that cannot be read, counts as a push, never as a read, so the helper never refuses on it. A same-user process can set its own name and argv: the process list is not a security boundary (the same limit as presence detection, `process-ancestry.ts`).
+- A push to an owner that has only a `person` identity is answered with that login's own token from the trusted gh, never the active gh account's, with one stderr line naming the account it ran as. No approval is read. A known read gets the same login's token and prints nothing, so a fetch never runs as whichever account gh or the keychain has active. SSH pushes to such an owner are not touched by the helper and go through the pre-push rules as before.
+- Settings that could capture the token make the helper refuse (`AGENT_PUSH_CREDENTIAL_CONFIG`): a credential helper in the repository's own config, and `GIT_TRACE_CURL`, `GIT_CURL_VERBOSE`, `GIT_TRACE_PACKET` or `GIT_TRACE_REDACT=0` in the environment (each would write the token to a trace). A proxy (`HTTPS_PROXY`, `http.proxy`), a CA bundle, `http.extraHeader` and `http.sslBackend` do not refuse: the default Claude Code sandbox sets a proxy on every command, a CONNECT proxy cannot read TLS, and planting a CA bundle is an attack, not an accident. `http.sslVerify=false` and `GIT_SSL_NO_VERIFY` give the token and print a `repo-aegis: warning:` line.
+- A helper after repo-aegis's that would persist the token (`osxkeychain`, `store`, …) refuses an **App** token (`AGENT_PUSH_CREDENTIAL_STORE`): the person's later pushes would then run as the App. It does not apply to a person's own login token stored in the person's own keychain: that changes nothing about which account later pushes use.
 
 ## Reviewed-benign waivers (`waivers:`)
 

@@ -12,30 +12,41 @@ from vendor documentation and have not been run end to end.
   pre-commit and pre-push scans, `check`, `status` and `doctor`.
 - **Reads through `repo-aegis gh`** whose App token cannot be minted. Since
   0.13.0 they fall back to the active `gh` account and print one warning line.
-- **The process-chain check of the git credential helper.** The sandbox blocks
-  the process list, which used to refuse every agent HTTPS push with
-  `AGENT_PUSH_CHAIN_UNREADABLE`. Since 0.13.0, a live account-bound approval
-  (`repo-aegis approve <owner>/<repo>` or `<owner>/*`, run by a person in a
-  terminal) covers it for that owner and that approval's lifetime.
+- **An agent HTTPS push through the git credential helper, as the owner's
+  mapped person account (the default way to push).** The sandbox sets a proxy
+  variable on every command and blocks the process list (`ps`). Neither stops
+  the helper any more: a proxy is fine (a CONNECT proxy cannot read TLS), and the
+  helper does not need the process list, because anything that is not a known
+  read counts as a push. It needs no approval either. The helper only chooses the
+  account (the person login the registry maps to the owner, or the owner's App
+  when one is opted in); whether the push may go is decided by pre-push (a public
+  destination still needs a person). Before 0.14.0 this path was refused with
+  `AGENT_PUSH_CHAIN_UNREADABLE` or `AGENT_PUSH_CREDENTIAL_CONFIG`.
 
 ## What does not work inside the sandbox
 
-**Minting a GitHub App token.** taaad-signer reads the macOS keychain, shows a
+**Minting a GitHub App token (opt-in identities only).** taaad-signer shows a
 Touch ID prompt and calls api.github.com. From inside Claude Code's sandbox it
-fails before the prompt appears (observed 2026-11-09: no Touch ID dialog). So
-an agent WRITE that needs the App's token (a push over HTTPS, or `gh pr create`
-as the App) fails with `GH_IDENTITY_UNAVAILABLE`. Since 0.13.0 the message
-names taaad's failing step, and says that the agent sandbox is the likely
-cause.
+fails before the prompt appears (observed 2026-11-09: no Touch ID dialog). The
+cause is the network: the signer's own connection to GitHub does not go through
+the sandbox's proxy and fails with `NSURLErrorDomain -1003` (host not found), so
+adding api.github.com to the sandbox's allowlist does not help, and the keychain
+is not the cause. So an agent WRITE that needs the App's token (a push over
+HTTPS, or `gh pr create` as the App) fails with `GH_IDENTITY_UNAVAILABLE`. The
+message names taaad's failing step and says that the sandbox blocks the signer's
+network connection. An owner mapped to a person login (the default) does not mint
+anything, so pushes to it work inside the sandbox as described above.
 
 Claude Code's documentation describes no setting that keeps the sandbox on and
-still allows the keychain or LocalAuthentication. `sandbox.network.allowMachLookup`
-exists, but nothing documents whether it covers these services
-([sandboxing docs](https://code.claude.com/docs/en/sandboxing)).
+still lets the signer reach GitHub or show LocalAuthentication.
+`sandbox.network.allowMachLookup` exists, but nothing documents whether it covers
+these services ([sandboxing docs](https://code.claude.com/docs/en/sandboxing)).
 
 ## What to configure
 
-Run the publishing commands outside the sandbox and keep everything else in it.
+Only an App identity (opt-in) needs this: a person-mapped push already works
+inside the sandbox. To mint an App token, run the publishing commands outside the
+sandbox and keep everything else in it.
 Claude Code's `sandbox.excludedCommands` takes `Bash(...)` permission-rule
 patterns. A matching command runs with no filesystem restriction and no network
 proxy. The docs' own example excludes git's network verbs. repo-aegis's hooks
@@ -79,6 +90,6 @@ the sandbox when the agent asks.
 ## Related
 
 - [agent-guide.md](agent-guide.md): the refusal codes, including
-  `AGENT_PUSH_CHAIN_UNREADABLE` and `GH_IDENTITY_UNAVAILABLE`.
+  `AGENT_PUSH_CREDENTIAL_CONFIG` and `GH_IDENTITY_UNAVAILABLE`.
 - [plan-landscape-recommendations.md](plan-landscape-recommendations.md)
   Phase U: why this path was fixed, and the acceptance test that pins it.

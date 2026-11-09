@@ -126,6 +126,17 @@ describe("classifyMintFailure: taaad's exit-1 texts become a fixed reason (stder
     assert.match(classifyMintFailure(1, "something new", false).message, /exit status 1/);
   });
 
+  it("the sandbox hint names the network, not the keychain, and says allowlisting the host does not help (P0)", () => {
+    // `taaad: error=github` carries no word of its own that could mention the keychain, so the hint is all that is tested.
+    for (const stderr of ["taaad-signer exited 7", "something new", "taaad: error=github"]) {
+      const m = classifyMintFailure(1, stderr, true).message;
+      assert.match(m, /network/, stderr);
+      assert.doesNotMatch(m, /keychain/, stderr);
+      assert.match(m, /does not go through the sandbox's proxy, so adding api\.github\.com to the sandbox allowlist does not help/, stderr);
+      assert.match(m, /Your human runs the command from a terminal, or lets this one command run outside the sandbox/, stderr);
+    }
+  });
+
   it("the sandbox hint is added only for the codes a sandbox could explain (github, missing, protocol, internal, keychain)", () => {
     for (const code of ["github", "missing", "protocol", "internal", "keychain"]) {
       assert.match(classifyMintFailure(1, `taaad: error=${code}`, true).message, /inside the agent's sandbox/, code);

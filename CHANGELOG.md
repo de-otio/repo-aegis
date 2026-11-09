@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [Unreleased]
+### Changed
+
+- **The git credential helper only chooses the account; it no longer decides whether a push may
+  go.** An agent push from the default Claude Code sandbox, which sets a proxy variable and blocks
+  the process list, used to be refused (`AGENT_PUSH_CHAIN_UNREADABLE`,
+  `AGENT_PUSH_CREDENTIAL_CONFIG`, then `GH_IDENTITY_WRITE_NEEDS_HUMAN`). Now an owner mapped to a
+  person login is pushed as that login with no approval (App identities are opt-in), and a public
+  destination is still stopped by pre-push rule g. Removed from the helper:
+  `AGENT_PUSH_CHAIN_UNREADABLE`, `AGENT_CREDENTIAL_DIRECT_FILL`, the approval lookups, and
+  `GH_IDENTITY_WRITE_NEEDS_HUMAN` (it is now `repo-aegis gh` only). Anything that is not a known
+  read (`fetch`, `pull`, `clone`, `ls-remote`, `archive`, `remote`, `submodule`) counts as a push,
+  including a process list that cannot be read. The configuration checks keep only what would put
+  the token in a trace or a helper that stores it (a helper in local, worktree or command scope;
+  `GIT_TRACE_CURL`, `GIT_CURL_VERBOSE`, `GIT_TRACE_PACKET`, `GIT_TRACE_REDACT` off). A proxy
+  (`HTTPS_PROXY`, `http.proxy`), a CA bundle, `http.extraHeader` and `http.sslBackend` no longer
+  refuse, and `http.sslVerify=false` or `GIT_SSL_NO_VERIFY` give the token with a
+  `repo-aegis: warning:` line. The same cuts apply to the git processes `repo-aegis gh` starts. A
+  registry that exists but cannot be read (it does not parse, or a newer repo-aegis wrote it) is
+  `GH_IDENTITY_UNAVAILABLE` for a push; an encrypted one prints a note on stderr and lets the next
+  helper answer.
+- **`repo-aegis install git-credential` works on stock macOS.** Apple's git carries
+  `credential.helper = osxkeychain` in a config nobody edits, so the install used to refuse with
+  `GIT_CREDENTIAL_ORDER_REFUSED` and a command a person had to run. When the global
+  `credential.https://github.com.helper` list is empty, it now writes an empty reset entry, its
+  helper, and the helpers the reset hides (osxkeychain) back after its own, and prints one line
+  saying so. The ledger is version 2 (`resetAdded`, `readded`; version 1 is still read), and
+  `--uninstall` removes exactly what was added: the helper, each re-added helper, then the reset
+  (only when no other value is left under the key). A non-empty list with a system helper in front
+  is still refused. The "needs an administrator" hint is gone.
+- **`AGENT_PUSH_CREDENTIAL_STORE` applies to App tokens only.** A later helper that would save the
+  token (`osxkeychain`, `store`, ...) would make the person's later pushes run as the App. A person's
+  own login token stored in the person's own keychain changes nothing about which account later
+  pushes use, so it no longer refuses.
+- **The sandbox hint for a failed App mint names the network.** Inside the Claude Code sandbox,
+  taaad-signer's own connection to GitHub does not go through the sandbox's proxy (it fails with
+  `NSURLErrorDomain -1003`), so the old "keychain or network" guess is replaced, and the text says
+  that adding api.github.com to the sandbox allowlist does not help.
 
 ### Fixed
 

@@ -166,32 +166,141 @@ describe("install git-credential", () => {
     assert.deepEqual(verdict(), { kind: "first" });
   });
 
-  it("I14b: a system-scope osxkeychain helper with no reset in front: refused with instructions, config byte-identical", () => {
-    writeFileSync(systemCfg, "[credential]\n\thelper = osxkeychain\n");
+  /** The global `credential.https://github.com.helper` list, in order, empty entries as "". */
+  const globalList = (): string[] => {
+    const r = spawnSync("git", ["config", "--global", "--get-all", "credential.https://github.com.helper"], { env: process.env, encoding: "utf8" });
+    return r.status === 0 ? r.stdout.replace(/\n$/, "").split("\n") : [];
+  };
+  const STOCK_SYSTEM = "[credential]\n\thelper = osxkeychain\n";
+
+  it("I14b: stock macOS (a system osxkeychain, an empty global list): the install writes the reset, ours and osxkeychain, in that order", () => {
+    writeFileSync(systemCfg, STOCK_SYSTEM);
     systemOn();
     const original = `[credential "https://gist.github.com"]\n\thelper = ${GH}\n`;
     writeFileSync(globalCfg, original);
+    const r = doInstall(opts());
+    assert.equal(r.changed, true);
+    assert.equal(r.resetAdded, true);
+    assert.deepEqual(r.readded, ["osxkeychain"]);
+    assert.deepEqual(globalList(), ["", ours(), "osxkeychain"]);
+    assert.deepEqual(verdict(), { kind: "first" });
+    assert.match(read(), /useHttpPath = true/);
+    // The ledger is v2 and records what was added.
+    const ledger = JSON.parse(readFileSync(ledgerPath(home), "utf8")) as { version: number; value: string; helperAdded: boolean; resetAdded: boolean; readded: string[] };
+    assert.equal(ledger.version, 2);
+    assert.equal(ledger.value, ours());
+    assert.equal(ledger.helperAdded, true);
+    assert.equal(ledger.resetAdded, true);
+    assert.deepEqual(ledger.readded, ["osxkeychain"]);
+    // Uninstall removes exactly that: the config is byte-identical to before.
+    const u = doUninstall(opts());
+    assert.equal(u.changed, true);
+    assert.equal(read(), original, "byte-identical after uninstall");
+    assert.equal(existsSync(ledgerPath(home)), false);
+  });
+
+  it("I14b: stock macOS with no global file at all: installs, and uninstall leaves an empty config", () => {
+    writeFileSync(systemCfg, STOCK_SYSTEM);
+    systemOn();
+    doInstall(opts());
+    assert.deepEqual(globalList(), ["", ours(), "osxkeychain"]);
+    doUninstall(opts());
+    assert.equal(read().trim(), "");
+  });
+
+  it("I14b: a NON-empty global list with a system helper in front, and no reset, is still refused: config byte-identical, no ledger", () => {
+    writeFileSync(systemCfg, STOCK_SYSTEM);
+    systemOn();
+    const original = `[credential "https://github.com"]\n\thelper = ${GH}\n`;
+    writeFileSync(globalCfg, original);
     assert.throws(
       () => doInstall(opts()),
-      (e: unknown) => (e as { code?: string }).code === GIT_CREDENTIAL_ORDER_REFUSED && /system/.test((e as Error).message) && /--add credential\.https:\/\/github\.com\.helper ""/.test((e as Error).message),
+      (e: unknown) =>
+        (e as { code?: string }).code === GIT_CREDENTIAL_ORDER_REFUSED &&
+        /system/.test((e as Error).message) &&
+        /--add credential\.https:\/\/github\.com\.helper ""/.test((e as Error).message) &&
+        !/needs an administrator/.test((e as Error).message),
     );
     assert.equal(read(), original, "nothing changed");
     assert.equal(existsSync(ledgerPath(home)), false);
   });
 
-  it("I14b: the same system helper behind a global reset entry is fine", () => {
-    writeFileSync(systemCfg, "[credential]\n\thelper = osxkeychain\n");
+  it("I14b: the same system helper behind a global reset entry is fine, and no extra reset is written", () => {
+    writeFileSync(systemCfg, STOCK_SYSTEM);
     writeFileSync(globalCfg, `[credential "https://github.com"]\n\thelper = \n`);
     systemOn();
-    doInstall(opts());
+    const r = doInstall(opts());
     assert.deepEqual(verdict(), { kind: "first" });
+    assert.equal(r.resetAdded, false);
+    assert.deepEqual(globalList(), ["", ours()]);
+    doUninstall(opts());
+    assert.equal(read(), `[credential "https://github.com"]\n\thelper = \n`, "the person's own reset stays");
   });
 
-  it("a global generic helper ahead of the github.com section, with no reset: refused", () => {
+  it("a global generic helper ahead of the github.com section, with no reset: hidden by a reset and put back after ours; uninstall restores the file", () => {
     const original = `[credential]\n\thelper = store\n`;
+    writeFileSync(globalCfg, original);
+    const r = doInstall(opts());
+    assert.deepEqual(r.readded, ["store"]);
+    assert.deepEqual(verdict(), { kind: "first" });
+    assert.deepEqual(effectiveHelpers(readCredentialConfig(work) ?? [], { path: null }).map(e => e.value), [ours(), "store"]);
+    doUninstall(opts());
+    assert.equal(read(), original);
+  });
+
+  it("a helper set under another URL pattern cannot be put back under the github.com key, so that install is refused, unchanged", () => {
+    writeFileSync(systemCfg, STOCK_SYSTEM);
+    systemOn();
+    const original = `[credential "https://github.com/example-org"]\n\thelper = !example-path-helper\n`;
     writeFileSync(globalCfg, original);
     assert.throws(() => doInstall(opts()), (e: unknown) => (e as { code?: string }).code === GIT_CREDENTIAL_ORDER_REFUSED);
     assert.equal(read(), original);
+    assert.equal(existsSync(ledgerPath(home)), false);
+  });
+
+  it("stock macOS: re-running changes nothing; a moved pin keeps the reset and osxkeychain in place; uninstall restores the file", () => {
+    writeFileSync(systemCfg, STOCK_SYSTEM);
+    systemOn();
+    const original = `[user]\n\tname = Example\n`;
+    writeFileSync(globalCfg, original);
+    doInstall(opts());
+    const once = read();
+    const again = doInstall(opts());
+    assert.equal(again.changed, false);
+    assert.equal(read(), once);
+    doInstall(opts({ pin: { node: PIN.node, cli: "/opt/example/lib/repo-aegis-2/dist/index.js" } }));
+    const moved = globalList();
+    assert.equal(moved.length, 3, moved.join(" | "));
+    assert.equal(moved[0], "");
+    assert.match(moved[1]!, /repo-aegis-2/);
+    assert.equal(moved[2], "osxkeychain");
+    const ledger = JSON.parse(readFileSync(ledgerPath(home), "utf8")) as { resetAdded: boolean; readded: string[] };
+    assert.equal(ledger.resetAdded, true);
+    assert.deepEqual(ledger.readded, ["osxkeychain"], "an earlier run's additions are still recorded");
+    doUninstall(opts({ pin: { node: PIN.node, cli: "/opt/example/lib/repo-aegis-2/dist/index.js" } }));
+    assert.equal(read(), original);
+  });
+
+  it("uninstall leaves the reset when the person added a helper of their own under the key since", () => {
+    writeFileSync(systemCfg, STOCK_SYSTEM);
+    systemOn();
+    writeFileSync(globalCfg, "");
+    doInstall(opts());
+    spawnSync("git", ["config", "--global", "--add", "credential.https://github.com.helper", "!example-own-helper"], { env: process.env });
+    doUninstall(opts());
+    assert.deepEqual(globalList(), ["", "!example-own-helper"], "ours and the re-added osxkeychain are gone; the reset stays");
+  });
+
+  it("a version 1 ledger is still read: uninstall removes the helper line it names and nothing else", () => {
+    writeFileSync(globalCfg, `[credential "https://github.com"]\n\thelper = \n\thelper = ${ours()}\n\thelper = ${GH}\n\tuseHttpPath = true\n`);
+    writeFileSync(
+      ledgerPath(home),
+      JSON.stringify({ version: 1, key: "credential.https://github.com.helper", value: ours(), helperAdded: true, useHttpPath: { set: false, previous: null } }),
+    );
+    const u = doUninstall(opts());
+    assert.equal(u.changed, true);
+    assert.deepEqual(globalList(), ["", GH], "the person's reset and gh helper stay; useHttpPath stays");
+    assert.match(read(), /useHttpPath = true/);
   });
 
   it("duplicate helper lines after the reset cannot be shifted unambiguously: refused, unchanged", () => {
@@ -221,9 +330,12 @@ describe("install git-credential", () => {
   it("the ledger records only what was added", () => {
     writeFileSync(globalCfg, REFERENCE);
     doInstall(opts());
-    const ledger = JSON.parse(readFileSync(ledgerPath(home), "utf8")) as { value: string; helperAdded: boolean; useHttpPath: { set: boolean; previous: string | null } };
+    const ledger = JSON.parse(readFileSync(ledgerPath(home), "utf8")) as { version: number; value: string; helperAdded: boolean; resetAdded: boolean; readded: string[]; useHttpPath: { set: boolean; previous: string | null } };
+    assert.equal(ledger.version, 2);
     assert.equal(ledger.value, ours());
     assert.equal(ledger.helperAdded, true);
+    assert.equal(ledger.resetAdded, false, "the person's own reset was not ours to remove");
+    assert.deepEqual(ledger.readded, []);
     assert.deepEqual(ledger.useHttpPath, { set: true, previous: null });
   });
 

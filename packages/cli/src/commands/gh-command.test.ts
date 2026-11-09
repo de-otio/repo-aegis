@@ -873,7 +873,6 @@ describe("H1: gh's git children cannot be steered by argv or by the repository's
     ["core.sshCommand", "core.sshCommand", "/tmp/ssh"],
     ["a url insteadOf rewrite", "url.https://example.net/.insteadOf", "https://github.com/"],
     ["a repo-local credential helper", "credential.helper", "!/tmp/helper"],
-    ["http.proxy", "http.proxy", "http://127.0.0.1:9"],
   ] as Array<[string, string, string]>) {
     it(`a repo-local ${label} refuses an agent's gh pr checkout, before any token is minted`, () => {
       const w = makeWorld();
@@ -884,6 +883,21 @@ describe("H1: gh's git children cannot be steered by argv or by the repository's
       assert.deepEqual(r.taaadArgv, []);
     });
   }
+
+  it("a repo-local proxy or CA bundle is no violation any more (P1-A: a CONNECT proxy cannot read TLS; planting a CA is an attack, not an accident)", () => {
+    for (const [key, value] of [
+      ["http.proxy", "http://127.0.0.1:9"],
+      ["http.sslCAInfo", "/tmp/ca.pem"],
+      ["http.extraHeader", "X-Example: 1"],
+      ["http.sslBackend", "openssl"],
+    ] as Array<[string, string]>) {
+      const w = makeWorld();
+      git(w.repo, "config", key, value);
+      const r = run(w, ["pr", "checkout", "1", "--repo", "example-org/svc"], { presence: "agent" });
+      assert.equal(r.status, 0, `${key}: ${r.err}`);
+      assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], TOKEN_BOT, key);
+    }
+  });
 
   it("the same configuration does not stop a verb that spawns no git, or a person at a terminal", () => {
     const w = makeWorld();
