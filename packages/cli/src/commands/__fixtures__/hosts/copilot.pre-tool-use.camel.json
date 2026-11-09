@@ -1,0 +1,7 @@
+{
+  "sessionId": "example-session",
+  "timestamp": 1704614400000,
+  "cwd": "/home/user/work/example-repo",
+  "toolName": "bash",
+  "toolArgs": "{\"command\":\"echo hello\",\"description\":\"Print hello\"}"
+}

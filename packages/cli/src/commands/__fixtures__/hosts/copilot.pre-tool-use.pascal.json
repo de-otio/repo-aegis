@@ -1,0 +1,11 @@
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "example-session",
+  "timestamp": "2024-01-07T08:00:00.000Z",
+  "cwd": "/home/user/work/example-repo",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo hello",
+    "description": "Print hello"
+  }
+}

@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { scrubGitEnv } from "../_test-utils.js";
+import { assertGoldenComplete, golden } from "./hook-hosts/_golden.js";
 
 let restoreGitEnv: () => void;
 let tmp: string;
@@ -26,6 +27,7 @@ before(() => {
 after(() => {
   restoreGitEnv();
   rmSync(tmp, { recursive: true, force: true });
+  assertGoldenComplete("hook-guard-egress-identity");
 });
 
 interface GuardResult {
@@ -53,7 +55,10 @@ function runGuard(command: string, home: string, opts: { human?: boolean } = {})
     encoding: "utf8",
     input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command }, cwd: tmp }),
   });
-  return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  const result = { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  // Behaviour comparison for the host-adapter refactor (opt-in, see hook-hosts/_golden.ts).
+  golden("hook-guard-egress-identity", { command, home, human: opts.human === true }, result, [tmp]);
+  return result;
 }
 
 const V2 = "schemaVersion: 2\npersonalOrgs:\n  - o\nengagements: []\n";

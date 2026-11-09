@@ -23,6 +23,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { approvalsPath, mintApproval, revokeApprovals } from "@de-otio/repo-aegis-core";
+import { assertGoldenComplete, golden } from "./hook-hosts/_golden.js";
+
+const GOLDEN_SUITE = "hook-guard-egress";
 
 let tmp: string;
 
@@ -32,6 +35,7 @@ before(() => {
 
 after(() => {
   rmSync(tmp, { recursive: true, force: true });
+  assertGoldenComplete(GOLDEN_SUITE);
 });
 
 interface GuardResult {
@@ -80,7 +84,15 @@ function runGuard(input: string, opts: GuardOptions): GuardResult {
     encoding: "utf8",
     input,
   });
-  return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  const result = { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  // Behaviour comparison for the host-adapter refactor (opt-in, see hook-hosts/_golden.ts).
+  golden(
+    GOLDEN_SUITE,
+    { input, agent: opts.agent ?? null, human: opts.human === true, shim: opts.shimOnPath === true, cwd: opts.cwd ?? tmp },
+    result,
+    [tmp],
+  );
+  return result;
 }
 
 function aegisHome(name: string, registry?: string): string {
