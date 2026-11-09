@@ -2,6 +2,17 @@
   "name": "@de-otio/repo-aegis",
   "version": "0.12.2",
   "description": "Engagement-scoped leak prevention CLI for multi-customer git repos",
+  "keywords": [
+    "claude-code",
+    "ai-agents",
+    "coding-agents",
+    "dlp",
+    "data-leak-prevention",
+    "pre-commit",
+    "git-hooks",
+    "cursor",
+    "codex"
+  ],
   "license": "GPL-3.0-or-later",
   "author": "Richard Myers",
   "homepage": "https://github.com/de-otio/repo-aegis",
