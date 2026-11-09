@@ -395,3 +395,45 @@ export function findLoginApproval(
     return null;
   }
 }
+
+/**
+ * The live, account-bound approval covering `destination`, or null
+ * (doc/plan-landscape-recommendations.md Phase U, U5).
+ *
+ * A person who ran `repo-aegis approve <org>/<repo>` or `<org>/*` for an owner
+ * with a mapped person identity has said, at a terminal and for a bounded time,
+ * "agents may publish here". The refusals that only defend against an agent
+ * DELIBERATELY stealing a token — `AGENT_PUSH_CHAIN_UNREADABLE` (the process
+ * list cannot be read, typically inside a sandbox) and `GH_IDENTITY_ARG_UNSAFE`
+ * (a local git setting that could run a program or redirect the token) — are
+ * outside the threat model (accidental leaks), so such an approval covers them.
+ *
+ * Same matching as {@link findLoginApproval} except that ANY recorded login
+ * qualifies: the token those refusals guard is the App's, not the person's, so
+ * the person's login is evidence of who approved, not of who writes. Only an
+ * `<org>/<repo>` or `<org>/*` approval with a login and no ref matches; a `*`
+ * approval, an approval without a login (no mapped person at mint time), a
+ * ref-limited approval and an expired one match nothing. Never throws.
+ */
+export function findAccountBoundApproval(
+  destination: { org: string; repo: string },
+  path: string = approvalsPath(),
+  now: Date = new Date(),
+): EgressApproval | null {
+  try {
+    if (!existsSync(path)) return null;
+    if (safeDestination(destination.org, destination.repo) === null) return null;
+    const org = destination.org.toLowerCase();
+    const repo = destination.repo.toLowerCase();
+    for (const a of listApprovals(path, now)) {
+      if (a.org === "*" || a.org !== org) continue;
+      if (a.repo !== "*" && a.repo !== repo) continue;
+      if (a.ref !== undefined) continue;
+      if (a.login === undefined || a.login === "") continue;
+      return a;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

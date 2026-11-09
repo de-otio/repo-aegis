@@ -438,6 +438,7 @@ export {
   revokeApprovals,
   findApproval,
   findLoginApproval,
+  findAccountBoundApproval,
   findUncoveringStarApproval,
   approvalScopeOf,
   starApprovalCovers,
