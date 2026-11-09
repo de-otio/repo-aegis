@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-09
+
 ### Fixed — docs and `doctor` text for identities
 
 - `doc/agent-guide.md`: the `dot gh` section said always `--as bot` and never plain `gh`, which
@@ -18,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `doctor`: `TAAAD_AGENT_WRITABLE` with no taaad pinned now says to install taaad v0.6.0 or later.
   The fix for a taaad that is not root-owned is marked optional.
 - README: covers identities, the managed drop-in, approvals by org and TTL, and rule h.
+
+### Fixed — the git credential helper read every agent push as a fetch
+
+- Real git starts the HTTPS remote helper as `git remote-https <remote> <url>`, waits, and that
+  process runs `git-remote-https` as its child. The helper took that dispatcher for the git that
+  asked, so a push minted a read-only token and GitHub refused it (403, `Permission … denied to
+  <app>[bot]`). It failed safe, but no agent HTTPS push to an App-mapped owner worked. The
+  dispatcher is now skipped when it sits directly above the remote helper with the same arguments.
+  The tests use the chain shape `GIT_TRACE=1` shows.
 
 ## [0.12.0] - 2026-11-08
 
@@ -2006,7 +2017,8 @@ to commit, push, or surface anything that names an unrelated engagement.
 - `init` takes a per-repo lock so concurrent `init` invocations cannot race
   and produce a half-written registry.
 
-[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/de-otio/repo-aegis/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/de-otio/repo-aegis/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/de-otio/repo-aegis/compare/v0.11.4...v0.12.0
 [0.11.4]: https://github.com/de-otio/repo-aegis/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/de-otio/repo-aegis/compare/v0.11.2...v0.11.3

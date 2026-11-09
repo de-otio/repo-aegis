@@ -1,190 +1,165 @@
 # repo-aegis
 
-> Engagement-scoped data-leak prevention for multi-customer git repositories.
+> Keeps one client's names and data out of another client's repositories, and out of public
+> ones, when AI coding agents do much of the writing, committing and pushing.
 
-A CLI for the consultant / contractor pattern: one machine, multiple
-concurrent customer engagements, plus personal and OSS work. Stops
-customer-A's data landing in customer-B's repo (or in a public OSS
-repo) without forcing you to delete customer-A's strings from your
-marker list when working on customer-A's own code.
+## The problem
+
+If you work for several clients from one machine, each client's names, project codenames and
+hostnames are all over your working context. An AI coding agent (Claude Code, Codex, Gemini,
+Cursor, …) picks those strings up from files, tool output and the conversation, and reuses them
+as "concrete examples" in whatever it writes next: a test fixture in client B's repository, a
+commit message, a pull request on a public open-source project. A rule in `CLAUDE.md` that says
+"never mention client names" does not stop it, because a string that keeps coming up in the
+session outweighs a written rule.
+
+repo-aegis adds checks that run as code, not as instructions. They block the write, the commit
+or the push instead of asking the agent to behave.
+
+**Who it is for:** consultants, contractors and anyone else who keeps several clients' code (and
+their own or open-source work) on one machine.
+
+**What it is not:** it is not a secret manager or a DLP product for a whole company. Local hooks
+can be bypassed (`git commit --no-verify`), so for a hard guarantee also run its CI checks on the
+server (`repo-aegis install ci`).
+
+## Concepts in one minute
+
+- **Engagement:** one client relationship, for example `customer-a`. It lists the GitHub orgs
+  that belong to that client.
+- **Marker:** a pattern that identifies a client, such as its name or a project codename,
+  written as a regular expression in the engagement.
+- **Registry:** the file that holds your engagements, markers and your own GitHub orgs
+  (`~/.config/repo-aegis/engagements.yaml`).
+- **Class:** what a repository is, recorded in its git config: a client's own repository, your
+  personal one, a public one, and so on. repo-aegis works it out from the remote's GitHub org.
+- **Deny set:** the markers that must not appear in a given repository. Inside client A's own
+  repository client A's markers are allowed, and everyone else's are denied. Because each
+  repository gets its own deny set, client A's name does not set off alarms in client A's own
+  code.
+- **Egress:** anything that sends data off your machine: `git push`, `gh pr create`,
+  `npm publish`.
 
 ## What it does
 
-- **Per-repo engagement-scoped deny set.** A pattern catalog of
-  customer-identifying strings, scoped per-repo so customer-A's
-  markers don't false-positive inside customer-A's own repo.
-- **Deterministic gate at every write path.** Pre-commit, pre-push,
-  and the Claude Code write hooks all run the same scanner; same
-  JSON output, same exit codes (0 = clean, 1 = hit, 2 = error).
-- **Path-aware cross-repo writes.** The write hook resolves
-  the destination working tree from the written path, scans against
-  _that_ repo's rules, and refuses with `CROSS_ORG_WRITE` when the
-  trust boundaries don't overlap.
-- **Zero-config onboarding.** First time an agent touches an
-  unclassified repo, `repo-aegis hook first-touch` matches the git
-  remote against the engagement registry's `githubOrgs` /
-  `personalOrgs` and classifies it without prompting (or prompts
-  exactly once on an unknown org).
-- **Universal secret-shape scanning for Bash output.** A second
-  PostToolUse hook (`hook scan-bash-output`) reads Claude Code's
-  Bash tool result and flags PEM private-key headers (incl. the
-  hex-encoded round-trip out of `security -w`), GitHub token
-  prefixes (`ghp_` / `ghs_` / `github_pat_` / …), and JWT shapes.
-  Pattern set is universal — not engagement-scoped, not
-  configurable. Detection-only by design: PostToolUse fires after
-  the leak has reached the agent context, so the hook points at
-  credential rotation instead of pretending the leak can be unsent.
-- **Destination-aware egress guard.** Every control above asks "are
-  these bytes safe in this repo?"; none asked "is this going to the
-  right place?" — and two right-bytes-wrong-boundary leaks in one week
-  landed in that gap. One decision function (`egress-intent` /
-  `egress-policy`) now runs at three enforcement points: the git
-  pre-push hook (which finally reads the remote URL git hands it), a
-  `gh` shim on `PATH` (`install shim`), and the pre-command hooks of
-  Claude Code / Codex CLI / Gemini CLI (`hook guard-egress`). Shape
-  rules refuse the implicit forms with no context at all — a bare `git
-  push`, an egress after `cd` in the same command, a `;`-chained push,
-  a PR body under `$TMPDIR` — and context rules `ask` a human for a
-  public destination or an irreversible verb (`merge`, `release`,
-  `publish`), refuse a cross-org destination, and scan a PR body
-  against the *destination's* deny set. Decision-only: the guard never
-  rewrites a command. When the human wants an agent to publish anyway,
-  `repo-aegis approve <org>/<repo>` (or `<org>/*`) from a terminal mints
-  a scoped approval every layer honours (15 minutes by default,
-  `--ttl` up to 24 hours) — an agent's shell has no TTY and cannot mint
-  one. An agent's publish to an owner the registry does not know is
-  refused outright (rule h); no approval lifts that. `selfIdentity` markers cover the inverse
-  direction — the operator's own project names and session links
-  entering a customer's repository.
-- **The GitHub identity follows the target owner.** The registry can map
-  each owner to a person (a `gh` login) and an agent (a GitHub App via
-  taaad). Plain `gh … --repo <owner>/<repo>` and agent HTTPS pushes then run
-  as that identity, so several agents can work for different accounts at
-  once without anyone switching the active `gh` account. Setup:
-  [doc/configuration.md](doc/configuration.md#setting-up-identities-a-walkthrough).
-- **Hooks an agent cannot switch off.** `install claude-md` writes the
-  Claude Code hooks and deny rules to a root-owned managed-settings
-  drop-in (it shows a diff, asks `[y/N]` and runs `sudo`), and every
-  hook runs a pinned node and CLI by absolute path, never a
-  `repo-aegis` found on `PATH`. `--user-settings` writes
-  `~/.claude/settings.json` instead, for machines without `sudo`.
-- **Engagement-scoped CLI verbs.** `allow`, `deny`, `status`,
-  `check`, `classify`, `audit`, `doctor`, `approve`,
-  `engagements add | end | show | set-identity`, `identity`,
-  `upstreams`, `markers test`, `suggest-markers`, `install …`,
-  `uninstall`. Stable JSON shapes everywhere.
-- **Server-side CI enforcement.** The client-side gate is advisory
-  by construction — `--no-verify` bypasses it and a fresh clone has
-  no hooks. `repo-aegis install ci --profile all` generates hardened
-  workflows (SHA-pinned, timeout-bounded, tag and config-tamper
-  guards), and two composite Actions wrap the CLI and the Layer-2
-  sweep. CI output **fails closed** on an empty deny set — a
-  registry that never loaded must not read as a clean scan — and
-  **redacts engagement attribution**, because a PR comment or a
-  public job log is a publication channel and an engagement id is
-  usually the customer's name.
-- **Off-gate-path LLM helpers.** `suggest-markers` proposes regex
-  candidates from a local Ollama model; `repo-aegis-scan
---semantic` runs an embedding-based audit sweep off-machine. The
-  deterministic gate stays regex-only and free of LLM dependencies
-  (enforced by an import-graph guard test).
+- **Scans before a write lands.** The same scanner runs in a pre-commit hook, a pre-push hook
+  and the coding agent's file-write hooks, so a denied marker is caught before it reaches a
+  commit. The agent gets a structured result it can act on and fix the slip itself.
+- **Checks where data is going.** Before a `git push`, `gh pr create`, release or publish, it
+  checks the destination. A push into another client's org is refused. A publish to a public
+  repository, or a merge or release, needs a person to confirm. An agent's push to a GitHub
+  owner you never registered is refused outright. When you want an agent to go ahead, you run
+  `repo-aegis approve <org>/<repo>` in your own terminal; the approval is short-lived and an
+  agent cannot create one.
+- **Flags secrets in command output.** Private keys, GitHub tokens and JWTs that show up in the
+  agent's shell output are flagged, so you know to rotate them.
+- **Is hard for an agent to switch off.** For Claude Code the hooks are installed as a
+  root-owned settings file and run a pinned copy of repo-aegis, so an agent cannot edit them
+  away. (`--user-settings` uses your own settings file instead, for machines without `sudo`.)
+- **Picks the right GitHub account per client (optional).** Map each GitHub owner to the
+  account, and optionally a GitHub App, that should act for it. Several agents can then work
+  for different clients at the same time without anyone switching the active `gh` account.
+  See [Setting up identities](doc/configuration.md#setting-up-identities-a-walkthrough).
+- **Enforces in CI too.** `repo-aegis install ci` generates GitHub Actions workflows that run the
+  same checks on the server. Bypassing a local hook does not get past them.
+
+## Requirements
+
+- macOS or Linux, with git. Node.js 20 or later (CI tests 20, 22 and 24).
+- `gh` (GitHub CLI), if you want `gh` commands checked.
+- `sudo`, for the root-owned Claude Code settings file. Without it, use `--user-settings`.
+- Full protection is for **Claude Code**. **Codex CLI** and **Gemini CLI** get the egress check
+  (configured by hand: [doc/agent-install.md](doc/agent-install.md)). Every agent, and you,
+  get the git hooks and the `gh` wrapper.
 
 ## Quick start
 
-Point your coding agent (Claude Code, Cursor, Aider, Cline, …) at
-this repo and ask it to **"install and configure repo-aegis"**. It
-will follow [doc/agent-install.md](doc/agent-install.md) end-to-end:
-install the package, scaffold the engagement registry, wire the
-hooks, and surface the compliance questions it can't decide on your
-behalf.
+The easy way: point your coding agent at this repository and ask it to **"install and configure
+repo-aegis"**. It follows [doc/agent-install.md](doc/agent-install.md), and it stops and asks
+you for the steps only a person may do (registering GitHub orgs, typing `y` for the root-owned
+settings file).
 
-Prefer a manual install? The minimum is:
+By hand:
 
-```sh
-npm install -g @de-otio/repo-aegis
-repo-aegis init                                  # bootstrap registry, hooks, Claude Code wiring
-                                                 # (the managed drop-in: asks [y/N], then sudo)
-repo-aegis install shim                          # gh wrapper for the egress guard; then put
-                                                 # ~/.config/repo-aegis/bin FIRST on PATH (it prints the line),
-                                                 # and restart the shell AND any agent host — PATH is per-process,
-                                                 # so a window opened before the line never sees the shim
-repo-aegis engagements add customer-a \
-  --github-org acme-corp                         # attach a GitHub org so future repos auto-classify
-cd /path/to/customer-a-repo
-repo-aegis classify --apply                      # set repo-aegis.class + repo-aegis.engagement
-repo-aegis status                                # confirm class and deny set
-repo-aegis doctor                                # machine-wide: push.default, shim first on PATH, hooks current
-```
+1. **Install and initialise.**
 
-Optional: map each owner to the GitHub account (and App) that should act
-for it, so agents stop depending on whichever `gh` account is active. See
-[Setting up identities](doc/configuration.md#setting-up-identities-a-walkthrough).
+   ```sh
+   npm install -g @de-otio/repo-aegis
+   repo-aegis init
+   ```
 
-`init` does not install the shim: it writes a file into a directory
-that must precede the real `gh` on `PATH`, and only you can edit your
-shell profile. `doctor` reports `SHIM_MISSING` / `SHIM_NOT_FIRST`
-until both halves are done.
+   `init` creates the registry, installs the git hooks in the current repository and installs
+   the Claude Code hooks. For the last part it shows what it will write, asks `[y/N]`, and
+   then `sudo` asks for your password.
 
-For ongoing operation, see the [agent operator
-guide](doc/agent-guide.md). For the full command catalog with flags,
-exit codes, and JSON shapes, see the [CLI
-reference](doc/cli-reference.md).
+2. **Install the `gh` wrapper** so that `gh` commands are checked too:
 
-## Why it matters
+   ```sh
+   repo-aegis install shim
+   ```
 
-**Recency in conversation outweighs prose rules.** A customer name
-mentioned ten times in the current AI-assisted session — typically
-because the user is _handling_ a leak, or just working on that
-customer's code — sits at the top of the agent's attention and gets
-emitted by reflex when a "concrete example" is needed. Soft
-instructions in `CLAUDE.md` / `.cursorrules` cannot filter this;
-deterministic gates can. Engagement-scoped deny sets prevent the
-"flat marker list false-positives in customer-A's own repo →
-everybody learns to ignore the hook" failure mode.
+   It prints a line to add to your shell profile. That line puts its directory **first** on
+   `PATH`. Then restart your shell **and** your coding agent, since each one only reads `PATH`
+   when it starts.
 
-For the longer argument and the full set of design decisions, see
-[doc/why-ai-coding.md](doc/why-ai-coding.md).
+3. **Describe a client.** From your own terminal (agents may not register GitHub orgs):
+
+   ```sh
+   repo-aegis engagements add customer-a \
+     --github-org example-client-org \
+     --marker 'customer-?a'
+   ```
+
+4. **Classify a repository and check it:**
+
+   ```sh
+   cd /path/to/customer-a-repo
+   repo-aegis classify --apply   # records the repository's class and engagement
+   repo-aegis status             # shows its class and which engagements are denied here
+   repo-aegis doctor             # machine-wide health check
+   ```
+
+   `doctor` lists anything still missing, each with the command that fixes it. New repositories
+   under a registered org are classified automatically the first time an agent works in them.
+
+**What install changes on your machine:**
+- `~/.config/repo-aegis/` (the registry and state);
+- git hooks in the repositories you install them into;
+- a block in `~/.claude/CLAUDE.md`;
+- a root-owned Claude Code settings file (or `~/.claude/settings.json`);
+- the `gh` wrapper directory;
+- optionally, a git credential helper.
+
+`repo-aegis uninstall` removes all of it (see below).
 
 ## Documentation
 
-| Doc                                          | Audience                                                          |
-| -------------------------------------------- | ----------------------------------------------------------------- |
-| [doc/agent-guide.md](doc/agent-guide.md)     | Coding agents driving repo-aegis (Claude Code, Cursor, …)         |
-| [doc/cli-reference.md](doc/cli-reference.md) | Per-subcommand flags, behaviour, exit codes, JSON shapes          |
-| [doc/configuration.md](doc/configuration.md) | Registry (incl. GitHub identities), managed drop-in, allowlist comments, `.repo-aegis.yml`, env vars |
-| [doc/architecture.md](doc/architecture.md)   | Workspace packages, how it composes, roadmap                      |
-| [doc/why-ai-coding.md](doc/why-ai-coding.md) | Why the deterministic gate is shaped the way it is                |
-| [doc/github-action.md](doc/github-action.md) | The composite GitHub Actions, generated workflows, CI hardening    |
-| [doc/design/](doc/design/)                   | As-built design + threat model + zero-config onboarding spec      |
+| Doc                                          | For                                                                     |
+| -------------------------------------------- | ----------------------------------------------------------------------- |
+| [doc/agent-install.md](doc/agent-install.md) | Installing, step by step (written for an agent to follow)              |
+| [doc/agent-guide.md](doc/agent-guide.md)     | Day-to-day use by coding agents: what each refusal means and what to do |
+| [doc/configuration.md](doc/configuration.md) | The registry, GitHub identities, the Claude Code settings file, overrides |
+| [doc/cli-reference.md](doc/cli-reference.md) | Every command: flags, exit codes, JSON output                           |
+| [doc/why-ai-coding.md](doc/why-ai-coding.md) | Why the checks are shaped the way they are                              |
+| [doc/github-action.md](doc/github-action.md) | The CI workflows and GitHub Actions                                     |
+| [doc/architecture.md](doc/architecture.md)   | Packages and how they fit together                                      |
+| [doc/design/](doc/design/)                   | Design notes and threat model                                           |
 
-Per-package READMEs:
-[packages/llm/README.md](packages/llm/README.md),
-[packages/mcp/README.md](packages/mcp/README.md).
+Optional add-ons: [packages/llm](packages/llm/README.md) (local-LLM marker suggestions and a
+semantic audit sweep; never part of the blocking checks) and [packages/mcp](packages/mcp/README.md).
 
 ## Uninstalling
 
-`repo-aegis uninstall` reverses every `install …` step in one shot —
-hooks, gitignore, claude-md (including the managed drop-in), ci, the
-`gh` shim and the git credential helper — (dry-run by
-default; `--yes` to apply). Opt-in `--purge-repos`
-walks `~/repos` / `~/code` / `~/src` / `~/projects` and unsets
-`repo-aegis.*` git config in every classified repo. Opt-in
-`--purge-home` deletes `~/.config/repo-aegis/` (registry, audit log,
-profiles). Run `repo-aegis uninstall --help` for the full flag set,
-or see the agent-side checklist in
-[doc/agent-guide.md](doc/agent-guide.md#uninstalling).
-
-To remove the npm package itself afterwards:
-
 ```sh
+repo-aegis uninstall          # dry run: lists what it would remove
+repo-aegis uninstall --yes    # removes every install step
 npm uninstall -g @de-otio/repo-aegis
 ```
 
-## Background
-
-The design pattern this tool implements is described in detail in
-the data-leak prevention guide it derives from. Once that guide is
-published, this README will link to it.
+`uninstall` reverses the git hooks, the Claude Code wiring (including the root-owned settings
+file), the CI workflows, the `gh` wrapper and the git credential helper. `--purge-repos` also
+clears repo-aegis's git config in your classified repositories. `--purge-home` also deletes
+`~/.config/repo-aegis/`. See `repo-aegis uninstall --help`.
 
 ## Development
 
