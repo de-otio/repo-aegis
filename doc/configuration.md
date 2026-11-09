@@ -274,7 +274,10 @@ Every injecting call prints `repo-aegis: as <identity> (<kind>) for <owner>/<rep
 a record (never the token) to `<home>/state/gh-decisions.jsonl`.
 
 **taaad and root ownership.** App tokens are minted by taaad, the only holder of the App private
-keys; `install shim` pins its launcher, the interpreter its shebang names and its package directory.
+keys. App identities need taaad v0.6.0 or later (`taaad mint`). taaad's optional macOS helper,
+`taaad-signer`, asks for Touch ID before each fresh token; repo-aegis reports its two refusals
+(prompt limit reached, prompt declined) and works the same with or without it. `install shim`
+pins taaad's launcher, the interpreter its shebang names and its package directory.
 A taaad installed under your home directory works (the usual `pipx install`). `doctor` reports a
 **warning**, `TAAAD_AGENT_WRITABLE`, when any of the three, or a directory above them, is not owned by
 root, because an agent that deliberately edited taaad's code could capture the tokens it mints.
@@ -300,7 +303,7 @@ global git config for `https://github.com` and sets
 
 - With a person present the helper prints nothing and your own helpers answer as before; the same for an owner with no `agent` identity.
 - An agent's push over SSH to such an owner is refused by the pre-push hook (`AGENT_PUSH_NEEDS_APP`): push over HTTPS.
-- The helper needs the pinned taaad: the one `install shim` recorded in the shim at `<home>/bin/gh`, and only while it is root-owned (see "Identities in practice"). With none it refuses (`GH_BINARY_UNTRUSTED`).
+- The helper needs the pinned taaad: the one `install shim` recorded in the shim at `<home>/bin/gh` (see "Identities in practice"). With none it refuses (`GH_BINARY_UNTRUSTED`).
 - Helper order matters: a reset entry, a system-scope helper such as `osxkeychain`, or `gh auth setup-git` can put another helper first, and that one answers with your credential. The install checks this and refuses with instructions rather than guess; `doctor` fails with `GIT_CREDENTIAL_HELPER_ORDER` when an owner has an agent identity and the order is wrong.
 - **Accepted limit: the process chain is a heuristic, even inside the sandbox.** The helper answers only a request made by git's HTTPS remote helper: `git-remote-https` must be its parent or grandparent (a plain shell may sit between), its argv must be `[git-remote-https, <remote>, https://github.com/<path>]` with the request's path (case and `.git` aside), and no `git credential…` command may sit between. That stops `git credential fill` run by hand and a renamed copy of `sh` posing as the remote helper with a bare name. It does not stop a same-user process that sets its own name and argv to match all of that: the process list is not a security boundary (the same limit as presence detection, `process-ancestry.ts`). The narrowing of the token to one repository and one scope is what bounds the harm.
 - HTTPS pushes to an owner that has only a `person` identity are refused (`GH_IDENTITY_WRITE_NEEDS_HUMAN`) even when a login-bound approval exists: the helper has no approval to consult, and falls through to the person's own helper only for a subcommand known to read (`fetch`, `pull`, `clone`, `ls-remote`, `archive`, `remote`, `submodule`; an alias or an unreadable subcommand is refused). SSH pushes to such an owner are not touched by the helper and go through the pre-push rules as before.

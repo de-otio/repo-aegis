@@ -159,8 +159,8 @@ export interface MintInput {
 
 /**
  * Mint through the pinned taaad (`taaad-mint.ts`, the one implementation, shared with the git credential
- * helper), after the checks only this caller needs: an org-level target, no pin, and a taaad that is not
- * root-only-writable (N4, A4, D4). A `MintError` becomes a failure code; its text is fixed and never taaad's output.
+ * helper), after the checks only this caller needs: an org-level target and no pin (N4, A4, D4; a taaad that
+ * is not root-only-writable is only a `doctor` warning). A `MintError` becomes a failure code; its text is fixed and never taaad's output.
  */
 export function mintAppToken(input: MintInput): MintResult {
   const fail = (failure: MintFailure): MintResult => ({ ok: false, failure });
@@ -170,7 +170,7 @@ export function mintAppToken(input: MintInput): MintResult {
   if (input.pin === null) {
     return fail({
       code: "GH_BINARY_UNTRUSTED",
-      why: "no taaad is pinned: install taaad into a root-owned prefix, then re-run `repo-aegis install shim`",
+      why: "no taaad is pinned: install taaad v0.6.0 or later, then re-run `repo-aegis install shim`",
     });
   }
   // A taaad that is not root-only-writable is a `doctor` warning (TAAAD_AGENT_WRITABLE), not a refusal: it
