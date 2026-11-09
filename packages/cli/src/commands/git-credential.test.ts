@@ -448,6 +448,24 @@ describe("git-credential get: an unreadable process list (U2, U5)", () => {
     assert.ok(!lines.join("\n").includes("example-user"), "the person's login is not copied into the log");
   });
 
+  it("the audit record lands in the PINNED home even when the caller's REPO_AEGIS_HOME points elsewhere (L6)", () => {
+    approve({ org: "o", repo: "r" }, { login: "example-user" });
+    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    const elsewhere = mkdtempSync(join(tmpdir(), "rae-other-home-"));
+    const saved = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = elsewhere;
+    try {
+      get(request(), unreadable());
+      assert.equal(process.env["REPO_AEGIS_HOME"], elsewhere, "the caller's variable is restored");
+    } finally {
+      if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
+      else process.env["REPO_AEGIS_HOME"] = saved;
+    }
+    assert.ok(existsSync(join(home, "state", "audit.log")), "written to the pinned home");
+    assert.ok(!existsSync(join(elsewhere, "state", "audit.log")), "not to the caller's home");
+    rmSync(elsewhere, { recursive: true, force: true });
+  });
+
   it("an approval that does not cover it leaves the refusal: another repo or owner, no login, `*`, a ref, expired", () => {
     const longAgo = new Date("2020-01-01T00:00:00Z");
     approve({ org: "o", repo: "other" }, { login: "example-user" });

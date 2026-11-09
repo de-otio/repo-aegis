@@ -343,11 +343,21 @@ function expiryLine(expiresAt: string | null): string {
   return Number.isSafeInteger(seconds) && seconds > 0 ? `password_expiry_utc=${seconds}\n` : "";
 }
 
-function auditBestEffort(details: Record<string, unknown>): void {
+/**
+ * Append the helper's audit record to the PINNED home's log (D8), as `repo-aegis gh` does: the audit log's reader
+ * defaults to REPO_AEGIS_HOME, which here is the caller's environment, not the home git's config pinned. The
+ * variable is set only for this one call and restored, so no other reader is affected.
+ */
+function auditBestEffort(details: Record<string, unknown>, home: string): void {
+  const saved = process.env["REPO_AEGIS_HOME"];
   try {
+    process.env["REPO_AEGIS_HOME"] = home;
     appendAuditRecord({ action: "git-credential", details });
   } catch {
     /* the audit log must never break a push, and it never holds a token */
+  } finally {
+    if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
+    else process.env["REPO_AEGIS_HOME"] = saved;
   }
 }
 
@@ -528,7 +538,7 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
       code,
       reason: err instanceof MintError ? err.reason : "failed",
       ...coveredBy,
-    });
+    }, home);
     return refuse(code, err instanceof MintError ? err.message : "the token could not be minted (taaad failed; repo-aegis did not cause it)", dest);
   }
   auditBestEffort({
@@ -539,7 +549,7 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
     scope,
     verb: chain ? "push" : "fetch",
     ...coveredBy,
-  });
+  }, home);
   return {
     stdout: `username=x-access-token\npassword=${minted.token}\n${expiryLine(minted.expiresAt)}`,
     // One line, so a person reading the push output can see why an unreadable process list did not stop it.
