@@ -162,12 +162,15 @@ describe("rule h — hostile destination names never reach pasteable text (revie
     });
 
     it(`under an unreadable registry: ${label}`, () => {
-      const out = decide("gh issue create --body x", {
-        registryState: "unreadable",
-        resolveDestination: () => dest({ org: bad }),
-      });
-      assert.ok(out.action === "deny", label);
-      assertSafe(out.reason, bad, label);
+      for (const ask of [false, true]) {
+        const out = decide("gh issue create --body x", {
+          registryState: "unparseable",
+          resolveDestination: () => dest({ org: bad }),
+          capabilities: { ask },
+        });
+        assert.ok(out.action === (ask ? "ask" : "deny"), label);
+        assertSafe(out.reason, bad, label);
+      }
     });
   }
 
@@ -289,7 +292,7 @@ describe("rule h — hostile destination names never reach pasteable text (revie
 
 describe("rule h — unreadable registry repair hint (review L4)", () => {
   const reasonFor = () =>
-    (decide("gh issue create --body x", { registryState: "unreadable", resolveDestination: () => dest() }) as {
+    (decide("gh issue create --body x", { registryState: "unparseable", capabilities: { ask: false }, resolveDestination: () => dest() }) as {
       reason: string;
     }).reason;
 
@@ -305,7 +308,7 @@ describe("rule h — unreadable registry repair hint (review L4)", () => {
           reason,
         );
         assert.ok(!reason.includes(fakeHome), "the home directory itself is not printed");
-        assert.match(reason, /If the registry is encrypted, a person runs, from a terminal: repo-aegis registry decrypt --identity <key>/);
+        assert.ok(!/decrypt/.test(reason), "an unparseable registry's fix is a repair, not a decrypt");
         assert.ok(!reason.includes("repair the registry file"), "does not read as a command");
       });
     } finally {

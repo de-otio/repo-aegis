@@ -386,13 +386,19 @@ export type ApprovalFinder = (
  * - `loaded`: read successfully. Rule h judges against its owner lists, and
  *   is skipped when it declares none.
  * - `missing`: no registry file exists. Rule h is skipped.
- * - `unreadable`: a file (or ciphertext) exists but could not be read:
- *   encrypted, unparseable, or a newer schema. Rule h refuses every
- *   non-interactive egress that has a destination, because no owner can be
- *   confirmed. Falling open here would let one corrupted line switch the
- *   rule off.
+ * - `encrypted`: only a `<registry>.age` ciphertext exists. repo-aegis runs as
+ *   if there were no registry (encryption at rest is deprecated), so rule h is
+ *   skipped and the note says so.
+ * - `unparseable`: the file exists but does not parse or validate.
+ * - `newer-schema`: the file parses but was written by a newer repo-aegis.
+ *   For both of the last two no owner can be confirmed: an interactive host is
+ *   asked, anything else is refused. Falling open here would let one
+ *   corrupted line switch the rule off.
  */
-export type RegistryState = "loaded" | "missing" | "unreadable";
+export type RegistryState = "loaded" | "missing" | "encrypted" | "unparseable" | "newer-schema";
+
+/** The two states in which a registry exists but cannot be read: rule h asks or refuses. */
+export const registryUnreadable = (s: RegistryState): boolean => s === "unparseable" || s === "newer-schema";
 
 export interface DecideEgressOptions {
   intents: EgressIntent[];
@@ -1150,6 +1156,8 @@ export function unregisteredOwnerReason(
   destination: Pick<Destination, "org" | "repo" | "unresolved" | "unresolvedWhy" | "candidates">,
   state: RegistryState,
   registry: Pick<Registry, "allowedUpstreams"> & Partial<Pick<Registry, "personalOrgs" | "engagements">>,
+  /** For an unreadable registry: whether the decision is an `ask` (the approval line says what a yes does). */
+  ask: boolean = false,
 ): string {
   const verb = describeVerb(intent.verb);
   const code = "UNREGISTERED_OWNER_EGRESS";
@@ -1169,23 +1177,30 @@ export function unregisteredOwnerReason(
       : `${verb} (unresolved destination)`
     : `${verb} → ${target}`;
 
-  if (state === "unreadable") {
+  if (registryUnreadable(state)) {
+    const newer = state === "newer-schema";
+    const who = unresolved ? `this destination's owner` : `the owner "${owner}"`;
     return refusal({
       code,
       ...subject,
       what,
-      why:
-        `The registry could not be read (it is encrypted or damaged), so repo-aegis cannot confirm that ` +
-        (unresolved ? `this destination's owner` : `the owner "${owner}"`) +
-        ` is registered and refuses egress it cannot vouch for`,
-      approval: "No approval covers this",
+      why: newer
+        ? `The registry was written by a newer repo-aegis than the one running this check, so it cannot confirm that ${who} is registered`
+        : `The registry exists but does not parse or validate, so repo-aegis cannot confirm that ${who} is registered`,
+      approval: ask
+        ? "A person's yes at this prompt lets this one command run; a push is still refused by the pre-push hook until the registry can be read"
+        : "No approval covers this",
       fixes: [
-        { by: "person", when: "If the registry is encrypted", command: "repo-aegis registry decrypt --identity <key>" },
-        {
-          by: "person",
-          when: "If it is damaged",
-          step: `repairs ${registryPathLabel()}, then re-runs the command (\`repo-aegis status\` shows why it fails to load)`,
-        },
+        newer
+          ? {
+              by: "person",
+              step:
+                "upgrades repo-aegis, then runs `repo-aegis install hooks` and `repo-aegis install claude-md` so the hooks run the new version",
+            }
+          : {
+              by: "person",
+              step: `repairs ${registryPathLabel()}, then re-runs the command (\`repo-aegis status\` shows why it fails to load)`,
+            },
       ],
     });
   }
@@ -1557,9 +1572,28 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   // not the destination cache, a local class, or an approval (D2).
   if (destination !== null && !opts.humanPresent) {
     let refused = false;
-    if (opts.registryState === "unreadable") {
-      // No owner can be confirmed, so none is admitted (D4, revised).
-      refused = true;
+    if (registryUnreadable(opts.registryState)) {
+      // No owner can be confirmed, so none is admitted (D4, revised). A host
+      // with an `ask` asks; the pre-push hook still refuses the push itself.
+      // A `gh` verb whose shim is not first on PATH has nothing below an
+      // unanswered ask, so it is denied instead (as rule g does).
+      const asks =
+        opts.capabilities.ask && !(opts.capabilities.ghShimOnPath === false && intent.verb.startsWith("gh-"));
+      return asks
+        ? {
+            action: "ask",
+            code: "UNREGISTERED_OWNER_EGRESS",
+            reason: unregisteredOwnerReason(intent, destination, opts.registryState, opts.registry, true),
+            ...(printable(destination) && { destination: printable(destination) }),
+            intent,
+            // Nothing to carry down: with the registry unreadable, pre-push refuses the push whatever the answer.
+            asked: [],
+          }
+        : deny(
+            "UNREGISTERED_OWNER_EGRESS",
+            unregisteredOwnerReason(intent, destination, opts.registryState, opts.registry),
+            printable(destination),
+          );
     } else if (opts.registryState === "loaded") {
       const owners = registeredOwners(opts.registry);
       // A registry that declares no owners has nothing to judge against. A
@@ -1575,7 +1609,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         }
       }
     }
-    // "missing": no registry file at all, rule h is skipped.
+    // "missing" (no registry file) and "encrypted" (run as if none): rule h is skipped.
     if (refused) {
       // A destination whose name is not a plausible GitHub owner/repo is not
       // attached to the decision: layers print it as JSON, and the refusal

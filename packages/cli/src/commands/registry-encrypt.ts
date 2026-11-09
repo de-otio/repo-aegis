@@ -16,9 +16,10 @@ import {
   AgeError,
   appendAuditRecord,
 } from "@de-otio/repo-aegis-core";
-import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
+import { emitJson, emitText, emitError } from "../format.js";
+import { requireTerminal, type RequireTerminalOptions } from "../require-terminal.js";
 
-interface EncryptOptions extends OutputOptions {
+interface EncryptOptions extends RequireTerminalOptions {
   recipient?: string;
 }
 
@@ -43,6 +44,15 @@ function encryptedMarkerPath(): string {
  * exactly the kind of foot-gun the marker file exists to prevent.
  */
 export function registryEncrypt(opts: EncryptOptions): void {
+  // Person-only, like the other mutators that change what repo-aegis enforces: an encrypted registry is read as no
+  // registry, which switches off rule h and the per-engagement org boundaries. An agent must not be able to put the
+  // machine in that state. Before any validation, so the refusal is not an oracle for the registry's state.
+  requireTerminal(
+    "REGISTRY_ENCRYPT_NEEDS_TTY",
+    "registry encrypt can only be run from a terminal: an encrypted registry is read as no registry, which switches off " +
+      "rule h and the engagement org boundaries, so an agent must not be able to do it.",
+    opts,
+  );
   if (!opts.recipient) {
     emitError(
       { code: "USAGE", error: "registry encrypt requires --recipient <pubkey>" },

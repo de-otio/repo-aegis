@@ -3,18 +3,16 @@
 import { existsSync } from "node:fs";
 import {
   computeDenySet,
-  loadRegistry,
+  loadRegistryState,
   scanFile,
   CustomerCoupledNoEngagementError,
-  RegistryEncryptedError,
-  RegistryNotFoundError,
   EXIT_HIT,
   type RepoJson,
   type ScanHit,
   type SkippedFile,
   type Registry,
 } from "@de-otio/repo-aegis-core";
-import { decideHookAction, type HookDecision } from "./hook-policy.js";
+import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import { parseHookWriteFields, readHookStdin, WRITE_HOOK_INPUT_MAX_BYTES } from "./hook-input.js";
 
 interface HookOptions {
@@ -94,8 +92,18 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   // Cursor's `afterFileEdit` has no output schema and cannot block: say so on every non-zero answer, so
   // nobody reads a hit as a prevented write.
   // (The explicit `never` annotation on the binding is what keeps control-flow narrowing after a call.)
+  // Set once the registry is known to be encrypted: every answer then carries the person-facing `systemMessage`
+  // (Claude Code drops stderr on exit 0), once per call.
+  let notice: string | undefined;
   const emit: (value: unknown, exitCode: number) => never = (value, exitCode) =>
-    emitJsonAndExit(cursor && exitCode !== 0 ? { ...(value as object), note: CURSOR_DETECTION_ONLY } : value, exitCode);
+    emitJsonAndExit(
+      {
+        ...(value as object),
+        ...(cursor && exitCode !== 0 && { note: CURSOR_DETECTION_ONLY }),
+        ...(notice !== undefined && { systemMessage: notice }),
+      },
+      exitCode,
+    );
 
   if (!filePath) {
     if (input.truncated) emit({ code: "HOOK_INPUT_TOO_LARGE", error: NOT_SCANNED_REASON }, 2);
@@ -103,36 +111,29 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   }
   if (!existsSync(filePath)) process.exit(0);
 
-  let registry: Registry;
-  try {
-    registry = loadRegistry();
-  } catch (err) {
-    // Registry is required for trust-boundary computation. Surface
-    // structured errors; otherwise stay silent (hook context).
-    if (err instanceof RegistryNotFoundError) {
-      // No registry => no engagements, no orgs. Treat the whole world
-      // as one boundary and scan with an empty deny set. The agent
-      // would have run `repo-aegis init` already if engagement scoping
-      // were in use; the hook should not block plain installs.
-      registry = { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
-    } else if (err instanceof RegistryEncryptedError) {
-      emit(
-        {
-          code: err.code,
-          error: err.message,
-        },
-        2,
-      );
-    } else {
-      emit(
-        {
-          code: "REGISTRY_ERROR",
-          error: (err as Error).message,
-        },
-        2,
-      );
-    }
+  // Missing: no registry => no engagements, no orgs. Treat the whole world as one boundary and scan with an empty
+  // deny set. The agent would have run `repo-aegis init` already if engagement scoping were in use; the hook should
+  // not block plain installs. Encrypted is read the same way (no plaintext to read; encryption at rest is
+  // deprecated), so `_always` and engagement markers still scan. A registry that exists but cannot be read is
+  // surfaced as REGISTRY_ERROR with fixed text (the parse error names orgs and engagement ids).
+  const load = loadRegistryState();
+  if (load.state === "newer-schema") emit({ code: "REGISTRY_ERROR", error: NEWER_SCHEMA_ERROR }, 2);
+  if (load.state === "unparseable") {
+    emit(
+      {
+        code: "REGISTRY_ERROR",
+        error:
+          "the registry cannot be read, so the cross-org write check cannot run. " +
+          "Run `repo-aegis status` (or `repo-aegis doctor`) in a terminal to see why.",
+      },
+      2,
+    );
   }
+  if (load.state === "encrypted") notice = ENCRYPTED_REGISTRY_NOTICE;
+  const registry: Registry =
+    load.state === "loaded"
+      ? load.registry
+      : { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
 
   const decision: HookDecision = decideHookAction({
     filePath,

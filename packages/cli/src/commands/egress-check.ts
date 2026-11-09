@@ -30,10 +30,9 @@ import {
   egressParseOptions,
   formatReceipt,
   isPrintableDestination,
-  loadRegistry,
+  loadRegistryState,
   parseEgressIntents,
   parseRemoteUrl,
-  RegistryNotFoundError,
   resolveDestinationOffline,
   ruleHStatus,
   SHAPE_RULE_CODES,
@@ -81,20 +80,19 @@ const EMPTY_REGISTRY: Registry = { engagements: [], alwaysBlock: [] };
  * are different for rule h (issue #151, decision D4):
  *
  *   - no registry file → `missing`: rule h is skipped (fails open);
- *   - encrypted, or a file that does not parse or validate → `unreadable`:
- *     rule h refuses any egress that has a destination, because no owner can
- *     be confirmed. Only {@link RegistryNotFoundError} is "missing"; any
- *     other error, including an unknown one, is `unreadable` (fail closed).
+ *   - only a ciphertext → `encrypted`: runs as if there were no registry
+ *     (rule h is skipped);
+ *   - a file that does not parse or validate (`unparseable`), or was written by
+ *     a newer repo-aegis (`newer-schema`): rule h refuses any egress that has a
+ *     destination, because no owner can be confirmed. The shim has no prompt,
+ *     so it denies rather than asks. Anything this code does not recognise is
+ *     `unparseable` (fail closed).
  */
 function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistryState } {
-  try {
-    return { registry: loadRegistry(), registryState: "loaded" };
-  } catch (err) {
-    return {
-      registry: EMPTY_REGISTRY,
-      registryState: err instanceof RegistryNotFoundError ? "missing" : "unreadable",
-    };
-  }
+  const load = loadRegistryState();
+  return load.state === "loaded"
+    ? { registry: load.registry, registryState: "loaded" }
+    : { registry: EMPTY_REGISTRY, registryState: load.state };
 }
 
 /** Public shape of an allow verdict's destination. Never more than this. */

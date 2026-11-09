@@ -193,6 +193,8 @@ describe("approve — mint-time scope warnings (issue #151, D7, plan §3.2/§3.9
     writeFileSync(join(root, "owners.yaml"), OWNERS_REGISTRY);
     writeFileSync(join(root, "no-personal.yaml"), NO_PERSONAL_REGISTRY);
     writeFileSync(join(root, "damaged.yaml"), "engagements: [unclosed\n");
+    writeFileSync(join(root, "newer.yaml"), "schemaVersion: 99\nengagements: []\n");
+    writeFileSync(join(root, "encrypted.yaml.age"), "age-encryption.org/v1\n");
   });
   after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -262,8 +264,28 @@ describe("approve — mint-time scope warnings (issue #151, D7, plan §3.2/§3.9
   it("an unreadable registry gets a content-free warning that no approval helps until it is repaired", () => {
     const w = warningsOf("acme/svc", "damaged.yaml");
     assert.equal(w.length, 1);
-    assert.match(w[0]!, /registry could not be read/);
+    assert.match(w[0]!, /registry does not parse or validate/);
     assert.match(w[0]!, /will not help before then/);
+    assert.doesNotMatch(w[0]!, /encrypt/);
+  });
+
+  it("a registry from a newer repo-aegis says to upgrade, not to repair", () => {
+    const w = warningsOf("acme/svc", "newer.yaml");
+    assert.equal(w.length, 1);
+    assert.match(w[0]!, /written by a newer repo-aegis/);
+    assert.match(w[0]!, /upgrades repo-aegis/);
+  });
+
+  it("an encrypted registry gets its own sentence: rule h is off while it is encrypted, and no 'could not be read' text", () => {
+    for (const target of ["acme/svc", "stranger/*"]) {
+      const w = warningsOf(target, "encrypted.yaml");
+      assert.equal(w.length, 1, target);
+      assert.match(w[0]!, /Rule h is off while the registry is encrypted/);
+      assert.doesNotMatch(w[0]!, /could not be read|damaged/);
+    }
+    const star = warningsOf("*", "encrypted.yaml");
+    assert.ok(star.some(n => /rule h is off while it is encrypted/.test(n)), star.join("|"));
+    assert.ok(!star.some(n => /declares no personalOrgs/.test(n)), "an encrypted registry is not an empty one");
   });
 
   it("never lists registry contents: the warning for one owner names no other owner, engagement or upstream", () => {

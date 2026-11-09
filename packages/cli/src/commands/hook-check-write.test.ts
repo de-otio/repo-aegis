@@ -560,12 +560,49 @@ describe("hook check-write: an unreadable registry blocks (exit 2), never fails 
     assert.doesNotMatch(out, /secret-org-name|secret-engagement-id/);
   });
 
-  it("a registry of a schemaVersion this build cannot read: exit 2", () => {
+  it("a registry of a schemaVersion this build cannot read (99): exit 2, REGISTRY_ERROR, with the newer-schema text", () => {
     const env = setupAegisHome("ck-newer-registry");
     writeRegistry(env.aegisHome, "schemaVersion: 99\nengagements: []\n");
     const r = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], { input: payload() });
     assert.equal(r.code, 2, r.stderr);
-    assert.match(`${r.stdout}${r.stderr}`, /REGISTRY_ERROR/);
+    const out = `${r.stdout}${r.stderr}`;
+    assert.match(out, /REGISTRY_ERROR/);
+    assert.match(out, /the registry was written by a newer repo-aegis than the one this hook runs/);
+    assert.match(out, /A person upgrades repo-aegis and runs `repo-aegis install claude-md`\./);
+    assert.doesNotMatch(out, /Run `repo-aegis status`/, "an upgrade, not a repair, is what this needs");
+  });
+
+  it("an encrypted registry (only the .age ciphertext) is read as no registry: a write to $TMPDIR/x exits 0, not REGISTRY_ENCRYPTED", () => {
+    const env = setupAegisHome("ck-encrypted-registry");
+    writeFileSync(join(env.aegisHome, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const r = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: join(tmp, "x") }, cwd: tmp }),
+    });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /REGISTRY_ENCRYPTED/);
+    // Claude Code drops stderr on exit 0, so the person sees the notice only as the JSON systemMessage: once.
+    const j = JSON.parse(r.stdout) as { systemMessage?: string };
+    assert.equal(
+      j.systemMessage,
+      "repo-aegis: rule h and engagement org boundaries are off while the registry is encrypted; run `repo-aegis registry decrypt --identity <key>` (a person runs this).",
+    );
+    assert.equal(r.stdout.split("systemMessage").length - 1, 1, "once per call");
+    assert.equal(r.stderr, "");
+  });
+
+  it("a readable registry (or none) prints nothing on an allowed write: the notice is for the encrypted state only", () => {
+    const env = setupAegisHome("ck-no-notice");
+    const none = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: join(tmp, "x") }, cwd: tmp }),
+    });
+    assert.equal(none.code, 0);
+    assert.equal(none.stdout, "");
+    writeRegistry(env.aegisHome, "schemaVersion: 2\nengagements: []\n");
+    const loaded = runCli(env.aegisHome, env.cwd, ["hook", "check-write"], {
+      input: JSON.stringify({ tool_input: { file_path: join(tmp, "x") }, cwd: tmp }),
+    });
+    assert.equal(loaded.code, 0);
+    assert.equal(loaded.stdout, "");
   });
 
   it("a missing registry still passes (nothing to protect yet)", () => {

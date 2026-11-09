@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   loadRegistry,
+  loadRegistryState,
   isActive,
   resolveEngagement,
   MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION,
@@ -15,6 +16,7 @@ import {
   RegistryNotFoundError,
   RegistryParseError,
   RegistryEncryptedError,
+  RegistrySchemaTooNewError,
 } from "./exceptions.js";
 
 let tmp: string;
@@ -676,5 +678,71 @@ engagements: []
     const reg = loadRegistry(path);
     assert.equal(reg.schemaVersion, 1);
     assert.deepEqual(reg.selfIdentity, ["example-org"]);
+  });
+});
+
+describe("loadRegistryState (never throws)", () => {
+  const valid = `engagements:
+  - id: customer-a
+    name: Customer A
+    markers: [foo]
+`;
+
+  it("loaded: the registry comes with it", () => {
+    const r = loadRegistryState(writeYaml("state-loaded.yaml", valid));
+    assert.equal(r.state, "loaded");
+    assert.ok(r.state === "loaded" && r.registry.engagements.length === 1);
+  });
+
+  it("missing: no file and no ciphertext", () => {
+    assert.deepEqual(loadRegistryState(join(tmp, "state-absent.yaml")), { state: "missing" });
+  });
+
+  it("encrypted: no plaintext but a sibling .age ciphertext", () => {
+    writeYaml("state-enc.yaml.age", "age-encryption.org/v1\n");
+    assert.deepEqual(loadRegistryState(join(tmp, "state-enc.yaml")), { state: "encrypted" });
+  });
+
+  it("unparseable: bad YAML, a missing engagements key, a failed schema, and an unreadable path", () => {
+    for (const [name, body] of [
+      ["state-bad-yaml.yaml", "engagements: [unclosed"],
+      ["state-no-engagements.yaml", "something: else\n"],
+      ["state-bad-shape.yaml", "engagements: 7\n"],
+    ] as const) {
+      assert.deepEqual(loadRegistryState(writeYaml(name, body)), { state: "unparseable" }, name);
+    }
+    // A directory exists but cannot be read as a file.
+    assert.deepEqual(loadRegistryState(tmp), { state: "unparseable" });
+  });
+
+  it("newer-schema: schemaVersion 99 reports what was found and what this build reads", () => {
+    const r = loadRegistryState(writeYaml("state-v99.yaml", `schemaVersion: 99\n${valid}`));
+    assert.deepEqual(r, { state: "newer-schema", found: 99, max: MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION });
+    assert.equal(MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION, 3);
+  });
+
+  it("a throw it does not recognise is unparseable (fails closed, never `missing`)", () => {
+    for (const thrown of [new TypeError("boom"), new RangeError("deep"), "a string", null]) {
+      const r = loadRegistryState("/irrelevant", () => {
+        throw thrown;
+      });
+      assert.deepEqual(r, { state: "unparseable" });
+    }
+  });
+
+  it("RegistrySchemaTooNewError is still a RegistryParseError with the old message", () => {
+    const path = writeYaml("state-v99b.yaml", `schemaVersion: 99\n${valid}`);
+    assert.throws(
+      () => loadRegistry(path),
+      (err: unknown) =>
+        err instanceof RegistrySchemaTooNewError &&
+        err instanceof RegistryParseError &&
+        err.found === 99 &&
+        err.max === 3 &&
+        err.code === "REGISTRY_PARSE" &&
+        /registry schemaVersion 99 is newer than this build supports \(max 3\); registry written by a newer repo-aegis — please upgrade/.test(
+          err.message,
+        ),
+    );
   });
 });

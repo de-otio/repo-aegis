@@ -13,7 +13,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureOutput } from "../_test-utils.js";
+import { captureOutput, UNDER_CLAUDE_ANCESTRY } from "../_test-utils.js";
 import { registryEncrypt } from "./registry-encrypt.js";
 import { registryDecrypt } from "./registry-decrypt.js";
 
@@ -101,10 +101,38 @@ function seedPlaintextRegistry(): { plain: string; cipher: string; marker: strin
 // Tests
 // ---------------------------------------------------------------------------
 
+describe("registry encrypt is person-only (an encrypted registry switches off rule h and the org boundaries)", () => {
+  it("refuses without a terminal (REGISTRY_ENCRYPT_NEEDS_TTY, exit 2) and touches nothing, before it validates anything", () => {
+    const { plain, cipher, marker } = seedPlaintextRegistry();
+    // No recipient either: the terminal check comes first, so a refusal is not an oracle for the registry's state.
+    for (const opts of [{ stderrIsTTY: false }, { stderrIsTTY: false, recipient: "age1notarealrecipient" }]) {
+      const { stderr, exitCode } = captureOutput(() => registryEncrypt({ ...opts, json: true }));
+      assert.equal(exitCode, 2);
+      assert.match(stderr, /REGISTRY_ENCRYPT_NEEDS_TTY/);
+      assert.match(stderr, /can only be run from a terminal/);
+    }
+    assert.ok(existsSync(plain), "the plaintext registry must be untouched");
+    assert.ok(!existsSync(cipher) && !existsSync(marker), "nothing was written");
+    restoreHome();
+  });
+
+  it("refuses with a TTY when an agent host is above the process (a pty wrapper is not a person)", () => {
+    const { plain, cipher } = seedPlaintextRegistry();
+    const { stderr, exitCode } = captureOutput(() =>
+      registryEncrypt({ stderrIsTTY: true, ancestry: () => UNDER_CLAUDE_ANCESTRY, env: {}, recipient: "age1notarealrecipient", json: true }),
+    );
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /REGISTRY_ENCRYPT_NEEDS_TTY/);
+    assert.match(stderr, /runs under claude/);
+    assert.ok(existsSync(plain) && !existsSync(cipher));
+    restoreHome();
+  });
+});
+
 describe("registry encrypt / decrypt", () => {
   it("requires --recipient on encrypt", { skip: !ageAvailable }, () => {
     seedPlaintextRegistry();
-    const { stderr, exitCode } = captureOutput(() => registryEncrypt({}));
+    const { stderr, exitCode } = captureOutput(() => registryEncrypt({ stderrIsTTY: true }));
     assert.equal(exitCode, 2);
     assert.match(stderr, /--recipient/);
     restoreHome();
@@ -120,7 +148,7 @@ describe("registry encrypt / decrypt", () => {
   it("round-trips: encrypt then decrypt yields the original bytes", { skip: !ageAvailable }, () => {
     const { plain, cipher, marker } = seedPlaintextRegistry();
 
-    captureOutput(() => registryEncrypt({ recipient, json: true }));
+    captureOutput(() => registryEncrypt({ recipient, json: true, stderrIsTTY: true }));
     assert.ok(existsSync(cipher), "ciphertext should exist");
     assert.ok(!existsSync(plain), "plaintext should be removed");
     assert.ok(existsSync(marker), "marker should be written");
@@ -147,7 +175,7 @@ describe("registry encrypt / decrypt", () => {
   it("refuses to encrypt when ciphertext already exists", { skip: !ageAvailable }, () => {
     const { plain, cipher } = seedPlaintextRegistry();
     writeFileSync(cipher, "preexisting-ciphertext");
-    const { stderr, exitCode } = captureOutput(() => registryEncrypt({ recipient }));
+    const { stderr, exitCode } = captureOutput(() => registryEncrypt({ recipient, stderrIsTTY: true }));
     assert.equal(exitCode, 2);
     assert.match(stderr, /already/);
     // Plaintext untouched
@@ -161,7 +189,7 @@ describe("registry encrypt / decrypt", () => {
     mkdirSync(join(home, "state"), { recursive: true, mode: 0o700 });
     writeFileSync(marker, JSON.stringify({ encrypted: true }));
 
-    const { stderr, exitCode } = captureOutput(() => registryEncrypt({ recipient }));
+    const { stderr, exitCode } = captureOutput(() => registryEncrypt({ recipient, stderrIsTTY: true }));
     assert.equal(exitCode, 2);
     assert.match(stderr, /already/);
     assert.ok(existsSync(plain), "plaintext should NOT have been removed");
@@ -179,7 +207,7 @@ describe("registry encrypt / decrypt", () => {
 
   it("refuses to decrypt when plaintext already exists", { skip: !ageAvailable }, () => {
     const { plain, cipher } = seedPlaintextRegistry();
-    captureOutput(() => registryEncrypt({ recipient }));
+    captureOutput(() => registryEncrypt({ recipient, stderrIsTTY: true }));
     // Restore plaintext (simulate user racing or the marker getting stale)
     writeFileSync(plain, SAMPLE_REGISTRY, { mode: 0o600 });
     assert.ok(existsSync(cipher), "ciphertext should still be present");

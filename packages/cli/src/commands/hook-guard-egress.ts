@@ -60,13 +60,11 @@ import {
   findDetachedStart,
   detachedStartRefusal,
   isPrintableDestination,
-  loadRegistry,
+  loadRegistryState,
   parseEgressIntents,
   ruleHSkipNote,
   ruleHStatus,
   SHAPE_RULE_CODES,
-  RegistryEncryptedError,
-  RegistryNotFoundError,
   type Destination,
   type DetachedHit,
   type EgressDecision,
@@ -76,6 +74,7 @@ import {
   type RuleHStatus,
 } from "@de-otio/repo-aegis-core";
 import { currentHumanPresent } from "../human-presence.js";
+import { ENCRYPTED_REGISTRY_NOTICE } from "./hook-policy.js";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
 import { adapterFor, type HookVerdict, type HostAdapter } from "./hook-hosts/index.js";
 import { writePromptApprovals } from "./hook-prompt-approval.js";
@@ -107,13 +106,26 @@ function ghShimOnPath(env: NodeJS.ProcessEnv): boolean | undefined {
 }
 
 /**
+ * The pinned-enforcement-binary fallback (`pinnedHookCommand`) exports `REPO_AEGIS_PIN_FALLBACK=1` to the
+ * `repo-aegis` it falls back to. It only ever adds a notice, so an agent that sets it gains nothing.
+ */
+export const PIN_FALLBACK_NOTICE =
+  "repo-aegis: the pinned enforcement binary is missing or not usable, so this hook ran the repo-aegis found on PATH " +
+  "(it is at least as new as the pinned version); re-pin it by running: repo-aegis install claude-md";
+
+function withFallbackNotice(verdict: HookVerdict): HookVerdict {
+  if (verdict.action !== "allow" || process.env["REPO_AEGIS_PIN_FALLBACK"] !== "1") return verdict;
+  return { ...verdict, notice: [verdict.notice, PIN_FALLBACK_NOTICE].filter(n => n !== undefined).join(" ") };
+}
+
+/**
  * Print the adapter's rendering of `verdict` and exit with its code. The one
  * place this hook writes to stdout: every decision goes through the host
  * adapter, so no code path here can print a host shape (or a rewritten
  * command) behind the adapter's back.
  */
 function emit(adapter: HostAdapter, verdict: HookVerdict): never {
-  const out = adapter.render(verdict);
+  const out = adapter.render(withFallbackNotice(verdict));
   if (out.stdout !== "") process.stdout.write(out.stdout);
   process.exit(out.exitCode);
 }
@@ -181,32 +193,40 @@ const EMPTY_REGISTRY: Registry = {
  * and a guard that refused to run because a registry was missing would be
  * inert exactly where it is most needed (a fresh machine). So a failure falls
  * back to an empty registry and the condition travels with the decision as
- * `registryState`, which rule h reads (issue #151, decision D4):
+ * `registryState`, which rule h reads (issue #151, decision D4), from the one
+ * core loader:
  *
  *   - no registry file  → `missing`: rule h is skipped;
- *   - encrypted, or a file that does not parse or validate → `unreadable`:
- *     rule h REFUSES any egress that has a destination, because no owner can
- *     be confirmed. Skipping here would let an agent that can write the file
- *     switch rule h off with one bad YAML line.
- *
- * Only {@link RegistryNotFoundError} is "missing". Anything else, including an
- * error this code does not know, is `unreadable`: fail closed.
+ *   - only a ciphertext → `encrypted`: runs as if there were no registry (rule
+ *     h skipped), and the note says so;
+ *   - a file that does not parse or validate (`unparseable`), or was written by
+ *     a newer repo-aegis (`newer-schema`): rule h ASKS (the pre-push hook still
+ *     refuses the push), because no owner can be confirmed. Skipping here would
+ *     let an agent that can write the file switch rule h off with one bad YAML
+ *     line.
  */
 function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistryState; note?: string } {
-  try {
-    return { registry: loadRegistry(), registryState: "loaded" };
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
+  const load = loadRegistryState();
+  switch (load.state) {
+    case "loaded":
+      return { registry: load.registry, registryState: "loaded" };
+    case "missing":
       return { registry: EMPTY_REGISTRY, registryState: "missing" };
-    }
-    return {
-      registry: EMPTY_REGISTRY,
-      registryState: "unreadable",
-      note:
-        err instanceof RegistryEncryptedError
-          ? "registry is encrypted: context rules ran without it, and any publish with a destination is refused until it is decrypted"
-          : "registry could not be read: context rules ran without it, and any publish with a destination is refused until it is repaired",
-    };
+    case "encrypted":
+      return {
+        registry: EMPTY_REGISTRY,
+        registryState: "encrypted",
+        note: "registry is encrypted: context rules and rule h ran without it",
+      };
+    case "unparseable":
+    case "newer-schema":
+      return {
+        registry: EMPTY_REGISTRY,
+        registryState: load.state,
+        note:
+          `registry could not be read (${load.state === "newer-schema" ? "was written by a newer repo-aegis" : "does not parse"}): ` +
+          "any publish with a destination needs a person",
+      };
   }
 }
 
@@ -407,7 +427,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   // `error` verdict through the adapter (the host's fail-open answer), never
   // an uncaught exception, which commander turns into exit 1 (and Copilot
   // fails CLOSED on exit 1). The outcome is computed first and emitted after.
-  const ctx = { registryNote, ruleH, humanPresent };
+  const ctx = { registryNote, ruleH, humanPresent, encrypted: ruleH === "skipped:encrypted" };
   let outcome = outcomeOrError(decision, ctx);
   if (outcome.stderr !== undefined) process.stderr.write(outcome.stderr);
   // Only for an `ask` that is going out as one (not an `error`): record what a yes at the host's prompt may
@@ -455,6 +475,8 @@ interface OutcomeContext {
   humanPresent: boolean;
   /** For an `ask` only: one fixed sentence (what a yes at the host's prompt carries), added after the reason. */
   askNote?: string;
+  /** The registry is encrypted (read as none): an allow carries a notice, because rule h and the org boundaries are off. */
+  encrypted?: boolean;
 }
 
 function planOutcome(
@@ -463,8 +485,13 @@ function planOutcome(
 ): Outcome {
   let { registryNote } = ctx;
   if (decision.action === "allow") {
-    if (decision.approval !== undefined) return { verdict: { action: "allow", reason: recordApprovalUse(decision, "hook guard-egress") } };
-    return { verdict: { action: "allow" } };
+    // An allow while the registry is encrypted says so: rule h and the engagement org boundaries are off, and the
+    // person would otherwise see nothing (the hosts drop exit-0 stderr).
+    const notice = ctx.encrypted === true ? { notice: ENCRYPTED_REGISTRY_NOTICE } : {};
+    if (decision.approval !== undefined) {
+      return { verdict: { action: "allow", reason: recordApprovalUse(decision, "hook guard-egress"), ...notice } };
+    }
+    return { verdict: { action: "allow", ...notice } };
   }
 
   // Rule h's own refusal already says the registry could not be read and how
@@ -475,7 +502,11 @@ function planOutcome(
   // (no destination) or a person at the keyboard gets no extra line. No
   // registry contents, ever.
   const skipNote =
-    !ctx.humanPresent && decision.code !== "UNREGISTERED_OWNER_EGRESS" && !SHAPE_RULE_CODES.has(decision.code)
+    !ctx.humanPresent &&
+    decision.code !== "UNREGISTERED_OWNER_EGRESS" &&
+    !SHAPE_RULE_CODES.has(decision.code) &&
+    // An encrypted registry already travels as `registryNote`, so its skip would only repeat it.
+    ctx.ruleH !== "skipped:encrypted"
       ? ruleHSkipNote(ctx.ruleH)
       : null;
   const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);

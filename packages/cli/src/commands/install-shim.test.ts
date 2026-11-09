@@ -65,13 +65,17 @@ describe("the rendered shim script", () => {
     const code = SHIM_SCRIPT.split("\n")
       .filter(l => !/^\s*#/.test(l))
       .join("\n");
-    assert.ok(!/command -v repo-aegis/.test(code), "still resolves repo-aegis by name");
+    // The one lookup by name is the pin-gone fallback, inside the guard (P1-D); no call by name remains.
+    assert.equal(code.split("command -v repo-aegis").length - 1, 1, "resolves repo-aegis by name outside the fallback");
+    assert.ok(code.indexOf("command -v repo-aegis") > code.indexOf('if [ -n "$__ra_missing" ]; then'));
     assert.ok(
       !/(^|[;&|(!`]|\bthen\b|\bdo\b|\$\()\s*repo-aegis(\s|$)/m.test(code),
       "still calls repo-aegis by name",
     );
-    // D1: the one call the shim makes goes through the pin, with the pinned home, and nothing follows it.
+    // D1: the one call the shim makes goes through the pin (or, with the pin gone and a PATH repo-aegis at
+    // least as new, through that), with the pinned home, and nothing follows it.
     assert.ok(code.includes('exec "$__ra_node" "$__ra_cli" gh --home "$__ra_home" -- "$@"'));
+    assert.ok(code.includes('exec "$__ra_fb" gh --home "$__ra_home" -- "$@"'));
     assert.ok(code.includes("__ra_home='/opt/ra-home'"));
     assert.ok(!code.includes("egress-check"), "the shim no longer makes its own decision call");
     assert.ok(!code.includes("egress-readback"), "the read-back runs inside `repo-aegis gh`");
@@ -79,11 +83,12 @@ describe("the rendered shim script", () => {
 
   it("D1: execs the CLI for every verb but --version, help and completion; no shell code follows the exec", () => {
     const lines = SHIM_SCRIPT.split("\n");
-    const execIdx = lines.findIndex(l => l.startsWith('exec "$__ra_node"'));
+    const execIdx = lines.findIndex(l => l.trim().startsWith('exec "$__ra_node"'));
     assert.ok(execIdx > 0, "no exec of the pinned CLI");
+    // Only the `fi` that closes the if/else between the pinned CLI and the fallback follows the last exec.
     assert.deepEqual(
       lines.slice(execIdx + 1).filter(l => l.trim() !== "" && !l.trim().startsWith("#")),
-      [],
+      ["fi"],
       "code after the exec",
     );
     assert.ok(SHIM_SCRIPT.includes("--version|help|completion) exec"), "the skip list");
@@ -169,6 +174,57 @@ describe("the shim with a pinned binary that is gone (T7: fails closed on publis
     const r = spawnSync("bash", [join(home, "bin", "gh"), "release", "create", "v1"], { env, encoding: "utf8" });
     assert.equal(r.status, 2, r.stderr);
     assert.ok(r.stderr.includes(missingNode), r.stderr);
+  });
+});
+
+describe("the shim with a pinned binary that is gone: the PATH fallback (P1-D)", () => {
+  /** A shim pinned (with a recorded version) to files that do not exist, a real gh, and a stub `repo-aegis` on PATH. */
+  function setup(name: string, stubVersion: string): { shim: string; env: NodeJS.ProcessEnv; home: string; log: string } {
+    const { home, run } = makeHome(name);
+    const missing = join(root, name, "no-such-dist", "index.js");
+    run(() => captureOutput(() => installShim(undefined, { pin: { node: process.execPath, cli: missing, version: "0.14.0" } })));
+    const ghDir = fakeGh(join(root, name, "real-gh"), 'echo "real gh: $*"');
+    const bin = join(root, name, "path-bin");
+    mkdirSync(bin, { recursive: true });
+    const log = join(root, name, "stub.log");
+    writeFileSync(join(bin, "repo-aegis"), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo ${stubVersion}; exit 0; fi\necho "$*" >> "${log}"\nexit 0\n`, {
+      mode: 0o755,
+    });
+    chmodSync(join(bin, "repo-aegis"), 0o755);
+    return {
+      shim: join(home, "bin", "gh"),
+      home,
+      log,
+      env: { ...process.env, REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), ghDir, bin, "/usr/bin", "/bin"].join(delimiter) },
+    };
+  }
+
+  it("a PATH repo-aegis at least as new as the pin takes the call (`gh --home <home> -- <args>`), with a WARNING; the real gh does not run", () => {
+    const { shim, env, home, log } = setup("p1d-ok", "0.14.0");
+    const r = spawnSync("bash", [shim, "pr", "create", "--title", "t"], { env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readFileSync(log, "utf8"), `gh --home ${home} -- pr create --title t\n`);
+    assert.ok(r.stderr.includes("repo-aegis: WARNING: the pinned enforcement binary is missing or not usable"), r.stderr);
+    assert.ok(r.stderr.includes("(0.14.0, pinned 0.14.0) instead. Re-pin it by running: repo-aegis install shim"), r.stderr);
+    assert.doesNotMatch(r.stdout, /real gh/);
+  });
+
+  it("an older PATH repo-aegis is refused with exit 2, naming both versions; neither it nor the real gh runs", () => {
+    const { shim, env, log } = setup("p1d-older", "0.13.0");
+    const r = spawnSync("bash", [shim, "pr", "create", "--title", "t"], { env, encoding: "utf8" });
+    assert.equal(r.status, 2, `stdout=${r.stdout} stderr=${r.stderr}`);
+    assert.ok(r.stderr.includes("shim refused a gh call: the pinned enforcement binary is missing or not usable"), r.stderr);
+    assert.ok(r.stderr.includes("is 0.13.0, older than the pinned 0.14.0"), r.stderr);
+    assert.equal(existsSync(log), false, "the stub never got the call");
+    assert.doesNotMatch(r.stdout, /real gh/);
+  });
+
+  it("`gh --version` still bypasses the guard entirely (the skip list comes first)", () => {
+    const { shim, env, log } = setup("p1d-skip", "0.13.0");
+    const r = spawnSync("bash", [shim, "--version"], { env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, "real gh: --version\n");
+    assert.equal(existsSync(log), false);
   });
 });
 

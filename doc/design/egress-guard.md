@@ -166,12 +166,22 @@ exception is rule h, which fails closed on a write whose owner it cannot name
 Rule h used to be lettered for "destination class `scratch` → allow". The code
 never special-cased `scratch`, so that row is now the unlettered "otherwise
 allow", and the letter h belongs to the unregistered-owner rule (issue #151).
-Rule h is skipped when no registry file exists or the registry declares no
-owners, and the refusal or the stderr note says which state applied. A
-registry that exists but cannot be read (unparseable, or encrypted at rest) does
-**not** skip it: rule h then refuses every non-interactive egress that has a
-destination, because an agent that can write the file could otherwise switch
-the rule off with one bad line of YAML. A person at a terminal still passes.
+Rule h is skipped when no registry file exists, when the registry declares no
+owners, or when it is encrypted at rest (repo-aegis runs as if there were no
+registry; encryption at rest is deprecated), and the refusal or the stderr
+note says which state applied. A registry that exists but cannot be read
+(`unparseable`: it does not parse or validate; `newer-schema`: a newer
+repo-aegis wrote it) does **not** skip it, because an agent that can write the
+file could otherwise switch the rule off with one bad line of YAML. The
+decision is `ask` where the host has a prompt (Claude Code, Copilot, Cursor)
+and `deny` where it has none, or where the `gh` shim is not first on `PATH`;
+the pre-push hook and the shim cannot ask, so they refuse. The `ask` is not a
+way through for a push: the pre-push hook still refuses it until the registry
+can be read. A person at a terminal still passes. The five states
+(`loaded`, `missing`, `encrypted`, `unparseable`, `newer-schema`) come from one
+non-throwing core loader, `loadRegistryState`, which the hook, the shim,
+pre-push, the `gh` identity layer, the write hooks and `doctor` all use, so
+they cannot disagree. Any error the loader does not recognise is `unparseable`.
 
 **`dot gh` is the one wrapper the parser reads** (doc/plan-recognise-dot-gh.md).
 Every other wrapper (an interpreter, a script) is not recognised: a segment the
@@ -487,9 +497,11 @@ can match there (it fails closed), and `status` / `doctor` report
 - **`UNREGISTERED_OWNER_EGRESS`** (rule h) — decided first of all, before any
   cache write or visibility lookup: with no person present, the URL's owner is
   not registered (or the URL does not resolve to a GitHub repository offline,
-  or the registry is unreadable) → exit 2, whatever approvals exist. It is the
-  same code, the same `registeredOwners()` and the same registry states as the
-  agent hook and the shim.
+  or the registry is unparseable or written by a newer repo-aegis) → exit 2,
+  whatever approvals exist. An encrypted registry is read as no registry: rule h
+  is skipped and stderr says so once (it also says the cross-org check used only
+  this repository's remote). It is the same code, the same `registeredOwners()`
+  and the same registry states as the agent hook and the shim.
 - **`CROSS_ORG_PUSH`** — the URL's org is positively disjoint from the repo's
   own trust boundary → exit 2. Deterministic, offline, no TTY involved.
 - **`PUBLIC_PUSH_NEEDS_HUMAN`** — destination `publicFacing` (by the same
@@ -1064,9 +1076,9 @@ every agent and every human, with no repo-aegis involvement at all.
 | Egress hook is decision-only | `hook guard-egress` returns `allow`/`ask`/`deny`; it never emits `updatedInput`. Rewriting a command reconstructs the implicit-destination defect. |
 | `ask` degrades to `deny` | On a framework without an `ask` decision, `ask` becomes `deny` with a "have a human run or approve this" reason — never `allow`. |
 | An `ask` needs a layer beneath it | Rule g′: on a `gh` verb, where the enforcing framework reports the `gh` shim is not first on its `PATH`, `ask` becomes `deny` (`SHIM_UNREACHABLE_NEEDS_HUMAN`) — an unanswered `ask` with nothing below it is not a refusal. `git push` (pre-push hook) and `npm publish` (no shim) are out of scope; an unknown `PATH` changes nothing. §4b. |
-| Shape rules are unconditional; context rules fail open (except rule h) | Rules that need no registry/class/visibility (`PUSH_IMPLICIT_TARGET`, `EGRESS_AFTER_CD`, `EGRESS_UNGUARDED_CHAIN`, `PAYLOAD_MODE_DEPENDENT_PATH`, `EGRESS_ENV_OVERRIDE`, `EGRESS_AFTER_STATE_CHANGE`, `GH_PR_CREATE_IMPLICIT_TARGET`, `DOT_GH_WRITE_NEEDS_BOT`, `EGRESS_PTY_WRAPPER`) always apply. Rules that need context never block on missing context, but may still `ask`. Rule h is the exception: it refuses a write whose owner it cannot name, and an unreadable registry. |
+| Shape rules are unconditional; context rules fail open (except rule h) | Rules that need no registry/class/visibility (`PUSH_IMPLICIT_TARGET`, `EGRESS_AFTER_CD`, `EGRESS_UNGUARDED_CHAIN`, `PAYLOAD_MODE_DEPENDENT_PATH`, `EGRESS_ENV_OVERRIDE`, `EGRESS_AFTER_STATE_CHANGE`, `GH_PR_CREATE_IMPLICIT_TARGET`, `DOT_GH_WRITE_NEEDS_BOT`, `EGRESS_PTY_WRAPPER`) always apply. Rules that need context never block on missing context, but may still `ask`. Rule h is the exception: it refuses a write whose owner it cannot name, and asks or refuses on a registry that is unparseable or from a newer repo-aegis. |
 | Human-presence test | `isatty(2)` on stderr that no agent host or pty wrapper sits above, or `REPO_AEGIS_EGRESS_HUMAN=1` (rules g and h only). Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`: documented human-only; agents are instructed never to set it. `approve` and the owner adds do not honour the env escape and also require the process chain to reach a login session, `sshd`, a terminal emulator or an attached multiplexer. A speed bump, not proof of a person; the sandbox is the boundary. |
-| Rule h: only the registry decides | `owner ∈ personalOrgs ∪ engagements[*].githubOrgs`, or an exact `owner/repo` in `allowedUpstreams` on a PR / issue / comment verb. Not the destination cache, not a local `repo-aegis.class`, not an approval, not the authenticated `gh` login (the active account changes under other sessions; `doctor` reports unregistered logins instead). Missing registry or no owners: skipped, with a note. Unreadable or encrypted registry: refuse. |
+| Rule h: only the registry decides | `owner ∈ personalOrgs ∪ engagements[*].githubOrgs`, or an exact `owner/repo` in `allowedUpstreams` on a PR / issue / comment verb. Not the destination cache, not a local `repo-aegis.class`, not an approval, not the authenticated `gh` login (the active account changes under other sessions; `doctor` reports unregistered logins instead). Missing registry, no owners, or an encrypted registry (read as none): skipped, with a note. Unparseable or newer-schema registry: ask where the host has a prompt, else refuse (pre-push always refuses). |
 | Unresolved writes fail closed | A write whose owner cannot be named offline is treated as unregistered (D5). The deliberate departure from "context rules fail open". |
 | `*` approvals cover only `personalOrgs` and destination-less verbs | D7. Customer orgs need `<org>/*` or `<org>/<repo>`; upstreams need `<owner>/<repo>`. |
 | A non-interactive `gh pr create` names its target | D10. `GH_PR_CREATE_IMPLICIT_TARGET`, unconditional; `gh pr create` only. |

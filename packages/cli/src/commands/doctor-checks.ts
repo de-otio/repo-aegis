@@ -26,6 +26,7 @@ export type DoctorCheckCode =
   | "GH_CONFIG_REDIRECT"
   | "REGISTRY_AGENT_WRITABLE"
   | "REGISTRY_UNREADABLE"
+  | "REGISTRY_ENCRYPTED"
   // Owner identities (doc/plan-owner-identity.md §5.1, §12.2 Q4).
   | "OWNER_IDENTITY_UNMAPPED"
   // The taaad that mints App tokens must be root-owned (doc/plan-owner-identity.md A4, §13.3).

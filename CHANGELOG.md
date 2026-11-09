@@ -86,6 +86,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes.
 - `decideEgress`'s `ask` decision now lists every (intent, target) that asked, in `asked`.
 
+- **A pinned binary that is gone no longer locks you out, and no longer opens a hole.** When the
+  pinned node or CLI is missing (a Node upgrade, a removed install), the git hooks, the `gh` shim
+  and every Claude Code hook command used to refuse everything until `install hooks`,
+  `install shim` and `install claude-md` were re-run. A newer repo-aegis could also write a
+  registry an older pinned one could not read, and the older one then refused every push. Now each
+  pinned script records the version it was pinned for (`__ra_version=` next to the paths) and,
+  when the pin is gone, runs the `repo-aegis` on `PATH` **only if it is at least that new**,
+  with a warning naming both versions. An older one, a version that is not plain
+  `MAJOR.MINOR.PATCH` (a prerelease, `v0.14.0`, a crash), nothing on `PATH`, or a pin installed
+  without a version (an older install) is refused as before (exit 1 for the git hooks, exit 2 for
+  the shim and the Claude Code hooks). `PATH` is never consulted while the pin works.
+  `ENFORCEMENT_PIN_MISSING` stays a `doctor` failure. **The generated scripts and hook commands
+  changed, so existing installs show as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`,
+  `MANAGED_DROPIN_STALE`) until you re-run `repo-aegis install hooks`, `repo-aegis install shim` and
+  `repo-aegis install claude-md`.**
+- **An encrypted registry is treated as no registry.** Encryption at rest is deprecated and goes
+  away in 0.15.0. Until then an encrypted registry no longer refuses every publish or every
+  Write: the hooks, pre-push, the `gh` shim and the write hooks run as if there were none (rule h
+  is skipped, and says so), so a person who left the registry encrypted is not locked out.
+  Marker scanning (`_always` and engagement files) is unaffected. `doctor` reports
+  `REGISTRY_ENCRYPTED` as a warning; the rule h and identity mapping it switches off are named in
+  the message.
+- **An unreadable registry now asks at the agent hook.** A registry that does not parse or validate,
+  or was written by a newer repo-aegis, used to be refused outright by the Claude Code hook. It
+  now asks a person (hosts with no prompt still deny). The pre-push hook and the `gh` shim still
+  refuse, so a push stays refused until the registry can be read; the answer's text says so, and
+  says "upgrade repo-aegis, then re-run `install hooks` and `install claude-md`" for a newer
+  schema instead of "decrypt or repair". `doctor` reports a newer-schema registry as
+  `REGISTRY_UNREADABLE` with the upgrade fix.
+- **`registry encrypt` is person-only** (`REGISTRY_ENCRYPT_NEEDS_TTY`): an encrypted registry is read
+  as none, which collapses every engagement's org boundary to the repository's origin org and turns
+  rule h off, so an agent must not be able to do it. While the registry is encrypted the write hooks
+  and the agent's egress hook (allows included) show the person a one-line notice as the JSON
+  `systemMessage`; the egress hook also shows a notice when it ran through the pin fallback.
+  `approve` now has a sentence of its own for an encrypted registry ("rule h is off while the
+  registry is encrypted") instead of "encrypted or damaged".
+- The write hooks (`hook check-write`, `hook scan-after-write`) report a registry from a newer
+  repo-aegis as `REGISTRY_ERROR` with its own text ("a person upgrades repo-aegis and runs
+  `repo-aegis install claude-md`"). Both now use fixed text for an unparseable registry: the
+  parse error, which can name orgs, is no longer echoed by `scan-after-write`.
+
 ### Removed
 
 - **The Action's `registry` input.** It only exported `REPO_AEGIS_REGISTRY`, but `audit` and
@@ -105,6 +146,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `doc/configuration.md` lists `REPO_AEGIS_MARKERS_DIR`, `REPO_AEGIS_VISIBILITY_LOOKUP` and
   `REPO_AEGIS_EGRESS_HUMAN`. A comment in `taaad-pin.ts` said an untrusted taaad refuses App tokens;
   it is a warning.
+
+### Internal
+
+- One non-throwing core loader, `loadRegistryState`, returns the registry's state (`loaded`,
+  `missing`, `encrypted`, `unparseable`, `newer-schema`); the hook, the shim's egress check,
+  pre-push, the `gh` identity layer, the write hooks and `doctor` use it instead of each
+  re-deriving the state from exceptions. A registry from a newer repo-aegis now throws
+  `RegistrySchemaTooNewError`, still a `RegistryParseError` with the same message.
 
 
 ## [0.13.1] - 2026-11-09

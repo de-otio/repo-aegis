@@ -256,9 +256,13 @@ describe("rendered hook scripts — T1: the pin is in, the bare name is out", ()
       assert.ok(text.includes('"$__ra_node" "$__ra_cli"'), "calls do not go through the pin");
     });
 
-    it(`${name} has no command-position \`repo-aegis\` and no \`command -v repo-aegis\``, () => {
+    it(`${name} has no command-position \`repo-aegis\`; \`command -v repo-aegis\` appears once, only inside the pin-gone fallback`, () => {
       const code = codeLines(renderHookScript(name, pin)).join("\n");
-      assert.ok(!/command -v repo-aegis/.test(code), "still resolves repo-aegis by name");
+      assert.equal(code.split("command -v repo-aegis").length - 1, 1, "resolves repo-aegis by name outside the fallback");
+      assert.ok(
+        code.indexOf("command -v repo-aegis") > code.indexOf('if [ -n "$__ra_missing" ]; then'),
+        "the PATH lookup runs before the pin is known to be unusable",
+      );
       // A command position: line start, after `!`, `then`, `;`, `&&`, `||`, `$(` or a backtick.
       assert.ok(
         !/(^|[;&|(!`]|\bthen\b|\bdo\b|\$\()\s*repo-aegis(\s|$)/m.test(code),
@@ -351,5 +355,225 @@ describe("rendered hook scripts — T12: quoting", () => {
         assert.throws(() => renderHookScript(name, { node: "/opt/node", cli: bad }), /newline|NUL/i);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The PATH fallback (P1-D): a gone pin is replaced only by a repo-aegis on PATH that is at least as new
+// ---------------------------------------------------------------------------
+
+interface FallbackRun {
+  status: number | null;
+  stderr: string;
+  /** What the PATH stub was asked to do (one line per call that was not `--version`). */
+  argv: string[];
+  /** Whether the stub ran at all, `--version` included. */
+  stubCalled: boolean;
+}
+
+/**
+ * Runs the rendered `name` script under bash. The pin points at files that do not exist (unless `cli` is given),
+ * and PATH holds a stub `repo-aegis` (when `stubVersion` is not null) that prints `stubVersion` for `--version` and
+ * otherwise logs its argv and exits 0.
+ */
+function runFallback(
+  label: string,
+  name: HookName,
+  pin: EnforcementPin,
+  stubVersion: string | null,
+  stdin = `refs/heads/main ${LOCAL_SHA} refs/heads/main ${ZERO}\n`,
+  /** The exit status of `stub --version` (the version is still printed first). */
+  versionExit = 0,
+): FallbackRun {
+  const dir = join(tmp, `fb-${label}`);
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  const log = join(dir, "argv.log");
+  const called = join(dir, "stub-called");
+  if (stubVersion !== null) {
+    const stub = join(bin, "repo-aegis");
+    writeFileSync(
+      stub,
+      `#!/bin/sh\n: > "$STUB_CALLED"\nif [ "$1" = "--version" ]; then printf '%s\\n' "$VER"; exit "$VER_EXIT"; fi\necho "$*" >> "$ARGV_LOG"\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    chmodSync(stub, 0o755);
+  }
+  const script = join(dir, name);
+  writeFileSync(script, renderHookScript(name, pin), { mode: 0o755 });
+  chmodSync(script, 0o755);
+  const r = spawnSync("bash", [script, "origin", "git@github.com:acme/svc.git"], {
+    cwd: dir,
+    input: stdin,
+    encoding: "utf8",
+    env: {
+      PATH: `${bin}:/usr/bin:/bin`,
+      HOME: dir,
+      ARGV_LOG: log,
+      STUB_CALLED: called,
+      VER: stubVersion ?? "",
+      VER_EXIT: String(versionExit),
+      REPO_AEGIS_HOME: join(dir, "home"),
+    },
+  });
+  let argv: string[] = [];
+  try {
+    argv = readFileSync(log, "utf8").split("\n").filter(l => l !== "");
+  } catch {
+    /* no call recorded */
+  }
+  let stubCalled = false;
+  try {
+    stubCalled = readFileSync(called, "utf8") === "";
+  } catch {
+    /* never ran */
+  }
+  return { status: r.status, stderr: r.stderr, argv, stubCalled };
+}
+
+const gonePin = (label: string): EnforcementPin => ({
+  node: join(tmp, `fb-${label}`, "no-node"),
+  cli: join(tmp, `fb-${label}`, "no-cli.js"),
+  version: "0.14.0",
+});
+
+describe("pre-push script: pin gone, PATH fallback", () => {
+  for (const have of ["0.14.0", "0.14.1", "1.0.0", "0.100.0"]) {
+    it(`a PATH repo-aegis ${have} (not older than the pinned 0.14.0) runs the push check, with a WARNING naming both`, () => {
+      const label = `ok-${have}`;
+      const r = runFallback(label, "pre-push", gonePin(label), have);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.argv.length, 1, JSON.stringify(r.argv));
+      assert.match(r.argv[0]!, /^check --push-ref refs\/heads\/main --remote origin --remote-url git@github\.com:acme\/svc\.git$/);
+      assert.match(r.stderr, /repo-aegis: WARNING: the pinned enforcement binary is missing or not usable \(.*no-node.*no-cli\.js\)/);
+      assert.ok(r.stderr.includes(`(${have}, pinned 0.14.0) instead`), r.stderr);
+      assert.ok(r.stderr.includes("/bin/repo-aegis"), "names the path it ran");
+      assert.ok(r.stderr.includes("Re-pin it by running: repo-aegis install hooks"), r.stderr);
+    });
+  }
+
+  it("an existing-ref push goes through the fallback too (check --range)", () => {
+    const r = runFallback("range", "pre-push", gonePin("range"), "0.14.0", `refs/heads/main ${LOCAL_SHA} refs/heads/main ${REMOTE_SHA}\n`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.argv[0]!, /^check --range 2{40}\.\.1{40} --remote-url /);
+  });
+
+  for (const have of ["0.13.9", "0.9.0"]) {
+    it(`an older PATH repo-aegis ${have} is refused (exit 1): both versions named, no check run`, () => {
+      const label = `older-${have}`;
+      const r = runFallback(label, "pre-push", gonePin(label), have);
+      assert.equal(r.status, 1, r.stderr);
+      assert.ok(r.stderr.includes(`is ${have}, older than the pinned 0.14.0`), r.stderr);
+      assert.ok(r.stderr.includes("Install 0.14.0 or later, then run: repo-aegis install hooks"), r.stderr);
+      assert.deepEqual(r.argv, [], "the stub never got `check`");
+    });
+  }
+
+  it("no repo-aegis on PATH is refused (exit 1) and says so", () => {
+    const r = runFallback("none", "pre-push", gonePin("none"), null);
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes("no repo-aegis is on PATH"), r.stderr);
+    assert.ok(r.stderr.includes("Re-pin it by running: repo-aegis install hooks"), r.stderr);
+    assert.ok(!r.stderr.includes("WARNING"));
+  });
+
+  for (const [i, version] of ["0.14.0-rc.1", "v0.14.0", "0.14", "", "1234567890.0.0", "9.9.9-secret-token"].entries()) {
+    it(`a PATH repo-aegis that prints ${JSON.stringify(version)} is refused as not a plain version, and never echoed`, () => {
+      const label = `unparsable-${i}`;
+      const r = runFallback(label, "pre-push", gonePin(label), version);
+      assert.equal(r.status, 1, r.stderr);
+      assert.ok(r.stderr.includes("did not report a plain MAJOR.MINOR.PATCH version (pinned 0.14.0)"), r.stderr);
+      assert.ok(!r.stderr.includes("secret-token"), "the --version output must not be echoed");
+      assert.deepEqual(r.argv, []);
+    });
+  }
+
+  it("a pin without a recorded version never falls back, however new the PATH repo-aegis is", () => {
+    const { version: _dropped, ...noVersion } = gonePin("noversion");
+    const r = runFallback("noversion", "pre-push", noVersion, "99.0.0");
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes("installed without a recorded version"), r.stderr);
+    assert.deepEqual(r.argv, []);
+    assert.equal(r.stubCalled, false, "no version, so PATH is not even asked");
+  });
+
+  it("a valid pin never looks at PATH: the stub is not called, not even with --version", () => {
+    const dir = join(tmp, "fb-valid");
+    mkdirSync(dir, { recursive: true });
+    const cli = join(dir, "fake-cli.cjs");
+    writeFakeCli(cli);
+    const r = runFallback("valid", "pre-push", { node: process.execPath, cli, version: "0.14.0" }, "99.0.0");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stubCalled, false, "the PATH stub ran");
+    assert.ok(!r.stderr.includes("WARNING"), r.stderr);
+  });
+
+  it("a PATH repo-aegis that prints a valid, new-enough version but exits non-zero from --version is refused as not a version", () => {
+    const r = runFallback("version-exit", "pre-push", gonePin("version-exit"), "9.9.9", undefined, 1);
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes("did not report a plain MAJOR.MINOR.PATCH version (pinned 0.14.0)"), r.stderr);
+    assert.deepEqual(r.argv, [], "the stub never got `check`");
+  });
+
+  it("only the first line of --version counts: a valid first line passes, a blank first line does not", () => {
+    const ok = runFallback("first-line-ok", "pre-push", gonePin("first-line-ok"), "0.14.0\nbuilt by someone");
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.ok(!ok.stderr.includes("built by someone"), "the rest of the output is never echoed");
+    const blank = runFallback("first-line-blank", "pre-push", gonePin("first-line-blank"), "\n0.14.0");
+    assert.equal(blank.status, 1, blank.stderr);
+  });
+
+  it("the fallback does not eat git's ref list: --version runs with stdin closed", () => {
+    const stdin = `refs/heads/a ${LOCAL_SHA} refs/heads/a ${ZERO}\nrefs/heads/b ${LOCAL_SHA} refs/heads/b ${ZERO}\n`;
+    const r = runFallback("stdin", "pre-push", gonePin("stdin"), "0.14.0", stdin);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.argv.length, 2, "both refs were checked");
+  });
+
+  it("a PATH repo-aegis that is not an absolute path (a relative PATH entry) is not used", () => {
+    const dir = join(tmp, "fb-relative");
+    mkdirSync(join(dir, "rel"), { recursive: true });
+    const stub = join(dir, "rel", "repo-aegis");
+    writeFileSync(stub, "#!/bin/sh\necho 99.0.0\n", { mode: 0o755 });
+    chmodSync(stub, 0o755);
+    const script = join(dir, "pre-push");
+    writeFileSync(script, renderHookScript("pre-push", { node: join(dir, "n"), cli: join(dir, "c"), version: "0.14.0" }), { mode: 0o755 });
+    const r = spawnSync("bash", [script], {
+      cwd: dir,
+      input: `refs/heads/main ${LOCAL_SHA} refs/heads/main ${ZERO}\n`,
+      encoding: "utf8",
+      env: { PATH: "rel:/usr/bin:/bin", HOME: dir },
+    });
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes("no repo-aegis is on PATH"), r.stderr);
+  });
+});
+
+describe("pre-commit script: pin gone, PATH fallback", () => {
+  it("runs `check --staged` on a PATH repo-aegis that is at least as new, with a WARNING", () => {
+    const r = runFallback("pc-ok", "pre-commit", gonePin("pc-ok"), "0.14.2", "");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(r.argv, ["check --staged"]);
+    assert.ok(r.stderr.includes("WARNING"), r.stderr);
+  });
+
+  it("refuses (exit 1) on an older one, and the stub never got check", () => {
+    const r = runFallback("pc-older", "pre-commit", gonePin("pc-older"), "0.13.0", "");
+    assert.equal(r.status, 1, r.stderr);
+    assert.ok(r.stderr.includes("pre-commit blocked"), r.stderr);
+    assert.deepEqual(r.argv, []);
+  });
+
+  it("a hit on the fallback blocks the commit (its exit status is not swallowed)", () => {
+    const dir = join(tmp, "fb-pc-hit");
+    const bin = join(dir, "bin");
+    mkdirSync(bin, { recursive: true });
+    const stub = join(bin, "repo-aegis");
+    writeFileSync(stub, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 0.14.0; exit 0; fi\nexit 1\n`, { mode: 0o755 });
+    chmodSync(stub, 0o755);
+    const script = join(dir, "pre-commit");
+    writeFileSync(script, renderHookScript("pre-commit", gonePin("pc-hit")), { mode: 0o755 });
+    const r = spawnSync("bash", [script], { cwd: dir, encoding: "utf8", env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir } });
+    assert.equal(r.status, 1, r.stderr);
   });
 });

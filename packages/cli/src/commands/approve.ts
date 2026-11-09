@@ -18,10 +18,9 @@ import {
   parseApprovalTarget,
   parseTtl,
   revokeApprovals,
-  loadRegistry,
+  loadRegistryState,
   registeredOwners,
   safeDestination,
-  RegistryNotFoundError,
   DEFAULT_APPROVAL_TTL_MS,
   MAX_APPROVAL_TTL_MS,
   type ListedApproval,
@@ -62,13 +61,10 @@ function describe(a: EgressApproval | ListedApproval, now: Date): string {
 
 /** The login of `owner`'s mapped `person` identity (a `gh-login`), or undefined: no registry, no mapping, or an app. */
 function mappedPersonLogin(owner: string, registryPath: string | undefined): string | undefined {
-  try {
-    const registry = registryPath === undefined ? loadRegistry() : loadRegistry(registryPath);
-    const person = registry.identityMap?.get(owner.toLowerCase())?.person;
-    return person !== undefined && person.kind === "gh-login" ? person.login : undefined;
-  } catch {
-    return undefined;
-  }
+  const load = loadRegistryState(registryPath);
+  if (load.state !== "loaded") return undefined;
+  const person = load.registry.identityMap?.get(owner.toLowerCase())?.person;
+  return person !== undefined && person.kind === "gh-login" ? person.login : undefined;
 }
 
 /**
@@ -78,13 +74,9 @@ function mappedPersonLogin(owner: string, registryPath: string | undefined): str
  * `safeDestination()` (the typed name is echoed into a terminal and pasted).
  */
 function mintWarnings(target: { org: string; repo: string }, registryPath: string | undefined): string[] {
-  let registry: Registry | null = null;
-  let unreadable = false;
-  try {
-    registry = registryPath === undefined ? loadRegistry() : loadRegistry(registryPath);
-  } catch (err) {
-    unreadable = !(err instanceof RegistryNotFoundError);
-  }
+  const load = loadRegistryState(registryPath);
+  const registry: Registry | null = load.state === "loaded" ? load.registry : null;
+  const unreadable = load.state === "unparseable" || load.state === "newer-schema";
   const owners = registry === null ? new Set<string>() : registeredOwners(registry);
 
   if (target.org === "*") {
@@ -93,7 +85,9 @@ function mintWarnings(target: { org: string; repo: string }, registryPath: strin
         "(npm publish), only. It does not cover customer orgs, allowed upstreams or unregistered owners: " +
         "approve <org>/* or <org>/<repo> for those.",
     ];
-    if (unreadable) {
+    if (load.state === "encrypted") {
+      notes.push("The registry is encrypted, so repo-aegis cannot say which owners '*' covers; rule h is off while it is encrypted.");
+    } else if (unreadable) {
       notes.push("The registry could not be read, so repo-aegis cannot say which owners '*' covers until it is repaired.");
     } else if ((registry?.personalOrgs ?? []).length === 0) {
       notes.push(
@@ -106,10 +100,20 @@ function mintWarnings(target: { org: string; repo: string }, registryPath: strin
 
   const safe = safeDestination(target.org, target.repo);
   if (safe === null) return [];
+  if (load.state === "encrypted") {
+    return [
+      "Rule h is off while the registry is encrypted (repo-aegis runs as if there were none), so it refuses nothing " +
+        "and this approval changes nothing about it. A person runs repo-aegis registry decrypt --identity <key> to turn rule h back on.",
+    ];
+  }
   if (unreadable) {
     return [
-      "The registry could not be read (it is encrypted or damaged), so rule h (UNREGISTERED_OWNER_EGRESS) " +
-        "refuses every non-interactive publish until a person repairs or decrypts it. This approval will not help before then.",
+      (load.state === "newer-schema"
+        ? "The registry was written by a newer repo-aegis than this one"
+        : "The registry does not parse or validate") +
+        ", so rule h (UNREGISTERED_OWNER_EGRESS) asks or refuses every non-interactive publish until a person " +
+        (load.state === "newer-schema" ? "upgrades repo-aegis" : "repairs it") +
+        ". This approval will not help before then.",
     ];
   }
   const exactUpstream =

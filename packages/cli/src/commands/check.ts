@@ -65,9 +65,9 @@ import {
   findUncoveringStarApproval,
   uncoveredStarSentence,
   type ApprovalScope,
-  loadRegistry,
+  loadRegistryState,
+  registryUnreadable,
   appendAuditRecord,
-  RegistryNotFoundError,
   type Registry,
   type RepoVisibility,
   CustomerCoupledNoEngagementError,
@@ -391,26 +391,28 @@ function refLabel(opts: CheckOptions): string {
 const EMPTY_REGISTRY: Registry = { engagements: [], alwaysBlock: [] };
 
 /**
- * Load the registry, and say HOW (rule h, issue #151, decision D4). The same
- * three-way state the agent hook and the shim use: only
- * {@link RegistryNotFoundError} is `missing`; an encrypted, unparseable or
- * otherwise unreadable registry is `unreadable` (rule h refuses), and the
- * ambiguity falls on the side of refusing.
+ * Load the registry, and say HOW (rule h, issue #151, decision D4), with the one
+ * core loader every layer shares. `missing` and `encrypted` both run as if there
+ * were no registry (an empty one, so the cross-org check still has the
+ * remote-origin fallback inside `computeTrustBoundary`); `unparseable` and
+ * `newer-schema` are unreadable: rule h refuses.
  *
  * For the trust-boundary comparison, `registry: null` means "skip the
  * cross-org check": a guardrail must not block on its own inability to
  * determine context (the spurious `CROSS_ORG_WRITE` flake,
- * doc/bugs/repo-aegis-check-write-flake.md). A *missing* registry is the one
- * error that is not ambiguous — there is simply no registry on this machine —
- * so it degrades to an empty one, which still lets the remote-origin fallback
- * inside `computeTrustBoundary` supply the repo's own org.
+ * doc/bugs/repo-aegis-check-write-flake.md).
  */
-function loadRegistryState(): { registry: Registry | null; state: RegistryState } {
-  try {
-    return { registry: loadRegistry(), state: "loaded" };
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) return { registry: EMPTY_REGISTRY, state: "missing" };
-    return { registry: null, state: "unreadable" };
+function loadRegistryForPush(): { registry: Registry | null; state: RegistryState } {
+  const load = loadRegistryState();
+  switch (load.state) {
+    case "loaded":
+      return { registry: load.registry, state: "loaded" };
+    case "missing":
+    case "encrypted":
+      return { registry: EMPTY_REGISTRY, state: load.state };
+    case "unparseable":
+    case "newer-schema":
+      return { registry: null, state: load.state };
   }
 }
 
@@ -533,7 +535,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   if (target.kind === "non-github") return null;
 
   const ref = refLabel(opts);
-  const loaded = loadRegistryState();
+  const loaded = loadRegistryForPush();
   const humanPresent = currentHumanPresent();
   const ruleH = ruleHStatus(loaded.state, loaded.registry ?? EMPTY_REGISTRY);
 
@@ -549,8 +551,8 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
         ...(target.kind === "unresolved" && { unresolvedWhy: target.why }),
       } as const);
     let refused = false;
-    if (loaded.state === "unreadable") {
-      refused = true; // no owner can be confirmed, so none is admitted (D4, revised)
+    if (registryUnreadable(loaded.state)) {
+      refused = true; // no owner can be confirmed, so none is admitted (D4, revised); a hook cannot ask, so it refuses
     } else if (loaded.state === "loaded" && loaded.registry !== null) {
       const owners = registeredOwners(loaded.registry);
       refused = owners.size > 0 && !ownerAdmitted(candidate, { verb: "git-push" }, owners, loaded.registry);
@@ -569,9 +571,16 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
         opts,
       );
     }
-    // D4: say when rule h did NOT judge, so nobody believes an owner check happened.
-    const skipNote = ruleHSkipNote(ruleH);
+    // D4: say when rule h did NOT judge, so nobody believes an owner check happened. (Encrypted has its own line below.)
+    const skipNote = loaded.state === "encrypted" ? null : ruleHSkipNote(ruleH);
     if (skipNote !== null) process.stderr.write(`repo-aegis: ${skipNote}\n`);
+  }
+  // An encrypted registry is treated as none: say so once per run, with what that switched off and the way back.
+  if (loaded.state === "encrypted") {
+    process.stderr.write(
+      "repo-aegis: registry is encrypted, so rule h was skipped and the cross-org check used only this repository's " +
+        "remote; a person runs `repo-aegis registry decrypt --identity <key>`\n",
+    );
   }
 
   if (target.kind === "unresolved") {

@@ -45,8 +45,10 @@ const preCommitScript = (pin: EnforcementPin): string => `\
 #
 # Runs the repo-aegis CLI pinned at install time, by absolute path, never
 # by name: a \`repo-aegis\` or \`node\` found first on PATH must not decide
-# what enforces. Fail CLOSED if the pinned files are gone (a moved or
-# upgraded Node, a removed install): re-run \`repo-aegis install hooks\`.
+# what enforces. If the pinned files are gone (a moved or upgraded Node, a
+# removed install) it falls back to the repo-aegis on PATH only when that is
+# at least as new as the pinned version, with a warning; otherwise it fails
+# CLOSED: re-run \`repo-aegis install hooks\`.
 set -euo pipefail
 
 ${pinAssignments(pin)}
@@ -54,7 +56,13 @@ ${pinGuard({ blocked: "pre-commit blocked", fix: "repo-aegis install hooks", exi
 
 # Never pass --verbose: hook output flows into the agent's tool result
 # and must not echo literal markers.
-if ! "$__ra_node" "$__ra_cli" check --staged; then
+__ra_rc=0
+if [ -n "$__ra_fb" ]; then
+  "$__ra_fb" check --staged || __ra_rc=1
+else
+  "$__ra_node" "$__ra_cli" check --staged || __ra_rc=1
+fi
+if [ "$__ra_rc" -ne 0 ]; then
   # A repo-aegis hit blocks the commit outright. Do NOT fall through to
   # the chaining below: running the repo's own pre-commit afterward and
   # letting IT decide the exit code would let an exit-0 chained hook
@@ -142,8 +150,9 @@ const prePushScript = (pin: EnforcementPin): string => `\
 # in \`repo-aegis doctor\` / \`status\`: re-run \`repo-aegis install hooks\`.
 #
 # Runs the repo-aegis CLI pinned at install time, by absolute path, never
-# by name (see the pre-commit script). Fail CLOSED if the pinned files are
-# gone: re-run \`repo-aegis install hooks\`.
+# by name (see the pre-commit script, which also says when it falls back to
+# PATH). Fail CLOSED if the pinned files are gone and no repo-aegis at least as
+# new is on PATH: re-run \`repo-aegis install hooks\`.
 set -euo pipefail
 
 ${pinAssignments(pin)}
@@ -155,15 +164,25 @@ zero="0000000000000000000000000000000000000000"
 remote_name="\${1:-origin}"
 remote_url="\${2:-}"
 
+# The pinned CLI, or the repo-aegis on PATH when the pin is gone and that one
+# is at least as new (the guard above decided; it refused otherwise).
+__repo_aegis_run() {
+  if [ -n "$__ra_fb" ]; then
+    "$__ra_fb" "$@"
+  else
+    "$__ra_node" "$__ra_cli" "$@"
+  fi
+}
+
 # Appends --remote-url only when git actually gave us one. An explicit
 # if/else rather than an array: bash 3.2 (macOS's stock /bin/bash) treats
 # "\${arr[@]}" on an EMPTY array as an unbound variable under \`set -u\`, so the
 # obvious array form would abort the hook on every push that has no \$2.
 __repo_aegis_check() {
   if [ -n "$remote_url" ]; then
-    "$__ra_node" "$__ra_cli" "$@" --remote-url "$remote_url"
+    __repo_aegis_run "$@" --remote-url "$remote_url"
   else
-    "$__ra_node" "$__ra_cli" "$@"
+    __repo_aegis_run "$@"
   fi
 }
 

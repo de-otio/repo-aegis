@@ -10,7 +10,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { managedHookCommand, type EnforcementPin } from "@de-otio/repo-aegis-core";
@@ -362,5 +362,51 @@ describe("T25: the exit-2 message names the literal `sudo rm` path (D8.10)", run
     const r = runCommand(managedHookCommand(pin, "hook first-touch", { uid: String(realUid), dropinPath: file }));
     assert.equal(r.status, 2);
     assert.ok(r.stderr.includes(`sudo rm '/opt/it'\\''s here/50-repo-aegis-1.json'`), r.stderr);
+  });
+});
+
+describe("P1-D: the managed hook command, pin gone, PATH fallback", runnable, () => {
+  const file = managedPaths("linux", String(realUid))!.file;
+
+  /** A PATH holding a stub `repo-aegis` that prints `version` for --version and otherwise logs its argv. */
+  function stubOnPath(label: string, version: string): { path: string; log: string } {
+    const dir = join(tmp, `p1d-${label}-${n++}`);
+    const bin = join(dir, "bin");
+    mkdirSync(bin, { recursive: true });
+    const log = join(dir, "argv.log");
+    writeFileSync(join(bin, "repo-aegis"), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo ${version}; exit 0; fi\necho "$*" >> "${log}"\ncat >/dev/null\nexit 0\n`, {
+      mode: 0o755,
+    });
+    chmodSync(join(bin, "repo-aegis"), 0o755);
+    return { path: `${bin}:/usr/bin:/bin`, log };
+  }
+  const gonePin = (): EnforcementPin => ({ node: process.execPath, cli: join(tmp, "p1d-gone", "dist", "index.js"), version: "0.14.0" });
+
+  it("a PATH repo-aegis at least as new as the pinned one runs the hook, after a WARNING that also names the sudo rm line", () => {
+    const stub = stubOnPath("ok", "0.14.2");
+    const r = runCommand(managedHookCommand(gonePin(), "hook guard-egress --agent claude", { uid: String(realUid), dropinPath: file }), { PATH: stub.path });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(existsSync(stub.log) && readFileSync(stub.log, "utf8"), "hook guard-egress --agent claude\n");
+    assert.match(r.stderr, /repo-aegis: WARNING: the pinned enforcement binary is missing or not usable/);
+    assert.ok(r.stderr.includes("(0.14.2, pinned 0.14.0) instead"), r.stderr);
+    assert.ok(r.stderr.includes(`   or remove this managed hook: sudo rm '${file}'`), r.stderr);
+  });
+
+  it("an older PATH repo-aegis is refused with exit 2, naming both versions and both ways out", () => {
+    const stub = stubOnPath("older", "0.13.9");
+    const r = runCommand(managedHookCommand(gonePin(), "hook guard-egress --agent claude", { uid: String(realUid), dropinPath: file }), { PATH: stub.path });
+    assert.equal(r.status, 2, r.stderr);
+    assert.ok(r.stderr.includes("is 0.13.9, older than the pinned 0.14.0"), r.stderr);
+    assert.ok(r.stderr.includes("repo-aegis install claude-md   or remove this managed hook: sudo rm"), r.stderr);
+    assert.ok(r.stderr.includes(`sudo rm '${file}'`), r.stderr);
+    assert.equal(existsSync(stub.log), false, "the stub never got the hook");
+  });
+
+  it("as a different uid it still ignores a gone pin and never asks PATH (the uid guard comes first)", () => {
+    const stub = stubOnPath("other-uid", "0.14.2");
+    const r = runCommand(managedHookCommand(gonePin(), "hook guard-egress", { uid: String(realUid + 1), dropinPath: file }), { PATH: stub.path });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, "");
+    assert.equal(existsSync(stub.log), false);
   });
 });

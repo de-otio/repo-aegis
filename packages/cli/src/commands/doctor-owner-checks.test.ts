@@ -399,25 +399,46 @@ describe("parseAuthStatusText", () => {
 // ---------------------------------------------------------------------------
 
 describe("registryStateChecks", () => {
-  it("unreadable is a FAILURE (severity absent == fail), with a person-only fix when encrypted", () => {
-    const [enc] = registryStateChecks("unreadable", null, true);
-    assert.equal(enc!.code, "REGISTRY_UNREADABLE");
-    assert.equal(enc!.ok, false);
-    assert.equal(enc!.severity, undefined);
-    assert.match(enc!.fix ?? "", /registry decrypt/);
-    assert.ok((enc!.fix ?? "").includes(PERSON_RUNS_THIS));
-    const [bad] = registryStateChecks("unreadable", null, false);
+  it("unparseable is a FAILURE (severity absent == fail) with a repair fix, and no decrypt advice", () => {
+    const [bad] = registryStateChecks({ state: "unparseable" });
+    assert.equal(bad!.code, "REGISTRY_UNREADABLE");
     assert.equal(bad!.ok, false);
-    assert.doesNotMatch(bad!.fix ?? "", /decrypt/);
+    assert.equal(bad!.severity, undefined);
+    assert.match(bad!.detail, /does not parse or validate/);
+    assert.match(bad!.fix ?? "", /repair or restore the registry file/);
+    assert.doesNotMatch(`${bad!.detail} ${bad!.fix ?? ""}`, /decrypt|encrypt/);
+  });
+
+  it("newer-schema is a FAILURE with the upgrade fix naming the schemaVersion this build reads", () => {
+    const [c] = registryStateChecks({ state: "newer-schema", found: 99, max: 3 });
+    assert.equal(c!.code, "REGISTRY_UNREADABLE");
+    assert.equal(c!.ok, false);
+    assert.equal(c!.severity, undefined);
+    assert.match(c!.detail, /written by a newer repo-aegis/);
+    assert.equal(
+      c!.fix,
+      "upgrade repo-aegis (this one reads schemaVersion up to 3), then run `repo-aegis install hooks` and `repo-aegis install claude-md`",
+    );
+  });
+
+  it("encrypted is REGISTRY_ENCRYPTED, a WARNING (not a failure), with a person-only decrypt fix and the 0.15.0 removal", () => {
+    const [enc] = registryStateChecks({ state: "encrypted" });
+    assert.equal(enc!.code, "REGISTRY_ENCRYPTED");
+    assert.equal(enc!.ok, false);
+    assert.equal(enc!.severity, "warn");
+    assert.match(enc!.detail, /encrypted at rest, so repo-aegis runs as if there were none: rule h and the GitHub identity mapping are off/);
+    assert.match(enc!.detail, /removed in 0\.15\.0/);
+    assert.match(enc!.fix ?? "", /registry decrypt --identity <your age identity file>/);
+    assert.ok((enc!.fix ?? "").includes(PERSON_RUNS_THIS));
   });
 
   it("missing is not a finding; loaded with owners is not a finding", () => {
-    assert.deepEqual(registryStateChecks("missing", null, false), []);
-    assert.deepEqual(registryStateChecks("loaded", registry(["alice"]), false), []);
+    assert.deepEqual(registryStateChecks({ state: "missing" }), []);
+    assert.deepEqual(registryStateChecks({ state: "loaded", registry: registry(["alice"]) }), []);
   });
 
   it("a loaded registry with no owners is OWNERS_UNDECLARED (a failure) with a person-only fix", () => {
-    const [c] = registryStateChecks("loaded", registry([], []), false);
+    const [c] = registryStateChecks({ state: "loaded", registry: registry([], []) });
     assert.equal(c!.code, "OWNERS_UNDECLARED");
     assert.equal(c!.ok, false);
     assert.equal(c!.severity, undefined);
@@ -637,15 +658,27 @@ describe("doctor — owner checks end to end", () => {
     assert.equal(stub.calls(), "");
   });
 
-  it("an encrypted-at-rest registry (only <registry>.age exists) is REGISTRY_UNREADABLE with the decrypt fix", () => {
+  it("a registry from a newer repo-aegis (schemaVersion 99) is REGISTRY_UNREADABLE with the upgrade fix and exits 1", () => {
+    const stub = makeStub([]);
+    const w = makeWorld("newer-registry", "schemaVersion: 99\nengagements: []\n", stub.path);
+    satisfyMachineChecks(w);
+    const r = runDoctor(docOpts(w), w.env);
+    assert.equal(r.exitCode, 1);
+    assert.match(r.stdout, /FAIL REGISTRY_UNREADABLE/);
+    assert.match(r.stdout, /fix: upgrade repo-aegis \(this one reads schemaVersion up to 3\)/);
+    assert.equal(stub.calls(), "");
+  });
+
+  it("an encrypted-at-rest registry (only <registry>.age exists) is a REGISTRY_ENCRYPTED warning, not a failure", () => {
     const stub = makeStub([]);
     const w = makeWorld("enc-registry", null, stub.path);
     satisfyMachineChecks(w);
     writeFileSync(`${w.registryFile}.age`, "age-encryption.org/v1\n");
     const r = runDoctor(docOpts(w), w.env);
-    assert.equal(r.exitCode, 1);
-    assert.match(r.stdout, /FAIL REGISTRY_UNREADABLE/);
+    assert.match(r.stdout, /WARN REGISTRY_ENCRYPTED/);
+    assert.doesNotMatch(r.stdout, /FAIL REGISTRY_/);
     assert.match(r.stdout, /fix: repo-aegis registry decrypt/);
+    assert.equal(r.exitCode, undefined, r.stdout);
   });
 
   it("a registry with no owners is OWNERS_UNDECLARED and exits 1", () => {

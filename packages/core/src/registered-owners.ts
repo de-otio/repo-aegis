@@ -15,6 +15,7 @@
 // the pre-push hook and `doctor` all call it, so they cannot disagree about
 // which owners are ours.
 import type { EgressVerb } from "./egress-intent.js";
+import type { RegistryState } from "./egress-policy.js";
 import type { Registry } from "./registry.js";
 
 /**
@@ -45,16 +46,18 @@ export function registeredOwners(registry: Registry): Set<string> {
 }
 
 /** Whether rule h is judging, and if not, why not (D4: every skip says which state applied). */
-export type RuleHStatus = "applied" | "skipped:missing" | "skipped:no-owners";
+export type RuleHStatus = "applied" | "skipped:missing" | "skipped:encrypted" | "skipped:no-owners";
 
 /**
- * Rule h's standing for a registry state. `unreadable` is `applied`: it
- * refuses. Layers use this to say so when rule h did NOT run, so an operator
+ * Rule h's standing for a registry state. `unparseable` and `newer-schema` are
+ * `applied`: they ask or refuse. `encrypted` is skipped: repo-aegis runs as if
+ * there were no registry. Layers use this to say so when rule h did NOT run, so an operator
  * is never left believing an owner check happened when there was nothing to
  * check against. Carries no registry contents.
  */
-export function ruleHStatus(state: "loaded" | "missing" | "unreadable", registry: Registry): RuleHStatus {
+export function ruleHStatus(state: RegistryState, registry: Registry): RuleHStatus {
   if (state === "missing") return "skipped:missing";
+  if (state === "encrypted") return "skipped:encrypted";
   if (state === "loaded" && registeredOwners(registry).size === 0) return "skipped:no-owners";
   return "applied";
 }
@@ -64,6 +67,11 @@ export function ruleHSkipNote(status: RuleHStatus): string | null {
   switch (status) {
     case "skipped:missing":
       return "rule h (unregistered-owner check) skipped: no registry file exists";
+    case "skipped:encrypted":
+      return (
+        "rule h (unregistered-owner check) skipped: the registry is encrypted, so repo-aegis runs as if there " +
+        "were none; a person runs `repo-aegis registry decrypt --identity <key>`"
+      );
     case "skipped:no-owners":
       return "rule h (unregistered-owner check) skipped: the registry declares no owners";
     case "applied":

@@ -39,13 +39,14 @@ export type { AuditRecord } from "./audit-log.js";
 // ---- registry ------------------------------------------------------------
 export {
   loadRegistry,
+  loadRegistryState,
   parseRegistryText,
   isActive,
   resolveEngagement,
   ALWAYS_BLOCK_RESERVED_ID,
   MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION,
 } from "./registry.js";
-export type { Engagement, Registry, ResolveResult, Identity, OwnerIdentities } from "./registry.js";
+export type { Engagement, Registry, RegistryLoad, ResolveResult, Identity, OwnerIdentities } from "./registry.js";
 
 // ---- remote URL parser ---------------------------------------------------
 export {
@@ -215,6 +216,8 @@ export { isKnownNonSecret } from "./known-non-secrets.js";
 export { hookScriptDigest, renderHookScript } from "./hook-scripts.js";
 export {
   assertPinnable,
+  fallbackVerdict,
+  fallbackVerdictShell,
   parsePinFromScript,
   pinAssignments,
   pinGuard,
@@ -223,10 +226,12 @@ export {
   managedHookCommand,
   isManagedHookCommand,
   MANAGED_ID_PATH,
+  PIN_VERSION_PATTERN,
   pinProblem,
   shellQuote,
   shellUnquote,
   type EnforcementPin,
+  type FallbackVerdict,
   type ManagedHookContext,
   type PinGuardOptions,
 } from "./enforcement-pin.js";
@@ -353,6 +358,7 @@ export type {
   ApprovalFinder,
   RegistryState,
 } from "./egress-policy.js";
+export { registryUnreadable } from "./egress-policy.js";
 // Rule h (issue #151): the one definition of "a registered owner", shared by
 // every layer so the hook, the shim, pre-push and `doctor` cannot disagree.
 export {
@@ -522,6 +528,7 @@ export {
   RegistryNotFoundError,
   RegistryParseError,
   RegistryEncryptedError,
+  RegistrySchemaTooNewError,
   NotAGitRepoError,
   AmbiguousQueryError,
   EngagementNotFoundError,

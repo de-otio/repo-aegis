@@ -57,6 +57,8 @@ interface GuardOptions {
    * `PATH` before `install shim` ran.
    */
   shimOnPath?: boolean;
+  /** Extra environment for the hook process (for example `REPO_AEGIS_PIN_FALLBACK=1`, which the pin fallback exports). */
+  env?: Record<string, string>;
 }
 
 /**
@@ -70,6 +72,7 @@ function runGuard(input: string, opts: GuardOptions): GuardResult {
   delete env["REPO_AEGIS_EGRESS_HUMAN"];
   delete env["REPO_AEGIS_ASSUME_PUBLIC"];
   if (opts.human) env["REPO_AEGIS_EGRESS_HUMAN"] = "1";
+  Object.assign(env, opts.env ?? {});
   if (opts.shimOnPath === true) {
     const binDir = join(opts.home, "bin");
     mkdirSync(binDir, { recursive: true });
@@ -804,31 +807,61 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
     }
   });
 
-  it("an unparseable registry REFUSES (one bad YAML line must not switch rule h off), and says how to repair", () => {
+  function asked(r: GuardResult): DecisionJson["hookSpecificOutput"] {
+    assert.equal(r.code, 0, `expected an ask; got ${r.code} ${r.stdout} ${r.stderr}`);
+    const j = JSON.parse(r.stdout) as DecisionJson;
+    assert.equal(j.hookSpecificOutput.permissionDecision, "ask", r.stdout);
+    return j.hookSpecificOutput;
+  }
+
+  it("an unparseable registry ASKS on Claude Code (one bad YAML line must not switch rule h off), and says how to repair", () => {
     const home = aegisHome("h-corrupt", OWNERS_REGISTRY + "this line: is: not valid: yaml: [\n");
     const r = runGuard(claudePayload(PUSH_STRANGER), { home });
-    const p = denied(r);
-    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(p.error, /could not be read/);
-    assert.match(p.error, /repair/);
-    assert.match(p.error, /repo-aegis registry decrypt --identity/);
-    for (const bad of REGISTERED) assert.ok(!r.stderr.includes(bad), `must not contain "${bad}"`);
+    const a = asked(r);
+    assert.match(a.permissionDecisionReason, /UNREGISTERED_OWNER_EGRESS/);
+    assert.match(a.permissionDecisionReason, /does not parse or validate/);
+    assert.match(a.permissionDecisionReason, /A person repairs /);
+    assert.match(a.permissionDecisionReason, /A person's yes at this prompt lets this one command run; a push is still refused by the pre-push hook until the registry can be read/);
+    assert.doesNotMatch(a.permissionDecisionReason, /encrypt|decrypt/);
+    for (const bad of REGISTERED) assert.ok(!r.stdout.includes(bad), `must not contain "${bad}"`);
     // A person still passes.
     assert.equal(runGuard(claudePayload(PUSH_STRANGER), { home, human: true }).code, 0);
+    assert.equal(runGuard(claudePayload(PUSH_STRANGER), { home, human: true }).stdout, "");
   });
 
-  it("an encrypted registry (only the .age ciphertext on disk) REFUSES", () => {
+  it("an unparseable registry DENIES on a host without an ask (Codex, Gemini)", () => {
+    const home = aegisHome("h-corrupt-noask", OWNERS_REGISTRY + "this line: is: not valid: yaml: [\n");
+    for (const [payload, agent] of [
+      [codexPayload(PUSH_STRANGER), "codex"],
+      [geminiPayload(PUSH_STRANGER), "gemini"],
+    ] as const) {
+      const p = denied(runGuard(payload, { home, agent }));
+      assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS", agent);
+      assert.match(p.error, /No approval covers this/);
+    }
+  });
+
+  it("an encrypted registry (only the .age ciphertext on disk) is read as no registry: rule h does not refuse, and the note says so", () => {
     const home = aegisHome("h-encrypted");
     writeFileSync(join(home, "engagements.yaml.age"), "age-encryption.org/v1\n");
-    const p = denied(runGuard(claudePayload(PUSH_STRANGER), { home }));
-    assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(p.error, /encrypted/);
-    assert.match(p.error, /repo-aegis registry decrypt --identity/);
+    const r = runGuard(claudePayload(PUSH_STRANGER), { home });
+    // No registry, so the rule g question about an unknown destination is asked, but rule h is not what asks it.
+    const a = asked(r);
+    assert.doesNotMatch(a.permissionDecisionReason, /UNREGISTERED_OWNER_EGRESS/);
+    assert.match(a.permissionDecisionReason, /registry is encrypted: context rules and rule h ran without it/);
+    const codex = runGuard(codexPayload(PUSH_STRANGER), { home, agent: "codex" });
+    assert.notEqual((JSON.parse(codex.stderr) as DenyPayload).code, "UNREGISTERED_OWNER_EGRESS");
   });
 
-  it("a registry from a newer schema is unreadable, so it refuses too", () => {
+  it("a registry from a newer schema (99) ASKS on Claude Code with the upgrade text, and denies without an ask", () => {
     const home = aegisHome("h-newer", "schemaVersion: 99\nengagements: []\n");
-    assert.equal(denied(runGuard(claudePayload(PUSH_STRANGER), { home })).code, "UNREGISTERED_OWNER_EGRESS");
+    const repo = makeRepo("h-newer-repo", { remote: "git@github.com:stranger/repo.git" });
+    const r = runGuard(claudePayload("git push origin main", repo), { home, cwd: repo });
+    const a = asked(r);
+    assert.match(a.permissionDecisionReason, /UNREGISTERED_OWNER_EGRESS/);
+    assert.match(a.permissionDecisionReason, /written by a newer repo-aegis than the one running this check/);
+    assert.match(a.permissionDecisionReason, /A person upgrades repo-aegis, then runs `repo-aegis install hooks` and `repo-aegis install claude-md`/);
+    assert.equal(denied(runGuard(codexPayload(PUSH_STRANGER), { home, agent: "codex" })).code, "UNREGISTERED_OWNER_EGRESS");
   });
 
   it("an unreadable registry does not wall off commands with no destination or no egress", () => {
@@ -1008,5 +1041,66 @@ describe("hook guard-egress — input past the 1 MiB cap (issue #151, final revi
     const payload = JSON.stringify({ tool_name: "Write", tool_input: { file_path: "/tmp/x", content: "x".repeat(1_100_000) } });
     const r = runGuard(payload, { home: aegisHome("v1-write") });
     assert.equal(r.code, 0, r.stderr);
+  });
+});
+
+describe("hook guard-egress — notices on an allow (P1-D)", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  interface NoticeJson {
+    systemMessage?: string;
+    hookSpecificOutput?: { hookEventName: string; permissionDecision?: string; additionalContext?: string };
+  }
+  const privateRepo = (name: string): string =>
+    makeRepo(name, { remote: "git@github.com:acme/internal.git", class: "private-strict", visibility: "private" });
+
+  it("an allowed push while the registry is encrypted says rule h and the org boundaries are off, as a systemMessage, with no permission decision", () => {
+    const home = aegisHome("notice-encrypted");
+    writeFileSync(join(home, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const repo = privateRepo("notice-encrypted-repo");
+    const r = runGuard(claudePayload("git push origin main", repo), { home, cwd: repo });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    const j = JSON.parse(r.stdout) as NoticeJson;
+    assert.match(j.systemMessage ?? "", /rule h and engagement org boundaries are off while the registry is encrypted; run `repo-aegis registry decrypt/);
+    assert.equal(j.hookSpecificOutput?.additionalContext, j.systemMessage);
+    assert.equal(j.hookSpecificOutput?.permissionDecision, undefined, "a notice must not skip the normal permission flow");
+    assert.equal(r.stderr, "");
+  });
+
+  it("the same allowed push with a readable registry stays silent (the notice is about the encrypted state only)", () => {
+    const home = aegisHome("notice-loaded", EMPTY_REGISTRY);
+    const repo = privateRepo("notice-loaded-repo");
+    const r = runGuard(claudePayload("git push origin main", repo), { home, cwd: repo });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(r.stdout, "");
+  });
+
+  it("a host with no systemMessage channel (Codex) stays silent on that allow", () => {
+    const home = aegisHome("notice-encrypted-codex");
+    writeFileSync(join(home, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const repo = privateRepo("notice-encrypted-codex-repo");
+    const r = runGuard(codexPayload("git push origin main", repo), { home, cwd: repo, agent: "codex" });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    assert.equal(r.stdout, "");
+  });
+
+  it("when the hook ran via the pin fallback (REPO_AEGIS_PIN_FALLBACK=1), even a command with no egress carries the notice", () => {
+    const home = aegisHome("notice-fallback", EMPTY_REGISTRY);
+    const r = runGuard(claudePayload("ls -la"), { home, env: { REPO_AEGIS_PIN_FALLBACK: "1" } });
+    assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+    const j = JSON.parse(r.stdout) as NoticeJson;
+    assert.match(j.systemMessage ?? "", /the pinned enforcement binary is missing or not usable, so this hook ran the repo-aegis found on PATH/);
+    assert.match(j.systemMessage ?? "", /repo-aegis install claude-md/);
+    assert.equal(j.hookSpecificOutput?.permissionDecision, undefined);
+    // Control: without the variable, the same command prints nothing.
+    assert.equal(runGuard(claudePayload("ls -la"), { home }).stdout, "");
+  });
+
+  it("an allowed push under the fallback AND an encrypted registry carries both notices in one message", () => {
+    const home = aegisHome("notice-both");
+    writeFileSync(join(home, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const repo = privateRepo("notice-both-repo");
+    const r = runGuard(claudePayload("git push origin main", repo), { home, cwd: repo, env: { REPO_AEGIS_PIN_FALLBACK: "1" } });
+    const j = JSON.parse(r.stdout) as NoticeJson;
+    assert.match(j.systemMessage ?? "", /registry is encrypted/);
+    assert.match(j.systemMessage ?? "", /ran the repo-aegis found on PATH/);
   });
 });

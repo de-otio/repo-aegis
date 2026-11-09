@@ -542,22 +542,26 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     assert.equal(r.code, 0, r.stderr);
   });
 
-  it("an unreadable registry (corrupt YAML) refuses, and says it could not be read", () => {
+  it("an unreadable registry (corrupt YAML) refuses, and says it does not parse", () => {
     const h = registryHome("h-corrupt", "engagements: [\n");
     const r = runCli(h, privateRepo, STRANGER_ISSUE);
     assert.equal(r.code, 2, r.stdout);
     const p = JSON.parse(r.stderr.trim()) as Refusal;
     assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(p.error, /could not be read/);
-    assert.match(p.error, /repair/);
+    assert.match(p.error, /does not parse or validate/);
+    assert.match(p.error, /A person repairs /);
+    assert.match(p.error, /No approval covers this/, "the shim has no prompt: it denies");
   });
 
-  it("an encrypted registry (ciphertext only) refuses", () => {
+  it("an encrypted registry (ciphertext only) is read as no registry: rule h does not refuse (rule g stops the unknown destination)", () => {
     const h = registryHome("h-encrypted");
     writeFileSync(join(h, "engagements.yaml.age"), "age-encryption.org/v1\n");
     const r = runCli(h, privateRepo, STRANGER_ISSUE);
     assert.equal(r.code, 2, r.stdout);
-    assert.equal((JSON.parse(r.stderr.trim()) as Refusal).code, "UNREGISTERED_OWNER_EGRESS");
+    const p = JSON.parse(r.stderr.trim()) as Refusal & { details: { ruleH?: string } };
+    assert.equal(p.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    assert.equal(p.details.ruleH, "skipped:encrypted");
+    assert.doesNotMatch(p.error, /encrypt/, "no encrypted wording in a refusal that is not about the registry");
   });
 
   it("no registry file: rule h is skipped (the unknown destination is stopped by rule g instead)", () => {
@@ -574,13 +578,14 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     assert.equal((JSON.parse(r.stderr.trim()) as Refusal).code, "PUBLIC_EGRESS_NEEDS_HUMAN");
   });
 
-  it("a registry from a newer schema is unreadable, so it refuses too (the hook has the same case)", () => {
+  it("a registry from a newer schema is unreadable, so it refuses too, with the upgrade text (the hook has the same case)", () => {
     const h = registryHome("h-newer", "schemaVersion: 99\nengagements: []\n");
     const r = runCli(h, privateRepo, STRANGER_ISSUE);
     assert.equal(r.code, 2, r.stdout);
     const p = JSON.parse(r.stderr.trim()) as Refusal;
     assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(p.error, /could not be read/);
+    assert.match(p.error, /written by a newer repo-aegis than the one running this check/);
+    assert.match(p.error, /A person upgrades repo-aegis/);
   });
 
   it("a hostile owner name never reaches the refusal or its details (review M2)", () => {

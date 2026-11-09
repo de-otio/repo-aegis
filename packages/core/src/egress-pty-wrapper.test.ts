@@ -130,8 +130,8 @@ describe("EGRESS_PTY_WRAPPER — a pty wrapper the parser does not model is no i
 describe("EGRESS_PTY_WRAPPER — nothing lifts it", () => {
   const command = "S=script; $S -q /dev/null gh issue create --repo acme/svc --title x";
 
-  it("needs no registry (missing, and unreadable)", () => {
-    for (const registryState of ["missing", "unreadable"] as const) {
+  it("needs no registry (missing, encrypted, unparseable, newer-schema)", () => {
+    for (const registryState of ["missing", "encrypted", "unparseable", "newer-schema"] as const) {
       const d = decide(command, { registryState, registry: { ...REGISTRY, personalOrgs: [] } as Registry });
       assert.equal(d.action === "deny" && d.code, "EGRESS_PTY_WRAPPER", registryState);
     }

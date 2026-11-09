@@ -34,12 +34,11 @@ import {
   readRepoConfig,
   readCachedVisibility,
   recordWorkingTree,
-  loadRegistry,
-  RegistryEncryptedError,
-  RegistryNotFoundError,
+  loadRegistryState,
   type HookState,
   type HookStateCode,
   type Registry,
+  type RegistryLoad,
 } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { findWorkingTrees, defaultScanRoots } from "../repo-walk.js";
@@ -48,7 +47,7 @@ import { checkLabel, isFailure, isReportable, PERSON_RUNS_THIS, type DoctorCheck
 import { checkShim } from "./install-shim.js";
 import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
 import { gitCredentialOrderChecks } from "./doctor-git-credential-checks.js";
-import { agentRemoteSshCheck, ghOwnerChecks, ownerIdentityChecks, registryStateChecks, taaadChecks, type DoctorRegistryState, type GhCheckOptions } from "./doctor-owner-checks.js";
+import { agentRemoteSshCheck, ghOwnerChecks, ownerIdentityChecks, registryStateChecks, taaadChecks, type GhCheckOptions } from "./doctor-owner-checks.js";
 import { checkLocalHooksPathDuplicate, checkPrePushHook, checkShellStartupOverrides, checkSshGithubRedirect } from "./doctor-env-checks.js";
 import { enforcementPinChecks } from "./doctor-pin-checks.js";
 import { managedDropinChecks, readDropInSettings, userSettingsEnforcementCheck } from "./doctor-managed-checks.js";
@@ -215,29 +214,15 @@ function checkPushDefault(): DoctorCheck {
 /** Checkouts recorded into the destination cache by this run (reset per `doctor()` call). */
 let recordedDestinations = 0;
 
-/** How the registry looked to this run, for the owner checks. */
-interface RegistryLoad {
-  state: DoctorRegistryState;
-  registry: Registry | null;
-  /** Unreadable because it is encrypted at rest (changes the fix). */
-  encrypted: boolean;
-}
-
 /**
- * Best-effort, and the three states are different findings (decision D4): no
- * file is not a finding (rule h is skipped by design), a file that exists but
- * cannot be read IS (rule h then refuses everything), a loaded registry is
- * compared against `gh`. Anything that is not "not found" counts as unreadable,
- * the same classification the hook, the shim and pre-push use.
+ * Best-effort, and the five states are different findings (decision D4): no
+ * file is not a finding (rule h is skipped by design), an encrypted registry is
+ * a warning (repo-aegis runs as if there were none), a file that exists but
+ * cannot be read (unparseable, or a newer schema) IS a failure (rule h then
+ * asks or refuses everything), and a loaded registry is compared against `gh`.
+ * The classification is the one the hook, the shim and pre-push use.
  */
-function loadRegistryForDoctor(): RegistryLoad {
-  try {
-    return { state: "loaded", registry: loadRegistry(), encrypted: false };
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) return { state: "missing", registry: null, encrypted: false };
-    return { state: "unreadable", registry: null, encrypted: err instanceof RegistryEncryptedError };
-  }
-}
+const loadRegistryForDoctor = (): RegistryLoad => loadRegistryState();
 
 function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
   // The managed drop-in (D8) is where the Claude Code hooks and deny rules live once
@@ -253,10 +238,10 @@ function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
   ];
   const inUserFile = userSettingsEnforcementCheck(opts.claudeHome);
   if (inUserFile !== null) checks.push(inUserFile);
-  checks.push(...registryStateChecks(reg.state, reg.registry, reg.encrypted));
+  checks.push(...registryStateChecks(reg));
   // With no registry there is nothing to protect and nothing to compare gh against.
   if (reg.state !== "missing") checks.push(checkRegistryAgentWritable(opts.claudeHome, undefined, dropin));
-  if (reg.state === "loaded" && reg.registry !== null) {
+  if (reg.state === "loaded") {
     checks.push(...ownerIdentityChecks(reg.registry));
     checks.push(...taaadChecks(reg.registry));
     checks.push(...gitCredentialOrderChecks(reg.registry));
@@ -354,8 +339,8 @@ export function doctor(opts: DoctorOptions): void {
   // but never as a per-repo failure doctor cannot substantiate.
   const regLoad: RegistryLoad = egressChecksOn
     ? loadRegistryForDoctor()
-    : { state: "missing", registry: null, encrypted: false };
-  const registry = regLoad.registry;
+    : { state: "missing" };
+  const registry = regLoad.state === "loaded" ? regLoad.registry : null;
   const machine = egressChecksOn ? machineChecks(opts, regLoad) : [];
 
   const results: DoctorRepoResult[] = [];
