@@ -78,10 +78,12 @@ in [doc/guide-data-leak-prevention.md](doc/guide-data-leak-prevention.md).
 - macOS or Linux, with git. Node.js 20 or later (CI tests 20, 22 and 24).
 - `gh` (GitHub CLI), if you want `gh` commands checked.
 - `sudo`, for the root-owned Claude Code settings file. Without it, use `--user-settings`.
-- Full protection is for **Claude Code**. **Codex CLI** and **Gemini CLI** can get the egress
-  check, configured by hand and unverified ([doc/agent-install.md](doc/agent-install.md)); Gemini
-  CLI has since been replaced by Antigravity CLI, whose hooks are not covered here. Every agent,
-  and you, get the git hooks and the `gh` wrapper.
+- Full protection is for **Claude Code**. **Codex CLI**, **Cursor**, **Copilot CLI** and
+  **Antigravity CLI** (which replaced Gemini CLI; `--agent gemini` stays for the old one) can get
+  the egress check, and Cursor also a post-edit scan. They are configured by hand from snippets
+  derived from each vendor's docs and not yet exercised in a live session
+  ([doc/agent-install.md](doc/agent-install.md)). Every agent, and you, get the git hooks and the
+  `gh` wrapper.
 
 ## Quick start
 

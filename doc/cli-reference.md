@@ -1427,18 +1427,35 @@ report `HOOKS_SCRIPT_STALE` until `install hooks` runs again. (0.11.0 changed
 only a comment in the script, to say that `$2` is the URL after all rewriting,
 but the digest covers the script's text, so the same reinstall applies.)
 
-### `repo-aegis hook guard-egress [--agent claude|codex|gemini]`
+### `repo-aegis hook guard-egress [--agent claude|codex|gemini|copilot|cursor|antigravity]`
 
-The pre-command hook. Reads the framework's JSON on stdin
-(`tool_input.command` or a root-level `command`, plus the root `cwd`),
-parses the command, runs `decideEgress` with `capabilities.ask` true for
-`claude` (the default) and false otherwise, and answers:
+The pre-command hook. Reads the host's JSON on stdin (the host adapter picked
+by `--agent` finds the command and the `cwd`), parses the command, runs
+`decideEgress` with `capabilities.ask` true for hosts that can ask and false
+otherwise, and answers in the host's own shape. An unknown `--agent` value is
+treated as a host that cannot ask (`ask` becomes `deny`), never as `claude`.
+
+| `--agent` | Event / matcher | Command field | `ask` | Allow (no publishing op) |
+|---|---|---|---|---|
+| `claude` (default) | `PreToolUse` / `Bash` | `tool_input.command` | yes | nothing, exit 0 |
+| `codex` | `PreToolUse` / `Bash` (older builds: `shell`) | `tool_input.command` | no: degrades to `deny` | nothing, exit 0 |
+| `gemini` (legacy) | `BeforeTool` / `run_shell_command` | `tool_input.command` | no: degrades to `deny` | nothing, exit 0 |
+| `copilot` | `preToolUse` / `bash` (also `PreToolUse`) | `toolArgs` (a JSON-encoded string) `.command`; or `tool_input.command` | yes in the interactive CLI; the cloud agent and autopilot treat it as a deny | nothing, exit 0. **Never exits 1**: Copilot fails closed on a non-zero exit other than 2, so an internal error is rendered as an allow |
+| `cursor` | `beforeShellExecution`, and `afterFileEdit` for the write scan | root `command` | yes, on `beforeShellExecution` only | `{"permission":"allow"}` |
+| `antigravity` | `PreToolUse` / `run_command` | `toolCall.args.CommandLine` | yes | `{"decision":"allow"}` |
+
+Registration is by hand for every host but Claude Code; the snippets, each
+marked doc-derived and not exercised in a live session, are in
+[agent-install.md](agent-install.md#other-agents). The Claude-style answer is:
 
 | Decision | Exit | stdout | stderr |
 |---|---|---|---|
 | allow (or no publishing operation in the command) | 0 | — | — |
 | ask | 0 | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":…}}` | — |
 | deny | 2 | the same shape with `"deny"` | `{ code, error, details: { verb, destination? } }` |
+
+Copilot's answer is the bare `{"permissionDecision":"ask"|"deny","permissionDecisionReason":…}`
+(exit 0 for ask, 2 for deny, the structured refusal on stderr as above).
 
 It never emits `updatedInput`. A registry that is missing, encrypted or
 unreadable does not disable the shape rules (an encrypted or unparseable one
@@ -1455,15 +1472,15 @@ command that starts a detached session: `tmux new -d`, `tmux new-window` /
 built at run time, or a script written by an earlier call, gets past them and
 falls to the terminal and ancestry checks. A quoted mention next to a
 repo-aegis word is refused too. Registered by
-`install claude-md` on `PreToolUse` matcher `Bash`. Hand-written Codex CLI
-and Gemini CLI snippets are in [agent-install.md](agent-install.md) (there
-`ask` degrades to `deny`). Treat both as **unverified**: the Codex matcher and
-payload field are unconfirmed against
-[Codex's hooks documentation](https://developers.openai.com/codex/hooks), and
-Gemini CLI has since been replaced by Antigravity CLI
+`install claude-md` on `PreToolUse` matcher `Bash`. Treat every other host as
+**doc-derived, not exercised in a live session**: the payload shapes come from
+each vendor's documentation (Codex: [hooks docs](https://developers.openai.com/codex/hooks);
+Copilot CLI and Cursor and Antigravity CLI likewise), and the fixtures under
+`packages/cli/src/commands/__fixtures__/hosts/` are marked `doc-derived` until
+a real capture replaces them. Gemini CLI has been replaced by Antigravity CLI
 ([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)),
-whose hook payload is not confirmed here either. `--agent gemini` keeps its
-name for the old shape (legacy).
+whose payload differs, so `--agent gemini` keeps its name for the old shape
+only (legacy) and `--agent antigravity` is the one for the new CLI.
 
 `--agent cursor` and `--agent antigravity` answer in their host's own shape
 instead of the table above (both built from vendor docs, not yet seen from a

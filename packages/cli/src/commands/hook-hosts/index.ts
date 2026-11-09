@@ -8,6 +8,7 @@
 import { antigravityAdapter } from "./antigravity.js";
 import { claudeAdapter } from "./claude.js";
 import { codexAdapter } from "./codex.js";
+import { copilotAdapter } from "./copilot.js";
 import { cursorAdapter } from "./cursor.js";
 import { geminiAdapter } from "./gemini.js";
 import { oversizedByToolName, parsePreToolUse, renderPreToolUse } from "./pre-tool-use.js";
@@ -16,7 +17,7 @@ import type { HostAdapter } from "./types.js";
 export type { HookVerdict, HostAdapter, HostOutput, ParsedHookInput } from "./types.js";
 
 export const ADAPTERS: ReadonlyMap<string, HostAdapter> = new Map(
-  [claudeAdapter, codexAdapter, geminiAdapter, cursorAdapter, antigravityAdapter].map(a => [a.name, a] as const),
+  [claudeAdapter, codexAdapter, copilotAdapter, geminiAdapter, cursorAdapter, antigravityAdapter].map(a => [a.name, a] as const),
 );
 
 /**

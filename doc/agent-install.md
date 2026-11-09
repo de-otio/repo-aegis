@@ -560,7 +560,7 @@ when all three are in:
 |---|---|---|---|
 | git `pre-push` hook | `repo-aegis init` / `install hooks` | `git push` to a cross-org or public destination, with the remote URL git hands the hook | every agent and every human, in every repo with `core.hooksPath` set |
 | `gh` shim on `PATH` | `repo-aegis install shim` + the profile line ([Step 2b](#step-2b--install-the-gh-shim)) | the publishing verbs of `gh pr`, `gh issue`, `gh release`, `gh repo` and mutating `gh api`, plus the post-publish read-back | every agent and every human, in every shell where the shim is first |
-| agent pre-command hook | `repo-aegis install claude-md` (Claude Code); see below for Codex, Gemini CLI and Antigravity CLI | everything, before the command runs, with `ask` where the agent supports it | that one agent |
+| agent pre-command hook | `repo-aegis install claude-md` (Claude Code); see below for Codex, Gemini CLI, Cursor, Copilot CLI and Antigravity CLI | everything, before the command runs, with `ask` where the agent supports it | that one agent |
 
 Skipping the shim leaves the middle row empty: `gh pr create` from a
 terminal, from a script, or from an agent without a pre-command hook
@@ -598,12 +598,18 @@ push.default nothing` recommendation.
 
 ### Other agents
 
-The same entry point serves Codex CLI and Gemini CLI; only the event name,
-the matcher and the `--agent` value change. Register it by hand in that
-agent's settings (consult the agent's own documentation for the exact key
-spelling — repo-aegis writes only Claude Code's `settings.json`). The
-snippets below were written from each agent's documentation and have not
-been exercised against a live session of that agent.
+The same entry point serves Codex CLI, Gemini CLI, Cursor, Copilot CLI and
+Antigravity CLI; only the event name, the matcher, the payload and the
+`--agent` value change. Register it by hand in that agent's settings
+(consult the agent's own documentation for the exact key spelling —
+repo-aegis writes only Claude Code's `settings.json`, and there is no
+installer for these). **Every snippet below is doc-derived, not exercised
+in a live session** of that agent: it was written from the agent's
+documentation, and its payload fixtures under
+`packages/cli/src/commands/__fixtures__/hosts/` are marked `doc-derived`
+until a real capture replaces them. Run the self-test at the end of this
+section after registering. To remove a hand-registered entry, see
+[Uninstalling](agent-guide.md#uninstalling) in `doc/agent-guide.md`.
 
 **Codex CLI** — `PreToolUse`, matcher `Bash`, command in
 `tool_input.command`. Per the Codex hooks documentation
@@ -613,8 +619,13 @@ https://learn.chatgpt.com/docs/hooks), Codex reads hooks from
 or the same two files under `<repo>/.codex/`. **Codex does not run a
 non-managed hook until it is reviewed and trusted:** after registering the
 entry, have the user open `/hooks` in Codex and trust it. Until then the
-guard is not running, and nothing says so. (An earlier version of this
-guide used the matcher `shell`; the Codex docs name `Bash`.)
+guard is not running, and nothing says so. Trust is tied to the hook's
+hash, so trust it again after any change to the command. (An earlier
+version of this guide used the matcher `shell`; the Codex docs name
+`Bash`, and the unified exec tool matches as `Bash` too. The adapter still
+accepts a payload whose `tool_name` is `shell`, for older builds.) Codex has
+no `ask`: the hook run is marked failed and the tool runs, so `ask` is
+rendered as a deny. Doc-derived, not exercised in a live session.
 
 ```json
 {
@@ -640,11 +651,9 @@ Google announced on 2026-05-19 that consumer access to Gemini CLI ends on
 (https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/).
 Gemini CLI stays available to Gemini Code Assist Standard / Enterprise
 customers and with paid API keys, so the snippet below still applies to
-those installs. Antigravity CLI keeps hooks, but its event name, matcher
-and payload shape were **not** verified here, and `--agent gemini` has not
-been tested against it (unverified). On Antigravity, confirm the payload
-against its documentation and run the self-test below before relying on
-the guard.
+those installs. Antigravity CLI has its own event, payload and answer
+shape, so `--agent gemini` does **not** work with it: use the Antigravity
+snippet below. Doc-derived, not exercised in a live session.
 
 ```json
 {
@@ -661,13 +670,90 @@ the guard.
 }
 ```
 
-On both of those, **`ask` degrades to `deny`** — never to `allow`. Neither
-framework is assumed to have an "ask" decision, so a case Claude Code would
-put in front of the user (a public destination with no human present)
-becomes a refusal whose reason says to have a human run or approve the
-command. That is the conservative direction, and it is deliberate: a guard
-that silently allowed what it could not ask about would be worse than no
-guard, because the operator would believe they had one.
+**Cursor** — `.cursor/hooks.json` in the project (or `~/.cursor/hooks.json`
+for every project). Two events: `beforeShellExecution` is the guard (the
+command is the root `command` field; `ask` is honoured on this event only),
+and `afterFileEdit` runs the post-write scan. `afterFileEdit` is
+observe-only: Cursor has already written the file, so a hit is a
+notification that the edit happened, not a block; the git pre-commit hook is
+the gate. Cloud agents run project hooks but **not** user hooks, so register
+in the project file if the cloud agent matters. Doc-derived, not exercised
+in a live session.
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      { "command": "repo-aegis hook guard-egress --agent cursor" }
+    ],
+    "afterFileEdit": [
+      { "command": "repo-aegis hook scan-after-write --agent cursor" }
+    ]
+  }
+}
+```
+
+**Copilot CLI** — `preToolUse` (camelCase), matcher `bash`, in
+`~/.copilot/hooks/repo-aegis.json` (or `$COPILOT_HOME/hooks/`; a repo's
+`.github/hooks/*.json` also works, and also covers the Copilot cloud
+agent). The command is inside `toolArgs`, which Copilot sends as a
+JSON-encoded string; the adapter decodes it. The PascalCase `PreToolUse`
+event (snake_case, VS Code-compatible payload) is accepted too. Two Copilot
+behaviours to know: a hook that exits non-zero other than 2 **fails closed**
+(blocks the tool), so the guard never exits 1 under `--agent copilot` and
+renders its own internal errors as an allow; and `ask` works in the
+interactive CLI but is treated as a deny in the cloud agent and autopilot
+mode. Doc-derived, not exercised in a live session.
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "repo-aegis hook guard-egress --agent copilot",
+        "matcher": "bash",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}
+```
+
+**Antigravity CLI** (`agy`) — `PreToolUse`, matcher `run_command`, in
+`~/.gemini/config/hooks.json` (or `.agents/hooks.json` in the project). The
+top-level key is a name you choose for the hook group. Hooks in
+`~/.gemini/antigravity-cli/settings.json` are **not** loaded; `/hooks` in
+Antigravity lists what was. The command is `toolCall.args.CommandLine`.
+Doc-derived, not exercised in a live session.
+
+```json
+{
+  "repo-aegis": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          { "type": "command", "command": "repo-aegis hook guard-egress --agent antigravity" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+On Codex and Gemini CLI, **`ask` degrades to `deny`** — never to `allow`.
+Neither framework is assumed to have an "ask" decision, so a case Claude
+Code would put in front of the user (a public destination with no human
+present) becomes a refusal whose reason says to have a human run or approve
+the command. That is the conservative direction, and it is deliberate: a
+guard that silently allowed what it could not ask about would be worse than
+no guard, because the operator would believe they had one. Cursor,
+Copilot CLI and Antigravity CLI do have an `ask`; each adapter uses it only
+where the host enforces it (see the per-host notes above), and an `ask`
+that a host treats as a deny is the same safe direction.
 
 The hook reads stdin tolerantly and exits 0 on anything it cannot parse, so
 registering it against a tool that sends a different payload shape is
@@ -676,6 +762,13 @@ harmless — but it also means a misregistration is silent. Test it once:
 ```sh
 echo '{"tool_name":"Bash","tool_input":{"command":"git push"}}' | repo-aegis hook guard-egress
 echo $?    # 2, with a PUSH_IMPLICIT_TARGET reason on stderr
+```
+
+For Copilot CLI, whose command sits in a JSON string, the same check is:
+
+```sh
+echo '{"toolName":"bash","toolArgs":"{\"command\":\"git push\"}"}' | repo-aegis hook guard-egress --agent copilot
+echo $?    # 2, with {"permissionDecision":"deny",…} on stdout
 ```
 
 ### Caveat: Claude Code's `ask` is not yet empirically verified
