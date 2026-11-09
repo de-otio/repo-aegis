@@ -96,17 +96,36 @@ export function classifyMintFailure(
     case 4:
       return e("denied", "your human declined taaad's presence prompt; stop and ask them before retrying");
   }
-  // taaad ≥ 0.7 may print one fixed line `taaad: error=<code>[ status=<n>]` carrying taaad-signer's own error code
-  // (SignerError.code). Only an allowlisted code is used, verbatim; nothing else from stderr is ever copied.
-  const coded = /^taaad: error=([a-z][a-z-]{0,30})(?: status=(-?\d{1,6}))?\s*$/m.exec(stderr);
-  if (coded !== null && SIGNER_CODES.has(coded[1]!)) {
-    const code = coded[1]!;
-    const detail = coded[2] === undefined ? "" : ` status=${coded[2]}`;
-    if (code === "presence-denied") return e("denied", `your human declined taaad's presence prompt (taaad error=${code}); stop and ask them before retrying`);
-    if (code === "rate-limited") return e("rate-limited", `taaad's presence-prompt limit is reached (taaad error=${code}); wait a few minutes and retry`);
-    if (code === "app-mismatch") return e("installation-mismatch", `the App's installation belongs to a different account than the destination owner (taaad error=${code})`, "installation-mismatch");
+  // taaad ≥ 0.7.0 prints, as the LAST stderr line of every failed `taaad mint`, `taaad: error=<code>` or
+  // `taaad: error=<code> status=<n>` (n an HTTP status, 100–599). The code is copied verbatim only when it is in
+  // the known vocabulary; an unknown code is treated as `internal` and NOT echoed (taaad's README: "treat an
+  // unknown code like internal"). Nothing else from stderr is ever copied.
+  const lastLine = stderr.replace(/\s+$/, "").split("\n").pop() ?? "";
+  const coded = /^taaad: error=([a-z][a-z-]{0,31})(?: status=([1-5]\d\d))?$/.exec(lastLine);
+  if (coded !== null) {
+    const known = TAAAD_CODES.has(coded[1]!);
+    const code = known ? coded[1]! : "internal";
+    const detail = known && coded[2] !== undefined ? ` status=${coded[2]}` : "";
+    const step = `taaad error=${code}${detail}`;
+    switch (code) {
+      case "presence-denied":
+        return e("denied", `your human declined taaad's presence prompt (${step}); stop and ask them before retrying`);
+      case "rate-limited":
+        return e("rate-limited", `taaad's presence-prompt limit is reached (${step}); wait a few minutes and retry`);
+      case "tty":
+        return e("tty", `taaad refused to print a token to a terminal (${step})`);
+      case "config":
+        return e("not-installed", `taaad has no usable configuration for this App, e.g. no installation id yet (${step})`);
+      case "owner-mismatch":
+      case "app-mismatch":
+        return e("installation-mismatch", `the App's installation belongs to a different account than the destination owner (${step})`, "installation-mismatch");
+      case "not-granted":
+        return e("permission-not-granted", `the App's installation does not grant the permission this operation needs (${step})`);
+      case "bad-response":
+        return e("bad-output", `GitHub's token response was unusable, so taaad minted nothing (${step})`);
+    }
     const sandboxable = code === "keychain" || code === "github" || code === "protocol" || code === "missing" || code === "internal";
-    return e("signer", `taaad-signer failed at step error=${code}${detail}, so no token was signed${sandboxable ? sandboxHint : ""}`);
+    return e("signer", `taaad failed at step ${step}, so no token was minted${sandboxable ? sandboxHint : ""}`);
   }
   if (/User interaction is not allowed/i.test(stderr)) {
     return e("screen-locked", "taaad-signer could not show its presence prompt (Touch ID), most likely because the screen is locked; retry when your human is at the machine");
@@ -132,8 +151,17 @@ export function classifyMintFailure(
   return e("failed", `taaad exited with a failure${statusPart} and minted nothing${sandboxHint || "; your human can run the same command from a terminal to see taaad's own message"}`);
 }
 
-/** taaad-signer's machine-readable error codes (taaad `SignerError.code`), used verbatim when taaad prints them. */
-const SIGNER_CODES: ReadonlySet<string> = new Set([
+/**
+ * taaad ≥ 0.7.0's error vocabulary, used verbatim when taaad prints it: taaad-signer's `SignerError.code` values
+ * plus the codes `taaad mint` raises itself (tty, usage, config, owner-mismatch, not-granted, bad-response).
+ */
+const TAAAD_CODES: ReadonlySet<string> = new Set([
+  "tty",
+  "usage",
+  "config",
+  "owner-mismatch",
+  "not-granted",
+  "bad-response",
   "internal",
   "missing",
   "protocol",

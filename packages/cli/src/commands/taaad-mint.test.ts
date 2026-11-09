@@ -74,19 +74,38 @@ describe("classifyMintFailure: taaad's exit-1 texts become a fixed reason (stder
       for (const leak of ["customer-a-org", "ghs_", "example-bot"]) assert.ok(!e.message.includes(leak), leak);
     });
   }
-  it("a taaad `error=<code>` line names the signer step verbatim, allowlisted codes only", () => {
-    const coded = classifyMintFailure(1, "error: taaad mint: customer-a-org\ntaaad: error=keychain status=-25308\n", false);
+  it("taaad ≥ 0.7's last-line `error=<code>[ status=<n>]` names the step verbatim, known codes only", () => {
+    const coded = classifyMintFailure(1, "error: taaad mint: customer-a-org failed\ntaaad: error=github status=502\n", false);
     assert.equal(coded.reason, "signer");
-    assert.match(coded.message, /step error=keychain status=-25308/);
+    assert.match(coded.message, /taaad error=github status=502/);
     assert.ok(!coded.message.includes("customer-a-org"), "only the code is copied");
-    assert.equal(classifyMintFailure(1, "taaad: error=presence-denied", false).reason, "denied");
-    assert.equal(classifyMintFailure(1, "taaad: error=rate-limited", false).reason, "rate-limited");
-    assert.equal(classifyMintFailure(1, "taaad: error=app-mismatch", false).kind, "installation-mismatch");
-    // An unknown code, or free text after it, is not trusted: the line is ignored.
+    const table: ReadonlyArray<readonly [string, MintFailureReason]> = [
+      ["presence-denied", "denied"],
+      ["rate-limited", "rate-limited"],
+      ["tty", "tty"],
+      ["config", "not-installed"],
+      ["owner-mismatch", "installation-mismatch"],
+      ["app-mismatch", "installation-mismatch"],
+      ["not-granted", "permission-not-granted"],
+      ["bad-response", "bad-output"],
+      ["keychain", "signer"],
+      ["widened", "signer"],
+      ["usage", "signer"],
+    ];
+    for (const [code, reason] of table) {
+      const m = classifyMintFailure(1, `taaad: error=${code}`, false);
+      assert.equal(m.reason, reason, code);
+      assert.match(m.message, new RegExp(`error=${code}\\b`), code);
+    }
+    // An unknown code is treated as internal and never echoed.
     const unknown = classifyMintFailure(1, "taaad: error=customer-a-org", false);
-    assert.equal(unknown.reason, "failed");
+    assert.equal(unknown.reason, "signer");
+    assert.match(unknown.message, /error=internal/);
     assert.ok(!unknown.message.includes("customer-a-org"));
+    // Only the LAST line counts, and only the exact shape; status only for an HTTP status.
+    assert.equal(classifyMintFailure(1, "taaad: error=keychain\nsomething after", false).reason, "failed");
     assert.equal(classifyMintFailure(1, "taaad: error=keychain and more text", false).reason, "failed");
+    assert.doesNotMatch(classifyMintFailure(1, "taaad: error=github status=99999", false).message, /error=github/, "status out of range: not the shape");
   });
 
   it("inside the agent sandbox, signer and generic failures say the sandbox is the likely cause; outside, they don't", () => {
