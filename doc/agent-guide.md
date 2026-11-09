@@ -825,6 +825,11 @@ the command.
 
 ### Writing to GitHub through `dot gh`: always `--as bot`
 
+**Except for an owner mapped in the registry** (`repo-aegis status` lists the mappings): there,
+use plain `gh --repo <owner>/<repo> …`, not `dot gh`. repo-aegis picks the mapped identity itself,
+and a `dot gh` write to a mapped owner is refused with `DOT_GH_OWNER_MAPPED`. Everything below is
+for owners that are not mapped.
+
 Some setups provide `dot gh`, a wrapper that runs `gh` with the token of the right identity for each command and never touches the shared active `gh` account. repo-aegis recognises it in exactly this form:
 
 ```
@@ -847,7 +852,7 @@ Why: without `--as`, `dot gh` chooses the identity from the repository's owner, 
 - **Check before you act:** `dot gh --as bot --explain --repo <owner>/<repo> pr create …` prints the identity and target and runs nothing.
 - **Read the receipt.** Every run prints `dot gh: as bot (…) for <owner>/<repo>` on stderr. If it names any other identity on a write, stop.
 - **Everything else still applies.** `--as bot` does not lift any other rule: public repositories still need your user's approval, unregistered owners are still refused, markers are still scanned. A refusal there is for your user, not for you to route around.
-- **When the bot lacks a permission** (it has no access to issues, secrets, Actions or workflow files), `dot gh` says so. Stop and report it. Never retry as `--as owner`, `--as work` or plain `gh`: that is the accident this rule exists to stop.
+- **When the bot lacks a permission** (it has no access to issues, secrets, Actions or workflow files), `dot gh` says so. Stop and report it. Never retry as `--as owner`, `--as work` or plain `gh`: that is the accident this rule exists to stop. (Plain `gh` is right only for a mapped owner, after a `DOT_GH_OWNER_MAPPED` refusal.)
 - Any other way of running a wrapper (node options, `NODE_OPTIONS`, a different script name, a script path in a variable) is not recognised and stays refused.
 
 ### Owners are the user's to register

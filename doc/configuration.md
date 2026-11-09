@@ -201,9 +201,9 @@ engagements:
   set-identity` and cleared by `identity require --off` (a person, at a
   terminal). `identity require --on` sets it again; it only tightens, so it
   needs no terminal and an agent may run it. It makes
-  `doctor` report `OWNER_IDENTITY_UNMAPPED` as a failure instead of a warning.
-  In a later phase it will also make an agent write to a registered owner with
-  no identity entry refuse. An owner with only a `person` identity is not
+  `doctor` report `OWNER_IDENTITY_UNMAPPED` as a failure instead of a warning,
+  and an agent's write to a registered owner with no identity entry is refused
+  (`GH_IDENTITY_UNMAPPED_OWNER`). An owner with only a `person` identity is not
   affected: it is mapped.
 - **Shapes** (fail closed): an identity name and an app slug match
   `^[a-z0-9][a-z0-9-]{0,62}$`; a login matches
@@ -247,6 +247,56 @@ runs `repo-aegis identity add|remove|require --off` or `repo-aegis engagements
 set-identity` (a personal org is `engagements set-identity --personal-org <org>`) (`IDENTITY_CHANGE_NEEDS_TTY`), and the agent hook refuses the
 command text (`AGENT_RAN_HUMAN_COMMAND`). See
 [cli-reference.md](cli-reference.md#identities-schema-version-3).
+
+### Setting up identities (a walkthrough)
+
+All of this is run by a person, from their own terminal. Agents cannot run it.
+
+1. **Upgrade every install, then run `repo-aegis install shim`** (and keep its `bin` directory
+   first on `PATH`). `doctor` should show no `SHIM_STALE` and no `GH_BINARY_UNTRUSTED`.
+2. **Define identities.** One `gh-login` per GitHub account you are logged into with `gh`, and one
+   `github-app` per App that taaad holds (`taaad apps list`):
+
+   ```sh
+   repo-aegis identity add me --gh-login alice
+   repo-aegis identity add me-bot --app example-bot
+   ```
+3. **Map each registered owner.** A personal org takes `--personal-org`; an engagement maps all
+   its `githubOrgs` at once (`repo-aegis status` lists the ids):
+
+   ```sh
+   repo-aegis engagements set-identity --personal-org example-org --person me --agent me-bot
+   repo-aegis engagements set-identity customer-a --person work
+   ```
+
+   **The first `set-identity` turns `requireIdentity` on.** From then on an agent's write to a
+   registered owner with no mapping at all is refused (`GH_IDENTITY_UNMAPPED_OWNER`). Map every
+   owner `doctor` lists under `OWNER_IDENTITY_UNMAPPED`, or run `repo-aegis identity require --off`.
+4. **Optional, for agent pushes as the App:** `repo-aegis install git-credential` (see below).
+   Without it, pushes keep using your own credential; with it, an agent's push to an App-mapped
+   owner must use the HTTPS remote.
+5. **Check:** `repo-aegis status` shows the mappings; `repo-aegis doctor` should report no
+   `OWNER_IDENTITY_UNMAPPED`.
+
+**Which owners can have an `agent` App.** `taaad mint` refuses a repository whose owner is not the
+account the App is installed on, so the App must be installed on that exact owner.
+
+- **Your own account or an org you own:** register the App there (`taaad register`, or
+  `taaad register --org <org>` for an org-owned App) and install it.
+- **An org you do not administer:** a private App can only be installed on the account that owns
+  it, and taaad's Operating Rule 8 forbids making it public. So a personal App cannot be used there.
+  The App has to be owned by that org and installed by an org owner. You can request the
+  installation from the App's page, and an owner approves it. A repository admin can install it
+  only on repositories they administer, only if the App requests no organisation or
+  "administration" permission, and only if the org has not turned that off.
+- **Or map only a `person`.** This is the intended setup for orgs you do not control. Agents read
+  as that account, and each write needs an approval you mint for that login
+  (`repo-aegis approve <owner>/<repo>`). No admin is involved.
+
+**What changes for agents.** A `dot gh` write to a mapped owner is refused
+(`DOT_GH_OWNER_MAPPED`): agents use plain `gh --repo <owner>/<repo> …` there, and repo-aegis picks
+the account. With taaad's optional macOS helper `taaad-signer` installed, each fresh App token asks
+you for Touch ID; a token is then reused until shortly before it expires.
 
 ### Identities in practice
 
