@@ -98,6 +98,17 @@ function assertDecisionOnly(r: Run, label: string): void {
   }
 }
 
+/**
+ * What an allowed (or fail-open) command prints, per `--agent`. Empty where the host takes empty stdout as
+ * "proceed"; otherwise the host's minimal allow (plan §5.2 rule 6): Cursor blocks on invalid output and
+ * Antigravity requires a `decision`.
+ */
+const ALLOW_STDOUT: Readonly<Record<string, string>> = {
+  cursor: '{"permission":"allow"}\n',
+  antigravity: '{"decision":"allow"}\n',
+};
+const allowStdout = (agent: string): string => ALLOW_STDOUT[agent] ?? "";
+
 describe("hook guard-egress — host fixtures", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
   const fixtures = loadFixtureIndex();
 
@@ -112,10 +123,10 @@ describe("hook guard-egress — host fixtures", { skip: !SUBPROCESS_TESTS_AVAILA
   for (const f of fixtures) {
     const payload = loadFixture(f);
 
-    it(`${f.file}: the fixture as captured is silent (exit 0, no output)`, () => {
+    it(`${f.file}: the fixture as captured is silent (exit 0, only the host's allow)`, () => {
       const r = run(JSON.stringify(payload).split(FIXTURE_CWD).join(repo), f.agent, "as-captured");
       assert.equal(r.code, 0, r.stderr);
-      assert.equal(r.stdout, "");
+      assert.equal(r.stdout, allowStdout(f.agent));
       assert.equal(r.stderr, "");
     });
 
@@ -127,7 +138,7 @@ describe("hook guard-egress — host fixtures", { skip: !SUBPROCESS_TESTS_AVAILA
         assertDecisionOnly(r, `${f.file} ${label}`);
         if (label === "non-egress") {
           assert.equal(r.code, 0);
-          assert.equal(r.stdout, "", "cheap and silent on non-egress (invariant 2)");
+          assert.equal(r.stdout, allowStdout(f.agent), "cheap and silent on non-egress (invariant 2)");
           assert.equal(r.stderr, "");
         }
         // A guard error is exit 1; nothing here may provoke one.
@@ -141,7 +152,7 @@ describe("hook guard-egress — host fixtures", { skip: !SUBPROCESS_TESTS_AVAILA
       it(`--agent ${agent}: ${label} fails open, silently`, () => {
         const r = run(input, agent, `malformed: ${label}`);
         assert.equal(r.code, 0);
-        assert.equal(r.stdout, "");
+        assert.equal(r.stdout, allowStdout(agent));
         assert.equal(r.stderr, "");
       });
     }

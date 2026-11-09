@@ -1222,6 +1222,12 @@ Settings from `install claude-md` register it as a pinned command (the pinned
 node and CLI, by absolute path, exit 2 if either is gone) rather than by bin
 name.
 
+`--agent cursor` reads Cursor's `afterFileEdit` payload instead (`file_path`
+and `cwd` at the root of the JSON). That event cannot block, so the check is
+detection only: a non-zero answer carries a `note` saying the edit has already
+happened and the pre-commit hook is the gate. Any other `--agent` value is the
+Claude Code shape.
+
 Silent exits (code 0):
 - empty stdin (the agent invoked the hook with no payload)
 - unparseable JSON
@@ -1457,7 +1463,22 @@ payload field are unconfirmed against
 Gemini CLI has since been replaced by Antigravity CLI
 ([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)),
 whose hook payload is not confirmed here either. `--agent gemini` keeps its
-name for the old shape.
+name for the old shape (legacy).
+
+`--agent cursor` and `--agent antigravity` answer in their host's own shape
+instead of the table above (both built from vendor docs, not yet seen from a
+real host; plan §5):
+
+| Host | Event | Allow | Ask | Deny | Guard error |
+|---|---|---|---|---|---|
+| Cursor | `beforeShellExecution` (root `command`) | `{"permission":"allow"}`, exit 0 | `{"permission":"ask","user_message":…,"agent_message":…}`, exit 0 | the same with `"deny"`, exit 0 | exit 1, no stdout (Cursor fails open) |
+| Antigravity CLI | `PreToolUse`, matcher `run_command` (`toolCall.args.CommandLine`) | `{"decision":"allow"}`, exit 0 | none: `ask` is answered as deny | `{"decision":"deny","reason":…}`, exit 0 | `{"decision":"allow"}`, exit 0 |
+
+Allow is never empty for these two (Cursor blocks on invalid output;
+Antigravity requires a `decision`). Cursor's `ask` is enforced only on
+`beforeShellExecution`, so the Cursor adapter does not judge a `preToolUse`
+payload: register the hook on `beforeShellExecution`. Antigravity's exit codes
+are undocumented, so every answer exits 0 and a deny is carried by the JSON.
 
 The hook also reads its **own** `PATH` — the one its host will hand the
 shell it is about to permit — and tells the policy whether the `gh` shim

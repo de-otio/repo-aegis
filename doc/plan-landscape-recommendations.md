@@ -599,3 +599,29 @@ the standing net.
 
 Malformed input is still silent, with no audit record. Adding that record
 is Phase 1 work, and it would change behaviour. T1a did not change it.
+
+### 5.3 T1b and T1d: Cursor and Antigravity adapters, Cursor write scan
+
+Built from the §5.1 facts alone; no real host has run any of it (H1).
+
+- **Cursor** (`hook-hosts/cursor.ts`): judges `beforeShellExecution` (root
+  `command`, `cwd`). Allow is `{"permission":"allow"}` (empty stdout probably
+  blocks), deny and ask are `{"permission", "user_message", "agent_message"}`
+  on stdout with exit 0, and a guard error is exit 1 with nothing on stdout
+  (non-zero other than 2 fails open). A `preToolUse` payload is **skipped**,
+  not judged: Cursor accepts `ask` there but does not enforce it, so judging it
+  would turn an `ask` into a run. Register on `beforeShellExecution` only.
+- **Antigravity** (`hook-hosts/antigravity.ts`, marked unverified): exit codes
+  and failure behaviour are undocumented, so every answer exits 0. Deny is the
+  JSON `{"decision":"deny","reason"}`, `ask` is answered as deny (the `ask`
+  vocabulary is unverified), a guard error is `{"decision":"allow"}`. The
+  working directory is read from the `Cwd` arg, a guessed key, and is left unset
+  when absent. `gemini` is marked legacy; its behaviour is unchanged.
+- **T1d, done, not dropped**: `repo-aegis hook scan-after-write --agent cursor`
+  reads root `file_path` (and `cwd`) from `afterFileEdit` and runs the existing
+  scan unchanged. The only addition is a `note` on every non-zero answer: the
+  edit already happened and the pre-commit hook is the gate.
+- The golden entries for `cursor` and `antigravity` in
+  `golden/hook-guard-egress-hosts.json` were re-recorded on purpose: their
+  output changed from the pre-adapter fallback (silent allow, exit 2 deny). The
+  claude, codex and gemini entries compare byte-identically.

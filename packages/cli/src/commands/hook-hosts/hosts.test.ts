@@ -187,7 +187,10 @@ describe("host adapters — fixtures", () => {
   // Fixtures for hosts with a registered adapter. Cursor, Copilot and
   // Antigravity fixtures exist ahead of their adapters (plan T1b–T1d); each
   // new adapter's fixtures join this table as soon as it is in ADAPTERS.
-  const covered = fixtures.filter(f => ADAPTERS.has(f.host));
+  // Not judged by design, tested as `skip` in cursor-antigravity.test.ts: Cursor's `preToolUse` does not
+  // enforce `ask`, so the Cursor adapter judges `beforeShellExecution` only.
+  const NOT_JUDGED = new Set(["cursor.pre-tool-use.json"]);
+  const covered = fixtures.filter(f => ADAPTERS.has(f.host) && !NOT_JUDGED.has(f.file));
 
   it("every registered adapter has at least one fixture", () => {
     for (const name of ADAPTERS.keys()) assert.ok(covered.some(f => f.host === name), name);
