@@ -200,7 +200,9 @@ Suppressions get a comment saying why, not a bare ignore.
    JSON under `$RUNNER_TEMP` and emit the path. This removes the delimiter
    question entirely and removes the primitive that makes S4 possible
    downstream. Keep `hits-json` for one minor version, populated via a
-   randomised delimiter, marked deprecated.
+   randomised delimiter, marked deprecated. (As built, the removal promised for
+   0.9.0 did not happen: `action.yml` still emits `hits-json` as of v0.12.1,
+   still marked deprecated.)
 4. Fix the doc snippet to read the file (or use `env:`), and say plainly why
    `${{ }}` must never appear inside `run:`.
 
@@ -695,4 +697,6 @@ worth knowing about.
 - **The `public:` trigger** and the `config-guard` base-ref diff need a real PR
   and a real visibility flip to exercise end to end. Installing the generated
   workflow into this repo (it currently ships a gate it does not run on
-  itself) is the cheapest way to get both.
+  itself) is the cheapest way to get both. (Done since: #74 installed the
+  generated `leak-scan` workflows into this repo, so the gate now runs on
+  itself.)

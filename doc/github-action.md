@@ -4,9 +4,16 @@ Two composite Actions plus a set of generated workflows.
 
 | What | Where | Purpose |
 |---|---|---|
-| `de-otio/repo-aegis@v1` | [`action.yml`](../action.yml) | Run any repo-aegis subcommand against the consuming repo. Defaults to `audit`. |
-| `de-otio/repo-aegis/actions/scan@v1` | [`actions/scan/action.yml`](../actions/scan/action.yml) | The scheduled Layer-2 sweep: GitHub code-search for markers already published. |
+| `de-otio/repo-aegis@<sha>` | [`action.yml`](../action.yml) | Run any repo-aegis subcommand against the consuming repo. Defaults to `audit`. |
+| `de-otio/repo-aegis/actions/scan@<sha>` | [`actions/scan/action.yml`](../actions/scan/action.yml) | The scheduled Layer-2 sweep: GitHub code-search for markers already published. |
 | `repo-aegis install ci` | generated | Writes complete, hardened workflows into a consuming repo. **Start here.** |
+
+**Pinning.** There is no floating `v1` tag: the repository publishes only
+`vX.Y.Z` release tags. Pin the action to a release's full commit SHA with the
+version in a trailing comment (`de-otio/repo-aegis@<sha> # v0.12.1`) and let
+Dependabot move it; a leak gate that an upstream tag move can rewrite is not a
+gate. The reference workflows under [`examples/`](../examples/) still say
+`@v1` as a readable placeholder, so replace it with a pin before copying them.
 
 The client-side gate is advisory by construction: `--no-verify` bypasses it, a
 fresh clone has no hooks, and
@@ -41,8 +48,9 @@ a path containing a quote ends your quoting and the remainder is executed.
       const raw = require('fs').readFileSync(process.env.RESULTS_FILE, 'utf8');
 ```
 
-`results-file` exists for this. `hits-json` is deprecated and will be removed
-in 0.9.0.
+`results-file` exists for this. `hits-json` is deprecated; it was announced
+for removal in 0.9.0 but the action still emits it, so do not rely on it
+going away or staying.
 
 ### 2. Never publish un-redacted findings
 
@@ -72,7 +80,9 @@ That writes two workflows and prints a `dependabot.yml` fragment to keep their
 action pins current:
 
 - **`.github/workflows/leak-scan.yml`** (profile `pr`) — the blocking gate. PRs,
-  pushes to a default branch, tags, and the `public` event. Three jobs:
+  pushes to `main` or `master` (the template hard-codes
+  `branches: [main, master]`; edit it if your default branch is named
+  otherwise), tags, and the `public` event. Three jobs:
   `leak-scan` (the audit), `new-ref-scan` (tags), `config-guard` (PRs that
   modify the gate's own configuration).
 - **`.github/workflows/leak-scan-strict.yml`** (profile `strict`) — a weekly
@@ -93,15 +103,22 @@ Add `leak-scan` and `config-guard` to your required checks, and put
 `.repo-aegis.yml` and `.github/` under CODEOWNERS. Without that, both jobs are
 advisory.
 
+**What `config-guard` does and does not check.** It only re-runs the audit with
+`--ignore-allowlist-comments` when a PR touches `.repo-aegis.yml` or the leak-scan
+workflows. It audits the PR's own checkout, so it reads the PR's own
+`.repo-aegis.yml`: a PR that edits `class`, `engagements` or exempt paths is not
+re-judged against the base branch's configuration. CODEOWNERS review on that
+file is the control for such changes.
+
 ---
 
-## Inputs — `de-otio/repo-aegis@v1`
+## Inputs — `de-otio/repo-aegis`
 
 | Name | Default | Description |
 |------|---------|-------------|
 | `command` | `audit` | Subcommand to invoke (`audit`, `check`, `status`, …). |
 | `args` | `''` | Extra CLI args, space-separated, passed verbatim after the subcommand. |
-| `registry` | `''` | Path to a custom `engagements.yaml`. Exported as `REPO_AEGIS_REGISTRY`. |
+| `registry` | `''` | Path to a custom `engagements.yaml`. Exported as `REPO_AEGIS_REGISTRY`. **Known issue:** see [Registry availability](#registry-availability). |
 | `fail-on-hits` | `'true'` | Fail the workflow on a non-zero CLI exit. |
 | `require-deny-set` | `'true'` | Fail when the computed deny set is empty. See below. |
 | `min-patterns` | `'0'` | Stronger floor: fail unless the deny set has at least N patterns. Overrides `require-deny-set` when > 0. |
@@ -116,7 +133,7 @@ advisory.
 |------|-------------|
 | `exit-code` | `0` clean, `1` hit, `2` the scan could not run (usage error, or the deny-set floor was not met). |
 | `results-file` | Path under `RUNNER_TEMP` holding the JSON output. **Use this.** |
-| `hits-json` | DEPRECATED (removal in 0.9.0) — the JSON as a string. See rule 1. |
+| `hits-json` | DEPRECATED (announced for removal in 0.9.0, still emitted) — the JSON as a string. See rule 1. |
 
 ---
 
@@ -153,7 +170,8 @@ operator and must be made available to the workflow:
 
 - **Checked into the consuming repo** at `.repo-aegis-registry/engagements.yaml`,
   passed via the `registry` input. Only appropriate when the registry is
-  non-confidential — e.g. a single-engagement OSS project.
+  non-confidential — e.g. a single-engagement OSS project. (See the known
+  issue below before relying on this.)
 - **Restored from secrets** at workflow time (see below). One multi-line secret
   containing the YAML.
 - **Restored from an age-encrypted blob** committed to the repo and decrypted
@@ -171,13 +189,23 @@ operator and must be made available to the workflow:
     # spliced into a script is both an injection vector and a log-leak risk.
     printf '%s' "$REGISTRY_YAML" > "${RUNNER_TEMP}/repo-aegis/engagements.yaml"
 
-- uses: de-otio/repo-aegis@v1
+- uses: de-otio/repo-aegis@<sha> # v0.12.1
   with:
     registry: ${{ runner.temp }}/repo-aegis/engagements.yaml
 ```
 
 With `require-deny-set` on (the default), a failure of any of the above is now
 a red job rather than a silent pass.
+
+> **Known issue: the `registry` input does not yet produce a deny set.** The
+> action only exports `REPO_AEGIS_REGISTRY`. `check` and `audit` build the deny
+> set from the **rendered marker files**, and nothing in the action renders
+> them from the registry. So with the `registry` input alone the computed deny
+> set is empty: the job **fails red** (exit 2) under the default
+> `require-deny-set` floor, and with `require-deny-set: 'false'` it **passes
+> with an empty deny set** (the marker scan reports `skipped`; the
+> deny-set-independent checks still run). Tracked; no verified workaround is
+> documented here yet.
 
 ---
 
@@ -189,9 +217,13 @@ or you have converted a silent hole into a permanently red check.
 
 ### Recommended: layer the enforcement
 
-- **Fork PRs** run on `pull_request` with no registry, enforcing the universal
-  `_always` patterns only — private keys, token shapes, JWTs. Real coverage, and
-  no secret is ever present in a job holding attacker-controlled files. Set
+- **Fork PRs** run on `pull_request` with no registry. With no registry the
+  deny set is empty (the `_always` patterns come only from the registry's
+  `alwaysBlock`), so the marker scan is skipped and `audit` reports
+  `marker-scan: skipped (empty deny set)`. Such a job runs only the
+  deny-set-independent checks (lockfile and private-registry egress,
+  visibility, remote consistency). No secret is ever present in a job holding
+  attacker-controlled files, which is the point of the split. Set
   `require-deny-set: 'false'` on this job, or scope the workflow so the
   registry-backed job is skipped for forks.
 - **Engagement-scoped enforcement** runs on `push` to protected branches, or in
@@ -223,7 +255,7 @@ the layered approach above.**
 
 ---
 
-## The scan action — `de-otio/repo-aegis/actions/scan@v1`
+## The scan action — `de-otio/repo-aegis/actions/scan`
 
 The Layer-2 sweep: GitHub code-search queries derived from your markers,
 de-duplicated against a state file, filed as an issue when something new turns
@@ -244,7 +276,25 @@ chore:
 The action decrypts the queries file into `RUNNER_TEMP`, never the workspace —
 a plaintext copy inside the checkout can be swept up by an artifact upload, a
 `git add`, or a build step that globs. It is removed after the run.
-`--reveal-matches` is deliberately not exposed as an input.
+`--reveal-matches` is deliberately not a named input; `extra-args` passes
+arguments verbatim, so it can still be supplied there. Don't.
+
+Inputs:
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `queries` | required | Path to the queries YAML. With `age-identity` set this is the age-**encrypted** file, decrypted to `RUNNER_TEMP` first. |
+| `age-identity` | `''` | An age private key (the secret's value, not a path) used to decrypt `queries`. Omit only for a plaintext queries file, which belongs only in a private repo. |
+| `state` | required | Path to the seen-hits state file. The caller restores and saves it; the action only reads and writes it. |
+| `output-format` | `issue` | `issue`, `json` or `markdown`. |
+| `report-issue-repo` | `''` | `owner/repo` to file findings into. Required for `output-format: issue`, and it **must** be a private repo. |
+| `token-env` | `GH_TOKEN` | Name of the env var holding the GitHub token. |
+| `exclude-org` | `''` | Space-separated orgs to exclude from results (your own, typically). |
+| `extra-args` | `''` | Additional `repo-aegis-scan run` arguments, space-separated. |
+| `version` | the action's own version | npm version of `@de-otio/repo-aegis-scan` to install; not `latest`. |
+
+Output: `exit-code`, the exit code of `repo-aegis-scan run` (mode-dependent,
+see below).
 
 **Exit codes differ by output mode**, which is easy to get wrong: in `json` mode
 `1` means "new hits found" and the caller must react; in `issue` mode a
@@ -306,8 +356,9 @@ engagements:
   - customer-a
 ```
 
-A public/OSS repo should set a class with no engagements, so the universal
-markers are enforced unconditionally.
+A public/OSS repo should set a class with no engagements. The deny set is
+then the registry's full marker set; with no registry on the runner it is
+empty (see [Fork PRs](#fork-prs)), and only the deny-set-independent checks run.
 
 ### Visibility and egress checks
 

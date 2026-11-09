@@ -1,6 +1,6 @@
 # repo-aegis `check-write` PreToolUse hook — intermittent spurious block
 
-**Status:** fixed 2026-05-27 (unreleased). Two distinct bugs (one deterministic
+**Status:** fixed 2026-05-27, shipped in v0.3.3 (#26). Two distinct bugs (one deterministic
 symptom, one cwd-dependent cause); see "Resolution" below.
 **Dates observed:** 2026-05-26 / 2026-05-27.
 **Component:** `repo-aegis hook check-write` wired as a Claude Code `PreToolUse`
@@ -93,8 +93,12 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
 ```
 
 Claude Code forwards **stderr** (not stdout) to the agent when a PreToolUse
-hook exits non-zero. So *every* block — legitimate or spurious — reaches the
-agent as the bare "No stderr output" wrapper.
+hook exits with the blocking code, **2** (see the exit-code section of
+<https://code.claude.com/docs/en/hooks>; that page says other non-zero codes
+are non-blocking and show stderr only to the user, which this write-up and
+CHANGELOG 0.3.3 originally stated as "any non-zero exit"). `check-write` blocks
+with exit 2, so *every* block — legitimate or spurious — reaches the agent as
+the bare "No stderr output" wrapper.
 
 The sibling PostToolUse hook already fixed this exact issue and documents it:
 `hook-scan-after-write.ts`'s `emitJsonAndExit` routes non-zero exits to
@@ -210,7 +214,7 @@ repo is the field failure in miniature.
 
 ## Resolution
 
-Landed (unreleased; see `CHANGELOG.md` `[Unreleased]`):
+Landed in v0.3.3 (#26; see `CHANGELOG.md` `[0.3.3]`):
 
 - **Bug A** — `hook-check-write.ts`'s `emitJsonAndExit` now routes non-zero
   exits to **stderr** (mirroring `scan-after-write`), so a block is

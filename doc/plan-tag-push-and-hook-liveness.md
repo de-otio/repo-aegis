@@ -209,7 +209,8 @@ shared with `--range`.
 4. `install-hooks.ts` `PRE_PUSH_SCRIPT`: git passes `<remote-name> <remote-url>`
    as `$1 $2`. Use `--range` when `remote_sha` is non-zero (unchanged), and
    `check --push-ref "$local_ref" --remote "$1"` when it is zero. Keep the
-   fail-open `command -v repo-aegis` guard.
+   fail-open `command -v repo-aegis` guard. (Superseded in v0.11.1 by the
+   pinned, fail-closed hooks: see `doc/plan-pin-enforcement-binary.md`.)
 5. Escape hatch: `REPO_AEGIS_NEW_REF_FULL_SCAN=1` forces the old behaviour.
 6. Update `program.test.ts` manifest, `doc/cli-reference.md`,
    `doc/design/README.md` (locked-decisions row for `check --push-ref`).

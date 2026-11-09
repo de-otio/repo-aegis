@@ -21,6 +21,10 @@ These apply to every subcommand. Specified once, not duplicated below.
 | `--version` | — | Print version and exit |
 
 `--cwd` is read globally and threaded into per-command handlers.
+
+> **Known issue:** `allow` and `deny` currently ignore `--cwd` (they read the
+> process working directory); run them from inside the target repo.
+
 `--home` and `--registry-path` set the corresponding env vars
 (`REPO_AEGIS_HOME` / `REPO_AEGIS_REGISTRY`) before the subcommand
 runs, so any deeply-nested call into `core` picks them up
@@ -32,6 +36,18 @@ Stable across every subcommand:
 - **0**: success / clean.
 - **1**: actionable finding (hits found / new code-search hits).
 - **2**: usage / config / "tool couldn't do its job".
+
+What exit **1** means differs by command; check the command before reacting:
+
+| Command | Exit 1 means |
+|---|---|
+| `check` | a non-waived marker hit, a blocking history hit, or a private-registry reference (`egress`) in a public-facing repo; never for a `scratch` repo (advisory) |
+| `audit` | at least one check failed |
+| `doctor` | at least one `fail`-severity finding (warnings never change the exit code) |
+| `egress-readback` | `PUBLISHED_BODY_MISMATCH`: the live PR body differs from the file |
+| `repo-aegis-scan run` | new hits found, only with `--output-format json` |
+| `hook scan-after-write`, `hook scan-bash-output` | a hit (for the Bash hook, secret-shaped content). `scan-after-write` exits 0 in a `scratch` repo; `scan-bash-output --advisory` exits 0 on a hit. See [`hook`](#hook-coding-agent-entry-points) for what Claude Code does with exit 1 |
+| `egress-check`, `hook guard-egress`, `hook check-write` | **a fault in the guard itself, not a finding.** Exit 1 is non-blocking: the shim and the hook framework proceed with the command. A deliberate refusal is always exit **2** |
 
 ## Canonical JSON objects
 
@@ -171,9 +187,16 @@ JSON:
   "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
   "alwaysBlock": { "patternCount": 3 },
   "regexBackend": "re2",
-  "warnings": []
+  "zeroMarkerEngagements": [],
+  "warnings": [],
+  "hooks": { /* HookState: effectivePath, origin, expectedPath, scripts, … */ }
 }
 ```
+
+`zeroMarkerEngagements` lists the ids of **active** engagements that have no
+markers (an engagement with nothing to match protects nothing; add markers by
+hand or with [`suggest-markers`](#repo-aegis-suggest-markers)). Ids only, never
+patterns.
 
 `regexBackend` is `"re2"` when the optional `re2` dependency is
 installed and active for pattern validation, or `"in-process"`
@@ -239,8 +262,9 @@ To inspect leak-context strict mode, run `repo-aegis context status --json`
 ### `repo-aegis check`
 
 Scans content against the repo's scoped deny set. The pre-commit /
-pre-push hooks shell out to this; the Claude Code PostToolUse hook
-calls it via `hook scan-after-write`.
+pre-push hooks shell out to this. The Claude Code PostToolUse hook
+(`hook scan-after-write`) uses the same scanner but is a separate entry
+point with its own logic; see [`hook`](#hook-coding-agent-entry-points).
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -314,11 +338,18 @@ Behaviour:
 7. Path exemptions (see [`alwaysBlockExemptPaths`](configuration.md))
    narrow an exempt path's matching to non-`_always` patterns only —
    never applied to `--ignore-allowlist-comments`-style audit modes,
-   which is what `audit --fixture-check` uses to keep exemptions
-   visible.
+   which is what `audit`'s fixture check (on by default; skip it with
+   `--no-fixture-check`) uses to keep exemptions visible.
 8. Hits printed redacted (position + engagement; never literal).
 9. `scratch` class → exit 0 even with hits (advisory).
-10. Otherwise exit 1 if any (non-waived, non-downgraded) hits.
+10. Otherwise exit 1 if any (non-waived, non-downgraded) hits, **or** any
+    `egress` finding: a private-registry reference in a lockfile or `.npmrc`
+    in scope, reported only for a public-facing repo (see
+    [`visibilityProbe`](#visibilityprobe--why-unknown-is-never-the-whole-answer)).
+    In `--history` mode a `historyHits` entry carries `alreadyPublic`; when
+    `true` (the commit is already reachable from the remote, checked only for
+    a public-facing repo) it is reported as a warning and does not count
+    toward the exit code.
 
 ### `check --push-ref` (new-ref / release-tag scanning)
 
@@ -350,10 +381,13 @@ and server-side push protection is the only non-advisory backstop.
 
 ### Waivers in `check` output
 
-`check` always prints `repo-aegis: waived: N` (text mode) and a
-`waived: ScanHitJson[]` array plus `expiredWaivers: []` (JSON), on
-every run, even when both are empty — a waiver must never disappear a
-finding silently. See [`repo-aegis waive`](#repo-aegis-waive) below for
+`check --json` always carries a `waived: ScanHitJson[]` array (each entry
+adds the waiver's `reason`, `approver` and optional `expires`) plus
+`expiredWaivers: []`, on every run, even when both are empty. In text mode,
+`repo-aegis: waived: N finding(s) via .repo-aegis.yml` is printed only when
+`N > 0` (a permanent `waived: 0` on every commit would be noise), and a
+warning line is added when any waiver has expired. A waiver must never
+disappear a finding silently. See [`repo-aegis waive`](#repo-aegis-waive) below for
 how a waiver is minted.
 
 JSON (clean):
@@ -363,10 +397,13 @@ JSON (clean):
   "hits": [],
   "historyHits": [],
   "skipped": [],
+  "egress": [],
   "repo": { /* RepoJson */ },
   "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
   "advisory": false,
-  "warnings": []
+  "warnings": [],
+  "waived": [],
+  "expiredWaivers": []
 }
 ```
 
@@ -378,13 +415,24 @@ JSON (with hits):
     { "path": "src/foo.ts", "line": 42, "column": 13,
       "engagement": "customer-b", "matchPreview": "ac***N=14" }
   ],
+  "historyHits": [],
   "skipped": [],
+  "egress": [],
   "repo": { /* RepoJson */ },
   "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
   "advisory": false,
-  "warnings": []
+  "warnings": [],
+  "waived": [],
+  "expiredWaivers": []
 }
 ```
+
+`egress` holds private-registry findings (`{ file, line?, host, pkg? }`; see
+step 10 above) and is non-empty only for a public-facing repo. A directory
+`--path` adds `filesScanned` and `skippedDirs`; `--push-ref` adds `rangeMode`
+(and `base`); `--remote-url` adds `destination`. An empty deny set returns the
+short form `{ "hits": [], "skipped": [], "egress": [], "status": "no-deny-set",
+"warnings": [] }` (exit 0 unless a floor is set).
 
 ### `repo-aegis waive`
 
@@ -411,15 +459,17 @@ Behaviour:
    commit to a public repo when it's derived from a generic `_always`
    shape in the first place; an engagement-marker digest would be an
    offline oracle for guessing the literal it came from.
-2. **Refuses to run when stdin is not a TTY**, unless
-   `REPO_AEGIS_WAIVE_NONINTERACTIVE=1` is set. A waiver is a human
+2. **Adding a waiver refuses to run when stdin is not a TTY**
+   (`WAIVE_NONINTERACTIVE`), unless `REPO_AEGIS_WAIVE_NONINTERACTIVE=1` is
+   set. `--list` and `--remove` are not gated. A waiver is a human
    decision; this stops a hook, script, or coding agent from minting
    one on its own behalf — which would otherwise reconstruct
    `git push --no-verify` with extra steps. Combined with two other
    controls: `hook check-write` (the PreToolUse gate) refuses an agent
    `Write`/`Edit`/`MultiEdit` to `.repo-aegis.yml` outright, and
-   `check` always reports `waived: N` so a waiver is never silent (see
-   above). All three are required; none alone is sufficient.
+   `check --json` always reports `waived` (text mode when `N > 0`) so a
+   waiver is never silent (see above). All three are required; none alone
+   is sufficient.
 3. Writes under `.repo-aegis.yml`'s `waivers:` key (see
    [configuration.md](configuration.md)), preserving comments and key
    order via a structured YAML edit — not a parse/re-stringify
@@ -464,7 +514,9 @@ Behaviour:
    the active set.
 6. Marker files carry a `MARKER_FORMAT_VERSION` header.
 
-JSON: `RenderResult` from `core` (`written`, `removed`, `flat`).
+JSON: `{ "dryRun": boolean, "written": { path, engagementId, patternCount }[],
+"removed": string[], "flat": string | null }`. `dryRun` is `true` under
+`--dry-run`, when nothing was written or deleted.
 
 ---
 
@@ -734,16 +786,22 @@ Emits (or `--write`s) the generated leak-scan workflow(s), and prints a
 | `--write` | off | write to disk instead of printing |
 | `--force` | off | overwrite an existing workflow file |
 | `--no-require-deny-set` | off | emit `--min-patterns 0` instead of `--require-deny-set` |
+| `--uninstall` | off | remove the generated workflow file(s); refuses a file that was edited by hand, and is idempotent when the file is missing. Defaults to every profile |
 
 **Profiles.**
 
 - **`pr`** → `.github/workflows/leak-scan.yml`. The blocking gate: PRs, pushes
-  to a default branch, tag pushes, and the `public` event. Three jobs —
+  to `main` or `master` (the template hard-codes `branches: [main, master]`;
+  edit the file if your default branch is named otherwise), tag pushes, and the
+  `public` event. Three jobs —
   `leak-scan` (one `audit` per run, not one per file), `new-ref-scan`
   (`check --push-ref` on tags, where remote refs are authoritative rather than
-  possibly-stale as they are in a local hook), and `config-guard` (re-runs with
-  `--ignore-allowlist-comments` when a PR modifies `.repo-aegis.yml` or the
-  workflow itself).
+  possibly-stale as they are in a local hook), and `config-guard` (re-runs
+  with `--ignore-allowlist-comments` when a PR modifies `.repo-aegis.yml` or
+  the workflow itself). **Limit:** `config-guard` adds only
+  `--ignore-allowlist-comments`; it audits the PR's own checkout, so it reads
+  the PR's own `.repo-aegis.yml`. A PR that edits `class`, `engagements` or
+  exempt paths is not re-judged against the base branch's configuration.
 - **`strict`** → `.github/workflows/leak-scan-strict.yml`. Weekly, with
   `--ignore-allowlist-comments --history` and every optional check enabled,
   filing findings as a single tracked issue. The PR gate must honour
@@ -808,6 +866,12 @@ drop-in is verified. `--user-settings` writes `~/.claude/settings.json` instead
 | `PostToolUse` | `Bash` | `repo-aegis hook scan-bash-output` |
 | `PostToolUse` | `Bash` | `repo-aegis hook egress-receipt` |
 | `SessionStart` | `*` | `repo-aegis hook first-touch` (only with `--first-touch`) |
+
+Matchers are regular expressions over the tool name (see Claude Code's
+[hooks documentation](https://code.claude.com/docs/en/hooks)). `MultiEdit` is
+kept in the file-write matchers for Claude Code versions that have that tool;
+whether the current release still does is unconfirmed here, and an
+alternative that names no existing tool is inert.
 
 The two `PostToolUse` Bash hooks share one matcher entry and both run;
 neither replaces the other, and both coexist with any user-authored hook
@@ -886,6 +950,8 @@ fifth silently isn't.
 | `--scan-root <path...>` | platform default roots | one or more directories to walk for git working trees (repeatable) |
 | `--fix` | off | report (dry-run) or, with `--yes`, unset a repo-local `core.hooksPath` override that's shadowing a healthy global value |
 | `--yes` | off | apply `--fix` changes; without it, `--fix` only reports what it would do |
+| `--no-egress-checks` | — | skip the egress-guard checks (see [`doctor` — egress-guard checks](#doctor--egress-guard-checks)) |
+| `--claude-home <dir>` | `~/.claude` | Claude Code home for the guard-hook check |
 
 Behaviour:
 1. Walk every working tree under the scan roots; resolve each one's
@@ -1143,14 +1209,18 @@ Toggles / reads the flag.
 
 ### `repo-aegis hook scan-after-write`
 
-The Claude Code PostToolUse hook. Reads the tool-result JSON on stdin,
-extracts `tool_input.file_path` (or `tool_input.path` for older
-shapes), and runs `check --path` on it. Output flows back into the
-agent's tool result as JSON (always — never literal markers).
+The Claude Code PostToolUse hook for `Write|Edit|MultiEdit`. Reads the
+tool-result JSON on stdin, extracts `tool_input.file_path` (or
+`tool_input.path` for older shapes) and the session `cwd`, and scans the file
+as it is on disk. It does **not** run `check --path`: it has its own logic
+(`decideHookAction`, then `computeDenySet` and `scanFile`), and it applies
+neither waivers nor the `--min-patterns` floor. It resolves the working tree
+from the written path, not from `cwd`, and the payload is JSON that never
+carries literal markers.
 
-This is the canonical hook entry. Settings.json from
-`install claude-md` registers it as a pinned command (the pinned node and
-CLI, by absolute path, exit 2 if either is gone) rather than by bin name.
+Settings from `install claude-md` register it as a pinned command (the pinned
+node and CLI, by absolute path, exit 2 if either is gone) rather than by bin
+name.
 
 Silent exits (code 0):
 - empty stdin (the agent invoked the hook with no payload)
@@ -1158,7 +1228,52 @@ Silent exits (code 0):
 - no `tool_input.file_path` (the hook fired on a tool we don't model)
 - `file_path` does not exist on disk
 
-Otherwise: hands off to `check`. Exit semantics are `check`'s.
+Exit codes:
+
+| Exit | When |
+|---|---|
+| 0 | clean; an empty deny set (`status: "no-deny-set"`); a `scratch` repo (advisory) |
+| 1 | a marker hit in a non-`scratch` repo (a redacted `hits` payload, on **stderr**) |
+| 2 | `CROSS_ORG_WRITE` (legacy detection only: the real refusal is the PreToolUse `hook check-write`), `CUSTOMER_COUPLED_NO_ENGAGEMENT`, an unreadable or encrypted registry, `HOOK_INPUT_TOO_LARGE` (payload past 1 MiB with no readable file path), or a scan error |
+
+> **Unverified:** Claude Code surfaces PostToolUse output to the model only on
+> exit 2; these hooks exit 1 on a hit, which its
+> [hooks documentation](https://code.claude.com/docs/en/hooks) describes as a
+> non-blocking error that the model does not see. Whether the agent sees a hit
+> from this hook is not confirmed in a live session. Tracked.
+
+### `repo-aegis hook check-write`
+
+The PreToolUse hook for `Write|Edit|MultiEdit`: the primary write gate. It
+runs **before** the tool does and looks only at the path and the session
+`cwd`, never at content. Exit 2 blocks the write: `CROSS_ORG_WRITE` (the
+destination's trust boundary does not overlap the session's),
+`WAIVER_FILE_WRITE_REFUSED` (an agent write to `.repo-aegis.yml`), an
+unreadable or encrypted registry (a missing registry is not an error), or
+`HOOK_INPUT_TOO_LARGE`. Exit 0 otherwise. Exit 1 is a fault outside the
+registry and is non-blocking.
+
+### `repo-aegis hook scan-bash-output [--advisory]`
+
+The PostToolUse hook for `Bash`. Scans the command's stdout and stderr for
+secret-shaped content (PEM private keys, JWTs, GitHub tokens) and, on a match,
+exits 1 with a `SECRET_LEAK` payload on **stdout**: kinds, a count and offsets,
+never the matched bytes. `--advisory` exits 0 on a hit and still emits the
+payload. The same exit-1 caveat as `scan-after-write` applies (see the note
+above).
+
+### `repo-aegis hook first-touch`
+
+The SessionStart hook (registered only with `install claude-md --first-touch`).
+Classifies the current repo from its remote and the registry and prints a
+`FirstTouchResult` as JSON (`status`: `already-classified`, `applied`,
+`needs-confirmation` or `skipped`).
+
+### `repo-aegis hook managed-heartbeat`
+
+The SessionStart hook of the managed drop-in. Records a timestamp in
+`state/managed-hooks-seen` so `doctor` can tell that Claude Code loads the
+drop-in (`MANAGED_HOOKS_NOT_FIRING`). Evidence, not a gate: it always exits 0.
 
 ---
 
@@ -1334,9 +1449,15 @@ command that starts a detached session: `tmux new -d`, `tmux new-window` /
 built at run time, or a script written by an earlier call, gets past them and
 falls to the terminal and ancestry checks. A quoted mention next to a
 repo-aegis word is refused too. Registered by
-`install claude-md` on `PreToolUse` matcher `Bash`; Codex CLI and Gemini
-CLI snippets are in [agent-install.md](agent-install.md) (there `ask`
-degrades to `deny`).
+`install claude-md` on `PreToolUse` matcher `Bash`. Hand-written Codex CLI
+and Gemini CLI snippets are in [agent-install.md](agent-install.md) (there
+`ask` degrades to `deny`). Treat both as **unverified**: the Codex matcher and
+payload field are unconfirmed against
+[Codex's hooks documentation](https://developers.openai.com/codex/hooks), and
+Gemini CLI has since been replaced by Antigravity CLI
+([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)),
+whose hook payload is not confirmed here either. `--agent gemini` keeps its
+name for the old shape.
 
 The hook also reads its **own** `PATH` — the one its host will hand the
 shell it is about to permit — and tells the policy whether the `gh` shim
@@ -1664,6 +1785,84 @@ Offers `selfIdentity` candidates — the registry's `personalOrgs`,
 by default; `--accept self-identity` persists them. See
 [configuration.md](configuration.md).
 
+### `scan-env`
+
+Discovers private package-registry hosts from this machine's toolchain
+configs (`~/.npmrc`, `pip.conf`, `~/.docker/config.json`,
+`~/.m2/settings.xml`, `~/.cargo/config.toml`, `~/.yarnrc.yml`) and offers them
+as markers. Dry run unless `--accept` is given; it never reads auth tokens.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--accept <placement>` | — | persist the discovered hosts: `private-infra` (blocked in public-facing repos only), `always-block` (everywhere) or `engagement` |
+| `--engagement <id>` | — | required with `--accept engagement` |
+| `--self` | off | offer the operator's own identity instead (see above); only `--accept self-identity` is valid with it |
+| `--from <path>` | cwd | also scan project-level configs under this directory |
+| `--scan-home <dir>` | `$HOME` | whose dotfiles to scan; distinct from the global `--home`, which moves the repo-aegis config directory |
+
+---
+
+## Additional commands
+
+### `repo-aegis suggest-markers`
+
+LLM-assisted marker discovery: extracts prose from a repo, asks a **local**
+Ollama model for candidate tokens and proposes regex markers for an
+engagement. Off the deterministic gate path; it runs only when invoked. See
+[packages/llm/README.md](../packages/llm/README.md).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--engagement <id>` | required | engagement to add markers to |
+| `--from <path>` | cwd | repo to scan |
+| `--model <id>` | `llama3.2:3b` | Ollama model id |
+| `--endpoint <url>` | `http://127.0.0.1:11434` | Ollama endpoint |
+| `--allow-remote-model` | off | allow a non-loopback endpoint (sends the repo's prose to a remote service) |
+| `--accept-remote-author-domains` | off | send git-log author email domains even to a non-loopback endpoint |
+| `--auto-accept-above <n>` | — | auto-accept candidates with confidence at or above `n` (0 to 1) |
+| `--dry-run` | off | print candidates and exit without persisting |
+
+### `repo-aegis registry encrypt --recipient <pubkey>` / `registry decrypt --identity <path>`
+
+Encrypts the registry at rest with `age` (`engagements.yaml` becomes
+`engagements.yaml.age`, the plaintext is removed) and reverses it. `encrypt`
+refuses with `REGISTRY_ALREADY_ENCRYPTED` when a ciphertext or the
+`state/registry.encrypted` marker exists; `decrypt` refuses when there is no
+ciphertext. The CLI never decrypts on demand: while the registry is encrypted,
+commands that need it fail with `REGISTRY_ENCRYPTED` until a person runs
+`decrypt`.
+
+### `repo-aegis audit-log on | off | show [--all] | path`
+
+The operator compliance trail, **off by default**. `on`/`off` toggle it;
+`show` prints the last 50 records (`--all` for every record); `path` prints the
+log file's path (`--json` adds `enabled` and `exists`). When on, each successful
+state-changing command appends one JSONL record of structural metadata
+(engagement ids, counts, paths), never literal markers or matched text.
+
+### `repo-aegis uninstall [--yes] [--purge-repos] [--purge-home] [--scan-root <path...>] [--claude-home <dir>]`
+
+Reverses every install step in one command: git hooks, global gitignore block,
+the Claude Code wiring (`install claude-md --uninstall`), the CI workflow(s),
+the `gh` shim and the git credential helper. A **dry run** unless `--yes`.
+`--purge-repos` also unsets the `repo-aegis.*` git config in every repo under
+the scan roots (default `~/repos`, `~/code`, `~/src`, `~/projects`);
+`--purge-home` also deletes `~/.config/repo-aegis/` (registry, audit log,
+profiles, caches).
+
+`repo-aegis uninstall sweep-repos [--yes] [--scan-root <path...>]` runs just
+the per-repo step: it walks the scan roots and unsets `repo-aegis.class` and
+`repo-aegis.engagement`, dry run unless `--yes`.
+
+### Other options not listed above
+
+- `hook scan-bash-output --advisory`: see [`hook`](#hook-coding-agent-entry-points).
+- `install ci --uninstall`, `doctor --no-egress-checks` and `--claude-home`:
+  see their own sections.
+- `status` JSON `zeroMarkerEngagements`, `check` JSON `egress` and
+  `historyHits[].alreadyPublic`, `render` JSON `dryRun`: documented with
+  each command's JSON.
+
 ---
 
 ## Scanner subcommands (`repo-aegis-scan`)
@@ -1690,9 +1889,16 @@ repo-aegis-scan run \
   [--no-update-state]               # dry-run
   [--prune-state-older-than <days>] # drop seenIso entries older than this
   [--reveal-matches]                # include literal snippets in output (default OFF)
+  [--semantic]                      # embedding-based sweep alongside the regex one (needs Ollama)
+  [--ollama-endpoint <url>]         # default: http://127.0.0.1:11434
+  [--ollama-model <id>]             # embedding model; default: nomic-embed-text
+  [--ollama-timeout-ms <n>]
+  [--allow-remote-ollama]           # permit a non-loopback endpoint (default OFF)
+  [--semantic-max-bytes-per-candidate <n>]  # default: 16384
 ```
 
-Exit codes:
+`--semantic` is off by default, asynchronous and advisory; it needs an
+engagements registry and the profile files that `rebuild-profiles` builds.
 - 0: completed; either no new hits, or new hits filed via issue/markdown
 - 1: completed; new hits found AND `--output-format=json` (caller must react)
 - 2: error (token missing, query parse fail, all-queries-failed,
@@ -1707,8 +1913,20 @@ duplicate names.
 
 Wraps `age` to encrypt the queries YAML. Used when the deployment
 repo (the one that runs `scan run` on a schedule) is itself public
-and you don't want to commit plain-text query strings.
+and you don't want to commit plain-text query strings. Other flags:
+`--recipient-file <path>` (one recipient per line) and `--output <path>`
+(default `<file>.age`).
 
 ### `repo-aegis-scan decrypt-query <file> --identity <key>`
 
-Inverse of `encrypt-query`.
+Inverse of `encrypt-query`. `--output <path>` writes the cleartext there
+(default: stdout).
+
+### `repo-aegis-scan rebuild-profiles`
+
+Builds the per-engagement embedding profiles that `run --semantic` compares
+against. Flags: `--ollama-endpoint`, `--ollama-model`, `--ollama-timeout-ms`
+and `--allow-remote-ollama` (as for `run`), `--threshold <n>` (cosine
+threshold for new profiles, default 0.78), `--diff` (report stored-vs-current
+manifest drift without embedding or writing), `--engagement <id...>`
+(restrict to these engagements) and `--registry <path>`.

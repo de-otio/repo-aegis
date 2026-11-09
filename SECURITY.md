@@ -2,7 +2,8 @@
 
 ## Supported versions
 
-Active fixes target the latest minor release (`0.2.x`). Older
+Active fixes target the latest minor release (see `CHANGELOG.md` for
+the current version). Older
 versions receive fixes only for high-severity issues at the
 maintainer's discretion.
 

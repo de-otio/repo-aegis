@@ -60,7 +60,7 @@ do not guess:
 Before installing, check:
 
 ```sh
-node --version          # must be >= 20
+node --version          # CI tests Node 20, 22 and 24; package.json has no `engines` field
 npm --version
 which repo-aegis        # is it already installed?
 ```
@@ -92,7 +92,8 @@ npm install -g @de-otio/repo-aegis
 ```
 
 The package publishes from npm with **trusted publishing
-provenance** as of v0.2.0+ (sigstore attestation). After install:
+provenance** (a SLSA provenance attestation; confirmed on the npm registry
+for v0.12.1; which release first carried it was not checked). After install:
 
 ```sh
 repo-aegis --version
@@ -116,7 +117,8 @@ This is idempotent. It:
 2. Scaffolds an empty `engagements.yaml` registry.
 3. Renders empty marker files (one per engagement, plus `_always`).
 4. Installs git hooks at `~/.config/repo-aegis/hooks/` (pre-commit,
-   pre-push) and sets `core.hooksPath` per repo.
+   pre-push) and sets `core.hooksPath` in the global git config (`install
+   hooks --local` sets it for one repo instead).
 5. Installs the Claude Code hooks: PreToolUse `check-write` (refuses
    cross-org writes), PreToolUse `guard-egress` (judges where a
    publishing command would send bytes), PostToolUse
@@ -133,13 +135,13 @@ that works for every agent and every human, not only Claude Code —
 because the shim needs a shell-profile edit only the user can make.
 That is [Step 2b](#step-2b--install-the-gh-shim), and it is not
 optional: without it a `gh pr create` from a terminal, from Codex, or
-from Gemini reaches GitHub unjudged.
+from Gemini CLI / Antigravity CLI reaches GitHub unjudged.
 
 After `init`:
 
 ```sh
 repo-aegis engagements list --json
-# -> { "engagements": [], "alwaysBlock": [], "schemaVersion": 2 }
+# -> { "engagements": [], "alwaysBlock": { "patternCount": 0 } }
 ```
 
 Empty registry. That's expected — you haven't configured anything
@@ -184,8 +186,8 @@ enforce — but that covers one agent, and only `gh`.
 
 Why this layer exists when the Claude Code hook already judges `gh`
 commands: the hook guards one agent's sessions. The shim sits in front of
-*every* `gh` invocation on the machine — a human terminal, Codex, Gemini,
-a script — and it is the only place the post-publish read-back
+*every* `gh` invocation on the machine — a human terminal, Codex, Gemini
+CLI or Antigravity CLI, a script — and it is the only place the post-publish read-back
 (`PUBLISHED_BODY_MISMATCH`) happens. Non-publishing verbs (`gh pr view`,
 `gh api GET`) pass straight through.
 
@@ -197,7 +199,8 @@ repo-aegis doctor
 ```
 
 If `PUSH_DEFAULT_IMPLICIT` is not ok, `git config --global push.default`
-is unset or `simple`, so a bare `git push` still works. The guard
+is anything but `nothing` (unset, `simple`, `current`, ...; only the global
+scope is read), so a bare `git push` still works. The guard
 refuses a bare push from an agent anyway, but making it an error for
 humans too is one line — recommend
 `git config --global push.default nothing` and let the user decide.
@@ -226,8 +229,8 @@ customers; ask. A reasonable script:
 >    pattern (`internal\\.acme\\.example`), bug-tracker prefix.
 >
 > Also tell me your *personal* GitHub orgs — orgs you own where
-> public/OSS work happens. These are configured separately and
-> classify their repos as `public-eligible`.
+> public/OSS work happens. These are configured separately; a repo in one
+> is classified `public-eligible` only if GitHub says that repo is public.
 
 Ask for all engagements at once if it's natural in the conversation;
 ask one at a time if the user prefers. Either is fine.
@@ -321,9 +324,11 @@ If `engagements add` fails with `ENGAGEMENT_EXISTS`:
 
 - The id is already registered. Run `repo-aegis engagements show
   <id> --json` to inspect, surface the existing entry, and ask the
-  user whether to update (different verb: `engagements add
-  --github-org` is additive on orgs and markers) or pick a different
-  id.
+  user whether to pick a different id. `engagements add` is not additive:
+  no verb adds an org or a marker to an existing engagement, and
+  `--github-org` only takes effect on a newly created one. To add an org to
+  an existing engagement, the user edits its `githubOrgs` in the registry
+  file themselves.
 
 If the user reports that `engagements add --github-org X` failed because `X`
 already belongs to another engagement / `personalOrgs`, ask which scope it
@@ -346,8 +351,11 @@ repo-aegis classify --apply
 
 If the repo's `git remote get-url origin` matches an engagement's
 `githubOrgs`, it sets `repo-aegis.class = customer-coupled` and
-`allow`s that engagement. If it matches `personalOrgs`, it sets
-`repo-aegis.class = public-eligible`. If neither, it reports
+`allow`s that engagement. If it matches `personalOrgs`, it asks GitHub
+(`gh repo view`) whether the repo is public: `public-eligible` if so,
+`private-strict` if not, and if that cannot be resolved it exits 2 with
+`VISIBILITY_UNRESOLVED` and sets nothing (see
+[doc/agent-guide.md](agent-guide.md)). If neither matches, it reports
 `matched: null` and sets nothing — ask the user.
 
 **Manual classify** when auto fails:
@@ -407,8 +415,9 @@ Surface to the user:
 > tool call. If a write would cross trust boundaries
 > (`CROSS_ORG_WRITE`) it is refused before the file is created. If
 > a write contains a marker for a forbidden engagement, the tool
-> result will carry a redacted hit with the engagement id and the
-> file:line:column.
+> result is meant to carry a redacted hit with the engagement id and the
+> file:line:column (whether the agent sees it is unverified, see
+> [doc/agent-guide.md](agent-guide.md)).
 >
 > Publishing commands (`git push`, `gh pr create`, `npm publish`, …)
 > are judged by destination before they run — in this agent's
@@ -551,7 +560,7 @@ when all three are in:
 |---|---|---|---|
 | git `pre-push` hook | `repo-aegis init` / `install hooks` | `git push` to a cross-org or public destination, with the remote URL git hands the hook | every agent and every human, in every repo with `core.hooksPath` set |
 | `gh` shim on `PATH` | `repo-aegis install shim` + the profile line ([Step 2b](#step-2b--install-the-gh-shim)) | the publishing verbs of `gh pr`, `gh issue`, `gh release`, `gh repo` and mutating `gh api`, plus the post-publish read-back | every agent and every human, in every shell where the shim is first |
-| agent pre-command hook | `repo-aegis install claude-md` (Claude Code); see below for Codex and Gemini | everything, before the command runs, with `ask` where the agent supports it | that one agent |
+| agent pre-command hook | `repo-aegis install claude-md` (Claude Code); see below for Codex, Gemini CLI and Antigravity CLI | everything, before the command runs, with `ask` where the agent supports it | that one agent |
 
 Skipping the shim leaves the middle row empty: `gh pr create` from a
 terminal, from a script, or from an agent without a pre-command hook
@@ -591,18 +600,28 @@ push.default nothing` recommendation.
 
 The same entry point serves Codex CLI and Gemini CLI; only the event name,
 the matcher and the `--agent` value change. Register it by hand in that
-agent's settings (consult the agent's own documentation for the file
-location and exact key spelling — repo-aegis writes only Claude Code's
-`settings.json`).
+agent's settings (consult the agent's own documentation for the exact key
+spelling — repo-aegis writes only Claude Code's `settings.json`). The
+snippets below were written from each agent's documentation and have not
+been exercised against a live session of that agent.
 
-**Codex CLI** — `PreToolUse`, command in `tool_input.command`:
+**Codex CLI** — `PreToolUse`, matcher `Bash`, command in
+`tool_input.command`. Per the Codex hooks documentation
+(https://developers.openai.com/codex/hooks, which redirects to
+https://learn.chatgpt.com/docs/hooks), Codex reads hooks from
+`~/.codex/hooks.json`, `~/.codex/config.toml` (an inline `[hooks]` table),
+or the same two files under `<repo>/.codex/`. **Codex does not run a
+non-managed hook until it is reviewed and trusted:** after registering the
+entry, have the user open `/hooks` in Codex and trust it. Until then the
+guard is not running, and nothing says so. (An earlier version of this
+guide used the matcher `shell`; the Codex docs name `Bash`.)
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "shell",
+        "matcher": "Bash",
         "hooks": [
           { "type": "command", "command": "repo-aegis hook guard-egress --agent codex" }
         ]
@@ -613,7 +632,19 @@ location and exact key spelling — repo-aegis writes only Claude Code's
 ```
 
 **Gemini CLI** — `BeforeTool`, matcher `run_shell_command`, command in
-`tool_input.command`:
+`tool_input.command` (that payload field is unverified: it was not checked
+against Gemini CLI's documentation).
+
+Google announced on 2026-05-19 that consumer access to Gemini CLI ends on
+2026-06-18 and that Antigravity CLI replaces it
+(https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/).
+Gemini CLI stays available to Gemini Code Assist Standard / Enterprise
+customers and with paid API keys, so the snippet below still applies to
+those installs. Antigravity CLI keeps hooks, but its event name, matcher
+and payload shape were **not** verified here, and `--agent gemini` has not
+been tested against it (unverified). On Antigravity, confirm the payload
+against its documentation and run the self-test below before relying on
+the guard.
 
 ```json
 {

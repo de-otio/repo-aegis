@@ -47,9 +47,12 @@ The monorepo has six packages plus a thin Action wrapper.
 
 Plus two composite Actions:
 
-- **`de-otio/repo-aegis`** — `uses: de-otio/repo-aegis@v1` installs the CLI
+- **`de-otio/repo-aegis`** — `uses: de-otio/repo-aegis@<sha>` (pin a release's
+  commit SHA; there is no floating `v1` tag) installs the CLI
   and runs `audit` (or any subcommand) against the consuming repo. Fails
   closed on an empty deny set and redacts engagement attribution by default.
+  Known issue: its `registry` input does not yet render markers, so it yields an
+  empty deny set; see [github-action.md](github-action.md#registry-availability).
 - **`de-otio/repo-aegis/actions/scan`** — the scheduled Layer-2 sweep:
   age-decrypts a queries file into `RUNNER_TEMP`, runs
   `repo-aegis-scan run`, files new hits as an issue.
@@ -65,15 +68,22 @@ a string is identified as a leak by the same logic at every layer.
 - **Pre-commit / pre-push hooks** shell out to `repo-aegis check
   --staged` and `--range` and translate exit code into the user-facing
   block.
-- **Claude Code PostToolUse hook** (registered as `repo-aegis hook
-  scan-after-write` in `~/.claude/settings.json`) does the same per
-  Write/Edit/MultiEdit. The hook is path-aware: it resolves the
-  destination working tree from the written path (not from the
+- **Claude Code PreToolUse hook** (`repo-aegis hook check-write`) is the
+  primary write gate. It runs before each Write/Edit/MultiEdit, looks only
+  at the path, and refuses a write whose destination crosses an org
+  boundary with `CROSS_ORG_WRITE` (and an agent write to `.repo-aegis.yml`
+  with `WAIVER_FILE_WRITE_REFUSED`) before anything lands on disk. See
+  [agent-guide.md](agent-guide.md) for how agents react to those codes.
+- **Claude Code PostToolUse hook** (`repo-aegis hook scan-after-write`)
+  scans the content of the file that was just written. It is path-aware: it
+  resolves the destination working tree from the written path (not from the
   launcher's `cwd`) and applies *that* repo's rules, so cross-repo
-  writes inside the same trust boundary just work. Writes whose
-  destination crosses an org boundary are refused with
-  `CROSS_ORG_WRITE`. See [agent-guide.md](agent-guide.md) for how
-  agents react to that error code.
+  writes inside the same trust boundary just work. It still carries a
+  `CROSS_ORG_WRITE` branch, but that is legacy detection for installs that
+  predate the PreToolUse hook: the file is already on disk by then.
+  Whether the agent sees a hit from this hook is unverified (it exits 1 on a
+  hit; Claude Code surfaces PostToolUse output to the model on exit 2). See
+  [cli-reference.md](cli-reference.md#hook-coding-agent-entry-points).
 - **Claude Code SessionStart hook** (`repo-aegis hook first-touch`)
   classifies a previously-unclassified repo from its git remote +
   registry org membership, prompting the user only when the org is
@@ -97,15 +107,16 @@ a string is identified as a leak by the same logic at every layer.
   `rebuild-profiles`. Off-machine, asynchronous, advisory. Hot-path
   determinism is preserved — see
   [design/zero-config-onboarding.md](design/zero-config-onboarding.md).
-- **Path-aware PostToolUse hook.** Cross-tree writes inside a shared
-  trust boundary scan against the destination's rules; cross-org
-  writes are refused.
+- **Path-aware write hooks.** Cross-tree writes inside a shared
+  trust boundary scan against the destination's rules; the PreToolUse
+  `check-write` hook refuses cross-org writes before they happen.
 - **One-command uninstall** (`repo-aegis uninstall`) with `--purge-repos`
   and `--purge-home` opt-ins.
-- **`re2` regex backend** for hard ReDoS resistance — install the
-  optional `re2` dependency and `getRegexBackend()` reports `"re2"`.
-  Falls back to the in-process time-budget heuristic when re2 is
-  unavailable.
+- **`re2` regex backend** for pattern *validation* (ReDoS resistance
+  when a marker is added) — install the optional `re2` dependency and
+  `getRegexBackend()` reports `"re2"`. Falls back to the in-process
+  time-budget heuristic when re2 is unavailable. Scanning itself uses the
+  native `RegExp` engine.
 - **Age-encrypted registry** — `repo-aegis registry encrypt
   --recipient <pubkey>` / `decrypt --identity <path>`.
 - **Operator audit log** — `repo-aegis audit-log on/off/show/path`
@@ -165,15 +176,18 @@ a string is identified as a leak by the same logic at every layer.
   see the CHANGELOG note on template evolution.
 
 - **Egress guard** — destination-aware publishing controls. Every layer
-  above inspects *content*; none inspected *where it is going*, and two
-  right-bytes-wrong-boundary incidents in one week landed in that gap. One
+  above inspects *content*; none inspected *where it is going*, and
+  right-bytes-wrong-boundary slips landed in that gap (observed by the
+  author; incident details are not published). One
   decision function in core (`egress-intent` parses a command line into its
   publishing operations; `egress-policy` decides `allow` / `ask` / `deny`)
   is enforced at three points: the git pre-push hook (`check --remote-url`,
   fed the `$2` git always passed and the hook ignored), a `gh` shim on
   `PATH` (`install shim`, `egress-check`, and a post-publish body read-back),
-  and the pre-command hooks of Claude Code / Codex CLI / Gemini CLI (`hook
-  guard-egress`, with a `hook egress-receipt` line after any publish). Shape
+  and the pre-command hook of Claude Code (`hook guard-egress`, with a `hook
+  egress-receipt` line after any publish); hand-configured Codex CLI and Gemini
+  CLI snippets exist but are unverified (Gemini CLI has since been replaced by
+  Antigravity CLI). Shape
   rules refuse the implicit forms (`git push` with no refspec, egress after
   `cd`, `;`-chained egress, a payload path under `$TMPDIR`) with no context
   at all; context rules refuse a cross-org destination, scan a payload

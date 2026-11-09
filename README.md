@@ -9,8 +9,9 @@ If you work for several clients from one machine, each client's names, project c
 hostnames are all over your working context. An AI coding agent (Claude Code, Codex, Gemini,
 Cursor, …) picks those strings up from files, tool output and the conversation, and reuses them
 as "concrete examples" in whatever it writes next: a test fixture in client B's repository, a
-commit message, a pull request on a public open-source project. A rule in `CLAUDE.md` that says
-"never mention client names" does not stop it, because a string that keeps coming up in the
+commit message, a pull request on a public open-source project. In the author's experience (not a
+measured result; incident details are not published), a rule in `CLAUDE.md` that says "never
+mention client names" does not reliably stop it, because a string that keeps coming up in the
 session outweighs a written rule.
 
 repo-aegis adds checks that run as code, not as instructions. They block the write, the commit
@@ -44,7 +45,11 @@ server (`repo-aegis install ci`).
 
 - **Scans before a write lands.** The same scanner runs in a pre-commit hook, a pre-push hook
   and the coding agent's file-write hooks, so a denied marker is caught before it reaches a
-  commit. The agent gets a structured result it can act on and fix the slip itself.
+  commit. The scanner's result is structured (`--json`), so an agent can in principle act on it
+  and fix the slip itself. **Unverified:** Claude Code surfaces PostToolUse output to the model only
+  on exit 2; these hooks exit 1 on a hit, so the agent may not see the post-write result. The
+  PreToolUse write gate and the commit/push hooks do not depend on this. Tracked; see Claude
+  Code's [hooks documentation](https://code.claude.com/docs/en/hooks).
 - **Checks where data is going.** Before a `git push`, `gh pr create`, release or publish, it
   checks the destination. A push into another client's org is refused. A publish to a public
   repository, or a merge or release, needs a person to confirm. An agent's push to a GitHub
@@ -52,7 +57,8 @@ server (`repo-aegis install ci`).
   `repo-aegis approve <org>/<repo>` in your own terminal; the approval is short-lived and an
   agent cannot create one.
 - **Flags secrets in command output.** Private keys, GitHub tokens and JWTs that show up in the
-  agent's shell output are flagged, so you know to rotate them.
+  agent's shell output are flagged, so you know to rotate them. (Same caveat as above: this hook
+  exits 1, and whether Claude Code shows that to the agent is unverified.)
 - **Is hard for an agent to switch off.** For Claude Code the hooks are installed as a
   root-owned settings file and run a pinned copy of repo-aegis, so an agent cannot edit them
   away. (`--user-settings` uses your own settings file instead, for machines without `sudo`.)
@@ -68,9 +74,10 @@ server (`repo-aegis install ci`).
 - macOS or Linux, with git. Node.js 20 or later (CI tests 20, 22 and 24).
 - `gh` (GitHub CLI), if you want `gh` commands checked.
 - `sudo`, for the root-owned Claude Code settings file. Without it, use `--user-settings`.
-- Full protection is for **Claude Code**. **Codex CLI** and **Gemini CLI** get the egress check
-  (configured by hand: [doc/agent-install.md](doc/agent-install.md)). Every agent, and you,
-  get the git hooks and the `gh` wrapper.
+- Full protection is for **Claude Code**. **Codex CLI** and **Gemini CLI** can get the egress
+  check, configured by hand and unverified ([doc/agent-install.md](doc/agent-install.md)); Gemini
+  CLI has since been replaced by Antigravity CLI, whose hooks are not covered here. Every agent,
+  and you, get the git hooks and the `gh` wrapper.
 
 ## Quick start
 
