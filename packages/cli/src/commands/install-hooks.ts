@@ -170,9 +170,14 @@ function globalConfigPath(cwd: string): string | null {
   return join(homedir(), ".gitconfig");
 }
 
-/** Do two paths name the same directory? By realpath where both exist, else by their absolute spelling. */
+/**
+ * Do two paths name the same directory? By realpath where both exist, else by their absolute spelling. A leading
+ * `~` or `~/` is expanded to the home directory first, as git does for a path-typed value: `git config --get`
+ * prints the value as it was written, so a global `~/.repo-aegis/hooks` must compare equal to its expansion.
+ */
 function sameDirectory(a: string, b: string): boolean {
-  const real = (p: string): string => {
+  const real = (raw: string): string => {
+    const p = raw === "~" || raw.startsWith("~/") ? join(homedir(), raw.slice(1)) : raw;
     try {
       return realpathSync(p);
     } catch {

@@ -25,8 +25,10 @@ import {
   checkTerminal,
   chooseIdentity,
   findAccountBoundApproval,
+  findLoginApproval,
   identityPresence,
   loadRegistry,
+  personLoginOf,
   readProcessAncestry,
   refusal,
   registeredOwners,
@@ -34,6 +36,7 @@ import {
   type AncestorInfo,
   type AncestryChain,
   type EgressApproval,
+  type IdentityChoice,
   type IdentityPresence,
   type IdentityScope,
   type Registry,
@@ -45,6 +48,8 @@ import {
   readCredentialConfig,
   type ConfigEntry,
 } from "../git-credential-config.js";
+import { resolveTrustedGh } from "./doctor-owner-checks.js";
+import { fetchLoginToken } from "./gh-identity-token.js";
 import { mintAppToken, MintError, resolvePinnedTaaad, type MintParams, type MintedToken } from "./taaad-mint.js";
 
 export const GIT_CREDENTIAL_ACTIONS = ["get", "store", "erase"] as const;
@@ -68,6 +73,24 @@ export interface GitCredentialDeps {
   loadRegistry: (home: string) => Registry | "missing" | null;
   resolveTaaad: (home: string) => string | null;
   mint: (params: MintParams) => MintedToken;
+  /**
+   * The token of the GitHub account `login`, for a push an approval bound to that login covers. Asked of the
+   * pinned/trusted `gh` (the one `repo-aegis gh` hands tokens to), never of whichever account is active: `untrusted`
+   * when no gh may be handed the request, `unavailable` when gh has no usable token for that login.
+   */
+  loginToken: (login: string, env: NodeJS.ProcessEnv, home: string) => LoginTokenResult;
+}
+
+export type LoginTokenResult =
+  | { kind: "token"; token: string }
+  | { kind: "untrusted"; reason: string }
+  | { kind: "unavailable" };
+
+function realLoginToken(login: string, env: NodeJS.ProcessEnv, home: string): LoginTokenResult {
+  const trusted = resolveTrustedGh({ ...env, REPO_AEGIS_HOME: home }, "default");
+  if (trusted.kind === "skip") return { kind: "untrusted", reason: trusted.reason };
+  const token = fetchLoginToken(trusted.path, login, env, "default");
+  return token === null ? { kind: "unavailable" } : { kind: "token", token };
 }
 
 export function realGitCredentialDeps(): GitCredentialDeps {
@@ -87,6 +110,7 @@ export function realGitCredentialDeps(): GitCredentialDeps {
     },
     resolveTaaad: resolvePinnedTaaad,
     mint: mintAppToken,
+    loginToken: realLoginToken,
   };
 }
 
@@ -276,7 +300,7 @@ const NOTHING: GitCredentialResult = { stdout: "", stderr: "" };
  * covers is named, so an agent that reads "no approval" does not conclude none of them can be.
  */
 const NO_APPROVAL_HERE =
-  "No approval covers this; only an unreadable process list (AGENT_PUSH_CHAIN_UNREADABLE) is covered, by an account-bound `repo-aegis approve <owner>/<repo>`.";
+  "No approval covers this; only an unreadable process list (AGENT_PUSH_CHAIN_UNREADABLE) is covered, by an account-bound `repo-aegis approve <owner>/<repo>`; a push as the owner's person account (GH_IDENTITY_WRITE_NEEDS_HUMAN) is covered by that same approval.";
 
 const DOCTOR_FIX: RefusalFix = { by: "person", command: "repo-aegis doctor", note: "it reports why; then re-run the command from a terminal" };
 
@@ -292,13 +316,19 @@ function configFix(violation: string): RefusalFix {
   };
 }
 
-function refuse(code: string, why: string, dest?: { owner: string; repo: string }, fix: RefusalFix = DOCTOR_FIX): GitCredentialResult {
+function refuse(
+  code: string,
+  why: string,
+  dest?: { owner: string; repo: string },
+  fix: RefusalFix = DOCTOR_FIX,
+  approval: string = NO_APPROVAL_HERE,
+): GitCredentialResult {
   const reason = refusal({
     code,
     ...(dest !== undefined && { destination: { verb: "git push", org: dest.owner, repo: dest.repo } }),
     what: "a git credential request for github.com",
     why,
-    approval: NO_APPROVAL_HERE,
+    approval,
     fixes: [fix],
   });
   return { stdout: QUIT, stderr: `repo-aegis git-credential: ${reason}\n` };
@@ -391,16 +421,28 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
       step: "runs the original `git push` from a terminal; a token is only given to git's own HTTPS remote helper",
     });
   }
-  // U5: a person's approval for `<owner>/<repo>` (or `<owner>/*`), bound to the owner's person account and
-  // unexpired, also covers "the process list cannot be read", so an agent can push from inside a sandbox. It
-  // covers only "cannot tell": a chain that WAS read and shows another caller is `direct`, refused above whatever
-  // is approved. The store is read from the pinned home, as the registry is, never from the caller's environment.
+  // The registry is read once, from the pinned home, and only past the checks above (a person present never
+  // reaches here: no registry read for them).
+  let registryRead: { value: Registry | "missing" | null } | undefined;
+  const readRegistry = (): Registry | "missing" | null => (registryRead ??= { value: deps.loadRegistry(home) }).value;
+  // U5: a person's approval for `<owner>/<repo>` (or `<owner>/*`), bound to the account the owner's person identity
+  // names NOW and unexpired, also covers "the process list cannot be read", so an agent can push from inside a
+  // sandbox. It covers only "cannot tell": a chain that WAS read and shows another caller is `direct`, refused
+  // above whatever is approved. An approval minted for an account the owner is no longer mapped to covers nothing,
+  // and neither does one for an owner with no person login (or no readable registry): there is no account to
+  // bind to. The store is read from the pinned home, as the registry is, never from the caller's environment.
   // Everything below still applies (one path, the identity choice, A5 configuration, the mint).
   let covered: EgressApproval | null = null;
   if (parent.kind === "unreadable") {
     const approvalTarget = request.mixed || request.paths.length > 1 || request.firstPath === null ? null : ownerRepoOf(request.firstPath);
-    covered =
-      approvalTarget === null ? null : findAccountBoundApproval({ org: approvalTarget.owner, repo: approvalTarget.repo }, approvalsPath(home));
+    if (approvalTarget !== null) {
+      const reg = readRegistry();
+      const bound = reg === "missing" || reg === null ? null : personLoginOf(reg, approvalTarget.owner);
+      covered =
+        bound === null
+          ? null
+          : findAccountBoundApproval({ org: approvalTarget.owner, repo: approvalTarget.repo }, bound, approvalsPath(home));
+    }
     if (covered === null) return refuseChainUnreadable(approvalTarget);
   }
   // An unreadable chain cannot tell a push from a fetch: it is treated as a push (the wider scope), which is what
@@ -432,48 +474,64 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   }
   const dest = { owner: target.owner.toLowerCase(), repo: target.repo };
 
-  const registry = deps.loadRegistry(home);
-  if (registry === "missing") return NOTHING;
+  const registry = readRegistry();
+  // No registry: the next helper answers, but only for a request known to come from git. A covered request is the
+  // unreadable-chain case, which is not known, so it keeps its refusal.
+  if (registry === "missing") return covered === null ? NOTHING : refuseChainUnreadable(dest);
   if (registry === null) {
     return refuse("GH_IDENTITY_UNAVAILABLE", "the registry in the pinned home could not be read (it is encrypted or damaged; repo-aegis did not change it), so repo-aegis cannot tell whether this owner has a GitHub identity", dest);
   }
 
   const owners = registeredOwners(registry);
-  const choice = chooseIdentity({
-    args: [],
-    isWrite: chain,
-    targets: [{ owner: dest.owner, repo: dest.repo, source: "literal" }],
-    registry,
-    presence,
-    approvalFor: () => null,
-    suppliedToken: false,
-    redirect: null,
-    registeredOwner: o => owners.has(o.toLowerCase()),
-  });
+  // The same approvals `repo-aegis gh` reads: the pinned home's, for a login-bound write as a person's account (A11).
+  const decide = (isWrite: boolean): IdentityChoice =>
+    chooseIdentity({
+      args: [],
+      isWrite,
+      targets: [{ owner: dest.owner, repo: dest.repo, source: "literal" }],
+      registry,
+      presence,
+      approvalFor: (owner, repo, login) => findLoginApproval({ org: owner, repo: repo ?? "*" }, login, approvalsPath(home))?.id ?? null,
+      suppliedToken: false,
+      redirect: null,
+      registeredOwner: o => owners.has(o.toLowerCase()),
+    });
+  let choice = decide(chain);
 
   if (choice.kind === "none") {
     // An unmapped owner falls through to the person's own helper, but only for a request known to come from git;
     // an unreadable chain is not known, so the covered case keeps its refusal.
     return covered === null ? NOTHING : refuseChainUnreadable(dest);
   }
-  // A person's account and a write: this helper never consults approvals (`approvalFor` is null above), so the
-  // core refusal's "an approval covers this" would be wrong here. Say what is true for this layer instead.
+  // A person's account and a write with no login-bound approval: say what covers it at this layer (the core
+  // refusal's text is written for `repo-aegis gh`).
   const needsHuman = (): GitCredentialResult =>
     refuse(
       "GH_IDENTITY_WRITE_NEEDS_HUMAN",
       "this would run as a person's GitHub account, and the git subcommand is not one known to only read (an alias, or one that cannot be read from the process list), so it may be a push; the person-only mapping is a registry choice, repo-aegis created no setting for it",
       dest,
-      { by: "person", step: "runs the push from a terminal (this helper does not consult approvals for a person's account, so an approval does not help here)" },
+      {
+        by: "person",
+        command: `repo-aegis approve ${dest.owner}/${dest.repo}`,
+        note: "login-bound: it records the owner's person account, and agents may then push as that account for the approval's lifetime; or the person runs the push from a terminal",
+      },
+      `A login-bound \`repo-aegis approve ${dest.owner}/${dest.repo}\` (or \`${dest.owner}/*\`) run by a person from a terminal covers this, for the account the owner's person identity names; a \`*\` approval, one with no recorded account and one for another account do not.`,
     );
   if (choice.kind === "refuse") return choice.code === "GH_IDENTITY_WRITE_NEEDS_HUMAN" ? needsHuman() : refuseText(choice.code, choice.reason);
+  // The id of the login-bound approval under which this push runs as the person's account, when it does.
+  let personApproval: string | null = null;
   // An agent that may only read as the person (N3): the next helper answers, but only for a subcommand known to
-  // read. An alias or an unreadable subcommand could be a push, and a push as the person needs a login-bound approval.
+  // read. An alias or an unreadable subcommand could be a push, and a push as the person needs a login-bound
+  // approval, which is looked up as for any write.
   if (choice.column === "person") {
     if (parent.kind === "remote" && parent.sub !== null && KNOWN_READ_SUBCOMMANDS.has(parent.sub)) return NOTHING;
-    return needsHuman();
+    const asWrite = chain ? choice : decide(true);
+    if (asWrite.kind !== "inject" || asWrite.column !== "person" || asWrite.approvalId === undefined) return needsHuman();
+    choice = asWrite;
+    personApproval = asWrite.approvalId;
   }
 
-  if (choice.identity.kind !== "github-app") {
+  if (personApproval === null && choice.identity.kind !== "github-app") {
     return refuse(
       "GH_IDENTITY_UNAVAILABLE",
       "the agent identity of this owner is not a GitHub App (the registry maps a GitHub login there; a person set that, repo-aegis did not)",
@@ -502,12 +560,65 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   if (storing !== null) {
     return refuse(
       "AGENT_PUSH_CREDENTIAL_STORE",
-      `the App token would be saved by a later credential helper (${storing}), because git sends \`store\` to every helper; scope that helper away from https://github.com (credential.https://github.com.helper with a reset entry) or reorder, then re-run \`repo-aegis install git-credential\`; repo-aegis did not add that helper`,
+      `the ${personApproval === null ? "App" : "account's"} token would be saved by a later credential helper (${storing}), because git sends \`store\` to every helper; scope that helper away from https://github.com (credential.https://github.com.helper with a reset entry) or reorder, then re-run \`repo-aegis install git-credential\`; repo-aegis did not add that helper`,
       dest,
       { by: "person", command: "git config --list --show-origin", note: "it lists the helpers in order and names the files that set them; scope the later one away from https://github.com or move it before repo-aegis's, then re-run `repo-aegis install git-credential`" },
     );
   }
 
+  if (personApproval !== null) {
+    // A person's account under a login-bound approval: the token is THAT login's, from the trusted gh, never the
+    // active gh account's. Every check above applied to it exactly as to an App token.
+    const identity = choice.identity;
+    if (identity.kind !== "gh-login") {
+      // approvalFor is only consulted for a gh-login, so this is unreachable; fail closed rather than guess.
+      return refuse("GH_IDENTITY_UNAVAILABLE", "the person identity of this owner is not a GitHub login", dest);
+    }
+    // The audit record names the approval (an id, never the login) and never a token.
+    const record = {
+      identity: identity.name,
+      kind: "gh-login",
+      column: "person",
+      owner: dest.owner,
+      repo: dest.repo,
+      scope: "write",
+      verb: "push",
+      approval: personApproval,
+      covers: "GH_IDENTITY_WRITE_NEEDS_HUMAN",
+      ...(covered !== null && { chainApproval: covered.id }),
+    };
+    const got = deps.loginToken(identity.login, deps.env, home);
+    if (got.kind !== "token") {
+      const untrusted = got.kind === "untrusted";
+      const code = untrusted ? "GH_BINARY_UNTRUSTED" : "GH_IDENTITY_UNAVAILABLE";
+      auditBestEffort({ ...record, outcome: "refused", code, reason: got.kind }, home);
+      return untrusted
+        ? refuse(code, `there is no gh repo-aegis may ask for the mapped account's token (${got.reason}); repo-aegis did not put that gh there, it only refuses to trust it`, dest, {
+            by: "person",
+            command: "repo-aegis doctor",
+            note: "it names which gh is first on PATH and why it is untrusted; then put a package-manager gh (for example Homebrew's) first, or run the push from a terminal",
+          })
+        : refuse(code, "the mapped GitHub account has no usable token on this machine (gh could not give one for it; repo-aegis did not cause that)", dest, {
+            by: "person",
+            command: "repo-aegis doctor",
+            note: "it reports why the mapped account cannot be used; then re-run the push",
+          });
+    }
+    auditBestEffort(record, home);
+    return {
+      stdout: `username=x-access-token\npassword=${got.token}\n`,
+      // One line naming the approval, so a person reading the push output sees why an agent could push as them.
+      stderr:
+        `repo-aegis: approval ${personApproval} lets this push run as the GitHub account mapped to ${dest.owner}\n` +
+        (covered === null ? "" : `repo-aegis: approval ${covered.id} covers an unreadable process list for ${dest.owner}/${dest.repo}\n`),
+    };
+  }
+
+  const appIdentity = choice.identity;
+  if (appIdentity.kind !== "github-app") {
+    // Refused above (a login in the agent column); here only to narrow the type, and fail closed.
+    return refuse("GH_IDENTITY_UNAVAILABLE", "the agent identity of this owner is not a GitHub App", dest);
+  }
   const taaadPath = deps.resolveTaaad(home);
   if (taaadPath === null) {
     return refuse("GH_BINARY_UNTRUSTED", "no pinned taaad is known to use (repo-aegis pins taaad only when `repo-aegis install shim` runs, so none is pinned yet or the pin was removed)", dest, {
@@ -521,7 +632,7 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   const coveredBy = covered === null ? {} : { approval: covered.id, covers: "AGENT_PUSH_CHAIN_UNREADABLE" };
   let minted: MintedToken;
   try {
-    minted = deps.mint({ taaadPath, slug: choice.identity.app, owner: dest.owner, repo: dest.repo, scope });
+    minted = deps.mint({ taaadPath, slug: appIdentity.app, owner: dest.owner, repo: dest.repo, scope });
   } catch (err) {
     const mismatch = err instanceof MintError && err.kind === "installation-mismatch";
     const code = mismatch ? "GH_IDENTITY_INSTALLATION_MISMATCH" : "GH_IDENTITY_UNAVAILABLE";

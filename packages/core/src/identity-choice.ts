@@ -442,6 +442,21 @@ function entryOf(registry: Registry, owner: string): OwnerIdentities | undefined
   return e !== undefined && (e.person !== undefined || e.agent !== undefined) ? e : undefined;
 }
 
+/**
+ * The GitHub login of the owner's mapped PERSON identity in `registry`, or null when the owner has no person
+ * identity or it is not a `gh-login` (an owner with only an agent identity has no account an approval could be
+ * bound to). The owner is matched case-insensitively. This is what an account-bound approval is compared with
+ * (U5): the CURRENT mapping, not whatever login the approval recorded when it was minted. Never throws.
+ */
+export function personLoginOf(registry: Registry, owner: string): string | null {
+  try {
+    const person = registry.identityMap?.get(owner.toLowerCase())?.person;
+    return person !== undefined && person.kind === "gh-login" && person.login !== "" ? person.login : null;
+  } catch {
+    return null;
+  }
+}
+
 function unsafeArgRefusal(dest: { owner: string; repo: string | null } | undefined): IdentityChoice {
   return refuse(
     "GH_IDENTITY_ARG_UNSAFE",

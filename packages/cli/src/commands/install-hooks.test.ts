@@ -315,6 +315,27 @@ describe("install-hooks — --local", () => {
     assert.ok(existsSync(join(fx.home, "hooks", "pre-push")), "the scripts are still written");
   });
 
+  it("a ~-spelled global value that expands to repo-aegis's hooks directory counts as already set; ~/other does not", () => {
+    const fx = makeFixture("local-duplicate-tilde");
+    const savedHome = process.env["HOME"];
+    // HOME = the fixture's base, so `~/home/hooks` is the pinned hooks directory (<base>/home/hooks).
+    process.env["HOME"] = fx.base;
+    try {
+      fx.run(() => execFileSync("git", ["config", "--global", "core.hooksPath", "~/home/hooks"], { cwd: fx.repo }));
+      const dup = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, local: true, json: true })));
+      assert.equal(JSON.parse(dup.stdout).localSkippedAlreadyGlobal, true, dup.stderr);
+      assert.equal(readScoped(fx, "local"), "", "no local value was written");
+
+      fx.run(() => execFileSync("git", ["config", "--global", "core.hooksPath", "~/other"], { cwd: fx.repo }));
+      const other = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, local: true, json: true })));
+      assert.equal(JSON.parse(other.stdout).localSkippedAlreadyGlobal, false, other.stderr);
+      assert.equal(readScoped(fx, "local"), expectedHooksDir(fx), "a different directory still gets the local value");
+    } finally {
+      if (savedHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = savedHome;
+    }
+  });
+
   it("--local --json reports the skip", () => {
     const fx = makeFixture("local-duplicate-json");
     fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo })));
