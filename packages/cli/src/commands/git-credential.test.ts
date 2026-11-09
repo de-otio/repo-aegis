@@ -209,10 +209,9 @@ describe("git-credential get: printing nothing (I14)", () => {
     assert.equal(calls(), 0);
   });
 
-  it("an unmapped owner, and an owner with only a person identity (a read as the person): nothing", () => {
+  it("an unmapped owner: nothing", () => {
     assert.equal(get(request("q/r.git")).stdout, "");
     assert.equal(get(request("stranger/r.git")).stdout, "");
-    assert.equal(get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"]) })).stdout, "");
     assert.equal(calls(), 0);
   });
 
@@ -609,12 +608,29 @@ describe("git-credential get: the chain's shape (M3)", () => {
   });
 });
 
-describe("git-credential get: person column falls through only for known reads (L1)", () => {
-  it("fetch, pull, clone, ls-remote, archive, remote, submodule fall through for an owner with only a person identity", () => {
+describe("git-credential get: person column answers known reads as the mapped login (L1)", () => {
+  it("fetch, pull, clone, ls-remote, archive, remote, submodule get the MAPPED login's token, with no approval and no output line", () => {
     for (const sub of ["fetch", "pull", "clone", "ls-remote", "archive", "remote", "submodule"]) {
-      assert.deepEqual(get(request("p/r.git"), deps({ ancestry: () => remoteChain([sub]) })), { stdout: "", stderr: "" }, sub);
+      loginCalls = [];
+      const r = get(request("p/r.git"), deps({ ancestry: () => remoteChain([sub]) }));
+      assert.deepEqual(r, { stdout: `username=x-access-token\npassword=${PERSON_TOKEN}\n`, stderr: "" }, sub);
+      assert.equal(loginCalls.length, 1, sub);
+      assert.equal(loginCalls[0]!.login, "example-user", `${sub}: the mapped login, not whichever account is active`);
     }
-    assert.equal(calls(), 0);
+    assert.equal(calls(), 0, "no App token is minted for a person column");
+  });
+
+  it("a read still passes the store guard: a later helper that would save the token refuses it", () => {
+    const cfg =
+      "global\tcredential.https://github.com.helper \nglobal\tcredential.https://github.com.helper !'/n' '/c' git-credential --home '/h'\nglobal\tcredential.https://github.com.helper osxkeychain";
+    const r = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"]), readConfig: () => parseShowScopeList(cfg) }));
+    assertRefused(r, "AGENT_PUSH_CREDENTIAL_STORE");
+    assert.equal(loginCalls.length, 0, "refused before the token was asked for");
+  });
+
+  it("no token for the mapped login: refused with GH_IDENTITY_UNAVAILABLE rather than answered as another account", () => {
+    personToken = () => ({ kind: "unavailable" });
+    assertRefused(get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"]) })), "GH_IDENTITY_UNAVAILABLE");
   });
 
   it("an alias, push, send-pack or an unreadable subcommand: quit=true GH_IDENTITY_WRITE_NEEDS_HUMAN", () => {
@@ -700,10 +716,20 @@ describe("git-credential get: a person's account under a login-bound approval (t
     assert.equal(loginCalls.length, 0, "no token was asked for");
   });
 
-  it("an approval does not turn a read into a push: fetch still falls through to the person's own helper", () => {
+  it("an approval does not turn a read into a push: fetch is answered as a read, with no approval line", () => {
     approve({ org: "p", repo: "*" }, { login: "example-user" });
-    assert.deepEqual(get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch", "origin"], "p/r.git") })), { stdout: "", stderr: "" });
-    assert.equal(loginCalls.length, 0);
+    assert.deepEqual(get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch", "origin"], "p/r.git") })), {
+      stdout: `username=x-access-token\npassword=${PERSON_TOKEN}\n`,
+      stderr: "",
+    });
+  });
+
+  it("a read's audit record says read/fetch and names no approval, login or token", () => {
+    auditOn();
+    withAudit(() => get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch", "origin"], "p/r.git") })));
+    assert.deepEqual({ ...lastAudit().details }, { identity: "me", kind: "gh-login", column: "person", owner: "p", repo: "r", scope: "read", verb: "fetch" });
+    const text = readFileSync(join(home, "state", "audit.log"), "utf8");
+    assert.ok(!text.includes("example-user") && !text.includes(PERSON_TOKEN));
   });
 
   it("an alias or unreadable subcommand is judged as a write: covered by the approval, refused without one", () => {

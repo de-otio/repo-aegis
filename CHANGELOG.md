@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-09
+
+### Fixed
+
+- **A fetch, pull or clone from an owner mapped to a person's GitHub account now runs as that
+  account.** The credential helper used to step aside for these reads, so git fell back to
+  whichever account its next helper held (gh's active account, the keychain's). With more than
+  one account, the read failed with "Repository not found" while a push to the same repo
+  worked. The helper now answers known reads with the mapped login's token. A read needs no
+  approval, prints nothing, and passes the same pre-mint checks as a push.
+
 ## [0.13.0] - 2026-11-09
 
 ### Changed — an agent can publish under one approval (Phase U of `doc/plan-landscape-recommendations.md`)
