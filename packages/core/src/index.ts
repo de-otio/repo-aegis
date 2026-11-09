@@ -377,12 +377,14 @@ export {
 export type { RefusalInput, RefusalFix } from "./refusal.js";
 export {
   findApprovalDefault,
+  findPromptApprovalDefault,
+  PROMPT_APPROVAL_DENY_SENTENCE,
   findUncoveredStarDefault,
   uncoveredStarSentence,
   SHAPE_RULE_CODES,
   unregisteredOwnerReason,
 } from "./egress-policy.js";
-export type { UncoveredStarFinder, HumanPresence } from "./egress-policy.js";
+export type { UncoveredStarFinder, PromptApprovalFinder, HumanPresence } from "./egress-policy.js";
 // Is a person behind this terminal? The process-ancestry walk (issue #151, PR 2b).
 export {
   readProcessAncestry,
@@ -447,8 +449,27 @@ export {
   APPROVALS_FILE,
   DEFAULT_APPROVAL_TTL_MS,
   MAX_APPROVAL_TTL_MS,
+  // Prompt approvals: a person's yes at the agent host's own prompt, for one exact command, for 2 minutes.
+  PROMPT_APPROVALS_DIR,
+  PROMPT_APPROVAL_TTL_MS,
+  PROMPT_APPROVAL_MODES,
+  promptApprovalsDir,
+  promptBindingOf,
+  recordPromptApproval,
+  revokeAllPromptApprovals,
+  isTargetedPromptVerb,
+  listPromptApprovals,
+  findPromptApproval,
+  listAllApprovals,
+  approvalSource,
+  isPromptVerb,
 } from "./egress-approval.js";
 export type {
+  PromptApproval,
+  PromptBinding,
+  PromptVerb,
+  ListedApproval,
+  RecordPromptOptions,
   EgressApproval,
   ApprovalStore,
   MintOptions,

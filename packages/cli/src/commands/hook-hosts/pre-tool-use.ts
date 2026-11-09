@@ -67,10 +67,32 @@ export function parsePreToolUse(stdin: string): ParsedHookInput {
   const fields: Field[] = [];
   for (const shape of own) {
     const f = readShape(root, shape);
-    if (f.kind === "found") return commandResult(f.command, rootCwd(root));
+    if (f.kind === "found") return withHostFields(commandResult(f.command, rootCwd(root)), root);
     fields.push(f);
   }
   return noOwnCommand(root, own, fields, named);
+}
+
+/** A root string field of at most 64 characters (what a permission mode or session id is), else undefined. */
+function shortRootString(root: Record<string, unknown>, key: string): string | undefined {
+  const v = root[key];
+  return typeof v === "string" && v.length <= 64 ? v : undefined;
+}
+
+/**
+ * Add the root `permission_mode` and `session_id` to a `command` result, when present as short strings. Only the
+ * PreToolUse parser calls this: the allowlist that reads them is Claude's vocabulary, and no other host's adapter
+ * may inherit it by accident.
+ */
+function withHostFields(result: ParsedHookInput, root: Record<string, unknown>): ParsedHookInput {
+  if (result.kind !== "command") return result;
+  const permissionMode = shortRootString(root, "permission_mode");
+  const sessionId = shortRootString(root, "session_id");
+  return {
+    ...result,
+    ...(permissionMode !== undefined && { permissionMode }),
+    ...(sessionId !== undefined && { sessionId }),
+  };
 }
 
 /**

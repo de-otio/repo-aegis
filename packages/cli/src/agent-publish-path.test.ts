@@ -37,6 +37,7 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { cliBuilt, cliPath } from "./_subprocess-utils.js";
 import { hermeticGitEnv, scrubGitEnv } from "./_test-utils.js";
+import { renderHookScript } from "@de-otio/repo-aegis-core";
 import { renderShimScript } from "./commands/shim-script.js";
 import { runGhCommand, type GhCommandDeps } from "./commands/gh-command.js";
 import { runGitCredential, type GitCredentialDeps } from "./commands/git-credential.js";
@@ -434,5 +435,152 @@ describe("the real seams: the built helper with the real process-list reader and
       assert.match(r.stdout, /^username=x-access-token\npassword=ghs_STUBexamplebot0123456789abcdef\n/, label);
       assert.match(r.stderr, /^repo-aegis: approval [0-9a-f]+ covers an unreadable process list for example-org\/svc\n$/, label);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P1: a yes at the agent's own prompt carries down to git's pre-push hook (sandbox-shaped, real seams)
+//
+// The hook asks (Claude Code, `default`), and the installed pre-push script — the rendered one, run by a real `git push`
+// — lets that exact push through. The same flow in `auto`, where no person answered, is refused PUBLIC_PUSH_NEEDS_HUMAN.
+// Nothing leaves the machine: the remote URL is `git@github.com:acme/svc.git`, but the `ssh` first on PATH is a stub that
+// runs git-receive-pack on a local bare repository. git contacts the remote BEFORE it runs pre-push, so the push must
+// really work; being plain `ssh`, the stub does not make the guard treat the github.com URL as unresolved.
+// ---------------------------------------------------------------------------
+describe("P1: a yes at the agent's prompt carries to the real pre-push hook", { skip: !cliBuilt() }, () => {
+  interface PushWorld {
+    home: string;
+    repo: string;
+    env: NodeJS.ProcessEnv;
+  }
+
+  function pushWorld(opts: { staleScript?: boolean } = {}): PushWorld {
+    const root = join(base, `p1-${worlds++}`);
+    const home = join(root, "aegis");
+    const hooksDir = join(home, "hooks");
+    const repo = join(root, "svc");
+    mkdirSync(join(home, "markers"), { recursive: true });
+    mkdirSync(join(home, "state"), { recursive: true });
+    mkdirSync(hooksDir, { recursive: true });
+    writeFileSync(join(home, "markers", "_always.txt"), "leak-token\n");
+    write(join(home, "engagements.yaml"), "schemaVersion: 2\nengagements: []\n");
+    const script = renderHookScript("pre-push", { node: process.execPath, cli: cliPath });
+    // A script from before `--remote-ref`: exactly the same text without the argument.
+    write(join(hooksDir, "pre-push"), opts.staleScript === true ? script.split(' --remote-ref "$remote_ref"').join("") : script, 0o755);
+    const bare = join(root, "remote.git");
+    mkdirSync(bare, { recursive: true });
+    spawnSync("git", ["init", "-q", "--bare", bare], { env: hermeticGitEnv(), stdio: "ignore" });
+    write(
+      join(root, "fakebin", "ssh"),
+      `#!/bin/sh\nfor last; do :; done\ncase "$last" in\n  git-receive-pack*) exec git receive-pack "$FAKE_REMOTE" ;;\n  git-upload-pack*) exec git upload-pack "$FAKE_REMOTE" ;;\nesac\nexit 1\n`,
+      0o755,
+    );
+    const env = hermeticGitEnv({
+      REPO_AEGIS_HOME: home,
+      REPO_AEGIS_VISIBILITY_LOOKUP: "0",
+      FAKE_REMOTE: bare,
+      PATH: `${join(root, "fakebin")}:${process.env["PATH"] ?? ""}`,
+      GIT_SSH_COMMAND: "ssh",
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.com",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.com",
+    });
+    delete env["REPO_AEGIS_EGRESS_HUMAN"];
+    delete env["REPO_AEGIS_ASSUME_PUBLIC"];
+    mkdirSync(repo, { recursive: true });
+    const git = (...a: string[]): void => void spawnSync("git", a, { cwd: repo, env, stdio: "ignore" });
+    git("init", "-q", "-b", "main");
+    git("config", "core.hooksPath", hooksDir);
+    git("remote", "add", "origin", "git@github.com:acme/svc.git");
+    git("config", "repo-aegis.class", "public-eligible");
+    git("config", "repo-aegis.visibility", "public");
+    writeFileSync(join(repo, "a.txt"), "hello\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "first");
+    return { home, repo, env };
+  }
+
+  /** What Claude Code sends the hook, and what the hook answers. */
+  function hookAsks(w: PushWorld, mode: string): "ask" | "deny" | "allow" {
+    const r = spawnSync(process.execPath, [cliPath, "hook", "guard-egress", "--agent", "claude"], {
+      cwd: w.repo,
+      env: w.env,
+      encoding: "utf8",
+      input: JSON.stringify({
+        session_id: "sess-p1",
+        cwd: w.repo,
+        permission_mode: mode,
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "git push origin main" },
+      }),
+    });
+    if (r.stdout === "") return "allow";
+    return (JSON.parse(r.stdout) as { hookSpecificOutput: { permissionDecision: "ask" | "deny" | "allow" } }).hookSpecificOutput.permissionDecision;
+  }
+
+  const realPush = (w: PushWorld) => spawnSync("git", ["push", "origin", "main"], { cwd: w.repo, env: w.env, encoding: "utf8" });
+
+  it("default: the hook asks, and the real push passes pre-push on that yes (and a second, different push does not)", () => {
+    const w = pushWorld();
+    assert.equal(hookAsks(w, "default"), "ask");
+    const r = realPush(w);
+    assert.equal(r.status, 0, `the push itself went through: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /PUBLIC_PUSH_NEEDS_HUMAN|blocked push/, r.stderr);
+    assert.match(r.stderr, /human approval p[0-9a-f]{8} stands in for a person on this push/, r.stderr);
+    assert.match(r.stderr, /repo-aegis: pushing refs\/heads\/main → acme\/svc/, r.stderr);
+    // Another branch to the same repository was never asked about: refused.
+    spawnSync("git", ["branch", "other"], { cwd: w.repo, env: w.env });
+    const other = spawnSync("git", ["push", "origin", "other"], { cwd: w.repo, env: w.env, encoding: "utf8" });
+    assert.notEqual(other.status, 0);
+    assert.match(other.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/, other.stderr);
+  });
+
+  it("a yes, then the person types again (UserPromptSubmit), then the push: refused. The yes covered one command, not the later one", () => {
+    const w = pushWorld();
+    assert.equal(hookAsks(w, "default"), "ask");
+    const submit = spawnSync(process.execPath, [cliPath, "hook", "prompt-submit"], {
+      cwd: w.repo,
+      env: w.env,
+      encoding: "utf8",
+      input: JSON.stringify({ session_id: "sess-p1", hook_event_name: "UserPromptSubmit", prompt: "and now?" }),
+    });
+    assert.deepEqual({ stdout: submit.stdout, stderr: submit.stderr, status: submit.status }, { stdout: "", stderr: "", status: 0 });
+    const r = realPush(w);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/, r.stderr);
+    assert.doesNotMatch(r.stderr, /stands in for a person/);
+    // ...and a terminal approval would have survived it: control that the refusal above is the revoke, not the setup.
+    const w2 = pushWorld();
+    assert.equal(hookAsks(w2, "default"), "ask");
+    mintApproval({ target: { org: "acme", repo: "svc" }, path: approvalsPath(w2.home) });
+    spawnSync(process.execPath, [cliPath, "hook", "prompt-submit"], { cwd: w2.repo, env: w2.env, input: "{}" });
+    const kept = realPush(w2);
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.match(kept.stderr, /human approval [0-9a-f]{8} stands in for a person/, kept.stderr);
+  });
+
+  it("auto: nobody answered the prompt, so the same push is refused PUBLIC_PUSH_NEEDS_HUMAN", () => {
+    const w = pushWorld();
+    assert.equal(hookAsks(w, "auto"), "ask");
+    const r = realPush(w);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/, r.stderr);
+    assert.match(r.stderr, /blocked push of new ref refs\/heads\/main/, r.stderr);
+    assert.doesNotMatch(r.stderr, /stands in for a person/);
+  });
+
+  it("with no hook ask at all, the real push is refused too (no approval appears from nowhere)", () => {
+    const w = pushWorld();
+    assert.match(realPush(w).stderr, /PUBLIC_PUSH_NEEDS_HUMAN/);
+  });
+
+  it("a pre-push script from before --remote-ref cannot honour the yes, and the refusal says to run `repo-aegis install hooks`", () => {
+    const w = pushWorld({ staleScript: true });
+    assert.equal(hookAsks(w, "default"), "ask");
+    const r = realPush(w);
+    assert.match(r.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/, r.stderr);
+    assert.match(r.stderr, /repo-aegis install hooks/, r.stderr);
   });
 });

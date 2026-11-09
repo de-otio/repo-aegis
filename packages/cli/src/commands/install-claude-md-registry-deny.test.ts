@@ -78,7 +78,7 @@ function install(e: Env, opts: Record<string, unknown> = {}): { stdout: string }
 const LEDGER = "state/claude-md-deny-rules.json";
 
 describe("registryDenyPlan", () => {
-  it("denies Edit on the registry, its .age, the approvals store, the destination cache, the two trusted state files, hooks/**, bin/**, markers/** and the pinned code — and nothing else", () => {
+  it("denies Edit on the registry, its .age, the approvals store, the destination cache, the two trusted state files, hooks/**, bin/**, prompt-approvals/**, markers/** and the pinned code — and nothing else", () => {
     const e = makeEnv("plan");
     const h = e.aegisHome;
     const pin = outsideGitPin();
@@ -92,6 +92,8 @@ describe("registryDenyPlan", () => {
       `Edit(/${h}/state/claude-md-deny-rules.json)`,
       `Edit(/${h}/hooks/**)`,
       `Edit(/${h}/bin/**)`,
+      // an agent that could write a prompt approval would have minted one for itself
+      `Edit(/${h}/prompt-approvals/**)`,
       `Edit(/${h}/markers/**)`,
       `Edit(/${pin.node})`,
       `Edit(/${join(pin.cli, "..", "..")}/**)`,

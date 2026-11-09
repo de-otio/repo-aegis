@@ -114,6 +114,16 @@ export interface EgressIntent {
   remote?: string;
   /** `git push`: the first refspec if given as a positional. */
   refspec?: string;
+  /** `git push --delete` / `-d` (or an unambiguous prefix of `--delete`): the refs named are removed, not pushed. */
+  deletesRef?: true;
+  /**
+   * `gh pr|issue <sub> <n>` / `gh release <sub> <tag>`: the first positional, verbatim, for the verbs that act on one
+   * numbered or tagged thing (a number, a URL, a branch name or a tag, as typed). Absent for `create` verbs that take
+   * none, and when the command names none.
+   */
+  targetRef?: string;
+  /** `gh api`, a mutating call: the HTTP method, upper-case; `POST` when only fields or a body were given (gh's default). */
+  apiMethod?: string;
   /** `gh … --repo o/r` (or `-R`), verbatim, when present. */
   repoFlag?: string;
   /**
@@ -1268,6 +1278,7 @@ function classifyGit(
   }
 
   const positionals: string[] = [];
+  let deletesRef = false;
   for (let k = 0; k < rest.length; k++) {
     const a = rest[k]!;
     if (a === "--") {
@@ -1276,6 +1287,8 @@ function classifyGit(
     }
     if (a.startsWith("-")) {
       if (GIT_PUSH_WITH_VALUE.has(a)) k++;
+      // `-d`, a cluster holding it (`-fd`), and `--delete` or any unambiguous prefix git accepts (`--de`, `--dele`).
+      else if (/^-[A-Za-z]*d[A-Za-z]*$/.test(a) || /^--de(l(e(t(e)?)?)?)?$/.test(a)) deletesRef = true;
       continue;
     }
     positionals.push(a);
@@ -1292,6 +1305,7 @@ function classifyGit(
     payloadFiles: [],
     ...(remote !== undefined && { remote }),
     ...(refspec !== undefined && { refspec }),
+    ...(deletesRef && { deletesRef: true as const }),
     ...(cwdOverride !== undefined && { cwdOverride }),
     ...(overrides.length > 0 && { envOverrides: [...new Set(overrides)] }),
     ...((opaque || forwarded) && { unresolved: "unparsed-shape" as const }),
@@ -1368,6 +1382,19 @@ const GH_VERBS: GhVerbMap = {
 };
 
 const MUTATING_METHODS = new Set(["POST", "PATCH", "PUT", "DELETE"]);
+
+/** The verbs whose first positional is the number or tag they act on (see {@link EgressIntent.targetRef}). */
+const GH_TARGETED_VERBS: ReadonlySet<EgressVerb> = new Set<EgressVerb>([
+  "gh-pr-edit",
+  "gh-pr-merge",
+  "gh-pr-comment",
+  "gh-pr-review",
+  "gh-issue-edit",
+  "gh-issue-comment",
+  "gh-release-create",
+  "gh-release-edit",
+  "gh-release-upload",
+]);
 
 /** How a `gh api` endpoint relates to a repository; see {@link analyseApiEndpoint}. */
 export type ApiEndpointTarget =
@@ -2352,10 +2379,13 @@ function classifyGh(
   }
 
   const [positionalRepo, ...extraRepos] = targets.repos;
+  const targetRef = group !== "api" && GH_TARGETED_VERBS.has(verb) ? positionals[0] : undefined;
   return {
     ...base,
     verb,
     payloadFiles,
+    ...(targetRef !== undefined && { targetRef }),
+    ...(group === "api" && { apiMethod: method ?? "POST" }),
     ...(repoFlag !== undefined && { repoFlag }),
     ...(envRepo !== undefined && { envRepo }),
     ...(positionalRepo !== undefined && { positionalRepo }),

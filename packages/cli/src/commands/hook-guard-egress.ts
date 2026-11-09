@@ -78,6 +78,7 @@ import {
 import { currentHumanPresent } from "../human-presence.js";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
 import { adapterFor, type HookVerdict, type HostAdapter } from "./hook-hosts/index.js";
+import { writePromptApprovals } from "./hook-prompt-approval.js";
 
 export interface HookGuardEgressOptions {
   /** The host adapter: `claude` (default) | `codex` | `gemini` | `copilot` | `cursor` | `antigravity`, case-insensitive; see ./hook-hosts/. Unknown → no ask. */
@@ -320,6 +321,8 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   let registryNote: string | undefined;
   let ruleH: RuleHStatus = "applied";
   let humanPresent = false;
+  // What the host said about itself, kept for the prompt-approval write after the verdict (never the command text).
+  let host: { permissionMode: string | undefined; sessionId: string | undefined; cwd: string } | undefined;
   try {
     const parsed = adapter.parse(stdinText);
     // Not a shell command: fail open, silently, without touching the registry.
@@ -330,6 +333,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     if (parsed.kind === "malformed") reportNotJudged(adapter, parsed.reason);
     if (parsed.kind !== "command") emit(adapter, { action: "allow" });
     const { command, cwd } = parsed;
+    host = { permissionMode: parsed.permissionMode, sessionId: parsed.sessionId, cwd: cwd ?? process.cwd() };
 
     // R6 (plan §8.2): a raw HTTP client writing to the GitHub API, or `gh auth token` next to a network
     // call. Shape rules on the command text: no registry, no approval, and no `ask`.
@@ -403,8 +407,22 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   // `error` verdict through the adapter (the host's fail-open answer), never
   // an uncaught exception, which commander turns into exit 1 (and Copilot
   // fails CLOSED on exit 1). The outcome is computed first and emitted after.
-  const outcome = outcomeOrError(decision, { registryNote, ruleH, humanPresent });
+  const ctx = { registryNote, ruleH, humanPresent };
+  let outcome = outcomeOrError(decision, ctx);
   if (outcome.stderr !== undefined) process.stderr.write(outcome.stderr);
+  // Only for an `ask` that is going out as one (not an `error`): record what a yes at the host's prompt may
+  // carry down to pre-push and the `gh` shim, and say so in the prompt (the sentence goes before the parenthesised
+  // registry notes). The hook never READS these records.
+  if (outcome.verdict.action === "ask" && decision.action === "ask" && host !== undefined) {
+    const carried = writePromptApprovals(decision, {
+      agent: adapter.name,
+      permissionMode: host.permissionMode,
+      sessionId: host.sessionId,
+      cwd: host.cwd,
+    });
+    if (carried.stderr !== undefined) process.stderr.write(carried.stderr);
+    if (carried.sentence !== undefined) outcome = outcomeOrError(decision, { ...ctx, askNote: carried.sentence });
+  }
   emit(adapter, outcome.verdict);
 }
 
@@ -435,6 +453,8 @@ interface OutcomeContext {
   registryNote: string | undefined;
   ruleH: RuleHStatus;
   humanPresent: boolean;
+  /** For an `ask` only: one fixed sentence (what a yes at the host's prompt carries), added after the reason. */
+  askNote?: string;
 }
 
 function planOutcome(
@@ -459,7 +479,8 @@ function planOutcome(
       ? ruleHSkipNote(ctx.ruleH)
       : null;
   const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);
-  const reason = notes.length === 0 ? decision.reason : `${decision.reason} (${notes.join("; ")})`;
+  const base = decision.action === "ask" && ctx.askNote !== undefined ? `${decision.reason} ${ctx.askNote}` : decision.reason;
+  const reason = notes.length === 0 ? base : `${base} (${notes.join("; ")})`;
 
   if (decision.action === "ask") return { verdict: { action: "ask", reason } };
 

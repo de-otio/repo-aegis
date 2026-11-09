@@ -67,4 +67,14 @@ export const EGRESS_RECEIPT_HOOK_ARGS = "hook egress-receipt";
 /** The SessionStart hook that records the managed drop-in's heartbeat (D8.12). Drop-in only. */
 export const MANAGED_HEARTBEAT_HOOK_ARGS = "hook managed-heartbeat";
 
+/**
+ * UserPromptSubmit — revokes the prompt approvals (a yes at the agent's permission prompt, recorded by the guard hook;
+ * doc/design/egress-guard.md §4a.1) when the person types. A yes covers the one command it was given for, and a person
+ * who types something after answering has moved on: the push that comes later asks again. Silent, exits 0, never
+ * blocks the prompt. The event has no matcher, so `*` is a placeholder the settings shape wants.
+ */
+export const PROMPT_SUBMIT_HOOK_ARGS = "hook prompt-submit";
+
+export const PROMPT_SUBMIT_HOOK_MATCHER = "*";
+
 export const HOOK_MATCHER = "Write|Edit|MultiEdit";

@@ -13,7 +13,7 @@
 import {
   appendAuditRecord,
   approvalsPath,
-  listApprovals,
+  listAllApprovals,
   mintApproval,
   parseApprovalTarget,
   parseTtl,
@@ -24,6 +24,7 @@ import {
   RegistryNotFoundError,
   DEFAULT_APPROVAL_TTL_MS,
   MAX_APPROVAL_TTL_MS,
+  type ListedApproval,
   type EgressApproval,
   type Registry,
 } from "@de-otio/repo-aegis-core";
@@ -46,11 +47,17 @@ export interface ApproveOptions extends OutputOptions {
   now?: () => Date;
 }
 
-function describe(a: EgressApproval, now: Date): string {
-  const left = Math.max(0, Math.round((Date.parse(a.expiresAt) - now.getTime()) / 60_000));
-  const scope = `${a.org}/${a.repo}${a.ref !== undefined ? ` (ref ${a.ref})` : ""}`;
-  const as = a.login !== undefined ? `  as ${a.login}` : "";
-  return `${a.id}  ${scope}${as}  by ${a.by}  expires ${a.expiresAt} (${left} min left)`;
+/** A freshly minted approval is a terminal one; `--list` entries carry their own `source`. */
+function describe(a: EgressApproval | ListedApproval, now: Date): string {
+  const source = "source" in a && a.source === "prompt" ? "prompt" : "terminal";
+  const ms = Date.parse(a.expiresAt) - now.getTime();
+  // A prompt approval lives two minutes: "0 min left" would hide that it is live, so show seconds.
+  const left = source === "prompt" ? `${Math.max(0, Math.round(ms / 1000))} s left` : `${Math.max(0, Math.round(ms / 60_000))} min left`;
+  const endpoint = "endpoint" in a && a.endpoint !== undefined ? ` (endpoint ${a.endpoint})` : "";
+  const scope = `${a.org}/${a.repo}${a.ref !== undefined ? ` (ref ${a.ref})` : ""}${endpoint}`;
+  const as = "login" in a && a.login !== undefined ? `  as ${a.login}` : "";
+  const verb = "verb" in a ? `  verb ${a.verb}` : "";
+  return `${a.id}  ${scope}${as}  by ${a.by}  source ${source}${verb}  expires ${a.expiresAt} (${left})`;
 }
 
 /** The login of `owner`'s mapped `person` identity (a `gh-login`), or undefined: no registry, no mapping, or an app. */
@@ -135,7 +142,9 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
   const now = (opts.now ?? (() => new Date()))();
 
   if (opts.list) {
-    const live = listApprovals(path, now);
+    // Both kinds: a terminal approval a person minted, and a prompt approval the agent hook recorded when a person
+    // answered the host's own prompt (2 minutes, one exact command).
+    const live = listAllApprovals(path, now);
     if (opts.json) {
       emitJson({ action: "approve", list: live });
     } else if (live.length === 0) {
@@ -201,6 +210,7 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
       cwd: process.cwd(),
       details: {
         id: approval.id,
+        source: "terminal",
         scope: `${approval.org}/${approval.repo}`,
         ...(approval.ref !== undefined && { ref: approval.ref }),
         expiresAt: approval.expiresAt,

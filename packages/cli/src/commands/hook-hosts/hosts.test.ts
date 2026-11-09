@@ -292,8 +292,21 @@ describe("host adapters — fixtures", () => {
       continue;
     }
 
+    // The Claude-Code-family parser (Claude, Codex, Gemini) also reads the root `permission_mode` and `session_id`
+    // (short strings only); Copilot, Cursor and Antigravity never do, whatever their payloads carry.
+    const hostFields = (() => {
+      if (!["claude", "codex", "gemini"].includes(f.agent)) return {};
+      const root = payload as Record<string, unknown>;
+      const m = root["permission_mode"];
+      const sid = root["session_id"];
+      return {
+        ...(typeof m === "string" && m.length <= 64 && { permissionMode: m }),
+        ...(typeof sid === "string" && sid.length <= 64 && { sessionId: sid }),
+      };
+    })();
+
     it(`${f.file}: yields its command and cwd`, () => {
-      assert.deepEqual(a.parse(JSON.stringify(payload)), { kind: "command", command: "echo hello", cwd: FIXTURE_CWD });
+      assert.deepEqual(a.parse(JSON.stringify(payload)), { kind: "command", command: "echo hello", cwd: FIXTURE_CWD, ...hostFields });
     });
 
     it(`${f.file}: any substituted command comes back verbatim (seeded, 500 commands)`, () => {
@@ -301,8 +314,51 @@ describe("host adapters — fixtures", () => {
       for (let i = 0; i < 500; i++) {
         const command = randomText(rng, 80).trim() || "true";
         const p = a.parse(JSON.stringify(withCommand(payload, f.commandPath!, command)));
-        assert.deepEqual(p, { kind: "command", command, cwd: FIXTURE_CWD });
+        assert.deepEqual(p, { kind: "command", command, cwd: FIXTURE_CWD, ...hostFields });
       }
     });
   }
+});
+
+describe("host adapters — permission_mode and session_id (what a prompt approval is gated on)", () => {
+  const claudePayload = (extra: Record<string, unknown>): string =>
+    JSON.stringify({ tool_name: "Bash", tool_input: { command: "git push origin main" }, cwd: "/w", ...extra });
+
+  it("the Claude-family parser reads both, as short strings only", () => {
+    assert.deepEqual(adapterFor("claude").parse(claudePayload({ permission_mode: "acceptEdits", session_id: "s-1" })), {
+      kind: "command",
+      command: "git push origin main",
+      cwd: "/w",
+      permissionMode: "acceptEdits",
+      sessionId: "s-1",
+    });
+    const mode64 = "m".repeat(64);
+    assert.equal((adapterFor("claude").parse(claudePayload({ permission_mode: mode64 })) as { permissionMode?: string }).permissionMode, mode64);
+    for (const bad of ["m".repeat(65), 7, null, true, ["default"], { a: 1 }]) {
+      const p = adapterFor("claude").parse(claudePayload({ permission_mode: bad, session_id: bad }));
+      assert.equal(p.kind, "command");
+      assert.ok(!("permissionMode" in p) && !("sessionId" in p), `ignored: ${JSON.stringify(bad)}`);
+    }
+  });
+
+  it("only a ROOT permission_mode counts, not one inside tool_input", () => {
+    const p = adapterFor("claude").parse(
+      JSON.stringify({ tool_name: "Bash", tool_input: { command: "x", permission_mode: "default" } }),
+    );
+    assert.ok(p.kind === "command" && !("permissionMode" in p));
+  });
+
+  it("Copilot, Cursor and Antigravity never fill them, even when the payload carries both", () => {
+    const shapes: Array<[string, Record<string, unknown>]> = [
+      ["copilot", { toolName: "bash", toolArgs: JSON.stringify({ command: "git push origin main" }) }],
+      ["copilot", { tool_name: "bash", tool_input: { command: "git push origin main" } }],
+      ["cursor", { command: "git push origin main", cwd: "/w" }],
+      ["antigravity", { toolCall: { name: "run_command", args: { CommandLine: "git push origin main", Cwd: "/w" } } }],
+    ];
+    for (const [agent, shape] of shapes) {
+      const p = adapterFor(agent).parse(JSON.stringify({ ...shape, permission_mode: "default", session_id: "s-1" }));
+      assert.equal(p.kind, "command", agent);
+      assert.ok(!("permissionMode" in p) && !("sessionId" in p), agent);
+    }
+  });
 });

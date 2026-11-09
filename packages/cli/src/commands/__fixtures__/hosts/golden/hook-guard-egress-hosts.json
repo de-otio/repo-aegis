@@ -20,7 +20,7 @@
     "code": 2
   },
   "{\"label\":\"explicit push to a public destination (ask, or deny without ask)\",\"agent\":\"claude\",\"input\":\"{\\\"session_id\\\":\\\"<ID>-0000-4000-8000-00000000a001\\\",\\\"transcript_path\\\":\\\"/home/user/.claude/projects/example/<ID>-0000-4000-8000-00000000a001.jsonl\\\",\\\"cwd\\\":\\\"<TMP>/repo\\\",\\\"permission_mode\\\":\\\"d…sha256:e54b929a79ed1cfa714fa39b3af6bd7ce284e4ec5dd41e9ca69e06f4f9f501dd#1": {
-    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"git push: PUBLIC destination — main → acme/svc (unknown, public-eligible), from a non-interactive shell. A person must approve this, or mint an approval first: `repo-aegis approve acme/svc` from a terminal. (rule h (unregistered-owner check) skipped: the registry declares no owners)\"}}\n",
+    "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"git push: PUBLIC destination — main → acme/svc (unknown, public-eligible), from a non-interactive shell. A person must approve this, or mint an approval first: `repo-aegis approve acme/svc` from a terminal. A yes here lets this git push to acme/svc ref main through git's pre-push hook for 2 minutes; any other command asks again. (rule h (unregistered-owner check) skipped: the registry declares no owners)\"}}\n",
     "stderr": "",
     "code": 0
   },

@@ -18,6 +18,32 @@ from vendor documentation and have not been run end to end.
   (`repo-aegis approve <owner>/<repo>` or `<owner>/*`, run by a person in a
   terminal) covers it for that owner and that approval's lifetime.
 
+- **A yes at Claude Code's permission prompt for a publish.** In `default` and
+  `acceptEdits` mode, when the hook asks about a `git push` or a `gh` write and
+  the user says yes, that yes now carries down for **that exact command** (same
+  verb, same repository and ref or endpoint) for 2 minutes: git's pre-push hook
+  and the `gh` shim honour it, so the user is not sent to a terminal for a
+  command they just approved. It does **not** carry in `auto` mode (a classifier
+  answers the prompt, not a person), `bypassPermissions`, `plan` or `dontAsk`,
+  and the prompt says so. Run `repo-aegis install hooks` once after upgrading:
+  the pre-push script now passes the ref being updated, and an older script
+  cannot honour the yes (`repo-aegis doctor` reports it as a stale hook). A write
+  as a person-mapped account still needs an approval minted by a person from a
+  terminal. The yes also ends the moment the person types anything: a
+  UserPromptSubmit hook (`repo-aegis hook prompt-submit`, registered by
+  `install claude-md`) deletes the prompt approvals then, so a yes followed by the
+  person typing before the push happens means the push asks again.
+- **Scripted `claude -p` runs have nobody to answer.** The hook sees
+  `permission_mode: "default"` there too, and its input has no field that says the
+  run is headless (nothing in the common fields of
+  [the hooks reference](https://code.claude.com/docs/en/hooks) does). repo-aegis
+  does not guess from the process list, because `ps` fails in the sandbox. For
+  a scripted run, pass an explicit `--permission-mode` other than `default` and
+  `acceptEdits` (for example `dontAsk` or `bypassPermissions`); otherwise prompt
+  approvals are written with nobody to answer the prompt, and a command that
+  repeats the same verb, destination and ref within two minutes passes
+  pre-push and the `gh` shim.
+
 ## What does not work inside the sandbox
 
 **Minting a GitHub App token.** taaad-signer reads the macOS keychain, shows a

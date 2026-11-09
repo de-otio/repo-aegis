@@ -92,6 +92,10 @@ export async function buildProgram(): Promise<Command> {
       "--remote-url <url>",
       "with --push-ref/--range: the destination remote URL (git passes it to pre-push as $2); enables the destination checks CROSS_ORG_PUSH and PUBLIC_PUSH_NEEDS_HUMAN and prints the push receipt",
     )
+    .option(
+      "--remote-ref <ref>",
+      "with --push-ref/--range: the ref git will update on the remote (pre-push's $remote_ref); lets a live prompt approval for exactly this push stand in for a person",
+    )
     .option("--history", "scan full git history with `git log -G` per pattern (slow)")
     .option("--since <revspec>", "with --history: lower-bound revspec (only commits reachable forward of this point)")
     .option("--max-file-bytes <n>", "skip files larger than this (default 1 MiB)", v => parseInt(v, 10))
@@ -600,6 +604,15 @@ export async function buildProgram(): Promise<Command> {
       await hookGuardEgress(withGlobals(opts, cmd));
     });
 
+  // UserPromptSubmit: a person typing ends the life of any prompt approval (egress-guard.md §4a.1). Silent, exit 0.
+  hook
+    .command("prompt-submit")
+    .description("UserPromptSubmit hook: revoke prompt approvals (a yes at the agent's prompt covers one command); silent, never blocks the prompt")
+    .action(async () => {
+      const { hookPromptSubmit } = await import("./commands/hook-prompt-submit.js");
+      await hookPromptSubmit();
+    });
+
   hook
     .command("egress-receipt")
     .description("PostToolUse(Bash): after a command that published, return one line naming the destination (org/repo, visibility, class) as additionalContext")
@@ -730,7 +743,7 @@ export async function buildProgram(): Promise<Command> {
     .option("--ttl <duration>", "how long the approval lives: 15m (default), 2h, 90s, 1d — never more than 24h")
     .option("--note <text>", "why (audit trail only)")
     .option("--list", "list live approvals instead of minting one")
-    .option("--revoke <id|all>", "revoke one approval by id, or every one")
+    .option("--revoke <id|all|prompt>", "revoke one approval by id, every one, or only the prompt approvals (a yes at the agent's prompt; terminal approvals stay)")
     .action(async (target: string | undefined, opts, cmd) => {
       const { approve } = await import("./commands/approve.js");
       approve(target, withGlobals(opts, cmd));

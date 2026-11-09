@@ -24,6 +24,7 @@ const HOOK_COMMAND = pinnedHookCommand(PIN, "hook scan-after-write");
 const CHECK_WRITE_HOOK_COMMAND = pinnedHookCommand(PIN, "hook check-write");
 const GUARD_EGRESS_HOOK_COMMAND = pinnedHookCommand(PIN, "hook guard-egress --agent claude");
 const EGRESS_RECEIPT_HOOK_COMMAND = pinnedHookCommand(PIN, "hook egress-receipt");
+const PROMPT_SUBMIT_HOOK_COMMAND = pinnedHookCommand(PIN, "hook prompt-submit", { failOpen: true });
 const BASH_HOOK_COMMAND = pinnedHookCommand(PIN, "hook scan-bash-output");
 const FIRST_TOUCH_HOOK_COMMAND = pinnedHookCommand(PIN, "hook first-touch");
 /** How a command appears inside the pretty-printed settings.json text (backslashes escaped). */
@@ -727,18 +728,75 @@ describe("install-claude-md — uninstall", () => {
           hookEntriesRemoved: number;
           guardEgressHookEntriesRemoved: number;
           egressReceiptHookEntriesRemoved: number;
+          promptSubmitHookEntriesRemoved: number;
         };
       };
       assert.equal(j.settings.guardEgressHookEntriesRemoved, 1);
       assert.equal(j.settings.egressReceiptHookEntriesRemoved, 1);
-      // scan-after-write + scan-bash-output + check-write + guard + receipt
-      assert.equal(j.settings.hookEntriesRemoved, 5);
+      assert.equal(j.settings.promptSubmitHookEntriesRemoved, 1);
+      // scan-after-write + scan-bash-output + check-write + guard + receipt + prompt-submit
+      assert.equal(j.settings.hookEntriesRemoved, 6);
     });
     const settings = JSON.parse(
       readFileSync(join(claudeHome, "settings.json"), "utf8"),
     ) as { hooks?: Record<string, unknown> };
     assert.ok(!settings.hooks || !("PreToolUse" in settings.hooks));
     assert.ok(!settings.hooks || !("PostToolUse" in settings.hooks));
+  });
+
+  it("installs the UserPromptSubmit hook that revokes prompt approvals, once, and uninstall removes it and only it", () => {
+    const claudeHome = makeClaudeHome("prompt-submit");
+    const aegisHome = aegisHomeFor("prompt-submit");
+    const settingsPath = join(claudeHome, "settings.json");
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: { UserPromptSubmit: [{ matcher: "*", hooks: [{ type: "command", command: "/my/own/prompt-hook.sh" }] }] },
+      }),
+    );
+    const read = () =>
+      JSON.parse(readFileSync(settingsPath, "utf8")) as { hooks?: Record<string, Array<{ matcher: string; hooks: Array<{ command: string }> }>> };
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      const first = captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, json: true }));
+      const j = JSON.parse(first.stdout) as { promptSubmitHook: { hookCommand: string; added: boolean } };
+      assert.equal(j.promptSubmitHook.hookCommand, PROMPT_SUBMIT_HOOK_COMMAND);
+      assert.equal(j.promptSubmitHook.added, true);
+      const commands = () => (read().hooks?.["UserPromptSubmit"] ?? []).flatMap(e => e.hooks.map(h => h.command));
+      assert.deepEqual(commands(), ["/my/own/prompt-hook.sh", PROMPT_SUBMIT_HOOK_COMMAND]);
+
+      // idempotent
+      const second = captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, json: true }));
+      assert.equal((JSON.parse(second.stdout) as { promptSubmitHook: { added: boolean } }).promptSubmitHook.added, false);
+      assert.deepEqual(commands(), ["/my/own/prompt-hook.sh", PROMPT_SUBMIT_HOOK_COMMAND]);
+
+      // uninstall: ours goes, the person's own stays
+      const out = captureOutput(() => installClaudeMd({ claudeHome, uninstall: true, json: true }));
+      const u = JSON.parse(out.stdout) as { settings: { promptSubmitHookEntriesRemoved: number } };
+      assert.equal(u.settings.promptSubmitHookEntriesRemoved, 1);
+      assert.deepEqual(commands(), ["/my/own/prompt-hook.sh"]);
+    });
+  });
+
+  it("uninstall leaves no UserPromptSubmit key behind when only ours was there", () => {
+    const claudeHome = makeClaudeHome("prompt-submit-only");
+    const aegisHome = aegisHomeFor("prompt-submit-only");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
+      captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
+    });
+    const settings = JSON.parse(readFileSync(join(claudeHome, "settings.json"), "utf8")) as { hooks?: Record<string, unknown> };
+    assert.ok(!settings.hooks || !("UserPromptSubmit" in settings.hooks));
+  });
+
+  it("the dry run lists the UserPromptSubmit hook too", () => {
+    const claudeHome = makeClaudeHome("prompt-submit-dry");
+    const aegisHome = aegisHomeFor("prompt-submit-dry");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      const out = captureOutput(() => installClaudeMd({ userSettings: true, claudeHome, dryRun: true, json: true }));
+      const j = JSON.parse(out.stdout) as { promptSubmitHook: { hookCommand: string; wouldAdd: boolean } };
+      assert.equal(j.promptSubmitHook.hookCommand, PROMPT_SUBMIT_HOOK_COMMAND);
+      assert.equal(j.promptSubmitHook.wouldAdd, true);
+    });
   });
 
   it("counts the egress entries in the text report's per-event totals", () => {
@@ -748,7 +806,8 @@ describe("install-claude-md — uninstall", () => {
       captureOutput(() => installClaudeMd({ userSettings: true, claudeHome }));
       return captureOutput(() => installClaudeMd({ claudeHome, uninstall: true }));
     });
-    assert.match(result.stdout, /removed 5 hook entries/);
+    assert.match(result.stdout, /removed 6 hook entries/);
+    assert.match(result.stdout, /UserPromptSubmit: 1\)/);
     assert.match(result.stdout, /PreToolUse: 2/);
     assert.match(result.stdout, /PostToolUse: 3/);
   });

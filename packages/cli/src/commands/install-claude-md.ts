@@ -14,6 +14,7 @@ import {
   leakContextFlagPath,
   appendAuditRecord,
   approvalsPath,
+  PROMPT_APPROVALS_DIR,
   denySetCachePath,
   destinationCachePath,
   markersDir,
@@ -33,6 +34,7 @@ import { currentEnforcementPin } from "../enforcement-pin.js";
 import { applyManagedInstall, chooseTarget, planManagedInstall, uninstallManaged, type ManagedSeams } from "./install-claude-md-managed.js";
 import { managedShadowChecks } from "./managed-shadow-checks.js";
 import { heartbeatCheck } from "./managed-heartbeat-check.js";
+import { dropInHookCommands } from "./managed-dropin.js";
 import { readManagedLedger } from "./managed-ledger.js";
 import { isHumanTerminal } from "../require-terminal.js";
 import type { DoctorCheck } from "./doctor-checks.js";
@@ -41,6 +43,8 @@ import {
   BASH_HOOK_MATCHER,
   CHECK_WRITE_HOOK_ARGS,
   EGRESS_RECEIPT_HOOK_ARGS,
+  PROMPT_SUBMIT_HOOK_ARGS,
+  PROMPT_SUBMIT_HOOK_MATCHER,
   FIRST_TOUCH_HOOK_ARGS,
   FIRST_TOUCH_HOOK_MATCHER,
   GUARD_EGRESS_HOOK_ARGS,
@@ -112,6 +116,8 @@ function hookCommands(pin: EnforcementPin) {
     scanBash: pinnedHookCommand(pin, BASH_HOOK_ARGS),
     guardEgress: pinnedHookCommand(pin, GUARD_EGRESS_HOOK_ARGS),
     egressReceipt: pinnedHookCommand(pin, EGRESS_RECEIPT_HOOK_ARGS),
+    // Fails open: exit 2 on UserPromptSubmit would swallow the person's own message.
+    promptSubmit: pinnedHookCommand(pin, PROMPT_SUBMIT_HOOK_ARGS, { failOpen: true }),
   };
 }
 
@@ -244,7 +250,7 @@ function placeHookCommand(hooks: HookCommand[], hookCommand: string, kind: HookK
  */
 function mergeHookOnEvent(
   settings: SettingsJson,
-  event: "PreToolUse" | "PostToolUse",
+  event: "PreToolUse" | "PostToolUse" | "UserPromptSubmit",
   matcher: string,
   hookCommand: string,
   kind: HookKind,
@@ -271,6 +277,10 @@ function mergePostToolUseHook(
   kind: HookKind,
 ): MergeResult {
   return mergeHookOnEvent(settings, "PostToolUse", matcher, hookCommand, kind);
+}
+
+function mergePromptSubmitHook(settings: SettingsJson, hookCommand: string): MergeResult {
+  return mergeHookOnEvent(settings, "UserPromptSubmit", PROMPT_SUBMIT_HOOK_MATCHER, hookCommand, "prompt-submit");
 }
 
 function mergePreToolUseHook(
@@ -326,7 +336,7 @@ function mergeFirstTouchHook(
 // What is denied is deliberately narrow, because the sandbox enforces it on
 // the agent's own Bash too: the files whose tampering bypasses the guard, and
 // nothing the tools write at run time. Denied: the registry file and its `.age`
-// ciphertext, the approvals store, `hooks/**` (the git hook scripts), `bin/**`
+// ciphertext, the approvals store, `prompt-approvals/**` (a yes at the agent prompt, recorded by the hook), `hooks/**` (the git hook scripts), `bin/**`
 // (the `gh` shim) and `markers/**` (the rendered deny set the write scan
 // reads: editing it silently drops markers). NOT denied, on purpose: `state/`
 // (audit log, lock, caches) and the rest of the home. Denying the whole
@@ -424,7 +434,9 @@ export function registryDenyPlan(pin: EnforcementPin = currentEnforcementPin()):
   // denied wherever the home is (even `$HOME` or a work tree): the risky-directory
   // test is for BROADER denies only. A markers directory moved OUT of the home is
   // a path of the operator's choosing and may itself be broad, so that one is tested.
-  const dirs = [join(home, "hooks"), join(home, "bin")];
+  // prompt-approvals/ is where the agent hook records a person's yes at the host's prompt for the layers below it
+  // to read: a record an agent wrote itself would be an approval it minted for itself.
+  const dirs = [join(home, "hooks"), join(home, "bin"), join(home, PROMPT_APPROVALS_DIR)];
   const markers = markersDir(home);
   if (markers === home || markers.startsWith(home + "/")) {
     dirs.push(markers);
@@ -487,7 +499,7 @@ function legacyDenyPair(list: readonly unknown[]): string[] {
 
 /** Basenames/globs of the paths this install protects, for recognising its own rules. */
 const OUR_RULE_SHAPE =
-  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|destinations\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers)\/\*\*)\)$/;
+  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|destinations\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers|prompt-approvals)\/\*\*)\)$/;
 
 /** Shape of the rules `registryDenyPlan` writes for a pin: `<...>/@de-otio/repo-aegis/**`, or a file named `node`. */
 const OUR_PIN_RULE_SHAPE = /^Edit\(\/\/(?:.+\/@de-otio\/repo-aegis\/\*\*|.+\/node)\)$/;
@@ -736,6 +748,7 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   const bashMerge = mergePostToolUseHook(settings!, BASH_HOOK_MATCHER, cmd.scanBash, "scan-bash-output");
   const guardEgressMerge = mergePreToolUseHook(settings!, BASH_HOOK_MATCHER, cmd.guardEgress, "guard-egress");
   const egressReceiptMerge = mergePostToolUseHook(settings!, BASH_HOOK_MATCHER, cmd.egressReceipt, "egress-receipt");
+  const promptSubmitMerge = mergePromptSubmitHook(settings!, cmd.promptSubmit);
   const firstTouchMerge: MergeResult | null = opts.firstTouch
     ? mergeFirstTouchHook(settings!, cmd.firstTouch)
     : null;
@@ -763,6 +776,7 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     bashMerge.added ||
     guardEgressMerge.added ||
     egressReceiptMerge.added ||
+    promptSubmitMerge.added ||
     (firstTouchMerge && firstTouchMerge.added)
   ) {
     try {
@@ -798,6 +812,8 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
         guardEgressHookAlreadyPresent: guardEgressMerge.alreadyPresent,
         egressReceiptHookAdded: egressReceiptMerge.added,
         egressReceiptHookAlreadyPresent: egressReceiptMerge.alreadyPresent,
+        promptSubmitHookAdded: promptSubmitMerge.added,
+        promptSubmitHookAlreadyPresent: promptSubmitMerge.alreadyPresent,
         ...(firstTouchMerge && {
           firstTouchAdded: firstTouchMerge.added,
           firstTouchAlreadyPresent: firstTouchMerge.alreadyPresent,
@@ -842,6 +858,11 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
         added: egressReceiptMerge.added,
         alreadyPresent: egressReceiptMerge.alreadyPresent,
       },
+      promptSubmitHook: {
+        hookCommand: cmd.promptSubmit,
+        added: promptSubmitMerge.added,
+        alreadyPresent: promptSubmitMerge.alreadyPresent,
+      },
       ...(firstTouchMerge && {
         firstTouch: {
           hookCommand: cmd.firstTouch,
@@ -880,6 +901,9 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   if (egressReceiptMerge.added) emitText(`registered PostToolUse(Bash) hook in ${settingsPath}`);
   else emitText(`PostToolUse(Bash) hook already registered in ${settingsPath}`);
   emitText(`  command: ${cmd.egressReceipt}`);
+  if (promptSubmitMerge.added) emitText(`registered UserPromptSubmit hook in ${settingsPath}`);
+  else emitText(`UserPromptSubmit hook already registered in ${settingsPath}`);
+  emitText(`  command: ${cmd.promptSubmit}`);
   if (firstTouchMerge) {
     if (firstTouchMerge.added) {
       emitText(`registered SessionStart hook in ${settingsPath}`);
@@ -1115,7 +1139,7 @@ function installManagedMode(ctx: ManagedModeContext): void {
       : `the managed drop-in ${paths.file} is already installed and unchanged`,
   );
   emitText(`  owner 0:0, mode 0644, ${plan.bytes} bytes, sha256 ${plan.digest}`);
-  emitText(`  registers ${plan.spec.firstTouch ? 7 : 6} hooks and ${denyPlan.rules.length} permissions.deny rule(s) for uid ${env.uid}`);
+  emitText(`  registers ${dropInHookCommands(plan.spec).length} hooks and ${denyPlan.rules.length} permissions.deny rule(s) for uid ${env.uid}`);
   emitText(snippet.appended ? `appended snippet to ${claudeMdPath}` : `snippet already present in ${claudeMdPath}`);
   if (migration.hooksRemoved > 0 || migration.rulesRemoved > 0) {
     emitText(
@@ -1191,6 +1215,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   const bashMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, cmd.scanBash, "scan-bash-output");
   const guardEgressMerge = mergePreToolUseHook(settings, BASH_HOOK_MATCHER, cmd.guardEgress, "guard-egress");
   const egressReceiptMerge = mergePostToolUseHook(settings, BASH_HOOK_MATCHER, cmd.egressReceipt, "egress-receipt");
+  const promptSubmitMerge = mergePromptSubmitHook(settings, cmd.promptSubmit);
   const denyInstall = installDenyRules(settings, settingsPath, pin);
   const wouldBeSettings = JSON.stringify(settings, null, 2) + "\n";
 
@@ -1240,6 +1265,11 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
         wouldAdd: egressReceiptMerge.added,
         alreadyPresent: egressReceiptMerge.alreadyPresent,
       },
+      promptSubmitHook: {
+        hookCommand: cmd.promptSubmit,
+        wouldAdd: promptSubmitMerge.added,
+        alreadyPresent: promptSubmitMerge.alreadyPresent,
+      },
       registryDeny: {
         rules: denyInstall.plan.rules,
         wouldAdd: denyInstall.added,
@@ -1271,6 +1301,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
   emitText(`#   ${cmd.scanAfterWrite}  (PostToolUse: Write|Edit|MultiEdit)`);
   emitText(`#   ${cmd.scanBash}  (PostToolUse: Bash)`);
   emitText(`#   ${cmd.egressReceipt}  (PostToolUse: Bash)`);
+  emitText(`#   ${cmd.promptSubmit}  (UserPromptSubmit)`);
   emitText("");
   emitText("# permissions.deny rules protecting the registry, approvals, hooks and shim:");
   for (const rule of denyInstall.plan.rules) emitText(`#   ${rule}`);
@@ -1283,6 +1314,7 @@ function dryRunInstallClaudeMd(ctx: DryRunContext): void {
     bashMerge.alreadyPresent &&
     guardEgressMerge.alreadyPresent &&
     egressReceiptMerge.alreadyPresent &&
+    promptSubmitMerge.alreadyPresent &&
     denyInstall.added.length === 0 &&
     denyInstall.legacyRemoved.length === 0
   ) {
@@ -1310,7 +1342,8 @@ type HookKind =
   | "scan-bash-output"
   | "check-write"
   | "guard-egress"
-  | "egress-receipt";
+  | "egress-receipt"
+  | "prompt-submit";
 
 function isRepoAegisHookCommand(command: string, kind: HookKind): boolean {
   return command.includes("repo-aegis") && command.includes(kind);
@@ -1324,6 +1357,7 @@ interface SettingsCleanupResult {
   checkWriteRemoved: number;
   guardEgressRemoved: number;
   egressReceiptRemoved: number;
+  promptSubmitRemoved: number;
 }
 
 /**
@@ -1346,11 +1380,12 @@ function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
     checkWriteRemoved: 0,
     guardEgressRemoved: 0,
     egressReceiptRemoved: 0,
+    promptSubmitRemoved: 0,
   };
   if (!settings.hooks) return result;
 
   const filterEvent = (
-    eventName: "PreToolUse" | "PostToolUse" | "SessionStart",
+    eventName: "PreToolUse" | "PostToolUse" | "SessionStart" | "UserPromptSubmit",
     kind: HookKind,
   ) => {
     const entries = settings.hooks?.[eventName];
@@ -1369,6 +1404,7 @@ function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
       else if (kind === "check-write") result.checkWriteRemoved += removed;
       else if (kind === "guard-egress") result.guardEgressRemoved += removed;
       else if (kind === "egress-receipt") result.egressReceiptRemoved += removed;
+      else if (kind === "prompt-submit") result.promptSubmitRemoved += removed;
     }
     // Collapse any matcher entry whose hooks array is now empty.
     settings.hooks![eventName] = entries.filter(e => e.hooks && e.hooks.length > 0);
@@ -1383,6 +1419,7 @@ function stripHookEntries(settings: SettingsJson): SettingsCleanupResult {
   filterEvent("PostToolUse", "scan-bash-output");
   filterEvent("PostToolUse", "egress-receipt");
   filterEvent("SessionStart", "first-touch");
+  filterEvent("UserPromptSubmit", "prompt-submit");
 
   if (Object.keys(settings.hooks).length === 0) {
     delete settings.hooks;
@@ -1435,6 +1472,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
     checkWriteRemoved: 0,
     guardEgressRemoved: 0,
     egressReceiptRemoved: 0,
+    promptSubmitRemoved: 0,
   };
   let denyRulesRemoved = 0;
   let denyRecordFound = false;
@@ -1488,6 +1526,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         bashHookEntriesRemoved: settingsResult.bashScanRemoved,
         guardEgressHookEntriesRemoved: settingsResult.guardEgressRemoved,
         egressReceiptHookEntriesRemoved: settingsResult.egressReceiptRemoved,
+        promptSubmitHookEntriesRemoved: settingsResult.promptSubmitRemoved,
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
         registryDenyRulesRemoved: denyRulesRemoved,
         settingsAbsent,
@@ -1521,6 +1560,7 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         bashHookEntriesRemoved: settingsResult.bashScanRemoved,
         guardEgressHookEntriesRemoved: settingsResult.guardEgressRemoved,
         egressReceiptHookEntriesRemoved: settingsResult.egressReceiptRemoved,
+        promptSubmitHookEntriesRemoved: settingsResult.promptSubmitRemoved,
         firstTouchHookEntriesRemoved: settingsResult.firstTouchRemoved,
         registryDenyRulesRemoved: denyRulesRemoved,
       },
@@ -1549,7 +1589,8 @@ function uninstallClaudeMd(ctx: UninstallClaudeMdContext): void {
         ` PostToolUse: ${
           settingsResult.scanRemoved + settingsResult.bashScanRemoved + settingsResult.egressReceiptRemoved
         },` +
-        ` SessionStart: ${settingsResult.firstTouchRemoved})`,
+        ` SessionStart: ${settingsResult.firstTouchRemoved},` +
+        ` UserPromptSubmit: ${settingsResult.promptSubmitRemoved})`,
     );
   }
   if (!settingsAbsent) {

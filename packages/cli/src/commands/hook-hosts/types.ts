@@ -29,6 +29,9 @@
  *
  * - `command`: a shell command the host is about to run. `cwd` is where it
  *   will run, if the payload says (never the hook's own `process.cwd()`).
+ *   `permissionMode` and `sessionId` are the host's root `permission_mode` and `session_id`, filled ONLY by the
+ *   Claude-Code-family parser (`parsePreToolUse`) and only when plain strings of at most 64 characters: they
+ *   are what lets the hook decide whether a "yes" at the host's prompt is a person's (prompt approvals).
  * - `skip`: a well-formed payload that is not this hook's business — a tool
  *   that is not a shell, or no command field. The policy does not run.
  * - `malformed`: the payload is not something this adapter understands (not
@@ -38,7 +41,7 @@
  *   it must not contain payload text.
  */
 export type ParsedHookInput =
-  | { kind: "command"; command: string; cwd?: string }
+  | { kind: "command"; command: string; cwd?: string; permissionMode?: string; sessionId?: string }
   | { kind: "skip" }
   | { kind: "malformed"; reason: string };
 

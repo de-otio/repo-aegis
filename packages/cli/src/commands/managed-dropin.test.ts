@@ -88,7 +88,7 @@ describe("T15: renderDropIn (D8.2, D8.4)", () => {
         for (const rule of d.permissions.deny) assert.match(rule, /^Edit\(\/\/[^/]/);
       });
 
-      it("registers the six hooks (no first-touch unless asked) plus the SessionStart heartbeat", () => {
+      it("registers the six hooks (no first-touch unless asked), the UserPromptSubmit prompt-approval revoker, and the SessionStart heartbeat", () => {
         const cmds = dropInHookCommands(spec);
         assert.deepEqual(
           cmds.map(c => `${c.event}|${c.matcher}`),
@@ -98,6 +98,7 @@ describe("T15: renderDropIn (D8.2, D8.4)", () => {
             "PostToolUse|Write|Edit|MultiEdit",
             "PostToolUse|Bash",
             "PostToolUse|Bash",
+            "UserPromptSubmit|*",
             "SessionStart|*",
           ],
         );
@@ -119,7 +120,19 @@ describe("T15: renderDropIn (D8.2, D8.4)", () => {
           const guard = command.indexOf(`[ "$__u" = ${uid} ] || exit 0;`);
           const pin = command.indexOf("if [ -f ");
           assert.ok(guard > 0 && pin > guard, `uid guard must precede the pin check: ${command}`);
-          assert.match(command, /exit 2$/);
+          // The guards fail CLOSED (exit 2). The one exception is the UserPromptSubmit revoker, which must never swallow
+          // the person's own message: it fails open (exit 0).
+          assert.match(command, command.includes("hook prompt-submit") ? /exit 0$/ : /exit 2$/);
+        }
+      });
+
+      it("the prompt-approval revoker fails open on a failing id and on a missing pin; every other hook still blocks", () => {
+        const byArgs = (needle: string) => dropInHookCommands(spec).find(c => c.command.includes(needle))!.command;
+        const revoker = byArgs("hook prompt-submit");
+        assert.equal((revoker.match(/exit 0/g) ?? []).length, 3, "uid mismatch, failing id, missing pin: all exit 0");
+        assert.ok(!revoker.includes("exit 2"));
+        for (const other of ["hook guard-egress", "hook check-write", "hook egress-receipt"]) {
+          assert.match(byArgs(other), /exit 2$/, other);
         }
       });
 

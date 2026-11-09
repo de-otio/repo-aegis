@@ -134,6 +134,13 @@ const prePushScript = (pin: EnforcementPin): string => `\
 # rather than passing an empty value, so \`check\` sees exactly the
 # pre-egress-guard argument list.
 #
+# \$remote_ref is the ref git will update ON THE REMOTE, on both paths, and is
+# passed as \`--remote-ref\`: a yes at an agent's permission prompt is bound to
+# that destination ref (\`local_ref\` is the source side, and the update path has
+# no ref argument at all). A script from before this flag sends none, so a
+# prompt approval never matches there (fail closed), and it shows up as stale
+# in \`repo-aegis doctor\` / \`status\`: re-run \`repo-aegis install hooks\`.
+#
 # Runs the repo-aegis CLI pinned at install time, by absolute path, never
 # by name (see the pre-commit script). Fail CLOSED if the pinned files are
 # gone: re-run \`repo-aegis install hooks\`.
@@ -171,13 +178,13 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     continue
   fi
   if [ "$remote_sha" = "$zero" ]; then
-    if ! __repo_aegis_check check --push-ref "$local_ref" --remote "$remote_name"; then
+    if ! __repo_aegis_check check --push-ref "$local_ref" --remote "$remote_name" --remote-ref "$remote_ref"; then
       echo "repo-aegis: blocked push of new ref $local_ref (remote: $remote_name); reason above" >&2
       exit_rc=1
     fi
   else
     range="\${remote_sha}..\${local_sha}"
-    if ! __repo_aegis_check check --range "$range"; then
+    if ! __repo_aegis_check check --range "$range" --remote-ref "$remote_ref"; then
       echo "repo-aegis: blocked push of range $range (ref: $local_ref); reason above" >&2
       exit_rc=1
     fi

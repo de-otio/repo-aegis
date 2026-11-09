@@ -9,12 +9,19 @@
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv, lastJsonLine, scrubGitEnv, PERSON_ANCESTRY } from "../_test-utils.js";
 import { check } from "./check.js";
-import { approvalsPath, mintApproval, setAncestryReaderForTests } from "@de-otio/repo-aegis-core";
+import {
+  approvalsPath,
+  auditLogPath,
+  mintApproval,
+  recordPromptApproval,
+  setAncestryReaderForTests,
+  type PromptBinding,
+} from "@de-otio/repo-aegis-core";
 
 let tmp: string;
 let originalCwd: string;
@@ -800,5 +807,128 @@ describe("check --remote-url — an UNKNOWN visibility fails closed (issue #114)
     // The source repo's own cache is untouched: it describes the source.
     const cached = execFileSync("git", ["config", "--get", "repo-aegis.visibility"], { cwd: repo, encoding: "utf8" });
     assert.equal(cached.trim(), "private");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prompt approvals at pre-push (doc/design/egress-guard.md §4a.1)
+//
+// A person's yes at an agent's permission prompt is recorded by the agent hook for exactly one command. Pre-push honours
+// it only for the same verb (`git-push`), the same repository, and the same REMOTE ref, which the installed script passes
+// as `--remote-ref`. A record for another verb (a PR) must never let a push through (F1b), and a script that sends no
+// `--remote-ref` (an older install) can never match one.
+// ---------------------------------------------------------------------------
+describe("check --remote-url — a prompt approval stands in for the TTY, for one exact push", () => {
+  const URL = "git@github.com:acme/x.git";
+  const T = new Date();
+
+  function auditedCtx(name: string): Ctx {
+    const ctx = setup(name);
+    writeFileSync(join(ctx.home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    return ctx;
+  }
+  const seed = (ctx: Ctx, b: PromptBinding, now: Date = T) =>
+    recordPromptApproval({ binding: b, permissionMode: "default", home: ctx.home, now })!;
+  const PUSH_MAIN: PromptBinding = { verb: "git-push", org: "acme", repo: "x", ref: "main" };
+  const publicRepo = (name: string) => makeRepo(name, { class: "public-eligible", visibility: "public" });
+
+  it("a matching record lets the update path through, says so, and the audit use is source prompt", () => {
+    const ctx = auditedCtx("prompt-update");
+    const repo = publicRepo("prompt-update-repo");
+    const a = seed(ctx, PUSH_MAIN);
+    const r = run(ctx, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: URL, remoteRef: "refs/heads/main", json: true });
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.match(r.stderr, new RegExp(`human approval ${a.id} stands in`));
+    const uses = readFileSync(auditLogPath(ctx.home), "utf8")
+      .trim()
+      .split("\n")
+      .map(l => JSON.parse(l) as { action: string; details: Record<string, unknown> })
+      .filter(l => l.action === "egress-approval-use");
+    assert.equal(uses.length, 1);
+    assert.equal(uses[0]!.details["source"], "prompt");
+    assert.equal(uses[0]!.details["id"], a.id);
+    assert.equal(uses[0]!.details["layer"], "git pre-push");
+  });
+
+  it("a push to a different remote ref, another repository, or after expiry is refused", () => {
+    const ctx = auditedCtx("prompt-refused");
+    const repo = publicRepo("prompt-refused-repo");
+    seed(ctx, PUSH_MAIN);
+    const other = run(ctx, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: URL, remoteRef: "refs/heads/other", json: true });
+    assert.equal(other.exitCode, 2, "another ref");
+    assert.equal(lastJsonLine<{ code: string }>(other.stderr).code, "PUBLIC_PUSH_NEEDS_HUMAN");
+    // a ref that merely starts like the approved one
+    const prefix = run(ctx, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: URL, remoteRef: "refs/heads/main2", json: true });
+    assert.equal(prefix.exitCode, 2, "a longer ref name");
+
+    const elsewhere = makeRepo("prompt-refused-other", { class: "public-eligible", visibility: "public", originUrl: "git@github.com:acme/y.git" });
+    const otherRepo = run(ctx, { cwd: elsewhere, range: "HEAD~1..HEAD", remoteUrl: "git@github.com:acme/y.git", remoteRef: "refs/heads/main", json: true });
+    assert.equal(otherRepo.exitCode, 2, "another repository");
+
+    const ctx2 = auditedCtx("prompt-expired");
+    seed(ctx2, PUSH_MAIN, new Date(Date.now() - 10 * 60_000));
+    const expired = run(ctx2, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: URL, remoteRef: "refs/heads/main", json: true });
+    assert.equal(expired.exitCode, 2, "an expired record");
+    assert.match(lastJsonLine<{ error: string }>(expired.stderr).error, /for 2 minutes/);
+  });
+
+  it("a record for a PR on the same repository never lets a push through (F1b)", () => {
+    const ctx = auditedCtx("prompt-pr-only");
+    const repo = publicRepo("prompt-pr-only-repo");
+    seed(ctx, { verb: "gh-pr-create", org: "acme", repo: "x" });
+    seed(ctx, { verb: "gh-release-create", org: "acme", repo: "x" });
+    const r = run(ctx, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: URL, remoteRef: "refs/heads/main", json: true });
+    assert.equal(r.exitCode, 2, r.stderr);
+    assert.equal(lastJsonLine<{ code: string }>(r.stderr).code, "PUBLIC_PUSH_NEEDS_HUMAN");
+  });
+
+  it("the new-ref path binds the REMOTE side: --push-ref refs/heads/feat --remote-ref refs/heads/main passes against `main`", () => {
+    const ctx = auditedCtx("prompt-new-ref");
+    const repo = publicRepo("prompt-new-ref-repo");
+    execFileSync("git", ["branch", "feat"], { cwd: repo });
+    seed(ctx, PUSH_MAIN);
+    const ok = run(ctx, { cwd: repo, pushRef: "refs/heads/feat", remoteUrl: URL, remoteRef: "refs/heads/main", json: true });
+    assert.equal(ok.exitCode, undefined, ok.stderr);
+    // The local side is not what is approved: a record for `feat` does not cover pushing feat TO main.
+    const ctx2 = auditedCtx("prompt-new-ref-local");
+    seed(ctx2, { ...PUSH_MAIN, ref: "feat" });
+    const no = run(ctx2, { cwd: repo, pushRef: "refs/heads/feat", remoteUrl: URL, remoteRef: "refs/heads/main", json: true });
+    assert.equal(no.exitCode, 2, "binding to the local ref would let this through");
+  });
+
+  it("no --remote-ref (an older installed script) is refused, and the text names `repo-aegis install hooks`", () => {
+    const ctx = auditedCtx("prompt-old-script");
+    const repo = publicRepo("prompt-old-script-repo");
+    seed(ctx, PUSH_MAIN);
+    for (const opts of [{ range: "HEAD~1..HEAD" }, { pushRef: "refs/heads/main" }]) {
+      const r = run(ctx, { cwd: repo, ...opts, remoteUrl: URL, json: true });
+      assert.equal(r.exitCode, 2, r.stderr);
+      const j = lastJsonLine<{ code: string; error: string }>(r.stderr);
+      assert.equal(j.code, "PUBLIC_PUSH_NEEDS_HUMAN");
+      assert.match(j.error, /repo-aegis install hooks/);
+    }
+  });
+
+  it("a terminal approval still wins first, and is audited as terminal", () => {
+    const ctx = auditedCtx("prompt-terminal-first");
+    const repo = publicRepo("prompt-terminal-first-repo");
+    const t = mintApproval({ target: { org: "acme", repo: "x" }, path: approvalsPath(ctx.home) });
+    seed(ctx, PUSH_MAIN);
+    const r = run(ctx, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: URL, remoteRef: "refs/heads/main", json: true });
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.match(r.stderr, new RegExp(`human approval ${t.id} stands in`));
+    const use = readFileSync(auditLogPath(ctx.home), "utf8")
+      .trim()
+      .split("\n")
+      .map(l => JSON.parse(l) as { action: string; details: Record<string, unknown> })
+      .find(l => l.action === "egress-approval-use");
+    assert.equal(use?.details["source"], "terminal");
+  });
+
+  it("a person at the keyboard needs no approval (unchanged)", () => {
+    const ctx = auditedCtx("prompt-unchanged");
+    const repo = publicRepo("prompt-unchanged-repo");
+    const human = run(ctx, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: URL, remoteRef: "refs/heads/main", json: true }, { tty: true });
+    assert.equal(human.exitCode, undefined, human.stderr);
   });
 });

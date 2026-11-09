@@ -58,7 +58,10 @@ import {
   getRemoteUrl,
   EGRESS_HUMAN_ENV,
   findApproval,
+  findPromptApproval,
+  normaliseRef,
   approvalScopeOf,
+  approvalSource,
   findUncoveringStarApproval,
   uncoveredStarSentence,
   type ApprovalScope,
@@ -135,6 +138,13 @@ interface CheckOptions extends DenySetFloorOptions {
    * because refusing it elsewhere would only invite callers to drop it.
    */
   remoteUrl?: string;
+  /**
+   * The ref git will update ON THE REMOTE, pre-push's `$remote_ref`, passed by the installed script on both its
+   * paths. It is what a prompt approval (a person's yes at an agent's permission prompt) is bound to: the
+   * destination ref, which neither `--push-ref` (the LOCAL ref, new refs only) nor `--range` carries. Absent
+   * (a script from before this flag) → a prompt approval never matches, which is the safe direction.
+   */
+  remoteRef?: string;
   /**
    * Live lookup for a destination whose visibility is unknown (issue #114).
    * Not a CLI flag: injectable for tests. Defaults to `gh repo view` unless
@@ -472,6 +482,18 @@ function publicPushApprovalSentence(
   }
 }
 
+/**
+ * What a "yes" at an agent's permission prompt does and does not do for this push, added to the refusal so that the
+ * refusal after a "no", or after the two minutes, or from an older hook script, is not a dead end. Fixed text.
+ */
+function promptApprovalSentence(remoteRef: string | undefined): string {
+  return remoteRef === undefined || remoteRef === ""
+    ? " This pre-push script is older than the installed repo-aegis (it does not tell it which remote ref is being " +
+        "updated), so a yes at an agent prompt cannot reach it: a person runs `repo-aegis install hooks` once."
+    : " A yes at an agent prompt covers only this exact push (the same repository and remote ref) for 2 minutes; " +
+        "re-run it and answer the prompt.";
+}
+
 /** How a push URL travels: ssh for scp-like, ssh:// and ssh-config alias forms; http for everything else GitHub. */
 function pushTransport(raw: string | undefined): "ssh" | "http" {
   const c = classifyRemoteUrl(raw);
@@ -676,14 +698,29 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   // destination, and a registry that could not be loaded has no personal orgs,
   // so `*` then covers nothing (fail closed).
   const scope = approvalScopeOf(registry ?? {});
-  const approval = dest.publicFacing && !humanPresent ? findApproval(parsed, opts.pushRef, scope) : null;
+  // A terminal approval first, unchanged. Failing that, a PROMPT approval: a person's yes at the agent's own
+  // permission prompt for exactly this verb, this destination and this REMOTE ref, for two minutes. The pre-push
+  // script's `--remote-ref` is what names that ref; without it nothing matches.
+  const needsApproval = dest.publicFacing && !humanPresent;
+  const approval: { id: string } | null = !needsApproval
+    ? null
+    : (findApproval(parsed, opts.pushRef, scope) ??
+      (opts.remoteRef !== undefined && opts.remoteRef !== ""
+        ? findPromptApproval({ verb: "git-push", org: parsed.org, repo: parsed.repo, ref: normaliseRef(opts.remoteRef) })
+        : null));
   if (approval !== null) {
     try {
       appendAuditRecord({
         action: "egress-approval-use",
         cwd: repo.cwd,
         repo: repo.cwd,
-        details: { id: approval.id, layer: "git pre-push", destination: `${parsed.org}/${parsed.repo}`, ref },
+        details: {
+          id: approval.id,
+          source: approvalSource(approval),
+          layer: "git pre-push",
+          destination: `${parsed.org}/${parsed.repo}`,
+          ref,
+        },
       });
     } catch {
       /* audit must not block the push */
@@ -702,7 +739,8 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
           `The destination ${parsed.org}/${parsed.repo} (${visLabel}, ${cls}) is public-facing, and no person is ` +
             `present` +
             (assumedPublic ? `.${UNKNOWN_VISIBILITY_HINT}` : ""),
-          publicPushApprovalSentence(parsed, opts.pushRef, scope, registry ?? EMPTY_REGISTRY),
+          publicPushApprovalSentence(parsed, opts.pushRef, scope, registry ?? EMPTY_REGISTRY) +
+            promptApprovalSentence(opts.remoteRef),
           [
             {
               by: "person",

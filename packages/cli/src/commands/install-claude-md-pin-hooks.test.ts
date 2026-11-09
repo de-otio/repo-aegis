@@ -91,6 +91,7 @@ function expectedCommands(pin: EnforcementPin): Array<{ event: string; matcher: 
     { event: "PostToolUse", matcher: "Bash", command: c("hook scan-bash-output") },
     { event: "PostToolUse", matcher: "Bash", command: c("hook egress-receipt") },
     { event: "SessionStart", matcher: "*", command: c("hook first-touch") },
+    { event: "UserPromptSubmit", matcher: "*", command: pinnedHookCommand(pin, "hook prompt-submit", { failOpen: true }) },
   ];
 }
 
@@ -128,7 +129,9 @@ describe("T13/T19: install claude-md --user-settings writes pinned hook commands
     for (const { command } of cmds) {
       assert.ok(!command.startsWith("repo-aegis hook"), command);
       assert.ok(command.includes(REAL_PIN.cli) && command.includes(REAL_PIN.node), command);
-      assert.match(command, /exit 2$/, "fails closed");
+      // Every guard fails closed; the UserPromptSubmit revoker fails OPEN, so it cannot swallow the person's own message.
+      if (command.includes("hook prompt-submit")) assert.match(command, /exit 0$/, "the revoker never blocks");
+      else assert.match(command, /exit 2$/, "fails closed");
     }
   });
 

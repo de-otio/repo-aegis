@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+### Added
+
+- **A yes at Claude Code's permission prompt now carries down to the layers below it, for that exact
+  command, for 2 minutes** (prompt approvals, `doc/design/egress-guard.md` §4a.1). When the agent hook
+  asks about a `git push` or a `gh` write in `default` or `acceptEdits` mode, it records the verb,
+  repository and destination ref (or API endpoint); git's pre-push hook and the `gh` shim then accept
+  that one command instead of sending the person to a terminal. Records live one file each under
+  `$REPO_AEGIS_HOME/prompt-approvals/`, are matched exactly (no wildcard), are never read by the agent
+  hook itself (so a "no" followed by a different command still asks), and are never written in `auto`,
+  `bypassPermissions`, `plan`, `dontAsk` or an unknown mode, or by any host other than Claude Code.
+  The prompt says which case applies. `approve --list` shows `source terminal|prompt` for every
+  entry, and `--revoke p<id>` / `--revoke all` cover them; each record and each use is an audit record
+  with `source: "prompt"`. The credential helper and the `gh` account-write path consult no prompt
+  approvals.
+- `repo-aegis check --remote-ref <ref>`: the ref git will update on the remote, which pre-push passes
+  on both of its paths.
+- `Edit(<home>/prompt-approvals/**)` joins the `permissions.deny` rules `install claude-md` writes.
+- **A yes ends when the person types.** `install claude-md` registers a UserPromptSubmit hook,
+  `repo-aegis hook prompt-submit`, in the managed drop-in or in `settings.json` (`--uninstall` removes it).
+  It deletes every prompt approval when the person types to the agent, is silent, exits 0 and never
+  blocks the prompt (its pinned command exits 0, not 2, if the pinned binary is gone). So a yes followed
+  by the person typing before the push, and a "no" followed by the person's next message, both mean the
+  push asks again. `repo-aegis approve --revoke prompt` does the same by hand and leaves terminal
+  approvals alone. Re-run `repo-aegis install claude-md` once to register it; with the managed drop-in,
+  `doctor` reports `MANAGED_DROPIN_STALE` until you do.
+- Prompt approvals bind more exactly: a mutating `gh api` binds the HTTP method as well as the endpoint
+  (a yes to a PATCH is not a yes to a DELETE); `gh pr|issue edit|merge|comment|review <n>` and
+  `gh release create|edit|upload <tag>` bind the number or tag when one is given (no target: the
+  repository only, as before); `git push --delete` / `-d` binds nothing; and a record dated more than 5 s
+  ahead of the reader's clock is ignored.
+- Documented: for scripted `claude -p` runs, pass an explicit `--permission-mode` other than
+  `default`/`acceptEdits`. The hook input has no headless indicator, and `permission_mode` reads
+  `default` there too.
+
 ### Changed
 
 - **Breaking-ish: Node.js 20 is no longer tested or documented as supported.** CI tests Node 22 and
@@ -44,6 +79,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `env -iC /tmp git push origin main` and `sudo -Eu root git push …` resolve to the push, so rule b′
   and the destination checks still see it.
 
+- **The generated pre-push script passes `--remote-ref "$remote_ref"`, so re-run `repo-aegis install
+  hooks`.** Until you do, `status` and `doctor` report the pre-push hook as stale
+  (`HOOKS_SCRIPT_STALE`), and a yes at the prompt cannot reach it: the push is refused as before, and
+  its message says to run `repo-aegis install hooks`. Nothing else about the old script's behaviour
+  changes.
+- `decideEgress`'s `ask` decision now lists every (intent, target) that asked, in `asked`.
+
 ### Removed
 
 - **The Action's `registry` input.** It only exported `REPO_AEGIS_REGISTRY`, but `audit` and
@@ -63,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `doc/configuration.md` lists `REPO_AEGIS_MARKERS_DIR`, `REPO_AEGIS_VISIBILITY_LOOKUP` and
   `REPO_AEGIS_EGRESS_HUMAN`. A comment in `taaad-pin.ts` said an untrusted taaad refuses App tokens;
   it is a warning.
+
 
 ## [0.13.1] - 2026-11-09
 
