@@ -391,19 +391,20 @@ independent controls close that off (see the design doc's threat-model
 table for the full rationale): the PreToolUse `hook check-write` gate
 refuses an agent write to `.repo-aegis.yml` outright; `repo-aegis
 waive` itself refuses to run outside a TTY unless
-`REPO_AEGIS_WAIVE_NONINTERACTIVE=1` is set; and `check` always reports
-`waived: N`, never silently.
+`REPO_AEGIS_WAIVE_NONINTERACTIVE=1` is set; and `check` says so
+(`waived: N` in its text output, the list in `--json`) whenever a waiver
+suppressed a finding.
 
 **Precedence (first wins):**
 
-1. CLI flag (`--cwd`, etc).
-2. `.git/config` (per-clone `repo-aegis.class` / `repo-aegis.engagement`).
-3. `.repo-aegis.yml` at the repo root.
-4. Default (`private-strict`, no engagements).
+1. `.git/config` (per-clone `repo-aegis.class` / `repo-aegis.engagement`).
+2. `.repo-aegis.yml` at the repo root.
+3. Default (`private-strict`, no engagements).
 
-`repo-aegis status --json` reports `classFromOverride: true` /
-`engagementsFromOverride: true` when the value came from the
-`.repo-aegis.yml` rather than git config.
+No command-line flag sets the class or the engagements (`--cwd` only chooses
+which repo is read). `repo-aegis status --json` does not report which source a
+value came from: its `repo` object carries `class`, `classExplicit` (`false`
+means the default is in use) and `engagements`.
 
 ## The pinned enforcement binary
 
@@ -495,8 +496,20 @@ hook. The file is `root:root 0644`, so the agent (which runs as you) cannot
 edit it, which is stronger than a deny rule in a file you own. Your own
 `settings.json` then holds only portable preferences and may be synced.
 
+Sources for the Claude Code behaviour this relies on: the
+[settings page](https://code.claude.com/docs/en/settings) (precedence across
+scopes; list keys such as `permissions` merge across files) and the
+[managed settings page](https://code.claude.com/docs/en/managed-settings.md)
+(delivery mechanisms; managed settings sit above every user, project and
+local file). That a user or project file cannot disable a managed *hook*, and
+the exact `managed-settings.d` paths in the table above, come from the
+install code and were not re-checked against those pages or re-tested against
+each Claude Code release (unverified). The hook contract itself (exit codes,
+matchers) is at <https://code.claude.com/docs/en/hooks>.
+
 The path comes from the platform and your uid, never from a stored record. The
-file holds only `hooks` and `permissions.deny`: the six hooks (plus
+file holds only `hooks` and `permissions.deny`: the five hooks (`check-write`,
+`guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`; plus
 `first-touch` when you asked for it), a SessionStart heartbeat, and the same
 `Edit(//…)` deny rules as before (registry, approvals, hooks, shim, markers, the
 pinned CLI package and the pinned Node).

@@ -23,11 +23,18 @@ a given repo is the union of all marker files, scoped according to
 the repo's class and the engagements the user has explicitly allowed
 in that repo.
 
-When you write or edit a file, the PostToolUse hook fires and runs
-`repo-aegis hook scan-after-write` on the path you just touched. The
-hook output flows back into your tool result. Hits show up as JSON
-with `path:line:col + engagement_id`, never as the literal matched
-string. **You are expected to react to these hits.**
+When you write or edit a file, two Claude Code hooks fire. Before the
+write, the PreToolUse hook `repo-aegis hook check-write` refuses (exit 2,
+the tool never runs) a write that crosses a trust boundary, or that targets
+a waiver file (`.repo-aegis.yml`) or `gh`'s own config. After the write, the
+PostToolUse hook runs `repo-aegis hook scan-after-write` on the path you
+just touched. The hook output flows back into your tool result. Hits show
+up as JSON with `path:line:col + engagement_id`, never as the literal
+matched string. **You are expected to react to these hits.**
+
+> Unverified: Claude Code surfaces PostToolUse output to the model only on
+> exit 2; these hooks exit 1 on a hit, so a hit may reach only the user.
+> Tracked; see the hooks docs: https://code.claude.com/docs/en/hooks
 
 ## The four classes
 
@@ -85,15 +92,18 @@ The `repo-aegis hook scan-after-write` hook output looks like:
       "path": "/Users/.../src/foo.ts",
       "line": 42,
       "column": 13,
-      "matchPreview": "[redacted]",
-      "engagement": "customer-b"
+      "matchPreview": "acm***11",
+      "engagement": "customer-b",
+      "patternId": "customer-b/3f9a1c07d2e4"
     }
   ],
+  "historyHits": [],
   "skipped": [],
   "repo": {
     "cwd": "/Users/.../some-repo",
     "isGitRepo": true,
     "class": "customer-coupled",
+    "classExplicit": true,
     "engagements": ["customer-a"]
   },
   "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
@@ -109,9 +119,11 @@ The `repo-aegis hook scan-after-write` hook output looks like:
   repo legitimately references customer-A but not customer-B. So you
   wrote a customer-B string into a customer-A repo. That is exactly
   the cross-tenancy leak the tool is built to prevent.
-- `matchPreview: "[redacted]"` — you do **not** know what the
-  literal string was. You only know it was in the line `src/foo.ts`
-  at line 42, column 13.
+- `matchPreview: "acm***11"` — you do **not** get the literal string:
+  only its first three characters and its length (`[redacted]` for a
+  match shorter than four characters). You know it was in `src/foo.ts`
+  at line 42, column 13. Do not repeat even the three-character head to
+  the user.
 
 Steps:
 
@@ -205,8 +217,9 @@ org from the repo's `git remote get-url origin`, and:
 - If nothing matches, sets nothing and reports `matched: null`. Ask
   the user.
 
-You can attach an org to an engagement (so the next repo in that org
-auto-classifies) with `engagements add` — see the next workflow.
+An org can be attached to an engagement (so the next repo in that org
+auto-classifies) when the engagement is created with `engagements add
+--github-org` — see the next workflow.
 
 ### "I just opened a repo I haven't seen before"
 
@@ -221,10 +234,11 @@ on every session-start. Possible outcomes:
   proceed.
 - **`needs-confirmation`** — the org is unknown to the registry. The
   hook output names the org (redacted with `[SEC H-5]` for orgs ≥ 4
-  chars: `xx***y`); ask the user whether to add it to an engagement
-  (`engagements add --github-org`) or to `personalOrgs`, and have the
-  user run that command from their own terminal. Do NOT guess, and do
-  NOT run it yourself.
+  chars: `xx***y`); ask the user whether to register it on a new
+  engagement (`engagements add --github-org`), on an existing engagement's
+  `githubOrgs` (a registry edit), or in `personalOrgs`, and have the user
+  do that from their own terminal. Do NOT guess, and do NOT run it
+  yourself.
 - **`skipped`** — no remote, not a git repo, etc. Surface to the
   user only if they're confused about why class is unset.
 
@@ -238,13 +252,17 @@ hook if the command line contains them (`AGENT_RAN_HUMAN_COMMAND`). Give the
 user the exact line and wait:
 
 ```sh
-repo-aegis engagements add customer-a --github-org acme-corp
-# or, on a brand-new engagement:
 repo-aegis engagements add customer-a --name "Customer A" \
   --github-org acme-corp \
   --marker "acme-corp" \
   --marker "acme\\.com"
 ```
+
+`--github-org` only takes effect when the engagement is **created**.
+Running `engagements add` on an id that already exists is not additive: it
+fails with `ENGAGEMENT_EXISTS`, and no verb adds an org to an existing
+engagement. For an engagement that already exists, the user adds the org
+under its `githubOrgs` in the registry file themselves.
 
 `--github-org` and `--personal-org` are mutually exclusive (a single
 org belongs to either an engagement or to the user's personal orgs,
@@ -457,10 +475,15 @@ state-changing CLI invocation appends one JSON Lines record to
 single file rather than archaeology across `.git/config` and the
 engagement registry.
 
-**What gets captured:** `allow`, `deny`, `engagements add` /
+**What gets captured**, including: `allow`, `deny`, `engagements add` /
 `engagements end` / `engagements remove`, `classify --apply`, `init`,
 `install hooks` / `install claude-md` / `install gitignore` /
-`install ci`, `render`, `registry encrypt` / `registry decrypt`. One
+`install ci` / `install shim` / `install git-credential`, `render`,
+`registry encrypt` / `registry decrypt`, `waive` (add and remove),
+`approve` (mint, revoke and use of an egress approval), `suggest-markers`,
+`scan-env`, `doctor` repairs, `uninstall`, and a refused publish
+(`check-egress-refused`). The list grows with the CLI; the source of
+truth is the `appendAuditRecord` call sites in `packages/cli/src`. One
 record per successful invocation, written *after* the primary action
 persists. Each record carries `ts`, `action`, `actor` (from
 `process.env.USER`), and structural metadata — engagement ids,
@@ -511,12 +534,23 @@ instead.
 
 Installed by `repo-aegis install hooks` (or `init`). They live at
 `~/.config/repo-aegis/hooks/pre-commit` and `pre-push`, with
-`core.hooksPath` set per repo.
+`core.hooksPath` set in the **global** git config by default (so every repo
+is covered); `install hooks --local` sets it for one repo only.
 
 Pre-commit runs `repo-aegis check --staged`. Pre-push reads
-ref-update lines on stdin and runs `repo-aegis check --range` per
-updated ref (force-pushes use the empty-tree SHA so every commit on
-the new branch is scanned).
+ref-update lines on stdin and scans each updated ref, in one of two ways:
+
+- **The remote already has the ref** (including a force-push): it runs
+  `repo-aegis check --range <remote-sha>..<local-sha>`, exactly the commits
+  the push adds.
+- **The ref is new to the remote** (a new branch or a tag): there is no
+  remote sha to diff against, so it runs `repo-aegis check --push-ref
+  <local-ref> --remote <name>`, which scans only what the remote-tracking
+  refs do not already reach (nothing at all for a tag on an already-pushed
+  commit). It does not re-scan the whole history. Set
+  `REPO_AEGIS_NEW_REF_FULL_SCAN=1` to force a full-history scan of new
+  refs instead; do that when this clone's remote-tracking refs may be ahead
+  of the real remote (after a server-side force-push or branch deletion).
 
 Both hooks run the CLI **pinned at install time** by absolute path (the
 Node executable and the CLI's `dist/index.js`, written into the script by
@@ -528,11 +562,24 @@ a person re-runs the installer, for example after moving or upgrading Node.
 with exit 2; other `gh` verbs pass through). See
 [`doc/configuration.md`](configuration.md#the-pinned-enforcement-binary).
 
-### Claude Code PostToolUse
+### Claude Code PreToolUse and PostToolUse
+
+Two hooks cover `Write`, `Edit` and `MultiEdit`:
+
+- **PreToolUse `hook check-write` is the primary write gate.** It runs
+  before the tool does, looks only at the path (no content scan), and exits
+  2, which blocks the write and feeds the reason to you. It refuses
+  `CROSS_ORG_WRITE` (the destination tree's trust boundary does not overlap
+  the session's), `WAIVER_FILE_WRITE_REFUSED` (a write to `.repo-aegis.yml`),
+  `GH_CONFIG_WRITE_REFUSED`, `HOOK_INPUT_TOO_LARGE` and `REGISTRY_ERROR`.
+- **PostToolUse `hook scan-after-write` scans the file's content after the
+  write.** Its `CROSS_ORG_WRITE` branch is legacy detection for installs
+  that predate v0.3.0 and never registered the PreToolUse hook: by then the
+  file is already on disk, so it can only tell you to revert.
 
 Installed by `repo-aegis install claude-md` (or `init --with-claude`).
-The settings.json entries run `hook scan-after-write` (and the other
-hook subcommands) on the **pinned** node and CLI by absolute path, wrapped
+The settings.json entries run `hook check-write`, `hook scan-after-write`
+(and the other hook subcommands) on the **pinned** node and CLI by absolute path, wrapped
 in a one-line `sh` command that exits 2 (a blocking hook error) if either
 pinned file is gone, **not** a `repo-aegis` resolved through PATH (a file
 named `repo-aegis` in a directory ahead of the real one on the agent's PATH
@@ -559,8 +606,8 @@ the hooks are in `settings.json` instead; that file then holds one machine's
 absolute paths and must not be synced or symlinked from a repository shared by
 other machines, or the same refusal appears there.
 
-The hook fires on every `Write`, `Edit`, and `MultiEdit` tool call.
-It reads your tool-result JSON on stdin, extracts the file_path,
+Both hooks fire on every `Write`, `Edit`, and `MultiEdit` tool call.
+`scan-after-write` reads your tool-result JSON on stdin, extracts the file_path,
 and **resolves the destination working tree from that path** (not
 from the launcher's `cwd`). It then applies the destination repo's
 classification + deny set. Output (always JSON, never literal
@@ -570,8 +617,8 @@ This means cross-repo writes (an agent rooted in repo A writing to a
 file in repo B) are scanned against B's rules. As long as A and B are
 in the same trust boundary — i.e. share an engagement's `githubOrgs`
 or both sit in `personalOrgs` — the write goes through. Crossing
-trust boundaries is refused with `CROSS_ORG_WRITE` (see
-[Cross-repo writes](#cross-repo-writes)).
+trust boundaries is refused with `CROSS_ORG_WRITE`, before the write, by
+`hook check-write` (see [Cross-repo writes](#cross-repo-writes)).
 
 It exits 0 silently when:
 - stdin is empty / unparseable
@@ -605,9 +652,11 @@ Two repos share a trust boundary if their org sets overlap.
 | Different working tree, disjoint trust boundaries | refuse with `CROSS_ORG_WRITE` (exit 2) |
 | File outside any git working tree (`/tmp/...`) | scan against `_always`-only deny set |
 
-When you see `CROSS_ORG_WRITE`, the file is **already on disk**
-(PostToolUse fires after the write succeeds). Surface to the user,
-propose reverting the file, do not silently retry. The agent should
+When `hook check-write` refuses with `CROSS_ORG_WRITE`, the write never
+happened (PreToolUse blocks the tool). Surface to the user and do not
+silently retry. On a legacy install that only has the PostToolUse hook, the
+same code arrives after the write, and the file is **already on disk**:
+propose reverting it. The agent should
 **not** widen the trust boundary on its own initiative (e.g. by
 adding the destination's org to `personalOrgs` or to an engagement's
 `githubOrgs`) — that's a compliance decision.
@@ -693,8 +742,8 @@ What the steps do:
 - **Always-on:** strips the managed `CLAUDE.md` block, removes
   PostToolUse + SessionStart hook entries from `settings.json`
   (preserving any third-party hooks in the same matcher entry),
-  unsets `core.hooksPath` and removes the per-repo pre-commit /
-  pre-push files, strips the managed block from `~/.config/git/ignore`,
+  unsets `core.hooksPath` (global and repo-local) and removes the
+  pre-commit / pre-push files, strips the managed block from `~/.config/git/ignore`,
   and removes the CI workflow file (only if it matches a known
   emitted template — a user-edited workflow is preserved with
   `WORKFLOW_MODIFIED`).
@@ -958,7 +1007,8 @@ the row below):
 | `PATH_NOT_SCANNED` | `check --path` / `repo_aegis_check_path` read nothing: the one file it was asked to scan was skipped (missing, unreadable, binary, or over `--max-file-bytes`), or the directory it was given held no readable file | **this is not a clean result — nothing was scanned.** `error` names the reason. A missing file usually means a wrong path: relative paths resolve against `--cwd` (the repo), not your shell's cwd. Fix the path or the size limit and re-run; never report the file as clean. |
 | `PATH_TOO_MANY_FILES` | a directory `--path` holds more files than `--max-files` (default 10000) | **nothing was scanned** — the run refused rather than report a truncated scan. Scan a narrower directory, or pass a higher `--max-files`. |
 | `VISIBILITY_UNRESOLVED` | `classify --apply` matched a `personalOrgs` org but could not determine whether the repo is public | the correct class depends on the answer and guessing is unsafe in both directions. Re-run with an account that can see the repo (`GH_TOKEN=$(gh auth token --user <user>) …`), or surface the choice to the user, who sets it with `git config repo-aegis.class <class>`. Do NOT pick one yourself. |
-| `CROSS_ORG_WRITE` | PostToolUse hook saw a write whose destination tree's trust boundary does not overlap the launcher's | the file is already on disk. Surface to the user, name the offending path, propose reverting. Do NOT modify `personalOrgs` / `githubOrgs` to widen the boundary; that's a compliance decision the user owns. |
+| `CROSS_ORG_WRITE` | the PreToolUse hook (`hook check-write`) refused a write whose destination tree's trust boundary does not overlap the launcher's (exit 2, the write did not happen). The PostToolUse hook raises it only on a legacy install without the PreToolUse hook, after the write | surface to the user and name the offending path; do not retry. If it came from the PostToolUse hook the file is already on disk, so propose reverting it. Do NOT modify `personalOrgs` / `githubOrgs` to widen the boundary; that's a compliance decision the user owns. |
+| <a id="waiver_file_write_refused"></a>`WAIVER_FILE_WRITE_REFUSED` | write hook (`hook check-write`): an Edit or Write to a file named `.repo-aegis.yml`, which carries waivers and the repo's class. Refused in any repo, even a same-org one | do not write `.repo-aegis.yml` and do not look for another way to record a waiver. Surface the finding to your human; `repo-aegis waive` is a human-run, TTY-gated command. |
 | `DEST_UNCLASSIFIED` (warning, not fatal) | PostToolUse hook scanned a write into a destination repo with no class, no engagements, and no remote it could parse | the scan ran against `_always` only. Suggest the user classify the destination (`cd <dest> && repo-aegis classify --apply`). The hit (if any) is still real; treat it like a normal scan result. |
 | `CUSTOMER_COUPLED_NO_ENGAGEMENT` | `check` ran in a `customer-coupled` repo with no engagement set | run `repo-aegis allow <id>` after confirming with the user which engagement(s) the repo references |
 | `HOOKS_PATH_CONFLICT` | `install hooks` saw a different `core.hooksPath` already set | tell the user the prior value verbatim; ask if they want to overwrite with `--force` |
@@ -1160,16 +1210,18 @@ engagements:
 ```
 
 **Precedence (first wins):**
-1. CLI flag (`--cwd`, etc).
-2. `.git/config` (per-clone `repo-aegis.class` / `repo-aegis.engagement`).
-3. `.repo-aegis.yml` at the repo root.
-4. Default (`private-strict`, no engagements).
+1. `.git/config` (per-clone `repo-aegis.class` / `repo-aegis.engagement`).
+2. `.repo-aegis.yml` at the repo root.
+3. Default (`private-strict`, no engagements).
+
+No command-line flag sets the class or the engagements (`--cwd` only
+chooses which repo to read).
 
 So a checked-in `.repo-aegis.yml` provides the project's intent;
 per-clone `git config` overrides it locally without changing the
-file. If you `repo-aegis status` and the repo's class came from the
-override, the JSON will show `classFromOverride: true` /
-`engagementsFromOverride: true`.
+file. `status --json` does not say which of the two a value came from:
+its `repo` object carries `class`, `classExplicit` (`false` means the
+default `private-strict` is in use) and `engagements`.
 
 When you're new to a repo, **always run `repo-aegis status --json`
 first** — don't infer class from filenames or recent conversation.
@@ -1213,7 +1265,8 @@ shape we don't model.
 | `install claude-md` | install Claude hooks: the root-owned managed drop-in (default), or `settings.json` with `--user-settings` | `action`, `mode` (`managed`/`user-settings`), `claudeHome`, `claudeMd`, then `managed` (`path`, `uid`, `platform`, `digest`, `bytes`, `installed`, `unchanged`, `createdDirs`) and `migration` (managed), or `hookCommand`, `settings` (user-settings); `note?` when it fell back to the user file; `--dry-run` adds `managed.contents` |
 | `install gitignore` | append global gitignore | `action`, `path`, `appended` |
 | `install ci` | emit GHA workflow | (printed to stdout, not JSON) |
-| `hook scan-after-write` | (PostToolUse entry) | same as `check --path` |
+| `hook check-write` | (PreToolUse entry, `Write\|Edit\|MultiEdit`) refuse a cross-org, waiver-file or gh-config write before it happens | no output on allow; refusal payload (`code`, `error`, `details`) on stderr, exit 2 |
+| `hook scan-after-write` | (PostToolUse entry) scan the written file; its own logic, so no waivers and no deny-set floor | `mode`, `hits`, `historyHits`, `skipped`, `repo`, `denySet`, `advisory`, `warnings` (stderr, exit 1 on a hit unless advisory); `hits`, `skipped`, `status: "no-deny-set"`, `warnings` when the deny set is empty |
 | `hook first-touch` | (SessionStart entry) classify previously-unclassified repo | `status` (`already-classified`/`applied`/`needs-confirmation`/`skipped`), redacted `details` |
 | `suggest-markers --engagement <id> [--auto-accept-above <n>\|--dry-run]` | LLM-assisted marker discovery (Phase 2) | `action`, `engagement`, `candidates`, `accepted` (when persisting), `dryRun?`, `review?`, `identityRejected?`, `skippedDuplicates?`, `rendered?` |
 | `init --migrate-classify` | port legacy `classify.yml` to registry | `action`, `migrated`, `personalOrgs`, `engagements` |

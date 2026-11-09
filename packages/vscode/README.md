@@ -62,9 +62,16 @@ PostToolUse hook applies here.
 ## Why this is "view-only"
 
 repo-aegis is a deterministic gate. The git hooks block commits with
-hits; the Claude Code PostToolUse hook surfaces hits to the agent
-between writes. Both are the source of truth for "did a leak slip
-through". An editor extension that *also* blocked writes would either
+hits; the Claude Code PostToolUse hook is meant to surface hits to the
+agent between writes. Both are the source of truth for "did a leak slip
+through".
+
+> **Unverified:** Claude Code surfaces PostToolUse output to the model
+> only on exit 2; these hooks exit 1 on a hit, so the agent may not see
+> the result. Tracked. See Claude Code's
+> [hooks documentation](https://code.claude.com/docs/en/hooks).
+
+An editor extension that *also* blocked writes would either
 duplicate that gate (and risk drifting from it) or replace it (and
 lose coverage when the editor is closed). So this surface is
 deliberately view-only — the gate stays where the leaks actually

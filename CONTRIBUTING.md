@@ -65,12 +65,11 @@ pass in CI and on a normal machine.
 
 ### Coverage targets
 
-- **`core`** and **`cli`**: 80% line, 80% branch.
-- **`scan`**: 70% line/branch (network-shaped code is harder to cover
-  exhaustively without a heavy mock harness; aim higher when you can).
-
-`npm run test:cov` enforces a global floor; per-package floors are aspirational
-and will be tightened as the suite grows.
+`npm run test:cov` enforces one global floor across all packages: 80% lines and
+75% branches (the `c8` flags in the root `package.json`). There are no
+per-package floors. As a target, aim for 80% line and branch coverage in `core`
+and `cli`; `scan` is harder to cover (network-shaped code needs a heavy mock
+harness), so a lower figure there is acceptable, but aim higher when you can.
 
 ## Code style
 

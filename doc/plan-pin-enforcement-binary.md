@@ -1,6 +1,6 @@
 # Plan: pin the enforcement binary in hooks and the shim
 
-Status: spec, ready to build. Branch `fix/pin-enforcement-binary`.
+Status: shipped in v0.11.1 (#158) (historical: the branch `fix/pin-enforcement-binary` no longer exists). The text below is the spec as written before the build.
 
 ## 1. Problem
 

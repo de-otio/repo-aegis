@@ -18,8 +18,8 @@ git hooks, a new `PATH` shim
 repo-aegis asks one question: *are these bytes safe in this repository class?*
 Every layer — the agent write hooks, pre-commit, pre-push, the CI scan, the
 publish gate — inspects **content** against a deny set derived from the repo the
-content sits in. That question has a blind spot, and two incidents in one week
-landed in it.
+content sits in. That question has a blind spot, and two incidents landed in it
+(both from the author's own use, within one week; details are not published).
 
 Both were **right bytes, wrong boundary**:
 
@@ -29,7 +29,7 @@ Both were **right bytes, wrong boundary**:
   stale `pr-body.md` from another session was waiting in the other one.
   `gh pr create --body-file "$TMPDIR/pr-body.md"` exited 0 and returned a URL.
   The content carried no denied marker; it was simply the wrong document, in
-  the wrong repository, for 57 minutes.
+  the wrong repository, for 57 minutes (the author's own account; no incident record is published).
 - A bare `git push` at the tail of a compound command whose leading `cd` had not
   taken effect ran in the *wrong checkout* and published a private in-progress
   branch to a **public** remote. The pre-push hook ran `check --push-ref`, the
@@ -281,7 +281,8 @@ Destination resolution is **offline**, and since 0.11.0 it names the owner
 - a `gh` verb with no explicit target → **gh's own pick**: the checkout's
   remotes sorted `upstream`, `github`, `origin`, then the rest, with a
   `remote.<name>.gh-resolved` value (`base`, or an `owner/repo`) honoured first
-  for the verb groups gh resolves that way. A remote the guard cannot read as a
+  for the verb groups gh resolves that way. (Read from the gh source, gh 2.46,
+  `context/remote.go`; not re-checked against later gh versions.) A remote the guard cannot read as a
   clean GitHub URL makes the result unresolved, never "the cwd's origin".
 - `gh api repos/o/r/…` → from the API path (`orgs/o/…` → the org, repo `*`;
   `{owner}`/`{repo}` placeholders in the owner or repo segment → `cwd`'s
@@ -417,7 +418,7 @@ different moment than gh reads it. It is the `gh` counterpart of rule a's
 `PUSH_IMPLICIT_TARGET`, and like rule a it is unconditional: it needs no
 registry, and an approval does not lift it, because the fix is to re-issue the
 command, not to get permission. (Without a TTY gh does not consult the API for
-a fork's parent. It does so only when it can prompt, which is one more reason
+a fork's parent (unverified: not documented by gh). It does so only when it can prompt, which is one more reason
 a pty wrapper is refused, below.) It covers `gh pr create` only; the other
 `gh` write verbs without `--repo` still rely on gh's own pick, as resolved
 above, and on rule h's check that the owner it lands on is registered. A person
@@ -532,9 +533,11 @@ pending shell command on stdin and blocks on exit 2:
 
 | Agent | Event | Command field | `ask` available |
 |---|---|---|---|
-| Claude Code | `PreToolUse`, matcher `Bash` | `tool_input.command` | yes — `hookSpecificOutput.permissionDecision: "ask"` forces a user prompt even under auto-allow |
+| Claude Code | `PreToolUse`, matcher `Bash` | `tool_input.command` | yes — `hookSpecificOutput.permissionDecision: "ask"` asks for a decision, but under Claude Code's auto mode the auto-mode classifier answers it, not a person (§4a, §4b) |
 | Codex CLI | `PreToolUse` | `tool_input.command` | not assumed |
 | Gemini CLI | `BeforeTool`, matcher `run_shell_command` | `tool_input.command` | not assumed |
+
+The Codex and Gemini rows are unverified against those tools' own documentation, and Gemini CLI has since been replaced by Antigravity CLI (<https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/>), whose hook shape this design does not cover.
 
 One entry point, `repo-aegis hook guard-egress [--agent claude|codex|gemini]`,
 reads stdin with the same tolerant field lookup `scan-bash-output` uses, runs
@@ -708,7 +711,7 @@ there is `ask`. An `ask` is a refusal only while something below it can
 hold the command when the ask is not answered by a person — and on Claude
 Code in auto mode an `ask` is answered by the auto-mode classifier, not a
 human (the same observation §4a is built on). Observed 2026-09-12 from an
-agent shell: `gh pr create` against a public repository reached GitHub;
+agent shell (recorded in `CHANGELOG.md` `[0.10.1]`, where it was fixed): `gh pr create` against a public repository reached GitHub;
 the identical command with the shim's directory prepended to `PATH` was
 refused with `PUBLIC_EGRESS_NEEDS_HUMAN`, exit 2.
 
@@ -945,6 +948,9 @@ every agent and every human, with no repo-aegis involvement at all.
 - **Judging whether a PR body is the *right* body.** Only the read-back or a
   human can; the design gets a wrong body in front of a human in seconds and
   makes the mismatch loud.
-- **Recalling objects already pushed.** GitHub serves unreachable commits by
-  sha after ref deletion on no published schedule. Everything here is
+- **Recalling objects already pushed.** GitHub can keep serving a commit by its
+  sha after a force-push or ref deletion, for example through cached views, forks
+  and pull requests that reference it
+  ([GitHub: removing sensitive data from a repository](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository)),
+  and GitHub publishes no schedule for when it stops. Everything here is
   prevention.

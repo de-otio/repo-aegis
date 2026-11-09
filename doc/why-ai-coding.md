@@ -8,8 +8,10 @@ AI coding agents (Claude Code, Cursor, Copilot, Aider, Cline, Continue)
 absorb whatever context they're given — file paths, tool output, prior
 conversation turns. Customer names that appear in any of those get
 reached for as concrete examples in subsequent writes, even when a
-`CLAUDE.md` / `.cursorrules` rule says otherwise. **Recency in
-conversation outweighs prose rules.** A token mentioned ten times in
+`CLAUDE.md` / `.cursorrules` rule says otherwise. **In the author's
+experience, recency in conversation outweighs prose rules.** (This is an
+observation, not a measured result; incident details are not published.)
+A token mentioned ten times in
 the current session — typically because the user is *handling* a leak
 of that value, or just working on that customer's code — sits at the
 top of the agent's attention and gets emitted by reflex when a
@@ -34,9 +36,10 @@ repo-aegis is designed around that failure mode:
 
 - **Deterministic gate, not a rule.** Pre-commit hook running
   `repo-aegis check --staged` catches what soft instructions cannot
-  filter. Same for a Claude Code PostToolUse hook on every
-  Write/Edit/MultiEdit — the earliest point at which a slip can be
-  caught, before it reaches a commit.
+  filter. Same for Claude Code hooks on every Write/Edit/MultiEdit: a
+  PreToolUse hook (`hook check-write`) that refuses a cross-org write
+  before it lands, and a PostToolUse hook (`hook scan-after-write`)
+  that scans what was written — both ahead of any commit.
 - **Self-correction loop, not just a block.** `repo-aegis check`
   returns structured hit data with `--json` and stable exit codes
   (0 = clean, 1 = hit, 2 = error). The agent reads the output,
@@ -45,6 +48,13 @@ repo-aegis is designed around that failure mode:
   only that it is blocked: it gets concrete feedback ("you
   wrote `betaco` in a customer-A repo") rather than an abstract
   refusal.
+
+  > **Unverified:** Claude Code surfaces PostToolUse output to the model
+  > only on exit 2; these hooks exit 1 on a hit, so the agent may not see
+  > the post-write result. The block-and-fix loop is therefore the design
+  > intent, not a confirmed behaviour. Tracked. See Claude Code's
+  > [hooks documentation](https://code.claude.com/docs/en/hooks).
+
 - **Engagement-scoped deny sets.** Inside customer-A's own repo,
   customer-A's strings legitimately appear in code, tests, configs.
   A flat marker list would false-positive on every legitimate
@@ -53,8 +63,9 @@ repo-aegis is designed around that failure mode:
   in `.git/config`: customer-A's markers are excluded inside
   customer-A's repo, but customer-B's markers, your other clients'
   markers, and your org-wide always-block markers are still enforced.
-  Zero false positives in the legitimate case; full coverage in
-  every other.
+  No false positives from the repo's own engagement markers; coverage
+  is limited to the markers that are registered (an unregistered name
+  is not detected).
 - **One verb the agent can invoke.** "Allow references to customer A
   in this repo" maps to `repo-aegis allow "customer A"` — fuzzy name
   match against the engagement registry, then a single `git config`

@@ -2,8 +2,9 @@
 
 > Post-implementation design notes for `@de-otio/repo-aegis`.
 >
-> The original pre-implementation design lived in
-> [`dot-notes/plans/repo-aegis-design.md`](https://github.com/de-otio/dot-notes).
+> The original pre-implementation design lived in a separate notes repository
+> (`dot-notes`, `plans/repo-aegis-design.md`). It is not part of this repo and
+> may not be accessible to readers, so it is not linked.
 > This document is the source of truth for the *as-built* shape: what
 > the tool actually is, why it was built that way, and which choices
 > are load-bearing.
@@ -19,10 +20,11 @@ OSS repository — without forcing the user to delete those strings from
 their own engagement registry while they're still working on that
 engagement's code.
 
-The failure mode it addresses is AI-coding-agent recency pressure: a customer-derived string mentioned ten times in the current
-session sits at the top of the agent's attention and gets emitted by
-reflex when a "concrete example" is needed, even when a `CLAUDE.md`
-rule says otherwise. A deterministic gate (pre-commit hook,
+The failure mode it addresses is AI-coding-agent recency pressure. This is the
+author's observation, not a measured rate: a customer-derived string mentioned
+ten times in the current session sits at the top of the agent's attention and
+gets emitted by reflex when a "concrete example" is needed, even when a
+`CLAUDE.md` rule says otherwise. A deterministic gate (pre-commit hook,
 PostToolUse hook) catches what soft instructions cannot filter, and
 gives the agent structured feedback it can self-correct on.
 
@@ -157,9 +159,11 @@ Both are optional and additive; neither bumps `schemaVersion`.
 `init` and `render` enforce chmod values; existing files with weaker
 permissions are tightened with a stderr note.
 
-The Claude Code PostToolUse hook lives in `~/.claude/settings.json` as
-a bare bin command (`repo-aegis hook scan-after-write`). No file is
-written under `~/.claude/hooks/`.
+The Claude Code PostToolUse hook lives in the Claude Code settings as a
+one-line `sh` command that runs `hook scan-after-write` on the pinned node and
+CLI by absolute path (see the locked-decisions row above and
+`doc/plan-pin-enforcement-binary.md`); it was a bare bin command before v0.11.1.
+No file is written under `~/.claude/hooks/`.
 
 ## Domain model
 
@@ -307,8 +311,9 @@ Stable, contract-bearing surface:
   `OutsideWorkingTreeError`, `LockTimeoutError`,
   `CustomerCoupledNoEngagementError`, `GitCommandError` (thrown, never
   swallowed, on any underlying git failure inside a scan — see the
-  `check` no-flag-default row's fail-closed language and the P0
-  changelog entry).
+  `check` no-flag-default row's fail-closed language and the CHANGELOG
+  `[0.7.0]` entry "`scanHistory` and the `check` git helpers now fail
+  closed").
 - Exit codes: `EXIT_OK = 0`, `EXIT_HIT = 1`, `EXIT_USAGE = 2`.
 - Locking: `withLock`, `withLockSync`, type `LockOptions`.
 - Schema helper: `formatZodError`.
@@ -352,7 +357,7 @@ around it.
 | Registry contents in error messages                 | Errors redirect to `engagements list`; never enumerate inline.                                                                                                                                                                          |
 | Hook output recency-pressure amplifier              | `ScanHit.matchPreview` redacted by default; literal markers never flow into agent tool-result. Hooks never pass `--verbose`.                                                                                                            |
 | Supply chain via `@latest`                          | Workflow YAML pins exact version. `npm ci` from lockfile. Trusted publishing (OIDC).                                                                                                                                                    |
-| ReDoS via marker patterns                           | `validatePatterns` runs at `render` with a subprocess timeout (100ms). Bad patterns block `render`. `re2` swap is documented as a future hardening.                                                                                     |
+| ReDoS via marker patterns                           | `validatePatterns` runs at `render` with a subprocess timeout (100ms). Bad patterns block `render`. `re2`, when installed, is already used for this validation (see the "Regex backend" row above); the scanner itself still uses native `RegExp`.                                                                                     |
 | Registry at-rest exposure                           | `chmod 600` registry, `chmod 700` directory. Cloud-sync warning documented. Optional age-encryption: `repo-aegis registry encrypt --recipient <pubkey>` writes `engagements.yaml.age` and removes the plaintext; `repo-aegis registry decrypt --identity <path>` reverses. `loadRegistry` throws `RegistryEncryptedError` (code `REGISTRY_ENCRYPTED`) when the ciphertext is present — no auto-decrypt. |
 | `REPO_AEGIS_HOME` silent override                   | Stderr warning on every TTY invocation. Hook context (stderr-is-pipe) suppressed because the warning would itself be a recency-pressure signal.                                                                                          |
 | Scanner issue body leaks                            | Default redacted; `--reveal-matches` is explicit opt-in. Documented "use only in private restricted repo."                                                                                                                              |
@@ -363,17 +368,19 @@ around it.
 | GHA workflow injection                              | `permissions:` block restricted (`contents: write` for state, `issues: write` for issue filing, nothing else). PAT not exposed to fork PRs (workflow runs only on schedule + manual dispatch by maintainers).                            |
 | Cross-border data transfer (`audit --org`)          | Org seed substrings redact through GitHub Code Search. Required `--accept-cross-border` flag (or `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1`) before any seed leaves the box. Maximum query cap (default 30, `--max-queries`).               |
 | CI output as a publication channel                  | `check`/`audit` emit engagement attribution (`engagement` per hit, `repo.engagements`, `denySet.files`, engagement-derived `patternId`s) — harmless at a local terminal, a disclosure in a PR comment, an issue body, or a public job log. `--redact-attribution` / `REPO_AEGIS_REDACT_ATTRIBUTION=1` strips it; the composite Actions and every generated workflow set it by default. Redaction is unconditional, not keyed on findings: a CLEAN `audit` emits the engagement list too. Guaranteed by an oracle test that greps the whole serialised payload for the fixture's engagement ids, not by per-key assertions. |
-| Registry redirect during the Action's CLI install   | npm reads `./.npmrc` from the working directory, so `npm install -g` run inside the consumer's checkout can be repointed by a file a PR author wrote — and the substituted package's install scripts would execute in a job that may hold the registry secret. Both composite Actions install from `${{ runner.temp }}`, with `--ignore-scripts` and an explicit `--registry`, pinned to a version rather than `latest`. Asserted by `tests/action-smoke.sh`. |
+| Registry redirect during the Action's CLI install   | npm reads a project `.npmrc` from the project root ([npm docs](https://docs.npmjs.com/cli/v10/configuring-npm/npmrc); those docs also say it is not read in global mode, so whether a bare `npm install -g` is exposed is unverified), so an install run inside the consumer's checkout can be repointed by a file a PR author wrote — and the substituted package's install scripts would execute in a job that may hold the registry secret. Both composite Actions install from `${{ runner.temp }}`, with `--ignore-scripts` and an explicit `--registry`, pinned to a version rather than `latest`. Asserted by `tests/action-smoke.sh`. |
 | Gate that silently no-ops in CI                     | A registry that fails to load (fork PR without secrets, renamed secret, bad path) yields an empty deny set, matches nothing, and exits 0 — indistinguishable from a real pass. `--min-patterns` / `--require-deny-set` exits **2** instead, enforced in the CLI where the size is computed so every caller inherits it, and checked before `check`'s `no-deny-set` early return. |
 | Zip-slip on `audit --published`                     | Post-extraction `realpathSync` check that every entry resolves under the temp dir; refuse otherwise.                                                                                                                                    |
 | Flag injection via PostToolUse `file_path`          | The hook subcommand `repo-aegis hook scan-after-write` parses stdin JSON in Node and calls `check({ path })` directly — there is no shell to inject through, and the file_path is never tokenised as a CLI argument.                     |
 | Compliance trail                                    | Audit log (when enabled) writes JSONL records of every state-changing action (`allow`, `deny`, `engagements add/end/remove`, `classify --apply`, `init`, `install hooks/claude-md/gitignore/ci`, `render`, `registry encrypt/decrypt`, `waive`, `doctor --fix`) to `~/.config/repo-aegis/state/audit.log` (chmod 600, append-only, rotates at 10 MiB). Records carry engagement ids and structural metadata only — never literal markers or matched substrings. Off by default; opt in via `repo-aegis audit-log on`. |
-| Waiver mechanism reconstructing `--no-verify`       | `.repo-aegis.yml` is a file inside the repo, so a blocked coding agent could otherwise write itself a waiver and retry — the cheapest possible unblock. Three independent controls, all required: (1) the PreToolUse `hook check-write` gate refuses an agent `Write`/`Edit`/`MultiEdit` to `.repo-aegis.yml` outright; (2) `repo-aegis waive` itself refuses to run when stdin is not a TTY, unless a human explicitly sets `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`; (3) `check` always reports `waived: N` (JSON: the full list), on every run, so an applied waiver is never silent. Only `_always`-stem patterns are waivable at all — see the locked-decisions row above for why. |
+| Waiver mechanism reconstructing `--no-verify`       | `.repo-aegis.yml` is a file inside the repo, so a blocked coding agent could otherwise write itself a waiver and retry — the cheapest possible unblock. Three independent controls, all required: (1) the PreToolUse `hook check-write` gate refuses an agent `Write`/`Edit`/`MultiEdit` to `.repo-aegis.yml` outright; (2) `repo-aegis waive` itself refuses to add a waiver when stdin is not a TTY, unless a human explicitly sets `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`; (3) `check` reports `waived: N` whenever a waiver suppressed a finding (JSON: the full list on every run), so an applied waiver is never silent. Only `_always`-stem patterns are waivable at all — see the locked-decisions row above for why. |
 
 ## Test strategy
 
-Coverage targets: 80% line + branch on `core` and `cli`; 70% on
-`scan` (network-bound branches require disproportionate mock effort).
+Coverage: `npm run test:cov` enforces one global floor, 80% lines and 75%
+branches (root `package.json`); there are no per-package floors. As a target,
+aim for 80% line + branch on `core` and `cli`; `scan` is harder to cover
+(network-bound branches require disproportionate mock effort).
 Current state: see `npm run test:cov`.
 
 Unit tests are colocated with sources (`*.test.ts` next to the module).

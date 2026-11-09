@@ -1,6 +1,6 @@
 # Design: public-repo egress hygiene (private-registry URL leak prevention)
 
-**Status:** proposed
+**Status:** implemented. The detection shipped in v0.5.0; the configurable allowlist and pip/cargo coverage in v0.6.0 (see `CHANGELOG.md`). The text below is the original design; where it differs from what shipped (notably §5, config keys), the as-built notes in that section apply.
 **Author:** (drafted with Claude Code)
 **Scope:** `@de-otio/repo-aegis-core`, `@de-otio/repo-aegis` (CLI)
 
@@ -15,9 +15,10 @@ the private registry). It is not a customer-confidentiality breach, so it sits
 automatic catches it.
 
 This was hit live: a lockfile regenerated via `npm install` (whose default
-registry was pointed at CodeArtifact by an inherited `~/.npmrc`) produced 338
-CodeArtifact `resolved` URLs about to be committed to a public repo. It was
-caught only by a *manual* host-histogram check, not by tooling.
+registry was pointed at CodeArtifact by an inherited `~/.npmrc`) produced a
+lockfile full of CodeArtifact `resolved` URLs (338 in the one observed case;
+incident details are not published) about to be committed to a public repo. It
+was caught only by a *manual* host-histogram check, not by tooling.
 
 ### Why the existing hooks miss it
 
@@ -201,6 +202,13 @@ root reason the existing check would not have fired even if wired in. Address:
 - Optional `egress: { enforce: on|off }` per-repo escape hatch (audited).
 - Extend `repoOverrideSchema` / `registryFileSchema` (zod) + `status` output to
   surface the egress policy and resolved `isPublicFacing`.
+
+As built (v0.6.0): neither `allowedRegistries` nor `egress.enforce` exists. The
+shipped key is the top-level `publicRegistries:` list in the engagement registry
+only (`packages/core/src/schemas.ts`). It is deliberately org-wide, not
+per-repo, so a checked-in `.repo-aegis.yml` cannot whitelist a private host into
+a public repo, and there is no per-repo off switch. `status` reports whether
+egress hygiene is enforced.
 
 ### 6. Output & redaction
 

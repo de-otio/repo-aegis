@@ -1,14 +1,13 @@
 # Zero-config onboarding — design
 
-> Design doc for the three-phase onboarding overhaul tracked in
-> [`plans/zero-config-onboarding.md`](../../plans/zero-config-onboarding.md)
-> and the implementation checklist at
-> [`plans/zero-config-onboarding-checklist.md`](../../plans/zero-config-onboarding-checklist.md).
+> Design doc for the three-phase onboarding overhaul. It was tracked in a
+> plan (`plans/zero-config-onboarding.md`) and an implementation checklist
+> (`plans/zero-config-onboarding-checklist.md`); both lived in the git-ignored
+> local `plans/` directory and are not in the repository, so they are not linked.
 >
 > Status: design accepted; Phase 1 (org-keyed JIT classification),
 > Phase 2 (LLM-assisted marker discovery), and Phase 3 (semantic
-> audit sweep) are implemented on `main` and awaiting the next
-> release tag.
+> audit sweep) shipped in v0.2.0.
 
 This document is the source of truth for the *as-designed* shape of:
 
@@ -39,11 +38,11 @@ and requires a new design doc PR.
 
 | Topic | Decision |
 |---|---|
-| Hot-path determinism | PostToolUse, pre-commit, pre-push hooks continue to use regex via re2. No semantic similarity, embedding lookup, or LLM judgement on the write/commit path. |
+| Hot-path determinism | PostToolUse, pre-commit, pre-push hooks continue to use regex. The scanner uses native `RegExp`; re2, when installed, only validates marker patterns at `render` (see the regex-backend row in `README.md`). No semantic similarity, embedding lookup, or LLM judgement on the write/commit path. |
 | Hot-path package independence | `@de-otio/repo-aegis-core` and the gate code in `@de-otio/repo-aegis` (the `check` / `hook scan-after-write` / `render` paths) must not transitively import any LLM client. Enforced by an import-graph test. |
 | Registry mutation | JIT classification can prompt; it can never silently add engagements or seed markers. The agent-guide rule (no silent registry edits) stays in force. |
 | Replacement of existing CLI verbs | All new behaviour is additive. `classify --apply`, `allow`, `engagements add` keep working unchanged for users who prefer them. |
-| Network egress | Gate code emits zero network traffic. Phase 2 / Phase 3 may emit traffic only when the user explicitly invokes the verb that does so, and only to endpoints the user configured. Default endpoints are local. |
+| Network egress | The content scan (marker matching on writes, commits and pushes) emits no network traffic. Known exception: on the pre-push path the egress guard may run `gh repo view` (5 s timeout) to look up a destination's visibility; `REPO_AEGIS_VISIBILITY_LOOKUP=0` disables it (`packages/core/src/visibility-lookup.ts`). Phase 2 / Phase 3 may emit traffic only when the user explicitly invokes the verb that does so, and only to endpoints the user configured. Default endpoints are local. |
 
 ## Architecture
 
@@ -220,6 +219,10 @@ to call via MCP.
 
 [packages/mcp/src/tools/first-touch.ts](../../packages/mcp/src/tools/first-touch.ts) (new)
 
+Note: the SessionStart hook this section describes is a command hook (`hook
+first-touch`, see `packages/cli/src/commands/claude-hook-specs.ts`), not an MCP
+tool hook. The MCP tool below is the separate, agent-callable counterpart.
+
 Tool name: `aegis_classify_first_touch`. Single MCP tool the agent
 calls at session start. Same JSON shapes as the rest of the MCP
 surface; runs in-process; no shell, no `--verbose` exposure.
@@ -242,9 +245,10 @@ type FirstTouchResult =
 The tool **never** mutates the registry on its own. `applied` means it
 called `setClass` / `addEngagement` on the *repo* (per-repo git
 config) — not the registry. `needs-confirmation` is the path that
-requires a follow-up MCP call (`aegis_engagement_add`, already
-exposed) to mutate the registry, which the agent makes only after the
-user confirms.
+requires a follow-up registry edit, which the agent makes only after the
+user confirms. That edit is the CLI `repo-aegis engagements add`; the MCP
+server has no registry-mutating tool (an earlier draft named an
+`aegis_engagement_add` tool that was never built).
 
 `idHint` for new-engagement suggestions is derived deterministically
 from the org name (lowercased, kebab-cased), with no other PII. The
@@ -262,8 +266,8 @@ adds:
     "SessionStart": [{
       "matcher": "*",
       "hooks": [{
-        "type": "tool",
-        "tool": "mcp__repo-aegis__aegis_classify_first_touch"
+        "type": "command",
+        "command": "<sh command that runs `repo-aegis hook first-touch`; pinned to absolute paths since v0.11.1>"
       }]
     }]
   }
@@ -579,16 +583,11 @@ the same time as `packages/llm/` is created so it can never be true.
 
 ### Test strategy
 
-Coverage targets, locked to existing project policy
-(`npm run test:cov` enforces 80% lines / 75% branches via c8):
-
-| Package | Lines | Branches |
-|---|---|---|
-| `core` (incl. new schema fields, remote-url) | 80 | 75 |
-| `cli` (incl. new classify, suggest-markers, engagements add flags) | 80 | 75 |
-| `mcp` (incl. first-touch tool) | 80 | 75 |
-| `scan` (incl. semantic sweep — network code excluded) | 70 | 65 |
-| `llm` | 80 | 75 |
+Coverage is held to the existing project policy: `npm run test:cov` enforces
+one global floor of 80% lines / 75% branches via c8 (root `package.json`), with
+no per-package floors. The per-package figures originally listed here (80/75 for
+`core`, `cli`, `mcp` and `llm`, 70/65 for `scan`) were targets, not enforced
+gates; network code in `scan` is excluded from the aim.
 
 Test layering:
 
@@ -631,14 +630,14 @@ permanent unless explicitly redesigned.
 | Personal orgs vs engagement orgs | Disjoint. Same-string overlap is a parse error. |
 | Non-github hosts | Phase 1 returns `null` from `parseRemoteUrl`. Out of scope. |
 | Migration of `classify.yml` | One-warning-per-invocation deprecation; migration is opt-in via `init --migrate-classify`. |
-| First-touch agent prompt | Single MCP tool returns `needs-confirmation`; agent surfaces to user; user-confirmed call to `aegis_engagement_add` mutates the registry. Tool itself never mutates the registry. |
+| First-touch agent prompt | Single MCP tool returns `needs-confirmation`; agent surfaces to user; user-confirmed `repo-aegis engagements add` (a CLI call; there is no MCP add tool) mutates the registry. Tool itself never mutates the registry. |
 | LLM endpoint default | `http://127.0.0.1:11434` (Ollama default). Non-local endpoints require explicit `--allow-remote-model`. |
 | LLM determinism | `temperature: 0, seed: 42` by default. Tests assert reproducibility. |
 | LLM output shape | Tokens with kind, never regex. Synthesis is deterministic and lives in trusted code. |
 | Profile storage | `~/.config/repo-aegis/profiles/<id>.json`, mode 0600, schema-versioned. |
 | Hot-path independence | `core` and gate paths must not import `llm`. Enforced by import-graph test. |
 | Audit log redaction | Never logs literal patterns / tokens / document content. Engagement ids and structural metadata only. |
-| Network egress in gate path | Forbidden. Gate code is offline-only. |
+| Network egress in gate path | Forbidden for the content scan. The one exception is the egress guard's `gh repo view` visibility lookup on the pre-push path (see the non-goals table). |
 
 ## Threat model additions
 
@@ -659,7 +658,6 @@ These extend the threat model in [`doc/design/README.md`](README.md).
 
 ## Reference
 
-- Plan: [`plans/zero-config-onboarding.md`](../../plans/zero-config-onboarding.md)
-- Implementation checklist: [`plans/zero-config-onboarding-checklist.md`](../../plans/zero-config-onboarding-checklist.md)
+- Plan and implementation checklist: `plans/zero-config-onboarding*.md` (local, git-ignored; not in the repository)
 - As-built design: [`doc/design/README.md`](README.md)
 - Agent operator guide: [`doc/agent-guide.md`](../agent-guide.md)

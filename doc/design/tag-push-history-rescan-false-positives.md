@@ -1,6 +1,6 @@
 # Design: tag-push / new-ref full-history rescan false positives
 
-**Status:** proposed
+**Status:** implemented. Items A to E shipped in v0.7.0 (`CHANGELOG.md` `[0.7.0]`; build record in `doc/plan-tag-push-and-hook-liveness.md`). The text below is the original design, so names in it may differ from what shipped; see the notes marked "as built".
 **Author:** (drafted with Claude Code)
 **Scope:** `@de-otio/repo-aegis-core`, `@de-otio/repo-aegis` (CLI), the pre-push hook
 
@@ -35,7 +35,9 @@ Fedify/ActivityPub test-fixtures file, surrounded by `testuser` /
 `test@example.com` / `example.com`) — a throwaway key by construction, not a
 credential. It had been public in the repo since its root commit.
 
-Net effect: **every release-tag push is blocked**, the only escape is
+Net effect: **every release-tag push to a new ref was blocked in that
+repository** (the scan walked the full history each time; the incident is
+described as observed once, and its details are not published), the only escape is
 `git push --no-verify` (which security tooling / agent classifiers correctly
 refuse to run), and the operator is pushed toward a blanket hook bypass to ship a
 routine release.
@@ -91,6 +93,11 @@ alwaysBlock:
     - "**/*.test.*"
 ```
 
+As built: the key is `alwaysBlockExemptPaths: [...]` (a top-level list, not
+nested under `alwaysBlock:`), settable in the registry and additively in
+`.repo-aegis.yml` (`packages/core/src/schemas.ts`). It has a built-in default
+list when the registry omits it.
+
 Customer-marker deny sets are **never** path-exempt — a customer name in a test
 fixture is still a leak. This asymmetry is the load-bearing point: the exemption
 is scoped to the pattern *class*, not applied globally.
@@ -114,6 +121,10 @@ globally:
 repo-aegis waive --pattern _always/private-key \
   --blob <sha> --reason "fedify test-fixture keypair"
 ```
+
+As built: the pattern id is `<stem>/<12 hex>` as printed in a `check` finding
+(for example `_always/9f2c1a4b7de0`), not a rule name such as
+`_always/private-key`, and `--approver <name>` is also required.
 
 Store waivers as `(patternId, blobSha, reason, approver, date)` in the repo's
 repo-aegis config (committed, auditable). `check` skips a finding whose

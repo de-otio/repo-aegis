@@ -1,6 +1,6 @@
 # Plan: let agents run `dot gh`, and make `--as bot` the way they write
 
-Status: implemented on this branch. Supersedes `doc/plan-gh-identity-selection.md` (parked on branch `plan/gh-identity-selection`, not merged).
+Status: shipped in v0.11.1 (#160). Supersedes `doc/plan-gh-identity-selection.md`, which was never merged to `main` (it exists only on the local branch `plan/gh-identity-selection`, so there is no file to link to); `doc/plan-owner-identity.md` later revived its decisions and shipped them in v0.12.0.
 
 ## 0. Threat model, in one sentence
 
@@ -38,7 +38,7 @@ dot gh [--as <id> | --as=<id> | --explain]… <gh args…>
 
 - `node` is the bare word or an absolute path whose last component is `node`. No word starting with `-` may come between `node` and the script.
 - The script is a literal word (no `$`, glob or substitution) whose last path component is `dot.mjs`.
-- `dot`'s own options are read **only at the front**, as `dot gh` itself reads them (`splitOwnOptions` in dot-work `scripts/dot-gh.mjs`). `dot gh pr create --as bot …` passes `--as bot` to `gh`, so for D2 there is no `--as`. The refusal says to move it to the front.
+- `dot`'s own options are read **only at the front**, as `dot gh` itself reads them (`splitOwnOptions` in dot-work `scripts/dot-gh.mjs`; dot-work is a private repository, so this reference cannot be checked from here). `dot gh pr create --as bot …` passes `--as bot` to `gh`, so for D2 there is no `--as`. The refusal says to move it to the front.
 - `--as` with a missing, empty (`--as=`) or `-`-leading value is a refusal by `dot gh` itself (`splitOwnOptions` checks the same three), and it runs no `gh`: no intent, like `--explain`.
 - The remainder goes to the existing plain-`gh` parser as an argument vector, unchanged, with the same context a plain `gh` on that segment gets (`GH_REPO` in the prefix or the environment, an earlier `GH_REPO` change, the user's aliases). The intent carries `wrapper: { kind: "dot-gh", as: <id> | null }`, and `precededByCd`, `joinedBy` and the other segment facts as for any intent.
 

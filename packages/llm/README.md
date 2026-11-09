@@ -29,8 +29,9 @@ enforces that.
 ## Why this is a separate package
 
 The deterministic gate (PostToolUse hook, pre-commit hook,
-`repo-aegis check`) must run sub-millisecond, offline, and free of
-heavy runtime dependencies. Splitting LLM-adjacent code into its own
+`repo-aegis check`) must stay fast, offline, and free of
+heavy runtime dependencies (not measured here: each hook invocation is a
+Node process start). Splitting LLM-adjacent code into its own
 package keeps `core` lean and makes the hot-path independence property
 machine-checkable. See
 [`doc/design/zero-config-onboarding.md`](../../doc/design/zero-config-onboarding.md)

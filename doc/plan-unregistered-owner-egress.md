@@ -1,13 +1,17 @@
 # Plan: refuse egress to unregistered owners (issue #151)
 
-Status: decisions confirmed 2026-11-02, after an internal review and an
-independent security review (§8). Ready for implementation. Source read at
-`e1e88ca` (v0.10.3).
+Status: shipped in v0.11.0 (#153, issue #151). Decisions confirmed 2026-11-02,
+after an internal review and an independent security review (§8). Source read at
+`e1e88ca` (v0.10.3). (Historical: the text below is the plan and its handoff as
+written; line references into the source have since drifted.)
 
 ## Implementation status (handoff, 2026-11-02)
 
-Integration branch: `feat/151-unregistered-owner` (local only; nothing pushed).
-Every PR was built by a Sonnet builder and reviewed by Opus until only lows remained.
+(Historical.) The work was built on the integration branch
+`feat/151-unregistered-owner` and its per-PR branches, which were local only and
+no longer exist; they landed on `main` as one squashed commit (#153). The branch
+names and tip SHAs in the table are kept as a record of the build order, not as
+references to look up. Every PR was built by a Sonnet builder and reviewed by Opus until only lows remained.
 
 | PR | Branch (tip) | State |
 |---|---|---|
@@ -22,7 +26,7 @@ Every PR was built by a Sonnet builder and reviewed by Opus until only lows rema
 | 7 docs | `pr7-docs` (d9b5ee7) | merged (7401a2d) |
 | final review | Fable `security-reviewer` | F1 critical (unbounded `sh -c` positional expansion → guard OOM → fail-open) fixed with expansion bounds and an intent cap; F2 (program written at run time) documented as residual; F3 folded into F1. Fix verification found V1 (pre-existing: hook input past 1 MiB was truncated and passed unjudged), fixed with `HOOK_INPUT_TOO_LARGE` |
 
-Next steps: open the PR to `main`, merge when green, release 0.11.0. Follow-up issues to file:
+Next steps (done: merged as #153, released as v0.11.0). Follow-up issues to file:
 Touch ID / Keychain presence signal (R12); pty-wrapper S10 history; doctor flags for R9/R10.
 Operator decisions recorded in this plan: D3–D10, audit records without names,
 `--repo "$VAR"` refused, `*` covers only npm publish without personal orgs.
@@ -563,7 +567,7 @@ Registry fixture: `personalOrgs: [acme]`, engagement `customer-a` with
 - An unresolved GraphQL mutation is refused by rule h without a person, and
   passes with a person (then rule g as today).
 - Case: `--repo Stranger/Repo` is refused, and `--repo ACME/x` is admitted.
-- Property-based (fast-check): for any owner string drawn from the GitHub
+- Property-based (a fixed-seed LCG in `egress-policy-rule-h.test.ts`, not fast-check; the repo has no such dependency): for any owner string drawn from the GitHub
   charset, and any registry whose owner set does not contain it, the decision
   for a non-interactive `gh issue create --repo <owner>/r` is
   `deny/UNREGISTERED_OWNER_EGRESS`, whatever the approvals store contains.
