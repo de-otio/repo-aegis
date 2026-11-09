@@ -5,7 +5,7 @@
 // (doc/plan-owner-identity.md §5.1, D2): it is an owner-registry change, gated
 // exactly like `engagements add --personal-org` (same `requireTerminal` path,
 // same five-part refusal), with its own code so a refusal names the right fix.
-import { IDENTITY_NAME_REGEX, ORG_NAME_REGEX } from "@de-otio/repo-aegis-core";
+import { IDENTITY_NAME_REGEX, ORG_NAME_REGEX, refusalTrailer } from "@de-otio/repo-aegis-core";
 import { requireTerminal, type RequireTerminalOptions } from "./require-terminal.js";
 
 export const IDENTITY_CHANGE_NEEDS_TTY = "IDENTITY_CHANGE_NEEDS_TTY";
@@ -64,7 +64,7 @@ export function identityChangeRefusal(cmd: IdentityCommand): string {
     `No approval covers this, and REPO_AEGIS_EGRESS_HUMAN is not honoured here. ` +
     `A person runs, from a terminal: ${fix}. ` +
     `Agents: do not retry or reroute; ask your human to run this command themselves. ` +
-    `[${IDENTITY_CHANGE_NEEDS_TTY}, see doc/agent-guide.md#${IDENTITY_CHANGE_NEEDS_TTY}]`
+    refusalTrailer(IDENTITY_CHANGE_NEEDS_TTY)
   );
 }
 

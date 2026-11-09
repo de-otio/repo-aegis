@@ -466,12 +466,17 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
   }
   // `set-identity` anywhere after the program word, and the `identity` command word alone: whatever
   // follows it (a subcommand fed by a pipe or a heredoc, a quoted argument vector) is read as human-only.
-  // The one exception is `identity require --on`, which only tightens.
+  // The exceptions: `identity require --on`, which only tightens, and `identity list`, which only reads (it
+  // prints names, kinds and the owner mapping, the same facts `status` prints). `list` is excused only when no
+  // mutating subcommand word sits in the same window, so `identity list add x` and a fed-in `identity add` stay refused.
   if (win.includes("set-identity")) return "identity-change";
   const idn = at("identity");
   if (idn !== -1) {
-    const sub = win.slice(idn + 1).find(w => !w.startsWith("-"));
-    if (!(sub === "require" && win.includes("--on") && !win.includes("--off"))) return "identity-change";
+    const rest = win.slice(idn + 1);
+    const sub = rest.find(w => !w.startsWith("-"));
+    const requireOn = sub === "require" && win.includes("--on") && !win.includes("--off");
+    const listOnly = sub === "list" && !rest.some(w => w === "add" || w === "remove" || w === "require");
+    if (!requireOn && !listOnly) return "identity-change";
   }
   const up = at("upstreams");
   if (up !== -1 && win.indexOf("add", up) !== -1) return "upstream-add";

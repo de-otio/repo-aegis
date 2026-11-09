@@ -74,6 +74,87 @@ describe("classifyMintFailure: taaad's exit-1 texts become a fixed reason (stder
       for (const leak of ["customer-a-org", "ghs_", "example-bot"]) assert.ok(!e.message.includes(leak), leak);
     });
   }
+  it("taaad ≥ 0.7's last-line `error=<code>[ status=<n>]` names the step verbatim, known codes only", () => {
+    const coded = classifyMintFailure(1, "error: taaad mint: customer-a-org failed\ntaaad: error=github status=502\n", false);
+    assert.equal(coded.reason, "signer");
+    assert.match(coded.message, /taaad error=github status=502/);
+    assert.ok(!coded.message.includes("customer-a-org"), "only the code is copied");
+    const table: ReadonlyArray<readonly [string, MintFailureReason]> = [
+      ["presence-denied", "denied"],
+      ["rate-limited", "rate-limited"],
+      ["tty", "tty"],
+      ["config", "not-installed"],
+      ["owner-mismatch", "installation-mismatch"],
+      ["app-mismatch", "installation-mismatch"],
+      ["not-granted", "permission-not-granted"],
+      ["bad-response", "bad-output"],
+      ["keychain", "signer"],
+      ["widened", "signer"],
+      ["usage", "signer"],
+      ["github", "signer"],
+      ["missing", "signer"],
+      ["protocol", "signer"],
+      ["internal", "signer"],
+      ["not-found", "signer"],
+      ["exists", "signer"],
+      ["bad-key", "signer"],
+    ];
+    for (const [code, reason] of table) {
+      const m = classifyMintFailure(1, `taaad: error=${code}`, false);
+      assert.equal(m.reason, reason, code);
+      assert.match(m.message, new RegExp(`error=${code}\\b`), code);
+    }
+    // An unknown code is treated as internal and never echoed.
+    const unknown = classifyMintFailure(1, "taaad: error=customer-a-org", false);
+    assert.equal(unknown.reason, "signer");
+    assert.match(unknown.message, /error=internal/);
+    assert.ok(!unknown.message.includes("customer-a-org"));
+    // Only the LAST line counts, and only the exact shape; status only for an HTTP status.
+    assert.equal(classifyMintFailure(1, "taaad: error=keychain\nsomething after", false).reason, "failed");
+    assert.equal(classifyMintFailure(1, "taaad: error=keychain and more text", false).reason, "failed");
+    assert.doesNotMatch(classifyMintFailure(1, "taaad: error=github status=99999", false).message, /error=github/, "status out of range: not the shape");
+  });
+
+  it("inside the agent sandbox, signer and generic failures say the sandbox is the likely cause; outside, they don't", () => {
+    for (const stderr of ["taaad-signer exited 7", "something new", "taaad: error=keychain", "taaad: error=github"]) {
+      assert.match(classifyMintFailure(1, stderr, true).message, /inside the agent's sandbox/, stderr);
+      assert.doesNotMatch(classifyMintFailure(1, stderr, false).message, /sandbox/, stderr);
+    }
+    // Not for failures a sandbox cannot explain.
+    assert.doesNotMatch(classifyMintFailure(1, "taaad: error=widened", true).message, /sandbox/);
+    assert.doesNotMatch(classifyMintFailure(1, "app example-bot has no install_id yet", true).message, /sandbox/);
+    assert.match(classifyMintFailure(1, "something new", false).message, /exit status 1/);
+  });
+
+  it("the sandbox hint is added only for the codes a sandbox could explain (github, missing, protocol, internal, keychain)", () => {
+    for (const code of ["github", "missing", "protocol", "internal", "keychain"]) {
+      assert.match(classifyMintFailure(1, `taaad: error=${code}`, true).message, /inside the agent's sandbox/, code);
+    }
+    for (const code of ["not-found", "exists", "bad-key", "widened", "usage"]) {
+      assert.doesNotMatch(classifyMintFailure(1, `taaad: error=${code}`, true).message, /sandbox/, code);
+    }
+  });
+
+  it("trailing whitespace after the code line (CRLF, blank lines) still parses it as the last line", () => {
+    assert.equal(classifyMintFailure(1, "noise\ntaaad: error=keychain\r\n\n  \t", false).reason, "signer");
+    assert.match(classifyMintFailure(1, "noise\ntaaad: error=keychain\r\n\n  \t", false).message, /error=keychain/);
+  });
+
+  it("the DEFAULT inSandbox follows SANDBOX_RUNTIME in the environment: set, even empty, is inside; unset is not", () => {
+    const saved = process.env["SANDBOX_RUNTIME"];
+    try {
+      process.env["SANDBOX_RUNTIME"] = "1";
+      assert.match(classifyMintFailure(1, "taaad: error=keychain").message, /inside the agent's sandbox/);
+      process.env["SANDBOX_RUNTIME"] = "";
+      assert.match(classifyMintFailure(1, "taaad: error=keychain").message, /inside the agent's sandbox/);
+      delete process.env["SANDBOX_RUNTIME"];
+      assert.doesNotMatch(classifyMintFailure(1, "taaad: error=keychain").message, /sandbox/);
+    } finally {
+      if (saved === undefined) delete process.env["SANDBOX_RUNTIME"];
+      else process.env["SANDBOX_RUNTIME"] = saved;
+    }
+  });
+
   it("the exit code wins over stderr for 3 and 4", () => {
     assert.equal(classifyMintFailure(3, "taaad-signer: User interaction is not allowed").reason, "rate-limited");
     assert.equal(classifyMintFailure(4, "taaad-signer: User interaction is not allowed").reason, "denied");

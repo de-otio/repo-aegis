@@ -528,29 +528,64 @@ state of an agent's shell, not an edge case.
 
 ### 4. Enforcement point: agent pre-command hooks (where offered; richer)
 
-Three agents in current use each expose a pre-command hook that receives the
-pending shell command on stdin and blocks on exit 2:
+Six agents in current use each expose a pre-command hook that receives the
+pending shell command on stdin and blocks on exit 2 (or a deny on stdout):
 
 | Agent | Event | Command field | `ask` available |
 |---|---|---|---|
 | Claude Code | `PreToolUse`, matcher `Bash` | `tool_input.command` | yes — `hookSpecificOutput.permissionDecision: "ask"` asks for a decision, but under Claude Code's auto mode the auto-mode classifier answers it, not a person (§4a, §4b) |
-| Codex CLI | `PreToolUse` | `tool_input.command` | not assumed |
-| Gemini CLI | `BeforeTool`, matcher `run_shell_command` | `tool_input.command` | not assumed |
+| Codex CLI | `PreToolUse`, matcher `Bash` (older builds: `shell`) | `tool_input.command` | no — the hook run is marked failed and the tool runs, so `ask` renders as `deny` |
+| Gemini CLI (legacy) | `BeforeTool`, matcher `run_shell_command` | `tool_input.command` | not assumed |
+| Cursor | `beforeShellExecution` (and observe-only `afterFileEdit` for the write scan) | root `command` | yes on `beforeShellExecution`; accepted but not enforced on `preToolUse` |
+| Copilot CLI | `preToolUse`, matcher `bash` (also `PreToolUse`) | `toolArgs` (a JSON-encoded string) `.command`, or `tool_input.command` | yes in the interactive CLI; a deny in the cloud agent and autopilot. Fails closed on a non-zero exit other than 2, so the adapter never exits 1 |
+| Antigravity CLI (unverified) | `PreToolUse`, matcher `run_command` | `toolCall.args.CommandLine` | no (not documented): the adapter answers `ask` as deny |
 
-The Codex and Gemini rows are unverified against those tools' own documentation, and Gemini CLI has since been replaced by Antigravity CLI (<https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/>), whose hook shape this design does not cover.
+Only the Claude Code row has been exercised live. Every other row is doc-derived (vendor documentation read on 2026-11-09; plan `doc/plan-landscape-recommendations.md` §5.1 has the sources and the exact shapes), and each is registered by hand from `doc/agent-install.md`. Gemini CLI was replaced by Antigravity CLI (<https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/>), whose payload and answer shape differ, so it has its own adapter and `--agent gemini` stays for the old shape. Each host is one adapter module under `packages/cli/src/commands/hook-hosts/` (contract in `types.ts`).
 
-One entry point, `repo-aegis hook guard-egress [--agent claude|codex|gemini]`,
+One entry point, `repo-aegis hook guard-egress [--agent claude|codex|gemini|copilot|cursor|antigravity]`,
 reads stdin with the same tolerant field lookup `scan-bash-output` uses, runs
 `decideEgress` with `capabilities.ask` per the table (default: `false`, the
 conservative choice), and emits:
 
-- `allow` → exit 0, no output;
-- `ask` → exit 0 with the Claude Code JSON (`permissionDecision: "ask"`,
-  `permissionDecisionReason: <reason>`); on other agents this branch is
-  unreachable because `ask` degraded to `deny`;
-- `deny` → exit 2, structured reason on **stderr** (the channel these
+- `allow` → exit 0 and the least output the host accepts as "no objection":
+  nothing for most hosts, the host's minimal allow where empty output is not
+  accepted (Cursor `{"permission":"allow"}`, Antigravity
+  `{"decision":"allow"}`). The output is host-specific, so invariant 2 is "no
+  registry read, no I/O, the least output the host accepts", not "silent";
+- `ask` → exit 0 with the host's ask JSON (Claude Code:
+  `permissionDecision: "ask"`, `permissionDecisionReason: <reason>`); on
+  agents without an ask this branch is unreachable because `ask` degraded to
+  `deny`;
+- `deny` → exit 2 (hosts where exit 2 blocks) or a deny on stdout with exit 0
+  (Cursor, Antigravity), structured reason on **stderr** (the channel these
   frameworks feed back to the model), JSON on stdout for frameworks that read
   it.
+
+A payload an adapter cannot read fails **open**, like the guard's own defects
+(a guard that walls off every command because a host changed its format is
+worse than one that misses a command), but not silently: a hook registered
+with the wrong `--agent` or event looks exactly like a working one, so when a
+payload names a shell tool with no command field, carries a command in another
+host's shape, or is not JSON, the hook prints one fixed stderr line and
+writes a `guard-egress-malformed` audit record when the audit log is on. The
+text carries a fixed reason and never payload bytes. A non-shell tool stays a
+silent skip. The same holds if rendering a decision throws: the hook answers
+`error` through the adapter (the host's fail-open answer) rather than exit 1,
+which Copilot would treat as a block.
+
+**Known limits of host coverage** (what is still not judged):
+
+- Codex `write_stdin` (text typed into a running session): its field names are
+  not in the hook documentation the Codex adapter was built from, so it is
+  skipped like any non-shell tool. Copilot `write_bash` / `write_powershell`
+  (`input`) and Antigravity `send_command_input` (`Input`) are judged.
+- Cursor `preToolUse`: `ask` is not enforced there, so the Cursor adapter
+  judges `beforeShellExecution` only; a `preToolUse` shell payload is reported
+  as not judged.
+- Cursor `afterFileEdit` is detection only (the edit already happened).
+- Any host's tools that run code without a shell tool (editors, MCP servers,
+  a script an earlier call wrote) are outside this hook; the pre-push hook and
+  the `gh` shim are the layers behind it.
 
 What this layer adds over §2 and §3: it runs **before** anything executes, it
 sees the **whole compound command** — so the shape rules a–c, b′ and b″

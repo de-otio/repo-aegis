@@ -14,7 +14,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { approvalsPath, mintApproval, type TerminalCheck } from "@de-otio/repo-aegis-core";
@@ -474,12 +474,20 @@ describe("repo-aegis gh: refusals never run gh", () => {
       ["a star approval", () => mintApproval({ target: { org: "*", repo: "*" }, login: "alice", path })],
     ] as const) {
       rmSync(path, { force: true });
-      mint();
+      const minted = mint();
       writeFileSync(join(w.stubs, "seq"), "0");
       rmSync(join(w.stubs, "gh.argv"), { force: true });
       const r = run(w, POX_WRITE, { presence: "agent", cwd });
       assert.equal(refusalCode(r), "GH_IDENTITY_WRITE_NEEDS_HUMAN", `${label}: ${r.err}`);
       assert.deepEqual(r.ghArgv, [], `${label}: gh ran`);
+      // An approval bound to another account is named (by id, never by login); the other two are not "live for this
+      // owner and repository" in the account-bound sense, so the refusal is the plain one.
+      if (label === "another login") {
+        assert.match(r.err, new RegExp(`approval ${minted.id} is live for this owner and repository but is bound to a different GitHub account`), r.err);
+        assert.ok(!r.err.includes("bob") && !r.err.includes("alice"), "no login in the refusal");
+      } else {
+        assert.doesNotMatch(r.err, /bound to a different GitHub account/, `${label}: ${r.err}`);
+      }
     }
   });
 
@@ -555,6 +563,10 @@ describe("repo-aegis gh: refusals never run gh", () => {
     assert.equal(refusalCode(r), "GH_BINARY_UNTRUSTED", r.err);
     assert.equal(existsSync(join(w.root, "never.log")), false);
     assert.deepEqual(mainCalls(r), []);
+    // U7: no pin is a state `install shim` creates; the fix line is that command, and no approval covers it.
+    assert.match(r.err, /repo-aegis pins taaad only at that step/);
+    assert.match(r.err, /A person installs taaad v0\.6\.0 or later and re-runs `repo-aegis install shim`/);
+    assert.match(r.err, /No approval covers this: an approval cannot stand in for an identity that could not be chosen or a token that could not be minted/);
   });
 
   it("under the real policy an untrusted gh is still refused before any mint (a non-root-owned taaad no longer is: plan §2.1, Q5)", () => {
@@ -564,6 +576,11 @@ describe("repo-aegis gh: refusals never run gh", () => {
     assert.equal(refusalCode(r), "GH_BINARY_UNTRUSTED", r.err);
     assert.deepEqual(r.taaadArgv, []);
     assert.deepEqual(mainCalls(r), []);
+    // U7: the cause, who put it there, the one fix line, and whether an approval covers it.
+    assert.match(r.err, /the gh first on PATH is not in a trusted location/);
+    assert.match(r.err, /repo-aegis did not put that gh there, it only refuses to trust it/);
+    assert.match(r.err, /A person runs, from a terminal: repo-aegis doctor \(it names which gh is first on PATH/);
+    assert.match(r.err, /No approval covers this: an approval cannot make a gh binary trustworthy/);
   });
 
   it("T1: a mapped person whose gh account has no token on this machine is GH_IDENTITY_UNAVAILABLE; the call and `auth switch` never run", () => {
@@ -905,6 +922,390 @@ describe("H1: gh's git children cannot be steered by argv or by the repository's
 });
 
 // ---------------------------------------------------------------------------
+// Phase U, U1: repo-aegis's own hooks directory is not a steering setting
+// ---------------------------------------------------------------------------
+
+describe("U1: a repo-local core.hooksPath that is repo-aegis's own pinned hooks directory is accepted", () => {
+  const git = (cwd: string, ...a: string[]): void => void spawnSync("git", a, { cwd, stdio: "ignore" });
+  const CHECKOUT = ["pr", "checkout", "1", "--repo", "example-org/svc"];
+
+  /** The directory `install hooks` writes under the pinned home. */
+  function ownHooks(w: World): string {
+    const dir = join(w.home, "hooks");
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  it("is accepted: the call runs as the App (refused before this change)", () => {
+    const w = makeWorld();
+    git(w.repo, "config", "core.hooksPath", ownHooks(w));
+    const r = run(w, CHECKOUT, { presence: "agent" });
+    assert.equal(refusalCode(r), undefined, r.err);
+    assert.equal(r.status, 0, r.err);
+    assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], TOKEN_BOT);
+  });
+
+  it("is accepted for pr create too (the observed failure), and by realpath: through a symlink and with a trailing slash", () => {
+    const w = makeWorld();
+    const dir = ownHooks(w);
+    const link = join(w.root, "hooks-link");
+    symlinkSync(dir, link);
+    for (const value of [link, `${dir}/`, join(dir, "..", "hooks")]) {
+      git(w.repo, "config", "core.hooksPath", value);
+      const r = run(w, WRITE, { presence: "agent" });
+      assert.equal(r.status, 0, `${value}: ${r.err}`);
+      assert.equal(refusalCode(r), undefined, `${value}: ${r.err}`);
+    }
+  });
+
+  it("another hooks directory still refuses, even one that exists and is next to the pinned one", () => {
+    const w = makeWorld();
+    ownHooks(w);
+    const other = join(w.home, "hooks-other");
+    mkdirSync(other, { recursive: true });
+    for (const value of [other, "/tmp/h", join(w.root, "elsewhere-hooks"), join(w.home, "hooks", "sub")]) {
+      git(w.repo, "config", "core.hooksPath", value);
+      const r = run(w, CHECKOUT, { presence: "agent" });
+      assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", `${value}: ${r.err}`);
+      assert.deepEqual(r.ghArgv, [], `${value}: gh ran`);
+      assert.deepEqual(r.taaadArgv, [], `${value}: a token was minted`);
+    }
+  });
+
+  it("a ~/-spelled local value is accepted when it expands (with the caller's HOME) to the pinned hooks directory, refused for ~/other", () => {
+    const w = makeWorld();
+    ownHooks(w); // <root>/aegis/hooks; with HOME=<root> the spelling is ~/aegis/hooks
+    mkdirSync(join(w.root, "other"), { recursive: true });
+    git(w.repo, "config", "core.hooksPath", "~/aegis/hooks");
+    const ok = run(w, CHECKOUT, { presence: "agent", env: { HOME: w.root } });
+    assert.equal(refusalCode(ok), undefined, ok.err);
+    assert.equal(ok.status, 0, ok.err);
+    assert.equal(ghEnv(w, mainCallNumber(ok))["GH_TOKEN"], TOKEN_BOT);
+    // The same spelling with a HOME that does not lead to the pinned directory is not it.
+    rmSync(join(w.stubs, "seq"), { force: true });
+    rmSync(join(w.stubs, "gh.argv"), { force: true });
+    assert.equal(refusalCode(run(w, CHECKOUT, { presence: "agent", env: { HOME: join(w.root, "elsewhere") } })), "GH_IDENTITY_ARG_UNSAFE");
+    for (const value of ["~/other", "~", "~/aegis/hooks/sub", "~user/aegis/hooks"]) {
+      git(w.repo, "config", "core.hooksPath", value);
+      const r = run(w, CHECKOUT, { presence: "agent", env: { HOME: w.root } });
+      assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", `${value}: ${r.err}`);
+      assert.equal(r.status, 2, value);
+    }
+  });
+
+  it("a relative value still refuses, even one that would resolve to the hooks directory from the home", () => {
+    const w = makeWorld();
+    ownHooks(w);
+    for (const value of ["hooks", "../aegis/hooks", ".git/hooks"]) {
+      git(w.repo, "config", "core.hooksPath", value);
+      const r = run(w, CHECKOUT, { presence: "agent" });
+      assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", `${value}: ${r.err}`);
+    }
+  });
+
+  it("another home's hooks directory is not the pinned one", () => {
+    const w = makeWorld();
+    const w2 = makeWorld();
+    git(w.repo, "config", "core.hooksPath", ownHooks(w2));
+    assert.equal(refusalCode(run(w, CHECKOUT, { presence: "agent" })), "GH_IDENTITY_ARG_UNSAFE");
+  });
+
+  it("every other key keeps refusing: the own hooks path does not excuse core.sshCommand, core.fsmonitor or a url rewrite", () => {
+    for (const [key, value] of [
+      ["core.sshCommand", "/tmp/ssh"],
+      ["core.fsmonitor", "/tmp/fsmon"],
+      ["url.https://example.net/.insteadOf", "https://github.com/"],
+      ["credential.helper", "!/tmp/helper"],
+    ] as Array<[string, string]>) {
+      const w = makeWorld();
+      git(w.repo, "config", "core.hooksPath", ownHooks(w));
+      git(w.repo, "config", key, value);
+      const r = run(w, CHECKOUT, { presence: "agent" });
+      assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", `${key}: ${r.err}`);
+      assert.deepEqual(r.taaadArgv, [], `${key}: a token was minted`);
+    }
+  });
+
+  it("two local values, one of them foreign, refuse (git reads the last; the check judges each)", () => {
+    const w = makeWorld();
+    git(w.repo, "config", "core.hooksPath", ownHooks(w));
+    git(w.repo, "config", "--add", "core.hooksPath", "/tmp/h");
+    assert.equal(refusalCode(run(w, CHECKOUT, { presence: "agent" })), "GH_IDENTITY_ARG_UNSAFE");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase U, U5 (gh half): an account-bound approval covers GH_IDENTITY_ARG_UNSAFE for a git setting
+// ---------------------------------------------------------------------------
+
+describe("U5: an account-bound approval covers a repository git setting", () => {
+  const git = (cwd: string, ...a: string[]): void => void spawnSync("git", a, { cwd, stdio: "ignore" });
+  const CHECKOUT = ["pr", "checkout", "1", "--repo", "example-org/svc"];
+  const dest = { org: "example-org", repo: "svc" };
+
+  function worldWithHooksPath(): World {
+    const w = makeWorld();
+    git(w.repo, "config", "core.hooksPath", "/tmp/h");
+    return w;
+  }
+
+  it("a live <org>/<repo> approval with a login lets the call run: one stderr line, a decision record naming the approval, the App's token", () => {
+    const w = worldWithHooksPath();
+    const a = mintApproval({ target: dest, login: "alice", path: approvalsPath(w.home) });
+    for (const args of [CHECKOUT, WRITE]) {
+      const r = run(w, args, { presence: "agent" });
+      assert.equal(r.status, 0, `${args.join(" ")}: ${r.err}`);
+      assert.equal(refusalCode(r), undefined, r.err);
+      assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], TOKEN_BOT);
+      const line = r.err.split("\n").filter(l => l.includes(`approval ${a.id}`));
+      assert.deepEqual(line, [`repo-aegis: approval ${a.id} covers core.hooksPath (local scope) for example-org/svc`]);
+      rmSync(join(w.stubs, "seq"), { force: true });
+      rmSync(join(w.stubs, "gh.argv"), { force: true });
+    }
+    const last = decisions(w).at(-1)!;
+    assert.equal(last["decision"], "inject");
+    assert.equal(last["coveredBy"], a.id);
+    assert.equal(last["covers"], "core.hooksPath (local scope)");
+  });
+
+  it("an <org>/* approval with a login covers every repository of the owner", () => {
+    const w = worldWithHooksPath();
+    const a = mintApproval({ target: { org: "example-org", repo: "*" }, login: "alice", path: approvalsPath(w.home) });
+    const r = run(w, CHECKOUT, { presence: "agent" });
+    assert.equal(r.status, 0, r.err);
+    assert.match(r.err, new RegExp(`approval ${a.id} covers core\\.hooksPath`));
+  });
+
+  it("when the audit log is on, the use is recorded there too, with ids and names only", () => {
+    const w = worldWithHooksPath();
+    writeFileSync(join(w.home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    const a = mintApproval({ target: dest, login: "alice", path: approvalsPath(w.home) });
+    const r = run(w, CHECKOUT, { presence: "agent" });
+    assert.equal(r.status, 0, r.err);
+    const logFiles = readdirSync(join(w.home, "state")).filter(f => f.startsWith("audit") && f !== "audit-log.json");
+    const text = logFiles.map(f => readFileSync(join(w.home, "state", f), "utf8")).join("\n");
+    assert.match(text, /"action":"egress-approval-use"/);
+    assert.ok(text.includes(a.id), text);
+    for (const t of ALL_TOKENS) assert.ok(!text.includes(t));
+  });
+
+  it("an approval with no login, a '*' approval, one for another repository or owner, and an expired one do not cover it", () => {
+    const w = worldWithHooksPath();
+    const path = approvalsPath(w.home);
+    const longAgo = new Date(Date.now() - 3 * 3600_000);
+    for (const [label, mint] of [
+      ["no login", () => mintApproval({ target: dest, path })],
+      ["a star approval with a login", () => mintApproval({ target: { org: "*", repo: "*" }, login: "alice", path })],
+      ["another repository", () => mintApproval({ target: { org: "example-org", repo: "other" }, login: "alice", path })],
+      ["another owner", () => mintApproval({ target: { org: "other-org", repo: "*" }, login: "alice", path })],
+      ["a ref-limited approval", () => mintApproval({ target: dest, login: "alice", ref: "main", path })],
+      ["an expired approval", () => mintApproval({ target: dest, login: "alice", path, now: longAgo, ttlMs: 3600_000 })],
+    ] as const) {
+      rmSync(path, { force: true });
+      mint();
+      rmSync(join(w.stubs, "seq"), { force: true });
+      rmSync(join(w.stubs, "gh.argv"), { force: true });
+      const r = run(w, CHECKOUT, { presence: "agent" });
+      assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", `${label}: ${r.err}`);
+      assert.equal(r.status, 2, label);
+      assert.deepEqual(r.ghArgv, [], `${label}: gh ran`);
+      assert.deepEqual(r.taaadArgv, [], `${label}: a token was minted`);
+    }
+  });
+
+  it("an approval bound to an account the owner is no longer mapped to covers nothing; re-mapping back covers again", () => {
+    const w = worldWithHooksPath();
+    // example-org's person identity is `alice` now; this approval was minted while it was `bob`.
+    mintApproval({ target: dest, login: "bob", path: approvalsPath(w.home) });
+    const r = run(w, CHECKOUT, { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", r.err);
+    assert.deepEqual(r.ghArgv, [], "gh ran");
+    assert.deepEqual(r.taaadArgv, [], "a token was minted");
+    // Re-map the owner to bob: the same approval now covers (control: the comparison is against the registry).
+    writeFileSync(join(w.home, "engagements.yaml"), REGISTRY.replace("{ name: example-org, person: alice, agent: example-bot }", "{ name: example-org, person: bob, agent: example-bot }"));
+    const r2 = run(w, CHECKOUT, { presence: "agent" });
+    assert.equal(r2.status, 0, r2.err);
+    assert.match(r2.err, /approval [0-9a-f]{8} covers core\.hooksPath/);
+  });
+
+  it("an owner with no person identity has nothing to bind an approval to: not covered, whatever login it carries", () => {
+    const w = worldWithHooksPath();
+    mintApproval({ target: { org: "agent-only-org", repo: "*" }, login: "alice", path: approvalsPath(w.home) });
+    const r = run(w, ["pr", "checkout", "1", "--repo", "agent-only-org/svc"], { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", r.err);
+    assert.deepEqual(r.ghArgv, []);
+    assert.deepEqual(r.taaadArgv, []);
+  });
+
+  it("with no approval the refusal says an account-bound approval from a terminal covers it", () => {
+    const w = worldWithHooksPath();
+    const r = run(w, CHECKOUT, { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE");
+    assert.match(r.err, /account-bound approval/);
+    assert.match(r.err, /repo-aegis approve <owner>\/<repo>/);
+  });
+
+  it("U7: the setting refusal names the setting, says repo-aegis did not set it, gives the unset line, and keeps the trailer", () => {
+    const w = worldWithHooksPath();
+    const r = run(w, CHECKOUT, { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE");
+    assert.match(r.err, /core\.hooksPath is set in local scope/);
+    assert.match(r.err, /repo-aegis did not set it \(its own hooks directory, written by `install hooks --local`, is exempt\)/);
+    assert.match(r.err, /A person runs, from a terminal: git config --local --unset-all core\.hooksPath \(it only stops that setting applying to this checkout/);
+    assert.match(r.err, /A person runs, from a terminal: repo-aegis approve <owner>\/<repo> \(account-bound: it covers this setting/);
+    assert.match(r.err, /Agents: do not run that yourself, retry or reroute; report this to your human\./);
+  });
+
+  it("the approval covers only the git setting: an unsafe ARGUMENT (an editor option) still refuses", () => {
+    const w = makeWorld();
+    mintApproval({ target: dest, login: "alice", path: approvalsPath(w.home) });
+    const r = run(w, ["pr", "create", "--editor", "--repo", "example-org/svc"], { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_IDENTITY_ARG_UNSAFE", r.err);
+    assert.deepEqual(r.ghArgv, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase U, U4: a READ whose identity cannot be produced runs as the active account
+// ---------------------------------------------------------------------------
+
+describe("U4: a read whose identity cannot be produced runs as the active gh account, with one warning", () => {
+  /** The single stderr line naming the code, for a call that went through the fallback. */
+  function warning(r: Ran): string {
+    const l = r.err.split("\n").filter(x => x.includes("GH_IDENTITY_UNAVAILABLE"));
+    assert.equal(l.length, 1, r.err);
+    return l[0]!;
+  }
+
+  it("a failed mint: the read runs plain (no token), the warning names the code and the reason", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.stubs, "taaad.fail"), "");
+    const r = run(w, READ, { presence: "agent", plainPath: true });
+    assert.equal(r.status, 0, r.err);
+    assert.equal(refusalCode(r), undefined);
+    assert.match(warning(r), /^repo-aegis gh: GH_IDENTITY_UNAVAILABLE: .+, so this read runs as the active gh account; proceeding$/);
+    assert.deepEqual(mainCalls(r), [READ.join(" ")]);
+    assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], undefined, "the read ran with a token");
+    assert.equal(ghEnv(w, mainCallNumber(r))["GH_PROMPT_DISABLED"], undefined, "the read ran with the allowlisted environment");
+    assert.ok(!r.err.includes(TOKEN_BOT) && !r.out.includes(TOKEN_BOT));
+    assert.equal(decisions(w).at(-1)?.["decision"], "fallback");
+  });
+
+  it("every unusable mint answer is the same for a read: no output, not JSON, another repository, wider permissions, no token", () => {
+    for (const setup of [
+      (w: World) => writeFileSync(join(w.stubs, "mint.read.json"), ""),
+      (w: World) => writeFileSync(join(w.stubs, "mint.read.json"), "not json at all"),
+      (w: World) => writeFileSync(join(w.stubs, "mint.read.json"), mintJson({ repositories: ["other"] })),
+      (w: World) => writeFileSync(join(w.stubs, "mint.read.json"), mintJson({ permissions: { contents: "admin" } })),
+      (w: World) => writeFileSync(join(w.stubs, "mint.read.json"), mintJson({ token: "" })),
+    ]) {
+      const w = makeWorld();
+      setup(w);
+      const r = run(w, READ, { presence: "agent", plainPath: true });
+      assert.equal(r.status, 0, r.err);
+      warning(r);
+      assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], undefined);
+      assert.ok(!r.err.includes(TOKEN_BOT));
+    }
+  });
+
+  it("the same failed mint for a WRITE still refuses, and gh does not run", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.stubs, "taaad.fail"), "");
+    const r = run(w, WRITE, { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_IDENTITY_UNAVAILABLE", r.err);
+    assert.equal(r.status, 2);
+    assert.deepEqual(mainCalls(r), []);
+  });
+
+  it("more write verbs never fall back: with the mint failing each is GH_IDENTITY_UNAVAILABLE, status 2, and gh never runs", () => {
+    const writes: string[][] = [
+      ["api", "repos/example-org/svc/issues", "-f", "title=x"],
+      ["api", "-X", "DELETE", "repos/example-org/svc/git/refs/heads/x"],
+      ["api", "--method", "PATCH", "repos/example-org/svc/issues/1", "-f", "state=closed"],
+      ["api", "graphql", "-f", "query=mutation{x}", "--repo", "example-org/svc"],
+      ["pr", "merge", "1", "--repo", "example-org/svc"],
+      ["issue", "comment", "1", "-b", "x", "--repo", "example-org/svc"],
+      ["release", "create", "v1", "--repo", "example-org/svc"],
+      ["workflow", "run", "x", "--repo", "example-org/svc"],
+      ["secret", "set", "X", "--repo", "example-org/svc"],
+      ["repo", "delete", "example-org/svc"],
+    ];
+    for (const args of writes) {
+      const w = makeWorld();
+      writeFileSync(join(w.stubs, "taaad.fail"), "");
+      // Hard-to-undo verbs (merge, delete) need a person's approval at the egress layer, which is decided before
+      // the identity; give it, so the call reaches the identity layer this test is about.
+      mintApproval({ target: { org: "example-org", repo: "*" }, path: approvalsPath(w.home) });
+      const r = run(w, args, { presence: "agent" });
+      const label = args.join(" ");
+      assert.equal(r.status, 2, `${label}: ${r.err}`);
+      assert.equal(refusalCode(r), "GH_IDENTITY_UNAVAILABLE", `${label}: ${r.err}`);
+      assert.deepEqual(r.ghArgv.filter(l => !l.startsWith("config get")), [], `${label}: gh ran`);
+      assert.ok(!r.err.includes("runs as the active gh account"), `${label}: fell back`);
+    }
+  });
+
+  it("an owner-less graphql mutation (cwd base only) never falls back either: refused, gh never runs", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.stubs, "taaad.fail"), "");
+    const r = run(w, ["api", "graphql", "-f", "query=mutation{x}"], { presence: "agent" });
+    assert.equal(r.status, 2, r.err);
+    assert.notEqual(refusalCode(r), undefined, r.err);
+    assert.deepEqual(r.ghArgv.filter(l => !l.startsWith("config get")), [], "gh ran");
+    assert.ok(!r.err.includes("runs as the active gh account"), "fell back");
+  });
+
+  it("a finding about the identity itself is not 'unavailable': an installation of another account still refuses a read", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.stubs, "mint.read.json"), mintJson({ installationAccount: "other-org" }));
+    const r = run(w, READ, { presence: "agent" });
+    assert.equal(refusalCode(r), "GH_IDENTITY_INSTALLATION_MISMATCH", r.err);
+    assert.deepEqual(mainCalls(r), []);
+  });
+
+  it("with no taaad pinned, a read is still GH_BINARY_UNTRUSTED (only the unavailable code falls through)", () => {
+    const w = makeWorld();
+    const r = run(w, READ, { presence: "agent", taaad: null });
+    assert.equal(refusalCode(r), "GH_BINARY_UNTRUSTED", r.err);
+    assert.deepEqual(mainCalls(r), []);
+  });
+
+  it("a person's read whose mapped account has no token runs as the active account too; the same call as a write still refuses (T1)", () => {
+    const w = makeWorld();
+    rmSync(join(w.stubs, "token.alice"));
+    const read = run(w, READ, { presence: "person", plainPath: true });
+    assert.equal(read.status, 0, read.err);
+    assert.match(warning(read), /the mapped GitHub account has no usable token on this machine, so this read runs as the active gh account/);
+    assert.equal(existsSync(join(w.stubs, "switched")), false, "gh auth switch ran");
+    const write = run(w, WRITE, { presence: "person" });
+    assert.equal(refusalCode(write), "GH_IDENTITY_UNAVAILABLE", write.err);
+  });
+
+  it("a fault after a token was minted: the read runs plain and the token is not handed to it; the write refuses (T13)", () => {
+    const w = makeWorld();
+    // The decision log is where the fault is made: `state` is a file, so the record cannot be written.
+    rmSync(join(w.home, "state"), { recursive: true });
+    writeFileSync(join(w.home, "state"), "not a directory");
+    const read = run(w, READ, { presence: "agent", plainPath: true });
+    assert.equal(read.status, 0, read.err);
+    assert.ok(read.taaadArgv.length > 0, "a token was minted before the fault");
+    assert.match(warning(read), /^repo-aegis gh: GH_IDENTITY_UNAVAILABLE: repo-aegis faulted while preparing the GitHub identity for a mapped owner, so this read runs as the active gh account; proceeding$/);
+    assert.equal(ghEnv(w, mainCallNumber(read))["GH_TOKEN"], undefined, "the minted token reached the read");
+    const write = run(w, WRITE, { presence: "agent" });
+    assert.equal(refusalCode(write), "GH_IDENTITY_UNAVAILABLE", write.err);
+  });
+
+  it("a read whose egress parse faulted is judged as a write, so it still refuses (M5)", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.stubs, "taaad.fail"), "");
+    const r = run(w, READ, { presence: "agent", evaluate: () => ({ kind: "fault", message: "the parser exploded" }) });
+    assert.equal(refusalCode(r), "GH_IDENTITY_UNAVAILABLE", r.err);
+    assert.deepEqual(r.ghArgv, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // M1, M5: an unreadable or missing registry, and a fault in the egress parse
 // ---------------------------------------------------------------------------
 
@@ -926,7 +1327,24 @@ describe("M1: verbs that read tokens are refused without a person whatever the r
     assert.deepEqual(r.ghArgv, []);
   });
 
-  it("an unreadable registry: an agent call naming an owner (literal, GH_REPO or the cwd) is GH_IDENTITY_UNAVAILABLE, and gh does not run", () => {
+  it("an unreadable registry: an agent WRITE naming an owner (literal, GH_REPO or the cwd) is refused, and gh does not run", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.home, "engagements.yaml"), "schemaVersion: 3\nidentities: [this is not valid\n");
+    for (const [args, env] of [
+      [WRITE, {}],
+      [["pr", "comment", "1", "--body", "b"], { GH_REPO: "plain-org/x" }],
+      [["pr", "comment", "1", "--body", "b"], {}], // the owner comes from the cwd's remote
+    ] as Array<[string[], Record<string, string>]>) {
+      const r = run(w, args, { presence: "agent", env });
+      // Rule h (egress) refuses a write to an owner it cannot vouch for before the identity decision is made.
+      assert.ok(["UNREGISTERED_OWNER_EGRESS", "GH_IDENTITY_UNAVAILABLE"].includes(refusalCode(r) ?? ""), `${args.join(" ")} ${JSON.stringify(env)}: ${r.err}`);
+      assert.equal(r.status, 2);
+      assert.deepEqual(r.ghArgv, []);
+    }
+  });
+
+  // U4: the same three shapes as READS no longer stop; they run as the active account with one warning line.
+  it("U4: an unreadable registry: an agent READ naming an owner (literal, GH_REPO or the cwd) runs as the active account, with one warning", () => {
     const w = makeWorld();
     writeFileSync(join(w.home, "engagements.yaml"), "schemaVersion: 3\nidentities: [this is not valid\n");
     for (const [args, env] of [
@@ -934,9 +1352,12 @@ describe("M1: verbs that read tokens are refused without a person whatever the r
       [["pr", "view", "1"], { GH_REPO: "plain-org/x" }],
       [["pr", "view", "1"], {}], // the owner comes from the cwd's remote
     ] as Array<[string[], Record<string, string>]>) {
-      const r = run(w, args, { presence: "agent", env });
-      assert.equal(refusalCode(r), "GH_IDENTITY_UNAVAILABLE", `${args.join(" ")} ${JSON.stringify(env)}: ${r.err}`);
-      assert.deepEqual(r.ghArgv, []);
+      const r = run(w, args, { presence: "agent", env, plainPath: true });
+      assert.equal(r.status, 0, `${args.join(" ")} ${JSON.stringify(env)}: ${r.err}`);
+      assert.equal(refusalCode(r), undefined);
+      const warn = r.err.split("\n").filter(l => l.includes("GH_IDENTITY_UNAVAILABLE"));
+      assert.equal(warn.length, 1, r.err);
+      assert.match(warn[0]!, /^repo-aegis gh: GH_IDENTITY_UNAVAILABLE: the registry in the pinned home could not be read.*so this read runs as the active gh account; proceeding$/);
     }
   });
 
@@ -1094,11 +1515,18 @@ describe("validateMintOutput (the shared check on taaad's answer)", () => {
     }
   });
 
-  it("scopes: read allows only read levels of metadata, contents, pull_requests, issues; contents-write only metadata and contents; write never admin", () => {
+  it("scopes: read allows any key at read level only (taaad plan 0004); contents-write only metadata and contents; write never admin", () => {
     const perms = (permissions: unknown): string => mintJson({ permissions });
+    // taaad 0.6.0's fixed read class still passes.
     assert.equal(ok(perms({ metadata: "read", contents: "read", pull_requests: "read", issues: "read" }), "read"), true);
+    // taaad ≥ 0.7.0's derived read class: every granted key at read.
+    assert.equal(ok(perms({ metadata: "read", security_events: "read", actions: "read" }), "read"), true);
+    assert.equal(ok(perms({ actions: "read" }), "read"), true);
+    // Never a write or admin level under read, whatever the key.
     assert.equal(ok(perms({ contents: "write" }), "read"), false);
-    assert.equal(ok(perms({ actions: "read" }), "read"), false);
+    assert.equal(ok(perms({ metadata: "read", security_events: "write" }), "read"), false);
+    assert.equal(ok(perms({ metadata: "read", administration: "admin" }), "read"), false);
+    assert.equal(ok(perms({}), "read"), false, "empty");
     assert.equal(ok(perms({ metadata: "read", contents: "write" }), "contents-write"), true);
     assert.equal(ok(perms({ metadata: "write" }), "contents-write"), false);
     assert.equal(ok(perms({ pull_requests: "read" }), "contents-write"), false);
@@ -1106,6 +1534,24 @@ describe("validateMintOutput (the shared check on taaad's answer)", () => {
     assert.equal(ok(perms({ contents: "admin" }), "write"), false);
     assert.equal(ok(perms(null), "write"), false);
     assert.equal(ok(perms(["contents"]), "write"), false);
+  });
+
+  it("under read, fixed permission maps have literal outcomes (every value must be exactly `read`; empty fails)", () => {
+    const cases: ReadonlyArray<readonly [Record<string, string>, boolean]> = [
+      [{ metadata: "read" }, true],
+      [{ metadata: "read", contents: "read", pull_requests: "read" }, true],
+      [{ issues: "read", checks: "read" }, true], // any key, taaad plan 0004
+      [{}, false],
+      [{ metadata: "read", contents: "write" }, false],
+      [{ contents: "admin" }, false],
+      [{ metadata: "read", administration: "none" }, false],
+      [{ metadata: "read", checks: "" }, false],
+      [{ metadata: "READ" }, false], // exact, case-sensitive
+      [{ metadata: "write" }, false],
+    ];
+    for (const [map, expected] of cases) {
+      assert.equal(ok(mintJson({ permissions: map }), "read"), expected, JSON.stringify(map));
+    }
   });
 
   it("an installation of another account is its own failure kind, case-insensitively matched", () => {

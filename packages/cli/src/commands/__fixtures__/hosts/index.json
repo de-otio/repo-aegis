@@ -1,0 +1,95 @@
+{
+  "_comment": "Host hook stdin fixtures (plan doc/plan-landscape-recommendations.md §5). provenance: 'observed' = captured from a real host run; 'doc-derived' = built from the vendor's primary docs on the date given, not yet seen from a real host. commandPath locates the shell command: each element is an object key, except the literal \"<json>\", which means the value at that point is a JSON-encoded string to decode first. A null commandPath means the event carries no command (observe-only events). Replace a doc-derived file with a real capture when one exists (plan task H1) and flip its provenance.",
+  "fixtures": [
+    {
+      "file": "claude.pre-tool-use.json",
+      "host": "claude",
+      "agent": "claude",
+      "event": "PreToolUse",
+      "provenance": "doc-derived",
+      "checked": "2026-11-09",
+      "source": "https://code.claude.com/docs/en/hooks (shape also exercised by hook-guard-egress.test.ts)",
+      "commandPath": ["tool_input", "command"]
+    },
+    {
+      "file": "codex.pre-tool-use.json",
+      "host": "codex",
+      "agent": "codex",
+      "event": "PreToolUse",
+      "provenance": "doc-derived",
+      "checked": "2026-11-09",
+      "source": "https://learn.chatgpt.com/docs/hooks (redirect target of developers.openai.com/codex/hooks)",
+      "commandPath": ["tool_input", "command"]
+    },
+    {
+      "file": "gemini.before-tool.json",
+      "host": "gemini",
+      "agent": "gemini",
+      "event": "BeforeTool",
+      "provenance": "doc-derived",
+      "checked": "2026-11-09",
+      "source": "https://geminicli.com/docs/hooks/reference/ (the command field of run_shell_command is not documented there; tool_input.command is the long-standing shape)",
+      "commandPath": ["tool_input", "command"]
+    },
+    {
+      "file": "cursor.before-shell-execution.json",
+      "host": "cursor",
+      "agent": "cursor",
+      "event": "beforeShellExecution",
+      "provenance": "doc-derived",
+      "checked": "2026-11-09",
+      "source": "https://cursor.com/docs/hooks (local capture not possible: cursor-agent 2025.09.12-4852336 is not logged in on this machine)",
+      "commandPath": ["command"]
+    },
+    {
+      "file": "cursor.pre-tool-use.json",
+      "host": "cursor",
+      "agent": "cursor",
+      "event": "preToolUse",
+      "provenance": "doc-derived",
+      "checked": "2026-11-09",
+      "source": "https://cursor.com/docs/hooks (example input; Shell tool_input shape comes only from the example)",
+      "commandPath": ["tool_input", "command"]
+    },
+    {
+      "file": "cursor.after-file-edit.json",
+      "host": "cursor",
+      "agent": "cursor",
+      "event": "afterFileEdit",
+      "provenance": "doc-derived",
+      "checked": "2026-11-09",
+      "source": "https://cursor.com/docs/hooks",
+      "commandPath": null
+    },
+    {
+      "file": "copilot.pre-tool-use.camel.json",
+      "host": "copilot",
+      "agent": "copilot",
+      "event": "preToolUse",
+      "provenance": "doc-derived",
+      "checked": "2026-11-09",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference and the debugging example in https://docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/use-hooks (toolArgs is a JSON-encoded string)",
+      "commandPath": ["toolArgs", "<json>", "command"]
+    },
+    {
+      "file": "copilot.pre-tool-use.pascal.json",
+      "host": "copilot",
+      "agent": "copilot",
+      "event": "PreToolUse",
+      "provenance": "doc-derived",
+      "checked": "2026-11-09",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-hooks-reference (VS Code-compatible snake_case payload when the event is configured as PascalCase; tool_input is 'parsed from JSON string when possible', so an adapter must accept an object or a string)",
+      "commandPath": ["tool_input", "command"]
+    },
+    {
+      "file": "antigravity.pre-tool-use.json",
+      "host": "antigravity",
+      "agent": "antigravity",
+      "event": "PreToolUse",
+      "provenance": "doc-derived",
+      "checked": "2026-11-09",
+      "source": "https://antigravity.google/docs/hooks (the docs example has a working-directory arg whose key was not legible in the fetched page; 'Cwd' is a guess, and the payload has no root-level cwd)",
+      "commandPath": ["toolCall", "args", "CommandLine"]
+    }
+  ]
+}

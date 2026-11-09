@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { mkdirSync, writeFileSync, chmodSync, existsSync, unlinkSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, chmodSync, existsSync, unlinkSync, statSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -168,6 +168,23 @@ function globalConfigPath(cwd: string): string | null {
   const override = process.env["GIT_CONFIG_GLOBAL"];
   if (override) return override;
   return join(homedir(), ".gitconfig");
+}
+
+/**
+ * Do two paths name the same directory? By realpath where both exist, else by their absolute spelling. A leading
+ * `~` or `~/` is expanded to the home directory first, as git does for a path-typed value: `git config --get`
+ * prints the value as it was written, so a global `~/.repo-aegis/hooks` must compare equal to its expansion.
+ */
+function sameDirectory(a: string, b: string): boolean {
+  const real = (raw: string): string => {
+    const p = raw === "~" || raw.startsWith("~/") ? join(homedir(), raw.slice(1)) : raw;
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  return real(a) === real(b);
 }
 
 function configPathForScope(cwd: string, scope: HooksScope): string | null {
@@ -411,12 +428,24 @@ export function installHooks(opts: InstallHooksOptions): void {
     );
   }
 
-  try {
-    gitConfigSetScoped(cwd, scope, "core.hooksPath", hooksDir);
-  } catch (err) {
-    const message = `failed to set core.hooksPath (${scope}): ${(err as Error).message}`;
-    if (opts.throwOnError) throw new Error(message);
-    emitError({ code: "GIT_CONFIG_ERROR", error: message }, opts);
+  // A local value equal to the global one adds nothing (git reads exactly one hooks directory and both name
+  // this one), and a repo-local `core.hooksPath` is a setting other controls (the gh shim's pre-flight)
+  // treat with suspicion. So `--local` with the global value already pointing here writes nothing; the
+  // scripts above are still refreshed. (Phase U, U1.)
+  const globalValue = scope === "local" ? gitConfigGetScoped(cwd, "global", "core.hooksPath") : null;
+  const duplicateOfGlobal = globalValue !== null && sameDirectory(globalValue, hooksDir);
+  if (duplicateOfGlobal) {
+    // `--force` over a DIFFERENT local value means "make this repo use repo-aegis's hooks": the global value
+    // already does, so clearing the stale local value reaches the same end state.
+    if (opts.force && previousValue !== null && previousValue !== hooksDir) gitConfigUnsetScoped(cwd, "local", "core.hooksPath");
+  } else {
+    try {
+      gitConfigSetScoped(cwd, scope, "core.hooksPath", hooksDir);
+    } catch (err) {
+      const message = `failed to set core.hooksPath (${scope}): ${(err as Error).message}`;
+      if (opts.throwOnError) throw new Error(message);
+      emitError({ code: "GIT_CONFIG_ERROR", error: message }, opts);
+    }
   }
 
   // Audit (best-effort). Emit AFTER the git config is set so the
@@ -434,6 +463,7 @@ export function installHooks(opts: InstallHooksOptions): void {
         overwritten: sameScopeConflict,
         previousCoreHooksPath: previousValue,
         configMtime: configMtimeBefore,
+        ...(duplicateOfGlobal && { skippedLocalDuplicateOfGlobal: true }),
         ...(shadowingLocalValue !== null && { shadowingLocalValue }),
         ...(unsetLocalPerformed && { unsetLocalPrevious: unsetLocalPreviousValue }),
       },
@@ -453,6 +483,7 @@ export function installHooks(opts: InstallHooksOptions): void {
       scope,
       previousCoreHooksPath: previousValue,
       overwritten: sameScopeConflict,
+      localSkippedAlreadyGlobal: duplicateOfGlobal,
       shadowingLocalValue,
       unsetLocal: unsetLocalPerformed
         ? { performed: true, previous: unsetLocalPreviousValue }
@@ -462,8 +493,12 @@ export function installHooks(opts: InstallHooksOptions): void {
   }
 
   emitText(`installed hooks at ${hooksDir}`);
-  emitText(`set ${scope} core.hooksPath = ${hooksDir}`);
-  if (sameScopeConflict) {
+  if (duplicateOfGlobal) {
+    emitText(`core.hooksPath is already set globally to ${hooksDir}; not writing a duplicate local value`);
+  } else {
+    emitText(`set ${scope} core.hooksPath = ${hooksDir}`);
+  }
+  if (sameScopeConflict && !duplicateOfGlobal) {
     emitText(`  (previous ${scope} value: ${previousValue} — overwritten with --force)`);
   }
   if (unsetLocalPerformed) {

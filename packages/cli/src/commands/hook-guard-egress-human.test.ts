@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { scrubGitEnv } from "../_test-utils.js";
 import { approvalsPath, mintApproval } from "@de-otio/repo-aegis-core";
+import { assertGoldenComplete, golden } from "./hook-hosts/_golden.js";
 
 let restoreGitEnv: () => void;
 let tmp: string;
@@ -29,6 +30,7 @@ before(() => {
 after(() => {
   restoreGitEnv();
   rmSync(tmp, { recursive: true, force: true });
+  assertGoldenComplete("hook-guard-egress-human");
 });
 
 interface GuardResult {
@@ -56,7 +58,10 @@ function runGuard(command: string, home: string, opts: { human?: boolean; agent?
     encoding: "utf8",
     input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command }, cwd: tmp }),
   });
-  return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  const result = { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  // Behaviour comparison for the host-adapter refactor (opt-in, see hook-hosts/_golden.ts).
+  golden("hook-guard-egress-human", { command, home, agent: opts.agent ?? null, human: opts.human === true }, result, [tmp]);
+  return result;
 }
 
 const REGISTRY = "schemaVersion: 2\npersonalOrgs:\n  - acme\nengagements: []\n";
@@ -144,7 +149,7 @@ describe("hook guard-egress — AGENT_RAN_HUMAN_COMMAND", { skip: !cliBuilt() },
     assert.match(error, /No approval covers this/); // approval
     assert.match(error, /A person runs it in their own terminal: repo-aegis engagements add/); // fix + who
     assert.match(error, /Agents: do not run that yourself/);
-    assert.match(error, /\[AGENT_RAN_HUMAN_COMMAND, see doc\/agent-guide\.md#agent_ran_human_command\]/); // where
+    assert.match(error, /\[AGENT_RAN_HUMAN_COMMAND; details: repo-aegis explain AGENT_RAN_HUMAN_COMMAND\]/); // where
     assert.doesNotMatch(error, /customer-zeta|zeta-org/);
   });
 
@@ -239,7 +244,7 @@ describe("hook guard-egress — EGRESS_PTY_WRAPPER", { skip: !cliBuilt() }, () =
       const body = JSON.parse(r.stderr) as { code: string; error: string };
       assert.equal(body.code, "EGRESS_PTY_WRAPPER");
       assert.match(body.error, /No approval covers this/);
-      assert.match(body.error, /\[EGRESS_PTY_WRAPPER, see doc\/agent-guide\.md#egress_pty_wrapper\]/);
+      assert.match(body.error, /\[EGRESS_PTY_WRAPPER; details: repo-aegis explain EGRESS_PTY_WRAPPER\]/);
     });
   }
 
@@ -304,7 +309,7 @@ describe("hook guard-egress — AGENT_DETACHED_SESSION (H2b)", { skip: !cliBuilt
       assert.match(body.error, /No approval covers this/); // approval
       assert.match(body.error, /Re-issue as: run the command in the foreground/); // fix, agent
       assert.match(body.error, /a person starts it in their own terminal/); // fix, person
-      assert.match(body.error, /\[AGENT_DETACHED_SESSION, see doc\/agent-guide\.md#agent_detached_session\]/); // where
+      assert.match(body.error, /\[AGENT_DETACHED_SESSION; details: repo-aegis explain AGENT_DETACHED_SESSION\]/); // where
     });
   }
 

@@ -247,7 +247,7 @@ describe("pre-push rule h — an unregistered owner is refused with no person pr
     assert.match(r.error, /No approval covers this/);
     assert.match(r.error, /a person runs, from a terminal: repo-aegis engagements add --personal-org stranger/);
     assert.match(r.error, /Agents: do not run that yourself/);
-    assert.match(r.error, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]/);
+    assert.match(r.error, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]/);
     assert.equal(r.details.destination, "stranger/r");
     assert.equal(r.details.ruleH, "applied");
   });

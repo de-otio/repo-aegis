@@ -138,7 +138,7 @@ export async function hookCheckWrite(): Promise<void> {
           `agent write to ${basename(filePath)} in gh's config directory refused: it controls which account, pager, ` +
           `editor and aliases gh uses, so changing it could redirect the credential repo-aegis injects. No approval ` +
           `covers this. Tell your human what you need changed; a person edits it, or runs \`gh config set\` or ` +
-          `\`gh auth\`, from their own terminal. [GH_CONFIG_WRITE_REFUSED, see doc/agent-guide.md#gh_config_write_refused]`,
+          `\`gh auth\`, from their own terminal. [GH_CONFIG_WRITE_REFUSED; details: repo-aegis explain GH_CONFIG_WRITE_REFUSED]`,
         details: { filePath },
       },
       EXIT_BLOCK,

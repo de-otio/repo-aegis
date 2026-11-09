@@ -1,0 +1,12 @@
+{
+  "session_id": "example-session",
+  "transcript_path": "/home/user/.gemini/tmp/example/chats/session.json",
+  "cwd": "/home/user/work/example-repo",
+  "hook_event_name": "BeforeTool",
+  "timestamp": "2026-11-09T12:00:00.000Z",
+  "tool_name": "run_shell_command",
+  "tool_input": {
+    "command": "echo hello",
+    "description": "Print hello"
+  }
+}

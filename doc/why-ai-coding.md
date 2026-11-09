@@ -81,8 +81,7 @@ agent can drive without specialised knowledge.
 
 For the broader threat model and the layered defences this tool sits
 inside (identity separation, ambient-coupling elimination, periodic
-audits), see the data-leak prevention guide referenced from the
-project [README](../README.md) Background section.
+audits), see the [data-leak prevention guide](guide-data-leak-prevention.md).
 
 ## Reference
 

@@ -24,6 +24,10 @@ their own or open-source work) on one machine.
 can be bypassed (`git commit --no-verify`), so for a hard guarantee also run its CI checks on the
 server (`repo-aegis install ci`).
 
+**Background:** the layered approach this tool automates in part (identity separation, removing
+ambient coupling, marker gates, agent hooks, audits, and what none of them catch) is written up
+in [doc/guide-data-leak-prevention.md](doc/guide-data-leak-prevention.md).
+
 ## Concepts in one minute
 
 - **Engagement:** one client relationship, for example `customer-a`. It lists the GitHub orgs
@@ -74,10 +78,12 @@ server (`repo-aegis install ci`).
 - macOS or Linux, with git. Node.js 20 or later (CI tests 20, 22 and 24).
 - `gh` (GitHub CLI), if you want `gh` commands checked.
 - `sudo`, for the root-owned Claude Code settings file. Without it, use `--user-settings`.
-- Full protection is for **Claude Code**. **Codex CLI** and **Gemini CLI** can get the egress
-  check, configured by hand and unverified ([doc/agent-install.md](doc/agent-install.md)); Gemini
-  CLI has since been replaced by Antigravity CLI, whose hooks are not covered here. Every agent,
-  and you, get the git hooks and the `gh` wrapper.
+- Full protection is for **Claude Code**. **Codex CLI**, **Cursor**, **Copilot CLI** and
+  **Antigravity CLI** (which replaced Gemini CLI; `--agent gemini` stays for the old one) can get
+  the egress check, and Cursor also a post-edit scan. They are configured by hand from snippets
+  derived from each vendor's docs and not yet exercised in a live session
+  ([doc/agent-install.md](doc/agent-install.md)). Every agent, and you, get the git hooks and the
+  `gh` wrapper.
 
 ## Quick start
 
@@ -148,12 +154,47 @@ By hand:
 | [doc/configuration.md](doc/configuration.md) | The registry, GitHub identities, the Claude Code settings file, overrides |
 | [doc/cli-reference.md](doc/cli-reference.md) | Every command: flags, exit codes, JSON output                           |
 | [doc/why-ai-coding.md](doc/why-ai-coding.md) | Why the checks are shaped the way they are                              |
+| [doc/guide-data-leak-prevention.md](doc/guide-data-leak-prevention.md) | Background: the layered approach to client-data leaks that this tool automates in part |
 | [doc/github-action.md](doc/github-action.md) | The CI workflows and GitHub Actions                                     |
 | [doc/architecture.md](doc/architecture.md)   | Packages and how they fit together                                      |
 | [doc/design/](doc/design/)                   | Design notes and threat model                                           |
 
+Working in another repository, where those files are not on disk? Every refusal ends
+`[CODE; details: repo-aegis explain CODE]`, and `repo-aegis explain <CODE>` prints the guide's text for it
+(the guides ship in the npm package; `explain --list` names every code).
+
 Optional add-ons: [packages/llm](packages/llm/README.md) (local-LLM marker suggestions and a
 semantic audit sweep; never part of the blocking checks) and [packages/mcp](packages/mcp/README.md).
+
+## Companion tools
+
+repo-aegis is not a general secret scanner. Its small built-in secret-shape check
+(`hook scan-bash-output`) is frozen: no new secret types will be added. Run a
+dedicated scanner next to it:
+
+| Tool | What it covers | Notes |
+| --- | --- | --- |
+| [ggshield](https://docs.gitguardian.com/ggshield-docs/integrations/ai-coding-tools/secret-scanning-for-ai-coding-tools) (GitGuardian) | Secrets in prompts, tool calls and tool output through AI coding hooks, plus git pre-commit and pre-push hooks | Scanning needs a GitGuardian account (SaaS). Installing the hooks did not need one. |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | Secrets in a working tree and in git history, as a pre-commit hook and a CI step | Local, no account. Already a common choice. |
+
+They answer a different question from repo-aegis. A secret scanner asks "does this
+text look like a credential?". repo-aegis asks "should this customer's name, or this
+command, go to that place, as that account?": engagement scoping (one customer's
+markers must not reach another's repo or a public one), destination (where a `git
+push` or `gh` call sends bytes) and identity (which GitHub account runs it). Use
+both; neither replaces the other.
+
+**Coexistence with Claude Code hooks.** Checked with ggshield 1.56.1 in a scratch
+home: `ggshield machine setup --agent claude-code --no-git-hooks --no-honeytokens`
+(or `ggshield install -m global -t claude-code`, now deprecated) adds its own
+`PreToolUse`, `PostToolUse` and `UserPromptSubmit` entries with a `.*` matcher,
+after the existing ones, and leaves every repo-aegis entry untouched. Re-running
+it changes nothing. Ordering caveat: Claude Code runs all matching hooks of an
+event in parallel, so neither tool runs before the other and a block from either
+one stops the call; do not rely on an order. This was verified for the file
+contents only, not in a live session, and only with repo-aegis installed first;
+see [doc/plan-landscape-recommendations.md](doc/plan-landscape-recommendations.md)
+(section 5). Run `repo-aegis doctor` after installing either one.
 
 ## Uninstalling
 

@@ -375,6 +375,20 @@ around it.
 | Compliance trail                                    | Audit log (when enabled) writes JSONL records of every state-changing action (`allow`, `deny`, `engagements add/end/remove`, `classify --apply`, `init`, `install hooks/claude-md/gitignore/ci`, `render`, `registry encrypt/decrypt`, `waive`, `doctor --fix`) to `~/.config/repo-aegis/state/audit.log` (chmod 600, append-only, rotates at 10 MiB). Records carry engagement ids and structural metadata only — never literal markers or matched substrings. Off by default; opt in via `repo-aegis audit-log on`. |
 | Waiver mechanism reconstructing `--no-verify`       | `.repo-aegis.yml` is a file inside the repo, so a blocked coding agent could otherwise write itself a waiver and retry — the cheapest possible unblock. Three independent controls, all required: (1) the PreToolUse `hook check-write` gate refuses an agent `Write`/`Edit`/`MultiEdit` to `.repo-aegis.yml` outright; (2) `repo-aegis waive` itself refuses to add a waiver when stdin is not a TTY, unless a human explicitly sets `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`; (3) `check` reports `waived: N` whenever a waiver suppressed a finding (JSON: the full list on every run), so an applied waiver is never silent. Only `_always`-stem patterns are waivable at all — see the locked-decisions row above for why. |
 
+### Secret detection is frozen
+
+The universal secret-shape set (`core/src/secret-markers.ts`, used by
+`hook scan-bash-output`) is closed: no new secret types are added to it.
+repo-aegis is not a general secret scanner, and growing one pattern at a time
+would make it a worse copy of tools that do that job full time. New secret
+types belong in a dedicated scanner such as
+[ggshield](https://docs.gitguardian.com/ggshield-docs/integrations/ai-coding-tools/secret-scanning-for-ai-coding-tools)
+or [gitleaks](https://github.com/gitleaks/gitleaks), which run alongside
+repo-aegis (see "Companion tools" in the top-level README). What repo-aegis owns
+is engagement scoping (which customer's markers may appear where), destination
+(where a publishing command sends bytes) and identity (which account a
+command runs as).
+
 ## Test strategy
 
 Coverage: `npm run test:cov` enforces one global floor, 80% lines and 75%

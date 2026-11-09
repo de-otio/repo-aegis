@@ -23,6 +23,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { approvalsPath, mintApproval, revokeApprovals } from "@de-otio/repo-aegis-core";
+import { assertGoldenComplete, golden } from "./hook-hosts/_golden.js";
+
+const GOLDEN_SUITE = "hook-guard-egress";
 
 let tmp: string;
 
@@ -32,6 +35,7 @@ before(() => {
 
 after(() => {
   rmSync(tmp, { recursive: true, force: true });
+  assertGoldenComplete(GOLDEN_SUITE);
 });
 
 interface GuardResult {
@@ -80,7 +84,15 @@ function runGuard(input: string, opts: GuardOptions): GuardResult {
     encoding: "utf8",
     input,
   });
-  return { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  const result = { stdout: r.stdout, stderr: r.stderr, code: r.status };
+  // Behaviour comparison for the host-adapter refactor (opt-in, see hook-hosts/_golden.ts).
+  golden(
+    GOLDEN_SUITE,
+    { input, agent: opts.agent ?? null, human: opts.human === true, shim: opts.shimOnPath === true, cwd: opts.cwd ?? tmp },
+    result,
+    [tmp],
+  );
+  return result;
 }
 
 function aegisHome(name: string, registry?: string): string {
@@ -168,19 +180,26 @@ describe("hook guard-egress — silent on everything that is not egress", { skip
     assert.equal(r.stderr, "");
   });
 
-  it("exits 0 on garbage stdin", () => {
+  // A payload that cannot be read fails open (exit 0, no decision on stdout) but is no longer silent: one
+  // fixed stderr line, so a hook registered with the wrong --agent or event does not look like a working one.
+  const NOT_JUDGED_LINE =
+    /^repo-aegis: guard-egress: this payload was not judged \([^)]+\); check that the hook is registered with the right --agent and event\n$/;
+
+  it("exits 0 on garbage stdin, saying once that nothing was judged (and never echoing the input)", () => {
     const home = aegisHome("garbage", EMPTY_REGISTRY);
     const r = runGuard("this is not json {{{", { home });
     assert.equal(r.code, 0);
     assert.equal(r.stdout, "");
-    assert.equal(r.stderr, "");
+    assert.match(r.stderr, NOT_JUDGED_LINE);
+    assert.ok(!r.stderr.includes("this is not json"), "fixed text only, never payload bytes");
   });
 
-  it("exits 0 on empty stdin", () => {
+  it("exits 0 on empty stdin, saying once that nothing was judged", () => {
     const home = aegisHome("empty", EMPTY_REGISTRY);
     const r = runGuard("", { home });
     assert.equal(r.code, 0);
     assert.equal(r.stdout, "");
+    assert.match(r.stderr, NOT_JUDGED_LINE);
   });
 
   it("exits 0 when the tool is not a shell tool, even if the payload mentions a push", () => {
@@ -196,11 +215,20 @@ describe("hook guard-egress — silent on everything that is not egress", { skip
     assert.equal(r.stderr, "");
   });
 
-  it("exits 0 when there is no command field at all", () => {
+  it("exits 0 when a shell tool is named but there is no command field at all, saying once that nothing was judged", () => {
     const home = aegisHome("no-command", EMPTY_REGISTRY);
     const r = runGuard(JSON.stringify({ tool_name: "Bash", tool_input: {} }), { home });
     assert.equal(r.code, 0);
     assert.equal(r.stdout, "");
+    assert.match(r.stderr, NOT_JUDGED_LINE);
+  });
+
+  it("exits 0, silently, when no tool is named and there is no command field", () => {
+    const home = aegisHome("no-command-no-tool", EMPTY_REGISTRY);
+    const r = runGuard("{}", { home });
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, "");
+    assert.equal(r.stderr, "");
   });
 });
 
@@ -599,7 +627,7 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
     assert.match(p.error, /^gh issue create → stranger\/repo: refused\./);
     assert.match(p.error, /No approval covers this/);
     assert.match(p.error, /a person runs, from a terminal: repo-aegis engagements add --personal-org stranger/);
-    assert.match(p.error, /\[UNREGISTERED_OWNER_EGRESS, see doc\/agent-guide\.md#unregistered_owner_egress\]/);
+    assert.match(p.error, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]/);
     for (const bad of REGISTERED) {
       assert.ok(!r.stderr.includes(bad), `stderr must not contain "${bad}"`);
       assert.ok(!r.stdout.includes(bad), `stdout must not contain "${bad}"`);

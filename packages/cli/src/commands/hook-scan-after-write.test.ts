@@ -279,3 +279,68 @@ always_block:
     assert.equal(json.hits.length, 1);
   });
 });
+
+// Plan T1d: Cursor `afterFileEdit` puts `file_path` at the payload's root and cannot block, so the
+// hook is detection only and says so. Payload shape: __fixtures__/hosts/cursor.after-file-edit.json
+// (doc-derived).
+describe("hook scan-after-write --agent cursor (afterFileEdit)", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
+  function cursorPayload(file: string): string {
+    return JSON.stringify({ hook_event_name: "afterFileEdit", file_path: file, edits: [{ old_string: "a", new_string: "b" }] });
+  }
+
+  function leakSetup(name: string): { env: Env; repo: string; file: string } {
+    const env = setupAegisHome(name);
+    writeRegistry(env.aegisHome, `schemaVersion: 2\nengagements: []\nalways_block:\n  - "_cursor_marker_"\n`);
+    writeMarker(env.aegisHome, "_always", "_cursor_marker_\n");
+    const repo = makeGitRepo(tmp, `${name}-repo`, { remote: "git@github.com:alpha-org/src.git", class: "public-eligible" });
+    const file = join(repo, "f.txt");
+    writeFileSync(file, "_cursor_marker_ leaked\n");
+    return { env, repo, file };
+  }
+
+  it("scans the root file_path: a marker hit exits 1 and the message says the edit already happened and the pre-commit hook is the gate", () => {
+    const { env, repo, file } = leakSetup("cursor-hit");
+    const r = runCli(env.aegisHome, repo, ["hook", "scan-after-write", "--agent", "cursor"], { input: cursorPayload(file) });
+    assert.equal(r.code, 1);
+    const json = r.json as { hits: unknown[]; note: string };
+    assert.equal(json.hits.length, 1);
+    assert.match(json.note, /AFTER Cursor saved the edit/);
+    assert.match(json.note, /already on disk/);
+    assert.match(json.note, /pre-commit hook is the gate/);
+    assert.doesNotMatch(r.stderr, /_cursor_marker_/, "the literal marker is never printed");
+  });
+
+  it("without --agent cursor the same payload is not understood (Claude shape needs tool_input.file_path): silent exit 0", () => {
+    const { env, repo, file } = leakSetup("cursor-no-flag");
+    const r = runCli(env.aegisHome, repo, ["hook", "scan-after-write"], { input: cursorPayload(file) });
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, "");
+  });
+
+  it("--agent cursor does not read tool_input.file_path (a Claude-shaped payload scans nothing)", () => {
+    const { env, repo, file } = leakSetup("cursor-claude-shape");
+    const r = runCli(env.aegisHome, repo, ["hook", "scan-after-write", "--agent", "cursor"], {
+      input: JSON.stringify({ tool_input: { file_path: file } }),
+    });
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout, "");
+  });
+
+  it("a clean file exits 0 with no detection-only note (the note rides non-zero answers only)", () => {
+    const { env, repo } = leakSetup("cursor-clean");
+    const clean = join(repo, "clean.txt");
+    writeFileSync(clean, "innocuous\n");
+    const r = runCli(env.aegisHome, repo, ["hook", "scan-after-write", "--agent", "cursor"], { input: cursorPayload(clean) });
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(r.stdout, /pre-commit/);
+  });
+
+  it("silent exit 0 when the file is missing or the payload is not JSON", () => {
+    const env = setupAegisHome("cursor-missing");
+    for (const input of [cursorPayload("/nonexistent/abc/xyz"), "not json {{{", "", "[1]"]) {
+      const r = runCli(env.aegisHome, env.cwd, ["hook", "scan-after-write", "--agent", "cursor"], { input });
+      assert.equal(r.code, 0, input);
+      assert.equal(r.stdout, "");
+    }
+  });
+});

@@ -361,7 +361,7 @@ describe("findDetachedStart — a detached session start is refused (H2b)", () =
     assert.match(text, /No approval covers this/);
     assert.match(text, /Re-issue as: run the command in the foreground/);
     assert.match(text, /a person starts it in their own terminal/);
-    assert.match(text, /\[AGENT_DETACHED_SESSION, see doc\/agent-guide\.md#agent_detached_session\]/);
+    assert.match(text, /\[AGENT_DETACHED_SESSION; details: repo-aegis explain AGENT_DETACHED_SESSION\]/);
   });
 });
 
@@ -383,7 +383,7 @@ describe("humanCommandRefusal — five parts (§3.9)", () => {
     assert.match(text, /which GitHub account acts for an owner/);
     assert.match(text, /No approval covers this/);
     assert.match(text, /A person runs it in their own terminal/);
-    assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}, see doc/agent-guide\\.md#agent_ran_human_command\\]`));
+    assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}; details: repo-aegis explain ${AGENT_RAN_HUMAN_COMMAND}\\]`));
   });
   const managedKinds: HumanOnlyKind[] = ["claude-md-uninstall", "managed-settings-write"];
   for (const kind of managedKinds) {
@@ -394,7 +394,7 @@ describe("humanCommandRefusal — five parts (§3.9)", () => {
       assert.match(text, /No approval covers this/); // approval
       assert.match(text, /A person runs it in their own terminal/); // fix + who
       assert.match(text, /Agents: do not run that yourself/);
-      assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}, see doc/agent-guide\\.md#agent_ran_human_command\\]`));
+      assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}; details: repo-aegis explain ${AGENT_RAN_HUMAN_COMMAND}\\]`));
     });
   }
   for (const kind of kinds) {
@@ -405,7 +405,7 @@ describe("humanCommandRefusal — five parts (§3.9)", () => {
       assert.match(text, /No approval covers this/); // approval
       assert.match(text, /A person runs it in their own terminal: repo-aegis /); // fix + who
       assert.match(text, /Agents: do not run that yourself/);
-      assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}, see doc/agent-guide\\.md#agent_ran_human_command\\]`)); // where
+      assert.match(text, new RegExp(`\\[${AGENT_RAN_HUMAN_COMMAND}; details: repo-aegis explain ${AGENT_RAN_HUMAN_COMMAND}\\]`)); // where
     });
   }
 
@@ -414,4 +414,43 @@ describe("humanCommandRefusal — five parts (§3.9)", () => {
     assert.equal(a, humanCommandRefusal({ kind: "approve" }));
     assert.doesNotMatch(a, /acme|customer/);
   });
+});
+
+describe("findHumanOnlyCommand — explain and identity list are read-only, so an agent may run them", () => {
+  const ALLOWED = [
+    "repo-aegis explain GH_IDENTITY_WRITE_NEEDS_HUMAN",
+    "repo-aegis explain --list",
+    "repo-aegis --json explain UNREGISTERED_OWNER_EGRESS",
+    "node packages/cli/dist/index.js explain AGENT_RAN_HUMAN_COMMAND --json",
+    "npx -y @de-otio/repo-aegis explain IDENTITY_CHANGE_NEEDS_TTY",
+    "repo-aegis identity list",
+    "repo-aegis identity list --json",
+    "repo-aegis --json identity list",
+    "/usr/local/bin/repo-aegis identity list",
+    "repo-aegis identity list | cat",
+  ];
+  for (const command of ALLOWED) {
+    it(`allows ${JSON.stringify(command)}`, () => assert.equal(findHumanOnlyCommand(command), null));
+  }
+
+  // The mutating siblings stay human-only, including the shapes that put a mutating word next to `list`.
+  const REFUSED: ReadonlyArray<readonly [string, HumanOnlyKind]> = [
+    ["repo-aegis identity add work --gh-login alice", "identity-change"],
+    ["repo-aegis identity remove work", "identity-change"],
+    ["repo-aegis identity require --off", "identity-change"],
+    ["repo-aegis identity", "identity-change"],
+    ["repo-aegis identity --json", "identity-change"],
+    ["repo-aegis identity list add work --gh-login alice", "identity-change"],
+    ["repo-aegis identity list remove work", "identity-change"],
+    ["repo-aegis identity list require --off", "identity-change"],
+    ["repo-aegis identity add list --gh-login alice", "identity-change"],
+    ["repo-aegis identity list; repo-aegis identity add work --gh-login alice", "identity-change"],
+    ["repo-aegis engagements set-identity customer-a --person work", "identity-change"],
+    ["repo-aegis engagements set-identity --personal-org example-org --agent work-bot", "identity-change"],
+    ["repo-aegis approve example-org/svc", "approve"],
+    ["repo-aegis explain X; repo-aegis approve example-org/svc", "approve"],
+  ];
+  for (const [command, kind] of REFUSED) {
+    it(`still refuses ${JSON.stringify(command)}`, () => assert.deepEqual(findHumanOnlyCommand(command), { kind }));
+  }
 });

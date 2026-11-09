@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-09
+
+### Changed — an agent can publish under one approval (Phase U of `doc/plan-landscape-recommendations.md`)
+
+Before this release, opening one PR from a sandboxed agent session took five refusals and four
+human round-trips, even with an active approval. Two of the refusals fired on state repo-aegis's
+own installer had created.
+
+- **An account-bound approval covers the deliberate-bypass refusals.** A live
+  `repo-aegis approve <owner>/<repo>` or `<owner>/*` that carries a person login now also covers
+  `AGENT_PUSH_CHAIN_UNREADABLE` (the credential helper can't read the process list, typically
+  inside a sandbox) and `GH_IDENTITY_ARG_UNSAFE` for a repo-local git setting, within that
+  approval's owner, scope and lifetime. Each covered call prints one line naming the approval and
+  writes an audit record. A `*` approval, an approval without a login, a ref-limited approval and
+  an expired one cover nothing. A readable process chain that shows a non-git caller is still
+  refused, and so are unsafe gh ARGUMENTS (`--hostname`, `--editor`, …).
+- **repo-aegis accepts its own hooks directory.** A repo-local `core.hooksPath` that resolves to
+  repo-aegis's pinned hooks directory is no longer "unsafe". `install hooks --local` no longer
+  writes a local value equal to the global one, and `doctor` reports an existing duplicate as
+  `HOOKS_PATH_LOCAL_DUPLICATE` with the one-line fix.
+- **A read falls back instead of refusing.** A read-only gh call whose identity can't be produced
+  (`GH_IDENTITY_UNAVAILABLE`) runs as the active gh account with one warning line. Writes still
+  refuse, and a minted token is never used on the fallback path.
+- **SSH remotes are flagged.** For an owner whose agents push as a GitHub App, `doctor` and
+  `classify --apply` report `AGENT_REMOTE_IS_SSH` with the person-run `git remote set-url --push`
+  fix. An agent's SSH push goes out as the person's key.
+- **Refusals say what caused them.** Every refusal on the agent publish path names its cause, says
+  whether repo-aegis created that condition, gives a fix line, and says whether an approval
+  covers it. Two refusals wrongly claimed an approval covers them; that is corrected.
+- **Inside the agent sandbox, refusals name the sandbox.** `AGENT_PUSH_CHAIN_UNREADABLE` says a
+  sandbox is the likely cause. A failed App-token mint says the sandbox most likely stopped
+  taaad-signer before its presence prompt (`SANDBOX_RUNTIME` is set). See the new
+  `doc/agent-sandbox.md` for what works there and the `sandbox.excludedCommands` route (unverified).
+- **A failed mint names taaad's step.** taaad ≥ 0.7.0's last-line `taaad: error=<code>[ status=<n>]`
+  is mapped (allowlisted codes only, copied verbatim; an unknown code becomes `internal` and is
+  not echoed). With an older taaad, the generic texts now carry taaad's exit status.
+- **taaad's derived read class is accepted** (taaad plan 0004). A read token passes when every
+  permission is at `read`, whatever the key. Write or admin under read is still refused. taaad
+  0.6.0's fixed four keys still pass.
+- The acceptance test `packages/cli/src/agent-publish-path.test.ts` replays the sequence above and
+  must pass. Not yet exercised against a live sandbox with real Touch ID.
+
+### Added — refusals explain themselves from any repository
+
+A refusal used to end `[CODE, see doc/agent-guide.md#code]`, a path in the repo-aegis repository.
+An agent working in another repository had nothing to open, the npm package shipped only `dist`,
+and no command explained a code.
+
+- `repo-aegis explain <CODE|topic> [--json]` and `explain --list`. The guide now ships in the
+  package (`dist/docs/agent-guide.md` and `agent-sandbox.md`, copied at build time), and the command
+  prints the guide's error-table row for the code and the `###` section it links to. Read-only: no
+  registry, no network, no git, no repository; the same answer from any directory. An unknown code
+  exits 2 with the nearest codes.
+- **Every refusal ends `[CODE; details: repo-aegis explain CODE]`.** The code token is first and
+  unchanged, so a tool that matches `[CODE` still works. The trailer used to differ in form between
+  gates, and three of them linked a case that did not match the guide's anchors.
+- `repo-aegis identity list [--json]`, read-only: every identity (name, kind, login or App slug) and
+  the personal orgs and engagements that use it as `person` or `agent`. An agent may run it and
+  `explain`; the mutating `identity` verbs, `engagements set-identity` and `approve` are still
+  refused for agents. Text redacts an engagement-only login, as `status` does.
+- `engagements set-identity --person` warns (and still succeeds) when the identity's login is empty
+  or not a valid GitHub login, and says writes through it will be refused until it is fixed.
+- `GH_IDENTITY_WRITE_NEEDS_HUMAN` now says so when a live approval exists for the owner and
+  repository but is bound to a different account than the owner's `person` identity, or when that
+  identity has no valid login. It names the approval's id and prints no login.
+
+### Added — egress guard for more agent hosts
+
+- `hook guard-egress --agent copilot | cursor | antigravity`, with one adapter module per host
+  under `packages/cli/src/commands/hook-hosts/`. Before this release, Copilot CLI (camelCase) and
+  Antigravity CLI payloads were silently allowed even for `git push`, because the hook found no
+  command field in them; they are now judged.
+- `hook scan-after-write --agent cursor` for Cursor's `afterFileEdit`. It is detection only: the
+  edit has already happened, and the pre-commit hook is the gate.
+- Codex's current matcher `Bash` is documented (older builds: `shell`), together with the `/hooks`
+  trust step. `--agent gemini` is legacy: Gemini CLI was replaced by Antigravity CLI.
+- Every non-Claude host is built from vendor documentation and has not been exercised in a live
+  session. `doc/agent-install.md` gives hand-registration snippets labelled that way, and a test
+  keeps them parseable and registered.
+
+### Fixed
+
+- The git credential helper wrote its audit record to the caller's `REPO_AEGIS_HOME` instead of
+  the pinned home.
+- **An agent push for an owner whose only identity is a person can now be approved.** The credential
+  helper passed no approvals to the identity decision, so `GH_IDENTITY_WRITE_NEEDS_HUMAN` could never
+  be lifted for an HTTPS push, while `repo-aegis gh` honoured the same login-bound approval. The helper
+  now reads the pinned home's approvals; with one that carries the owner's person login it hands git
+  THAT login's token (`gh auth token --user <login>` through the trusted gh, never the active gh
+  account's), after every check an App token passes (A5 configuration and environment, the `store`
+  guard). It prints one stderr line naming the approval id and writes an audit record (id only: no
+  login, no token). Without an approval the refusal stays, and its text now says a login-bound
+  `repo-aegis approve <owner>/<repo>` from a terminal covers it.
+- **An account-bound approval covers only the owner's CURRENT person login.** `AGENT_PUSH_CHAIN_UNREADABLE`
+  and `GH_IDENTITY_ARG_UNSAFE` (git setting) were covered by an approval carrying any login, so one
+  minted before the owner's person identity was re-mapped kept covering for up to 24 hours. Both
+  callers now compare the approval's login (case-insensitively) with the login the registry maps
+  now; an owner with no person login, or a registry that cannot be read, is covered by nothing.
+- A covered unreadable-chain request for an owner with no registry is refused
+  (`AGENT_PUSH_CHAIN_UNREADABLE`), never answered with silence that hands the push to the person's
+  own helper.
+- `install hooks --local` compares a `~`-spelled global `core.hooksPath` by its expansion, so
+  `~/.repo-aegis/hooks` is the duplicate it is.
+
+### Documentation
+
+- New: `doc/guide-data-leak-prevention.md`, the background guide the README promised; a
+  "Companion tools" section (ggshield, gitleaks), plus the result of a ggshield coexistence check:
+  its installer keeps repo-aegis's hooks (file contents only, one install order tested); the
+  universal secret-shape set is frozen; identity-layer non-goals; npm keywords.
+
 ### Documentation — docs corrected against the code
 
 - The docs now describe the force-push scan depth (`--range` for an existing ref, `--push-ref`

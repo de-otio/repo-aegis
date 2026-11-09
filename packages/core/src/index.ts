@@ -368,7 +368,7 @@ export type { OwnerCandidate, RuleHStatus } from "./registered-owners.js";
 // to read more), so the three enforcement layers cannot drift in wording.
 export {
   refusal,
-  agentGuideAnchor,
+  refusalTrailer,
   safeDestination,
   isSafeOwner,
   isPrintableDestination,
@@ -438,6 +438,8 @@ export {
   revokeApprovals,
   findApproval,
   findLoginApproval,
+  findAccountBoundApproval,
+  findApprovalWithAnyLogin,
   findUncoveringStarApproval,
   approvalScopeOf,
   starApprovalCovers,
@@ -545,13 +547,14 @@ export {
   upstreamProblem,
   IDENTITY_NAME_REGEX,
   GH_LOGIN_REGEX,
+  ghLoginProblem,
   REGISTRY_IDENTITIES_MIN_VERSION,
   personalOrgName,
 } from "./schemas.js";
 export type { IdentityDefinition, PersonalOrgEntry } from "./schemas.js";
 
 // Which GitHub identity a `gh` call runs as (doc/plan-owner-identity.md §13.1). Pure; nothing calls it yet.
-export { identityPresence, ghCallTargets, ghCallInfo, chooseIdentity } from "./identity-choice.js";
+export { identityPresence, ghCallTargets, ghCallInfo, chooseIdentity, personLoginOf } from "./identity-choice.js";
 export type {
   IdentityPresence,
   GhCallTarget,

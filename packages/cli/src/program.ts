@@ -193,12 +193,32 @@ export async function buildProgram(): Promise<Command> {
       engagementsSetIdentity(id, withGlobals(opts, cmd));
     });
 
-  // Registry schemaVersion 3: named GitHub identities. Every mutator needs a terminal and is human-only.
+  // The end of every refusal reads `[CODE; details: repo-aegis explain CODE]`. Read-only, and an agent may run it:
+  // it reads the guide that ships in dist/docs and nothing else (no registry, no network, no git, no repo).
+  program
+    .command("explain [code]")
+    .description(
+      "print what a refusal or error code means and what to do about it, from the agent guide that ships with repo-aegis (the code is the word in `[CODE; details: …]`). Read-only; works from any directory. `--list` prints every known code.",
+    )
+    .option("--list", "print every known code (and topic)")
+    .action(async (code: string | undefined, opts, cmd) => {
+      const { explain } = await import("./commands/explain.js");
+      explain(code, withGlobals(opts, cmd));
+    });
+
+  // Registry schemaVersion 3: named GitHub identities. The mutators need a terminal and are human-only; `list` is read-only.
   const identity = program
     .command("identity")
     .description(
-      "manage the registry's GitHub identities (schemaVersion 3). Every subcommand needs a terminal; an agent must not run them.",
+      "manage the registry's GitHub identities (schemaVersion 3). `list` is read-only; every other subcommand needs a terminal, and an agent must not run it.",
     );
+  identity
+    .command("list")
+    .description("list every identity (name, kind, login or App slug) and which engagements and personal orgs map to it. Read-only; prints no token or key.")
+    .action(async (opts, cmd) => {
+      const { identityList } = await import("./commands/identity-list.js");
+      identityList(withGlobals(opts, cmd));
+    });
   identity
     .command("add <name>")
     .description("define identity <name> as a GitHub login (a person) or a GitHub App slug (an agent). Needs a terminal.")
@@ -548,6 +568,7 @@ export async function buildProgram(): Promise<Command> {
   hook
     .command("scan-after-write")
     .description("PostToolUse: read tool-result JSON on stdin and run check on the written file")
+    .option("--agent <name>", "hook framework shape: claude (default) | cursor (afterFileEdit; detection only, the edit has already happened)")
     .action((opts, cmd) => hookScanAfterWrite(withGlobals(opts, cmd)));
 
   hook
@@ -573,7 +594,7 @@ export async function buildProgram(): Promise<Command> {
   hook
     .command("guard-egress")
     .description("PreToolUse(Bash): read the pending shell command on stdin and allow / ask / deny its publishing operations (git push, gh pr|issue|release|repo|api, npm publish); exit 2 blocks")
-    .option("--agent <name>", "hook framework shape: claude (default; supports ask) | codex | gemini (ask degrades to deny)")
+    .option("--agent <name>", "hook framework shape: claude (default; supports ask) | cursor (supports ask; beforeShellExecution) | copilot (supports ask) | codex | antigravity (unverified) | gemini (legacy): no ask, ask degrades to deny")
     .action(async (opts, cmd) => {
       const { hookGuardEgress } = await import("./commands/hook-guard-egress.js");
       await hookGuardEgress(withGlobals(opts, cmd));

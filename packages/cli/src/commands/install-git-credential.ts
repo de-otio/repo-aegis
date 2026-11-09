@@ -25,6 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import {
   appendAuditRecord,
   pinProblem,
+  refusalTrailer,
   repoAegisHome,
   shellQuote,
   statePath,
@@ -231,7 +232,7 @@ function gate(opts: InstallGitCredentialOptions, verb: string): void {
     GIT_CREDENTIAL_NEEDS_TTY,
     `${verb}: refused. The credential helper decides which GitHub account an agent's pushes use, so only a person at a terminal can install or remove it. ` +
       `No approval covers this. A person runs \`repo-aegis install git-credential${opts.uninstall === true ? " --uninstall" : ""}\` from a terminal. ` +
-      `Agents: do not retry or reroute; ask your human to run it. [${GIT_CREDENTIAL_NEEDS_TTY}, see doc/agent-guide.md#${GIT_CREDENTIAL_NEEDS_TTY.toLowerCase()}]`,
+      `Agents: do not retry or reroute; ask your human to run it. ${refusalTrailer(GIT_CREDENTIAL_NEEDS_TTY)}`,
     opts,
   );
 }

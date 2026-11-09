@@ -146,7 +146,7 @@ describe("the TTY gate (same path as `engagements add --personal-org`)", () => {
         assert.match(r.stderr, /REPO_AEGIS_EGRESS_HUMAN is not honoured/);
         assert.match(r.stderr, /A person runs, from a terminal: repo-aegis /);
         assert.match(r.stderr, /Agents: do not retry or reroute/);
-        assert.match(r.stderr, /doc\/agent-guide\.md#IDENTITY_CHANGE_NEEDS_TTY/);
+        assert.match(r.stderr, /\[IDENTITY_CHANGE_NEEDS_TTY; details: repo-aegis explain IDENTITY_CHANGE_NEEDS_TTY\]/);
         for (const secret of ["alice", "example-bot", "customer-a", "mapped-org", "upstream-org"]) {
           assert.ok(!r.stderr.includes(secret), `must not echo registry contents (${secret})`);
         }

@@ -1,0 +1,14 @@
+{
+  "conversation_id": "00000000-0000-4000-8000-00000000a002",
+  "generation_id": "00000000-0000-4000-8000-00000000a003",
+  "model": "example-model",
+  "hook_event_name": "afterFileEdit",
+  "cursor_version": "0.0.0",
+  "workspace_roots": ["/home/user/work/example-repo"],
+  "user_email": "user@example.com",
+  "transcript_path": null,
+  "file_path": "/home/user/work/example-repo/README.md",
+  "edits": [
+    { "old_string": "Hello", "new_string": "Hello, world" }
+  ]
+}

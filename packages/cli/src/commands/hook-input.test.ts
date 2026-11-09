@@ -15,6 +15,24 @@ import { parseHookWriteFields, scanJsonPrefix, WRITE_HOOK_INPUT_MAX_BYTES } from
 
 const BIG = "x".repeat(WRITE_HOOK_INPUT_MAX_BYTES + 1024);
 
+describe("parseHookWriteFields: Cursor afterFileEdit cwd", () => {
+  it("takes the cwd from workspace_roots[0] when the payload has no cwd", () => {
+    const text = JSON.stringify({ file_path: "/r/a.ts", workspace_roots: ["/r", "/other"] });
+    assert.deepEqual(parseHookWriteFields(text, "cursor"), { filePath: "/r/a.ts", cwd: "/r" });
+  });
+
+  it("an explicit cwd wins; an empty or malformed workspace_roots gives no cwd", () => {
+    assert.equal(parseHookWriteFields(JSON.stringify({ file_path: "/r/a.ts", cwd: "/c", workspace_roots: ["/r"] }), "cursor").cwd, "/c");
+    for (const roots of [[], [""], [7], "/r", null]) {
+      assert.equal(parseHookWriteFields(JSON.stringify({ file_path: "/r/a.ts", workspace_roots: roots }), "cursor").cwd, undefined);
+    }
+  });
+
+  it("the Claude shape does not read workspace_roots", () => {
+    assert.equal(parseHookWriteFields(JSON.stringify({ tool_input: { file_path: "/r/a.ts" }, workspace_roots: ["/r"] }), "claude").cwd, undefined);
+  });
+});
+
 describe("scanJsonPrefix", () => {
   it("reads top-level and nested string values by path from a cut-off text", () => {
     const full = JSON.stringify({ cwd: "/w", tool_input: { file_path: "/w/f.ts", content: "abc" } });

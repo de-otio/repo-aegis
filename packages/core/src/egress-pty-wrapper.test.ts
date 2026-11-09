@@ -159,7 +159,7 @@ describe("EGRESS_PTY_WRAPPER — the refusal answers the five questions (§3.9)"
     assert.match(d.reason, /Re-issue as: the same command run directly/);
     assert.match(d.reason, /a person runs it, or mints the approval, from their own terminal/);
     assert.match(d.reason, /Agents: do not run that yourself/);
-    assert.match(d.reason, /\[EGRESS_PTY_WRAPPER, see doc\/agent-guide\.md#egress_pty_wrapper\]/);
+    assert.match(d.reason, /\[EGRESS_PTY_WRAPPER; details: repo-aegis explain EGRESS_PTY_WRAPPER\]/);
   });
 
   it("never carries the command line (title, repo, payload)", () => {

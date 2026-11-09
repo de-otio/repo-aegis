@@ -71,9 +71,23 @@ export type MintFailureReason =
  * MATCHED here, never copied into the message: it can name an owner (a customer) and it is printed to agents.
  * Patterns follow taaad v0.6's `taaad mint` error texts; anything unrecognised is the generic failure.
  */
-export function classifyMintFailure(status: number | null, stderr: string): MintError {
+export function classifyMintFailure(
+  status: number | null,
+  stderr: string,
+  /** Whether this process runs inside the agent's sandbox (Claude Code's sandbox runtime sets SANDBOX_RUNTIME). */
+  inSandbox: boolean = process.env["SANDBOX_RUNTIME"] !== undefined,
+): MintError {
   const e = (reason: MintFailureReason, message: string, kind: MintError["kind"] = "unavailable"): MintError =>
     new MintError(kind, message, reason);
+  // Seen 2026-11-09: inside the default Claude Code sandbox taaad-signer fails BEFORE its presence prompt (no
+  // Touch ID dialog appears), plausibly because the sandbox blocks the keychain or the helper's GitHub call. The
+  // hint names the likely cause without claiming it; it is added only where a sandbox could explain the failure.
+  const sandboxHint = inSandbox
+    ? ". This command ran inside the agent's sandbox, which most likely stopped taaad-signer before its presence " +
+      "prompt (keychain or network); an App token cannot be minted from inside it. Your human runs the command " +
+      "from a terminal, or lets this one command run outside the sandbox"
+    : "";
+  const statusPart = status === null ? "" : ` (taaad exit status ${status})`;
   switch (status) {
     case 2:
       return e("tty", "taaad refused to print a token to a terminal");
@@ -82,6 +96,37 @@ export function classifyMintFailure(status: number | null, stderr: string): Mint
     case 4:
       return e("denied", "your human declined taaad's presence prompt; stop and ask them before retrying");
   }
+  // taaad ≥ 0.7.0 prints, as the LAST stderr line of every failed `taaad mint`, `taaad: error=<code>` or
+  // `taaad: error=<code> status=<n>` (n an HTTP status, 100–599). The code is copied verbatim only when it is in
+  // the known vocabulary; an unknown code is treated as `internal` and NOT echoed (taaad's README: "treat an
+  // unknown code like internal"). Nothing else from stderr is ever copied.
+  const lastLine = stderr.trimEnd().split("\n").pop() ?? "";
+  const coded = /^taaad: error=([a-z][a-z-]{0,31})(?: status=([1-5]\d\d))?$/.exec(lastLine);
+  if (coded !== null) {
+    const known = TAAAD_CODES.has(coded[1]!);
+    const code = known ? coded[1]! : "internal";
+    const detail = known && coded[2] !== undefined ? ` status=${coded[2]}` : "";
+    const step = `taaad error=${code}${detail}`;
+    switch (code) {
+      case "presence-denied":
+        return e("denied", `your human declined taaad's presence prompt (${step}); stop and ask them before retrying`);
+      case "rate-limited":
+        return e("rate-limited", `taaad's presence-prompt limit is reached (${step}); wait a few minutes and retry`);
+      case "tty":
+        return e("tty", `taaad refused to print a token to a terminal (${step})`);
+      case "config":
+        return e("not-installed", `taaad has no usable configuration for this App, e.g. no installation id yet (${step})`);
+      case "owner-mismatch":
+      case "app-mismatch":
+        return e("installation-mismatch", `the App's installation belongs to a different account than the destination owner (${step})`, "installation-mismatch");
+      case "not-granted":
+        return e("permission-not-granted", `the App's installation does not grant the permission this operation needs (${step})`);
+      case "bad-response":
+        return e("bad-output", `GitHub's token response was unusable, so taaad minted nothing (${step})`);
+    }
+    const sandboxable = code === "keychain" || code === "github" || code === "protocol" || code === "missing" || code === "internal";
+    return e("signer", `taaad failed at step ${step}, so no token was minted${sandboxable ? sandboxHint : ""}`);
+  }
   if (/User interaction is not allowed/i.test(stderr)) {
     return e("screen-locked", "taaad-signer could not show its presence prompt (Touch ID), most likely because the screen is locked; retry when your human is at the machine");
   }
@@ -89,7 +134,7 @@ export function classifyMintFailure(status: number | null, stderr: string): Mint
     return e("timeout", "nobody answered taaad's presence prompt (Touch ID) in time; retry when your human is at the machine");
   }
   if (/taaad-signer/i.test(stderr)) {
-    return e("signer", "taaad-signer failed, so no token was signed; your human can run the same command from a terminal to see taaad's own message");
+    return e("signer", `taaad-signer failed${statusPart}, so no token was signed${sandboxHint || "; your human can run the same command from a terminal to see taaad's own message"}`);
   }
   if (/has no install_id/i.test(stderr)) {
     return e("not-installed", "the App has no installation yet (taaad has no installation id for it)");
@@ -103,8 +148,33 @@ export function classifyMintFailure(status: number | null, stderr: string): Mint
   if (/not accessible to the parent installation|\b(404|422)\b|not found/i.test(stderr)) {
     return e("repo-not-covered", "GitHub would not issue a token for this repository: the App's installation does not include it");
   }
-  return e("failed", "taaad exited with a failure and minted nothing; your human can run the same command from a terminal to see taaad's own message");
+  return e("failed", `taaad exited with a failure${statusPart} and minted nothing${sandboxHint || "; your human can run the same command from a terminal to see taaad's own message"}`);
 }
+
+/**
+ * taaad ≥ 0.7.0's error vocabulary, used verbatim when taaad prints it: taaad-signer's `SignerError.code` values
+ * plus the codes `taaad mint` raises itself (tty, usage, config, owner-mismatch, not-granted, bad-response).
+ */
+const TAAAD_CODES: ReadonlySet<string> = new Set([
+  "tty",
+  "usage",
+  "config",
+  "owner-mismatch",
+  "not-granted",
+  "bad-response",
+  "internal",
+  "missing",
+  "protocol",
+  "not-found",
+  "presence-denied",
+  "rate-limited",
+  "github",
+  "widened",
+  "keychain",
+  "exists",
+  "bad-key",
+  "app-mismatch",
+]);
 
 /**
  * Longer than taaad's own wait: taaad-signer gives a person 240 s to answer its presence prompt (Touch ID),
@@ -138,15 +208,20 @@ export function taaadEnv(env: NodeJS.ProcessEnv = process.env): Record<string, s
   };
 }
 
-const READ_KEYS = new Set(["metadata", "contents", "pull_requests", "issues"]);
-
-/** Permissions no wider than `scope` (taaad README: read set / contents:write + metadata:read / the installation's own). */
+/**
+ * Permissions no wider than `scope` (taaad README: read class / contents:write + metadata:read / the installation's own).
+ *
+ * `read` is checked by LEVEL, not by key (taaad plan 0004): taaad ≥ 0.7.0 derives the read class from what the
+ * installation grants (every granted permission at `read`), so an App granted e.g. `security_events: read` can serve
+ * a read. taaad 0.6.0's fixed four keys (metadata, contents, pull_requests, issues) still pass. What a read token must
+ * never carry is a `write` or `admin` level; which keys it reads is the App's grant, already chosen by its owner.
+ */
 function permissionsWithin(scope: IdentityScope, perms: Record<string, string>): boolean {
   const entries = Object.entries(perms);
   if (entries.length === 0) return false;
   switch (scope) {
     case "read":
-      return entries.every(([k, v]) => READ_KEYS.has(k) && v === "read");
+      return entries.every(([, v]) => v === "read");
     case "contents-write":
       return entries.every(([k, v]) => (k === "contents" && v === "write") || (k === "metadata" && v === "read"));
     case "write":

@@ -637,12 +637,44 @@ GitHub identity belongs to which owner (see
 This release stores and shows the mapping only; no command chooses or injects
 a token from it.
 
-**Every command here needs a person at a terminal**, checked the same way as
+**Every command here but `identity list` and `identity require --on` needs a person at a terminal**, checked the same way as
 `engagements add --personal-org`: otherwise it exits 2 with
 `IDENTITY_CHANGE_NEEDS_TTY` (no environment variable or approval lifts it) and
 writes nothing. The agent hook also refuses any Bash command whose text runs
 one (`AGENT_RAN_HUMAN_COMMAND`). The gate runs before validation, so an invalid
 argument is no oracle for an agent.
+
+#### `repo-aegis identity list [--json]`
+
+Read-only, and **an agent may run it** (the hook does not refuse it, unlike
+every other `identity` verb but `require --on`). Prints every identity (name,
+kind, and its GitHub login or App slug) and where each is used: the
+`person` column (acts when a person is present) and the `agent` column (acts
+when none is), as personal orgs and engagements. Engagements appear by id,
+never by their orgs. It prints no token, key or key-file path: the registry
+holds none, and the command reads nothing else. Use it to answer "which
+account does repo-aegis think acts for this owner?" when a refusal such as
+`GH_IDENTITY_WRITE_NEEDS_HUMAN` asks.
+
+Redaction follows `status`: text prints a `gh-login` identity's login only when a personal org (the
+operator's own) uses it; an engagement-only or unreferenced one prints `<engagement-only login>`, because an
+Enterprise Managed User login carries a shortcode that can name a customer. `--json` carries every login. A login that
+is empty or is not GitHub login syntax prints `(not a valid GitHub login)` in text and carries `loginProblem`
+(`empty` or `invalid`) in JSON; the registry loader rejects such a login today, so this is a check, not an expected state.
+The registry records no App installation account, so none is listed.
+
+```
+identities (requireIdentity):
+  alice: gh-login alice
+    person: personal-org example-org
+    agent:  -
+  work: gh-login <engagement-only login>
+    person: engagement customer-a
+    agent:  -
+  work-bot: github-app example-bot
+    person: -
+    agent:  personal-org example-org, engagement customer-a
+```
 
 #### `repo-aegis identity add <name> --gh-login <login> | --app <slug>`
 
@@ -691,6 +723,14 @@ this mirrors that form; it takes no `<id>`. The org must already be registered
 becomes `{ name, person?, agent? }` and goes back to a plain string when
 cleared; a comment on the entry is kept.
 
+When `--person` names an identity whose login is empty or not GitHub login
+syntax, the command still succeeds (a person ran it at a terminal) but warns on
+stderr that writes through that identity will be refused until the login is
+fixed, and prints the fix (clear the mappings, `identity remove`,
+`identity add --gh-login`, map again); `--json` carries the same text as
+`warning`. The registry loader rejects such a login today, so the warning is a
+backstop, not a state you will normally see. The warning never contains the login.
+
 An engagement with no `githubOrgs` is refused (`ENGAGEMENT_HAS_NO_ORGS`): an
 identity would map nothing. The version guard (`MULTIPLE_INSTALLS`) sits on the
 step that raises `schemaVersion` to 3, so `set-identity` on a file that is
@@ -736,7 +776,7 @@ and points `core.hooksPath` at that directory.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--global` | **on** (since 0.7) | write `core.hooksPath` in the global git config, covering every repo on the machine |
-| `--local` | off | write `core.hooksPath` in this repo's local git config only (the pre-0.7 default) |
+| `--local` | off | write `core.hooksPath` in this repo's local git config only (the pre-0.7 default). When the global value already points at repo-aegis's hooks directory it writes nothing (a local value equal to the global one adds nothing) and says so; the hook scripts are still refreshed |
 | `--unset-local` | off | clear a repo-local `core.hooksPath` that would shadow the global value just installed, in one step |
 | `--force` | off | overwrite a conflicting `core.hooksPath` in the scope being written |
 | `--uninstall` | off | unset `core.hooksPath` in **both** global and local scope, and remove pre-commit/pre-push from `<home>/hooks` |
@@ -1222,6 +1262,13 @@ Settings from `install claude-md` register it as a pinned command (the pinned
 node and CLI, by absolute path, exit 2 if either is gone) rather than by bin
 name.
 
+`--agent cursor` reads Cursor's `afterFileEdit` payload instead (`file_path`
+at the root of the JSON; the working directory is the payload's `cwd` when it
+has one, otherwise the first entry of `workspace_roots`). That event cannot block, so the check is
+detection only: a non-zero answer carries a `note` saying the edit has already
+happened and the pre-commit hook is the gate. Any other `--agent` value is the
+Claude Code shape.
+
 Silent exits (code 0):
 - empty stdin (the agent invoked the hook with no payload)
 - unparseable JSON
@@ -1421,18 +1468,56 @@ report `HOOKS_SCRIPT_STALE` until `install hooks` runs again. (0.11.0 changed
 only a comment in the script, to say that `$2` is the URL after all rewriting,
 but the digest covers the script's text, so the same reinstall applies.)
 
-### `repo-aegis hook guard-egress [--agent claude|codex|gemini]`
+### `repo-aegis hook guard-egress [--agent claude|codex|gemini|copilot|cursor|antigravity]`
 
-The pre-command hook. Reads the framework's JSON on stdin
-(`tool_input.command` or a root-level `command`, plus the root `cwd`),
-parses the command, runs `decideEgress` with `capabilities.ask` true for
-`claude` (the default) and false otherwise, and answers:
+The pre-command hook. Reads the host's JSON on stdin (the host adapter picked
+by `--agent` finds the command and the `cwd`), parses the command, runs
+`decideEgress` with `capabilities.ask` true for hosts that can ask and false
+otherwise, and answers in the host's own shape. `--agent` is matched without
+regard to case. An unknown value is treated as a host that cannot ask (`ask`
+becomes `deny`), never as `claude`; it answers in the PreToolUse shape and
+reads the command from whichever known payload shape arrives
+(`tool_input.command`, Copilot `toolArgs`, a root `command`, Antigravity
+`toolCall.args.CommandLine`).
+
+**A payload that was not judged is not silent.** The hook still fails open
+(the host's allow), but when the payload names a shell tool and has no command
+where this `--agent` reads one, or carries a command in another host's shape
+(a Claude- or Gemini-shaped payload under `--agent antigravity`, a Cursor
+`preToolUse` payload under `--agent cursor`), or is not JSON at all, it prints
+one fixed line on stderr, `repo-aegis: guard-egress: this payload was not
+judged (<reason>); check that the hook is registered with the right --agent
+and event`, and writes a `guard-egress-malformed` record when the audit log is
+on. The reason is fixed text, never payload bytes. A payload for a tool that is
+not a shell stays `skip` and silent. Text typed into an open shell session is
+judged as a command where the host's payload says so: Copilot `write_bash` /
+`write_powershell` (`input`) and Antigravity `send_command_input` (`Input`).
+Codex `write_stdin` is not judged (a known limit, see
+[design/egress-guard.md](design/egress-guard.md)).
+
+| `--agent` | Event / matcher | Command field | `ask` | Allow (no publishing op) |
+|---|---|---|---|---|
+| `claude` (default) | `PreToolUse` / `Bash` | `tool_input.command` | yes | nothing, exit 0 |
+| `codex` | `PreToolUse` / `Bash` (older builds: `shell`) | `tool_input.command` | no: degrades to `deny` | nothing, exit 0 |
+| `gemini` (legacy) | `BeforeTool` / `run_shell_command` | `tool_input.command` | no: degrades to `deny` | nothing, exit 0 |
+| `copilot` | `preToolUse` / `bash` (also `PreToolUse`) | `toolArgs` (a JSON-encoded string) `.command`; or `tool_input.command` | yes in the interactive CLI; the cloud agent and autopilot treat it as a deny | nothing, exit 0. **Never exits 1**: Copilot fails closed on a non-zero exit other than 2, so an internal error is rendered as an allow |
+| `cursor` | `beforeShellExecution`, and `afterFileEdit` for the write scan | root `command` | yes, on `beforeShellExecution` only | `{"permission":"allow"}` |
+| `antigravity` (unverified) | `PreToolUse` / `run_command` | `toolCall.args.CommandLine` | no: degrades to `deny` | `{"decision":"allow"}` |
+
+Registration is by hand for every host but Claude Code; the snippets, each
+marked doc-derived and not exercised in a live session, are in
+[agent-install.md](agent-install.md#other-agents). The Claude-style answer is:
 
 | Decision | Exit | stdout | stderr |
 |---|---|---|---|
 | allow (or no publishing operation in the command) | 0 | — | — |
 | ask | 0 | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":…}}` | — |
 | deny | 2 | the same shape with `"deny"` | `{ code, error, details: { verb, destination? } }` |
+
+Copilot's answer carries the decision in both places its two events read, in
+one object: `{"permissionDecision":"ask"|"deny","permissionDecisionReason":…,"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":…,"permissionDecisionReason":…}}`
+(top level for camelCase `preToolUse`, `hookSpecificOutput` for PascalCase
+`PreToolUse`; exit 0 for ask, 2 for deny, the structured refusal on stderr as above).
 
 It never emits `updatedInput`. A registry that is missing, encrypted or
 unreadable does not disable the shape rules (an encrypted or unparseable one
@@ -1449,15 +1534,31 @@ command that starts a detached session: `tmux new -d`, `tmux new-window` /
 built at run time, or a script written by an earlier call, gets past them and
 falls to the terminal and ancestry checks. A quoted mention next to a
 repo-aegis word is refused too. Registered by
-`install claude-md` on `PreToolUse` matcher `Bash`. Hand-written Codex CLI
-and Gemini CLI snippets are in [agent-install.md](agent-install.md) (there
-`ask` degrades to `deny`). Treat both as **unverified**: the Codex matcher and
-payload field are unconfirmed against
-[Codex's hooks documentation](https://developers.openai.com/codex/hooks), and
-Gemini CLI has since been replaced by Antigravity CLI
+`install claude-md` on `PreToolUse` matcher `Bash`. Treat every other host as
+**doc-derived, not exercised in a live session**: the payload shapes come from
+each vendor's documentation (Codex: [hooks docs](https://developers.openai.com/codex/hooks);
+Copilot CLI and Cursor and Antigravity CLI likewise), and the fixtures under
+`packages/cli/src/commands/__fixtures__/hosts/` are marked `doc-derived` until
+a real capture replaces them. Gemini CLI has been replaced by Antigravity CLI
 ([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)),
-whose hook payload is not confirmed here either. `--agent gemini` keeps its
-name for the old shape.
+whose payload differs, so `--agent gemini` keeps its name for the old shape
+only (legacy) and `--agent antigravity` is the one for the new CLI.
+
+`--agent cursor` and `--agent antigravity` answer in their host's own shape
+instead of the table above (both built from vendor docs, not yet seen from a
+real host; plan §5):
+
+| Host | Event | Allow | Ask | Deny | Guard error |
+|---|---|---|---|---|---|
+| Cursor | `beforeShellExecution` (root `command`) | `{"permission":"allow"}`, exit 0 | `{"permission":"ask","user_message":…,"agent_message":…}`, exit 0 | the same with `"deny"`, exit 0 | exit 1, no stdout (Cursor fails open) |
+| Antigravity CLI | `PreToolUse`, matcher `run_command` (`toolCall.args.CommandLine`) | `{"decision":"allow"}`, exit 0 | none: `ask` is answered as deny | `{"decision":"deny","reason":…}`, exit 0 | `{"decision":"allow"}`, exit 0 |
+
+Allow is never empty for these two (Cursor blocks on invalid output;
+Antigravity requires a `decision`). Cursor's `ask` is enforced only on
+`beforeShellExecution`, so the Cursor adapter does not judge a `preToolUse`
+payload (it fails open and prints the one "not judged" line above): register
+the hook on `beforeShellExecution`. Antigravity's exit codes
+are undocumented, so every answer exits 0 and a deny is carried by the JSON.
 
 The hook also reads its **own** `PATH` — the one its host will hand the
 shell it is about to permit — and tells the policy whether the `gh` shim
@@ -1571,8 +1672,28 @@ kind, owner/repo, verb, approval id; never the token) to `<home>/state/gh-decisi
 whatever the audit log's setting; refusals are recorded too.
 
 Any fault between choosing and spawning on a mapped owner is `GH_IDENTITY_UNAVAILABLE` and `gh`
-does not run (never a call as the active account). On an unmapped call a fault warns and `gh` runs
-unchanged. Exit status is `gh`'s own.
+does not run for a **write** (never a call as the active account). A **read** (a call the egress
+parser finds no publish in) whose identity cannot be produced (no token, a failed mint, an unreadable
+registry, a fault) runs as the active `gh` account instead, with one stderr line:
+`repo-aegis gh: GH_IDENTITY_UNAVAILABLE: <reason>, so this read runs as the active gh account; proceeding`.
+No token of any kind is attached, and the decision log records `fallback`. Findings about the
+identity itself (`GH_IDENTITY_INSTALLATION_MISMATCH`, `GH_BINARY_UNTRUSTED`) still refuse a read.
+On an unmapped call a fault warns and `gh` runs unchanged. Exit status is `gh`'s own.
+
+For a verb that runs `git` here (`pr checkout`, `pr create`, `repo sync`, a clone,
+`issue develop --checkout`) with no person present, the repository's own git configuration is
+judged first (`GH_IDENTITY_ARG_UNSAFE`). A repo-local `core.hooksPath` that resolves (realpath) to
+repo-aegis's own `<home>/hooks` directory, which `install hooks --local` writes, is accepted; any
+other value, and every other setting, still refuses. An **account-bound** approval for the owner
+(`repo-aegis approve <owner>/<repo>` or `<owner>/*`, for an owner with a mapped GitHub account, so
+the approval records a login) covers that refusal for its scope and lifetime: the call runs, stderr
+gets `repo-aegis: approval <id> covers <setting> for <owner>/<repo>`, and the decision log and the
+audit log (when on) record the approval id. The approval's login must be the one the owner's person
+identity has in the registry NOW (an approval minted before that identity was re-mapped covers
+nothing, and an owner with no person identity has nothing to bind to). An approval without a login,
+a `*` approval, an approval for another repository or owner, a ref-limited one and an expired one
+(an approval is expired from the instant its lifetime ends) do not cover it.
+Unsafe arguments (`--editor`, `--hostname`, `--template` and the like) are not covered by an approval.
 
 Installing is not enabling: the shim only guards once `<home>/bin`
 precedes the real `gh` on `PATH`, which this command prints (also as
@@ -1609,8 +1730,9 @@ The git credential helper itself; git runs it, you do not (`install git-credenti
 - `store` and `erase`: ignored, exit 0.
 - `get` for `protocol=https`, `host=github.com` (any case, also `github.com:443`) with a path `<owner>/<repo>[.git]`:
   - **a person present** (`identityPresence`: a terminal that is a person's): prints nothing, so the next helper answers as it would without repo-aegis;
-  - **no person present** (an agent, or no terminal): `chooseIdentity` decides from the registry in `--home` only. An unmapped owner, or an owner with only a `person` identity (agents read as the person), prints nothing. An owner with an `agent` identity gets `username=x-access-token` and `password=<token>`, minted by the pinned taaad as `mint --app <slug> --repo <owner>/<repo> --permissions <scope> --json` with an environment of exactly `HOME`, `PATH=/usr/bin:/bin`, `TERM` and `LANG`, and checked (installation account equals the owner, the repositories are exactly the one, the permissions are no wider than the scope). A URL with an embedded username still yields `x-access-token`.
+  - **no person present** (an agent, or no terminal): `chooseIdentity` decides from the registry in `--home` only. An unmapped owner prints nothing. An owner with only a `person` identity: a fetch, pull, clone or other known read prints nothing (agents read as the person); a push (or an alias or unreadable subcommand, which may be one) is `GH_IDENTITY_WRITE_NEEDS_HUMAN` unless a login-bound approval covers it, the same approval `repo-aegis gh` honours (`<owner>/<repo>` or `<owner>/*`, minted from a terminal, carrying exactly the login the owner's person identity has, no ref limit, unexpired). Then the helper hands git that login's own token (`gh auth token --user <login>` through the trusted gh, never the active account's), prints `repo-aegis: approval <id> lets this push run as the GitHub account mapped to <owner>` on stderr, and writes a `git-credential` audit record with the approval id (no login, no token). Every pre-mint check below applies to it exactly as to an App token. An owner with an `agent` identity gets `username=x-access-token` and `password=<token>`, minted by the pinned taaad as `mint --app <slug> --repo <owner>/<repo> --permissions <scope> --json` with an environment of exactly `HOME`, `PATH=/usr/bin:/bin`, `TERM` and `LANG`, and checked (installation account equals the owner, the repositories are exactly the one, the permissions are no wider than the scope). A URL with an embedded username still yields `x-access-token`.
   - the scope is `contents-write` when the nearest `git` above `git-remote-https` is `push` or `send-pack`, and `read` for any other remote operation (fetch, pull, clone, ls-remote, an alias).
+  - **an unreadable process list** (typically a sandbox that blocks `ps`; the default Claude Code sandbox does): `AGENT_PUSH_CHAIN_UNREADABLE`, unless a live approval covers it. An approval minted by `repo-aegis approve <owner>/<repo>` or `<owner>/*` from a terminal covers it when it carries the login the owner's person identity has in the registry now (not one recorded before a re-mapping; an owner with no person login, or no readable registry, has nothing to bind to) and no ref limit; a `*` approval, an approval for another owner or repository, and an expired one do not. A covered request continues through every other check and mints a `contents-write` token (a push cannot be told from a fetch, so the wider scope is taken), prints `repo-aegis: approval <id> covers an unreadable process list for <owner>/<repo>` on stderr, and, with the audit log on, adds the `approval` id and `covers` code to its `git-credential` record. The approvals are read from `--home`, never from `REPO_AEGIS_HOME`. An approval covers only "cannot tell": a chain that was read and shows a caller other than git's HTTPS remote helper is `AGENT_CREDENTIAL_DIRECT_FILL` whatever is approved. Without an approval the refusal names a sandbox as the likely cause and three steps for a person: run the push from a terminal, run `repo-aegis approve <owner>/<repo>`, or allow the agent's command to run outside the sandbox.
 - **Every refusal** prints exactly `quit=true` on stdout (git then stops asking and does not prompt), the refusal with its code on stderr, and exits 0. Falling through on a refusal would give the agent the person's credential. The refusals: no `git-remote-https` in the process chain, such as `git credential fill` run by hand (`AGENT_CREDENTIAL_DIRECT_FILL`), or an unreadable chain (`AGENT_PUSH_CHAIN_UNREADABLE`); a configuration or environment that could redirect or capture the token (`AGENT_PUSH_CREDENTIAL_CONFIG`); a second, different path in one request (`AGENT_PUSH_CREDENTIAL_PATH`); an unreadable registry, taaad failing or the App not installed on the repository (`GH_IDENTITY_UNAVAILABLE`); an installation of another account (`GH_IDENTITY_INSTALLATION_MISMATCH`); no pinned taaad (`GH_BINARY_UNTRUSTED`); and the `chooseIdentity` refusals (`GH_IDENTITY_PRESENCE_UNKNOWN`, `GH_IDENTITY_WRITE_NEEDS_HUMAN`, …).
 - The token is written to stdout only: never to stderr, the audit log (which records identity, owner, repository and scope) or any argument vector.
 - **A failed mint** names the step that failed, from taaad's exit code and its error text (matched, never printed): the screen is locked, nobody answered the Touch ID prompt in time, the prompt was declined or its limit reached, the App has no installation or its installation does not include the repository or grant `contents: write`, or a generic failure. With the audit log on, it is recorded as a `git-credential` entry with `outcome: "refused"`, the code and that `reason` word. taaad gets 300 s, longer than taaad-signer's 240 s wait for Touch ID.
@@ -1726,6 +1848,8 @@ now reports, unless `--no-egress-checks`:
 | `PREPUSH_HOOK_MISSING` (warn) | the egress guard hook is registered but the **global** `core.hooksPath` is unset or not the repo-aegis hooks directory, so a repo that does not set it locally has no `pre-push` hook, the only layer that sees the environment git and ssh really run with | `repo-aegis install hooks` |
 | `SHELL_STARTUP_OVERRIDES` (warn) | `~/.zshenv`, `~/.zshrc`, `~/.zprofile`, `~/.zlogin`, `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` or `~/.profile` sets `GH_REPO`, `GH_HOST`, `GH_CONFIG_DIR`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_SSH_VARIANT`, `SRT_*` or `REPO_AEGIS_*`; reported by name and file, never value | remove the export |
 | `SSH_GITHUB_REDIRECT` (info) | `~/.ssh/config` has a `Host github.com` block whose `HostName` is not GitHub, or that applies a `ProxyCommand` / `ProxyJump` | none if intended |
+| `HOOKS_PATH_LOCAL_DUPLICATE` (info, per repo) | a repo-local `core.hooksPath` names the same directory as the global one, so it adds nothing; older `install hooks --local` runs wrote these. Removing it is safe: the global value takes over | `git config --local --unset core.hooksPath` (in that repo) |
+| `AGENT_REMOTE_IS_SSH` (warn, per repo) | the repo's owner has a GitHub App as its **agent** identity and `origin`'s push URL is SSH, which goes out as the person's SSH key, so an agent's `git push origin` is refused (`AGENT_PUSH_NEEDS_APP`). `classify --apply` prints the same finding | `git remote set-url --push origin https://github.com/<org>/<repo>.git`; a person runs it (it changes the push URL only, fetches and the person's own pushes keep SSH) |
 
 The `gh`-backed checks (`GH_LOGIN_UNREGISTERED`, `GH_MEMBER_ORG_UNREGISTERED`,
 `REGISTERED_ORG_NOT_MEMBER`) cover **every account logged in for
@@ -1803,6 +1927,34 @@ as markers. Dry run unless `--accept` is given; it never reads auth tokens.
 ---
 
 ## Additional commands
+
+### `repo-aegis explain <CODE|topic> [--json]`, `explain --list`
+
+Prints what a refusal or error code means and what to do about it. Every
+refusal ends `[CODE; details: repo-aegis explain CODE]`, and a refusal can
+reach an agent working in any repository, where this repo's
+`doc/agent-guide.md` does not exist; the guide ships inside the npm package
+(`dist/docs/`, copied at build time, with `agent-sandbox.md`) and this command
+reads it from there.
+
+**Read-only, and an agent may run it.** It reads two files that sit next to the
+command and nothing else: no registry, no network, no git, no repository, and
+the working directory is irrelevant, so it gives the same answer from any
+directory.
+
+It finds the row of the guide's error table whose `<a id="…">` anchor matches
+the code (or whose first cell names it) and prints its meaning and recovery,
+followed by the `###` section of the guide that row links to, if it links to
+one. The code is matched case-insensitively and `-` counts as `_`. Besides
+codes, `sandbox` prints the shipped `agent-sandbox.md`, and the slug of any `##`
+or `###` heading of the guide (`cross-repo-writes`) prints that section.
+`--list` prints every known code, one per line. `--json` prints `{ code, codes,
+anchor, meaning, recovery, section }` (or `{ topic, markdown, source }` for a
+topic); `--list --json` prints `{ codes, topics }`.
+
+An unknown code exits 2 with `UNKNOWN_CODE` and the nearest known codes (in
+`details.nearest` under `--json`). `EXPLAIN_DOCS_MISSING` (exit 2) means the
+guide is not next to the command, which only happens in an unbuilt checkout.
 
 ### `repo-aegis suggest-markers`
 

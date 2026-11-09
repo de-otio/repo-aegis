@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { agentGuideAnchor, refusal, safeDestination } from "./refusal.js";
+import { refusalTrailer, refusal, safeDestination } from "./refusal.js";
 
 describe("safeDestination", () => {
   it("accepts GitHub names, lower-cased", () => {
@@ -43,7 +43,7 @@ describe("refusal", () => {
       "gh issue create → owner/repo: refused. The owner is not registered. No approval covers this. " +
         "If it is yours, a person runs, from a terminal: do-a-thing --x (or --y). " +
         "Agents: do not run that yourself, retry or reroute; report this to your human. " +
-        "[SOME_CODE, see doc/agent-guide.md#some_code]",
+        "[SOME_CODE; details: repo-aegis explain SOME_CODE]",
     );
   });
 
@@ -81,7 +81,7 @@ describe("refusal", () => {
     });
     assert.ok(text.startsWith("gh issue create: refused. The destination name is not a valid GitHub owner/repo"), text);
     assert.ok(!text.includes("$(id)") && !text.includes("engagements add"), text);
-    assert.match(text, /\[SOME_CODE, see doc\/agent-guide\.md#some_code\]$/);
+    assert.match(text, /\[SOME_CODE; details: repo-aegis explain SOME_CODE\]$/);
   });
 
   it("a safe destination leaves the message as built", () => {
@@ -93,7 +93,7 @@ describe("refusal", () => {
     assert.match(text, /^gh issue create → owner\/repo: refused\./);
   });
 
-  it("agentGuideAnchor lower-cases the code", () => {
-    assert.equal(agentGuideAnchor("UNREGISTERED_OWNER_EGRESS"), "doc/agent-guide.md#unregistered_owner_egress");
+  it("refusalTrailer names the code first and the command that explains it", () => {
+    assert.equal(refusalTrailer("UNREGISTERED_OWNER_EGRESS"), "[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS]");
   });
 });

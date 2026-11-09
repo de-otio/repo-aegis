@@ -1,0 +1,17 @@
+{
+  "conversationId": "example-conversation",
+  "workspacePaths": ["/home/user/work/example-repo"],
+  "transcriptPath": "/home/user/.gemini/antigravity/transcripts/example.jsonl",
+  "artifactDirectoryPath": "/home/user/.gemini/antigravity/artifacts/example",
+  "modelName": "example-model",
+  "lastUserInput": "run echo hello in the shell",
+  "stepIdx": 19,
+  "toolCall": {
+    "name": "run_command",
+    "args": {
+      "CommandLine": "echo hello",
+      "Cwd": "/home/user/work/example-repo",
+      "WaitMsBeforeAsync": 5000
+    }
+  }
+}

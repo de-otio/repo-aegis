@@ -292,14 +292,73 @@ describe("install-hooks — --local", () => {
 
   it("--local with a differing global value does NOT refuse (writing local never destroys global)", () => {
     const fx = makeFixture("local-over-global");
-    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo })));
-    // Global now correctly set. A --local install is an explicit,
-    // single-repo opt-in to shadowing it — no guard applies here (the
-    // guard only fires the other direction: writing global while a
-    // differing local value exists).
+    fx.run(() => execFileSync("git", ["config", "--global", "core.hooksPath", "/some/other/global-path"], { cwd: fx.repo }));
+    // A --local install is an explicit, single-repo opt-in to shadowing
+    // the global value — no guard applies here (the guard only fires the
+    // other direction: writing global while a differing local value exists).
     const result = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, local: true })));
     assert.equal(result.exitCode, undefined);
     assert.equal(readScoped(fx, "local"), expectedHooksDir(fx));
+    assert.equal(readScoped(fx, "global"), "/some/other/global-path", "the global value is untouched");
+  });
+
+  // Phase U, U1: a local value equal to the global one adds nothing, and a repo-local core.hooksPath is what the
+  // gh shim's pre-flight treats as steering. Fails without the change: the local value used to be written.
+  it("--local with the global value already pointing at repo-aegis's hooks writes no duplicate local value, and says so", () => {
+    const fx = makeFixture("local-duplicate");
+    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo })));
+    const result = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, local: true })));
+    assert.equal(result.exitCode, undefined);
+    assert.equal(readScoped(fx, "local"), "", "no local value was written");
+    assert.equal(readScoped(fx, "global"), expectedHooksDir(fx));
+    assert.match(result.stdout, /already set globally/);
+    assert.ok(existsSync(join(fx.home, "hooks", "pre-push")), "the scripts are still written");
+  });
+
+  it("a ~-spelled global value that expands to repo-aegis's hooks directory counts as already set; ~/other does not", () => {
+    const fx = makeFixture("local-duplicate-tilde");
+    const savedHome = process.env["HOME"];
+    // HOME = the fixture's base, so `~/home/hooks` is the pinned hooks directory (<base>/home/hooks).
+    process.env["HOME"] = fx.base;
+    try {
+      fx.run(() => execFileSync("git", ["config", "--global", "core.hooksPath", "~/home/hooks"], { cwd: fx.repo }));
+      const dup = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, local: true, json: true })));
+      assert.equal(JSON.parse(dup.stdout).localSkippedAlreadyGlobal, true, dup.stderr);
+      assert.equal(readScoped(fx, "local"), "", "no local value was written");
+
+      fx.run(() => execFileSync("git", ["config", "--global", "core.hooksPath", "~/other"], { cwd: fx.repo }));
+      const other = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, local: true, json: true })));
+      assert.equal(JSON.parse(other.stdout).localSkippedAlreadyGlobal, false, other.stderr);
+      assert.equal(readScoped(fx, "local"), expectedHooksDir(fx), "a different directory still gets the local value");
+    } finally {
+      if (savedHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = savedHome;
+    }
+  });
+
+  it("--local --json reports the skip", () => {
+    const fx = makeFixture("local-duplicate-json");
+    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo })));
+    const result = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, local: true, json: true })));
+    const j = JSON.parse(result.stdout) as { scope: string; localSkippedAlreadyGlobal: boolean };
+    assert.equal(j.scope, "local");
+    assert.equal(j.localSkippedAlreadyGlobal, true);
+  });
+
+  it("--local with no global value (or a different one) still writes the local value", () => {
+    const fx = makeFixture("local-no-global");
+    const result = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, local: true, json: true })));
+    assert.equal(JSON.parse(result.stdout).localSkippedAlreadyGlobal, false);
+    assert.equal(readScoped(fx, "local"), expectedHooksDir(fx));
+  });
+
+  it("--local --force over a stale local value, with the global value already ours, clears the stale value instead of writing a duplicate", () => {
+    const fx = makeFixture("local-duplicate-force");
+    fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo })));
+    setLocal(fx, "/some/stale/path");
+    const result = fx.run(() => captureOutput(() => installHooks({ cwd: fx.repo, local: true, force: true })));
+    assert.equal(result.exitCode, undefined);
+    assert.equal(readScoped(fx, "local"), "");
   });
 });
 

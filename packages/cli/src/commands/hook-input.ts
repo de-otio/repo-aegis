@@ -41,21 +41,22 @@ export interface HookWriteFields {
  * The fields of a Write/Edit hook payload: from `JSON.parse` when the text is whole, otherwise from
  * {@link scanJsonPrefix} on what was read. Pure; never throws.
  */
-export function parseHookWriteFields(text: string): HookWriteFields {
+export function parseHookWriteFields(text: string, shape: HookWriteShape = "claude"): HookWriteFields {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return fieldsFromStrings(scanJsonPrefix(text));
+    return fieldsFromStrings(scanJsonPrefix(text), shape);
   }
   if (!parsed || typeof parsed !== "object") return {};
   const root = parsed as Record<string, unknown>;
   const out: HookWriteFields = {};
-  const ti = root["tool_input"];
-  if (ti && typeof ti === "object") {
-    const tiObj = ti as Record<string, unknown>;
-    for (const k of ["file_path", "path"]) {
-      const v = tiObj[k];
+  // Claude Code: under `tool_input`. Cursor `afterFileEdit` (plan T1d): `file_path` at the root.
+  const holder = shape === "cursor" ? root : root["tool_input"];
+  if (holder && typeof holder === "object") {
+    const holderObj = holder as Record<string, unknown>;
+    for (const k of PATH_KEYS[shape]) {
+      const v = holderObj[k];
       if (typeof v === "string" && v.length > 0) {
         out.filePath = v;
         break;
@@ -64,12 +65,28 @@ export function parseHookWriteFields(text: string): HookWriteFields {
   }
   const cwd = root["cwd"];
   if (typeof cwd === "string" && cwd.length > 0) out.cwd = cwd;
+  // Cursor `afterFileEdit` states no `cwd`: its common fields name the project in `workspace_roots`,
+  // so the first root is the directory the edit belongs to.
+  if (out.cwd === undefined && shape === "cursor") {
+    const roots = root["workspace_roots"];
+    const first = Array.isArray(roots) ? roots[0] : undefined;
+    if (typeof first === "string" && first.length > 0) out.cwd = first;
+  }
   return out;
 }
 
-function fieldsFromStrings(strings: ReadonlyMap<string, string>): HookWriteFields {
+/** Where the written file's path sits in the payload: Claude Code `tool_input.*`, Cursor the root. */
+export type HookWriteShape = "claude" | "cursor";
+
+const PATH_KEYS: Record<HookWriteShape, readonly string[]> = {
+  claude: ["file_path", "path"],
+  cursor: ["file_path"],
+};
+
+function fieldsFromStrings(strings: ReadonlyMap<string, string>, shape: HookWriteShape): HookWriteFields {
   const out: HookWriteFields = {};
-  const fp = strings.get("tool_input.file_path") || strings.get("tool_input.path");
+  const fp =
+    shape === "cursor" ? strings.get("file_path") : strings.get("tool_input.file_path") || strings.get("tool_input.path");
   if (fp) out.filePath = fp;
   const cwd = strings.get("cwd");
   if (cwd) out.cwd = cwd;
@@ -172,4 +189,4 @@ export function scanJsonPrefix(text: string): Map<string, string> {
 export const WRITE_HOOK_INPUT_TOO_LARGE_REASON =
   "repo-aegis: refused. This write's hook payload is larger than 1 MiB and the file path could not be read from " +
   "its start, so the write could not be checked. No approval covers this. Fix: write the file in smaller parts " +
-  "(a first Write, then Edits), or have your human check the payload. See doc/agent-guide.md#hook_input_too_large.";
+  "(a first Write, then Edits), or have your human check the payload. [HOOK_INPUT_TOO_LARGE; details: repo-aegis explain HOOK_INPUT_TOO_LARGE]";

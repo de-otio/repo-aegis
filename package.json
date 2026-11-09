@@ -14,7 +14,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b packages/core packages/llm packages/cli packages/scan packages/vscode packages/mcp",
+    "build": "tsc -b packages/core packages/llm packages/cli packages/scan packages/vscode packages/mcp && node scripts/copy-cli-docs.mjs",
     "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo coverage",
     "test": "find packages -path '*/dist/*' -name '*.test.js' -print0 | GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 REPO_AEGIS_HOME=$(mktemp -d \"${TMPDIR:-/tmp}/repo-aegis-test.XXXXXX\" || echo /nonexistent/repo-aegis-test-home) REPO_AEGIS_VISIBILITY_LOOKUP=0 xargs -0 node --test --test-reporter=spec",
     "test:file": "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 REPO_AEGIS_HOME=$(mktemp -d \"${TMPDIR:-/tmp}/repo-aegis-test.XXXXXX\" || echo /nonexistent/repo-aegis-test-home) REPO_AEGIS_VISIBILITY_LOOKUP=0 node --test --test-reporter=spec",

@@ -376,7 +376,7 @@ describe("precedence and plumbing", () => {
       const hit = checkIdentityHookRules(c)[0]!;
       assert.equal(hit.code, code);
       assert.match(hit.reason, /refused\./);
-      assert.match(hit.reason, new RegExp(`\\[${code}, see doc/agent-guide\\.md#${code.toLowerCase()}\\]`));
+      assert.match(hit.reason, new RegExp(`\\[${code}; details: repo-aegis explain ${code}\\]`));
       assert.match(hit.reason, /No approval covers this/);
     }
   });

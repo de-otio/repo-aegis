@@ -13,7 +13,7 @@
 //   4. The FIX, and WHO runs it: a person from a terminal, or the agent
 //      re-issuing the command. An agent must be able to tell from the text
 //      alone that it may not run a person's step itself.
-//   5. WHERE to read more: the code and `doc/agent-guide.md#<code>`.
+//   5. WHERE to read more: the code and `repo-aegis explain <code>`.
 //
 // One builder, so the agent hook, the `gh` shim and the pre-push hook cannot
 // drift apart in wording.
@@ -135,14 +135,19 @@ function renderFix(fix: RefusalFix): string {
   return `${lead}: ${fix.command ?? "(no command given)"}${note}.`;
 }
 
-/** Where `doc/agent-guide.md` documents a code. */
-export function agentGuideAnchor(code: string): string {
-  return `doc/agent-guide.md#${code.toLowerCase()}`;
+/**
+ * The closing token of every refusal: `[CODE; details: repo-aegis explain CODE]`. A refusal reaches an agent in
+ * whatever repository it works in, where the repo-aegis repo's `doc/agent-guide.md` does not exist, so the trailer
+ * names a command that prints the guide's text (it ships in the package). The code stays first and unchanged, so
+ * a tool that greps `[CODE` still matches.
+ */
+export function refusalTrailer(code: string): string {
+  return `[${code}; details: repo-aegis explain ${code}]`;
 }
 
 /**
  * Build the five-part refusal text:
- * `<what>: refused. <why> <approval> <fixes…> [<code>, see doc/agent-guide.md#<code>]`.
+ * `<what>: refused. <why> <approval> <fixes…> [<code>; details: repo-aegis explain <code>]`.
  */
 export function refusal(input: RefusalInput): string {
   if (input.destination !== undefined && safeDestination(input.destination.org, input.destination.repo) === null) {
@@ -151,7 +156,7 @@ export function refusal(input: RefusalInput): string {
       "The destination name is not a valid GitHub owner/repo, so repo-aegis cannot check, register or approve it.",
       "No approval covers this.",
       "Re-issue the command naming a valid <owner>/<repo>.",
-      `[${input.code}, see ${agentGuideAnchor(input.code)}]`,
+      refusalTrailer(input.code),
     ].join(" ");
   }
   const parts = [`${input.what}: refused.`, sentence(input.why), sentence(input.approval)];
@@ -159,6 +164,6 @@ export function refusal(input: RefusalInput): string {
   if (input.fixes.some(f => f.by === "person")) {
     parts.push("Agents: do not run that yourself, retry or reroute; report this to your human.");
   }
-  parts.push(`[${input.code}, see ${agentGuideAnchor(input.code)}]`);
+  parts.push(refusalTrailer(input.code));
   return parts.join(" ");
 }
