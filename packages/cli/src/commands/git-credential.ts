@@ -37,6 +37,7 @@ import {
   type IdentityPresence,
   type IdentityScope,
   type Registry,
+  type RefusalFix,
 } from "@de-otio/repo-aegis-core";
 import {
   credentialConfigViolation,
@@ -270,14 +271,35 @@ export function parentFromAncestry(chain: AncestryChain | readonly AncestorInfo[
 const QUIT = "quit=true\n";
 const NOTHING: GitCredentialResult = { stdout: "", stderr: "" };
 
-function refuse(code: string, why: string, dest?: { owner: string; repo: string }): GitCredentialResult {
+/**
+ * The approval sentence of every refusal here but AGENT_PUSH_CHAIN_UNREADABLE (U7): the one condition an approval
+ * covers is named, so an agent that reads "no approval" does not conclude none of them can be.
+ */
+const NO_APPROVAL_HERE =
+  "No approval covers this; only an unreadable process list (AGENT_PUSH_CHAIN_UNREADABLE) is covered, by an account-bound `repo-aegis approve <owner>/<repo>`.";
+
+const DOCTOR_FIX: RefusalFix = { by: "person", command: "repo-aegis doctor", note: "it reports why; then re-run the command from a terminal" };
+
+/** What a person does about a configuration or environment hit named by `credentialConfigViolation`. */
+function configFix(violation: string): RefusalFix {
+  if (violation.endsWith("in the environment")) {
+    return { by: "person", step: "unsets that environment variable in the shell the push runs from, or runs the push from a shell without it" };
+  }
+  return {
+    by: "person",
+    command: "git config --list --show-origin",
+    note: "it names the file that sets it; remove the setting there (it only stops applying to the pushes it was meant for, so read its value first)",
+  };
+}
+
+function refuse(code: string, why: string, dest?: { owner: string; repo: string }, fix: RefusalFix = DOCTOR_FIX): GitCredentialResult {
   const reason = refusal({
     code,
     ...(dest !== undefined && { destination: { verb: "git push", org: dest.owner, repo: dest.repo } }),
     what: "a git credential request for github.com",
     why,
-    approval: "No approval covers this.",
-    fixes: [{ by: "person", step: "checks `repo-aegis doctor` and re-runs the command from a terminal" }],
+    approval: NO_APPROVAL_HERE,
+    fixes: [fix],
   });
   return { stdout: QUIT, stderr: `repo-aegis git-credential: ${reason}\n` };
 }
@@ -339,7 +361,12 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   if (presence === "person") return NOTHING;
 
   if (!isAbsolute(home)) {
-    return refuse("GH_IDENTITY_UNAVAILABLE", "the helper was configured without an absolute --home");
+    return refuse(
+      "GH_IDENTITY_UNAVAILABLE",
+      "the helper line in git's configuration has no absolute --home (repo-aegis writes that line itself in `install git-credential`, so it is stale or was edited by hand)",
+      undefined,
+      { by: "person", command: "repo-aegis install git-credential", note: "it rewrites only repo-aegis's own helper entry, so re-running it is safe" },
+    );
   }
   // A7: only git-remote-https may be answered. Checked for every github.com request from a non-person, mapped or not.
   let parent: Parent;
@@ -349,7 +376,10 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
     parent = { kind: "unreadable" };
   }
   if (parent.kind === "direct") {
-    return refuse("AGENT_CREDENTIAL_DIRECT_FILL", "the request does not come from git's HTTPS remote helper (for example `git credential fill` was run directly), so no credential is given");
+    return refuse("AGENT_CREDENTIAL_DIRECT_FILL", "the request does not come from git's HTTPS remote helper (for example `git credential fill` was run directly), so no credential is given; the command itself is the cause, and no repo-aegis setting created it", undefined, {
+      by: "person",
+      step: "runs the original `git push` from a terminal; a token is only given to git's own HTTPS remote helper",
+    });
   }
   // U5: a person's approval for `<owner>/<repo>` (or `<owner>/*`), bound to the owner's person account and
   // unexpired, also covers "the process list cannot be read", so an agent can push from inside a sandbox. It
@@ -367,11 +397,17 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   // the approval authorises.
   const chain = parent.kind === "push" || covered !== null;
   if (request.mixed) {
-    return refuse("AGENT_PUSH_CREDENTIAL_PATH", "the request names more than one protocol or host, so repo-aegis cannot tell where the credential would go");
+    return refuse("AGENT_PUSH_CREDENTIAL_PATH", "the request names more than one protocol or host, so repo-aegis cannot tell where the credential would go (git sent it that way; no repo-aegis setting created this)", undefined, {
+      by: "person",
+      step: "runs the push on its own, from a terminal",
+    });
   }
   // A17: one path per invocation. A renamed repository makes git ask again with the new path.
   if (request.paths.length > 1) {
-    return refuse("AGENT_PUSH_CREDENTIAL_PATH", "the request names more than one repository path, so repo-aegis cannot tell which one the credential is for");
+    return refuse("AGENT_PUSH_CREDENTIAL_PATH", "the request names more than one repository path, so repo-aegis cannot tell which one the credential is for (git sent it that way; no repo-aegis setting created this)", undefined, {
+      by: "person",
+      step: "runs the push for one repository at a time, from a terminal",
+    });
   }
   const target = request.firstPath === null ? null : ownerRepoOf(request.firstPath);
   if (target === null) {
@@ -379,7 +415,9 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
     // falling through would answer an agent with the person's credential.
     return refuse(
       "AGENT_PUSH_CREDENTIAL_CONFIG",
-      "git did not pass an owner/repo path (credential.useHttpPath must be true for github.com; `repo-aegis install git-credential` sets it)",
+      "git did not pass an owner/repo path (credential.useHttpPath must be true for github.com; `repo-aegis install git-credential` sets it, so it was never installed or the setting was turned off afterwards)",
+      undefined,
+      { by: "person", command: "repo-aegis install git-credential", note: "it sets credential.useHttpPath for github.com and touches nothing else, so re-running it is safe" },
     );
   }
   const dest = { owner: target.owner.toLowerCase(), repo: target.repo };
@@ -387,7 +425,7 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   const registry = deps.loadRegistry(home);
   if (registry === "missing") return NOTHING;
   if (registry === null) {
-    return refuse("GH_IDENTITY_UNAVAILABLE", "the registry in the pinned home could not be read, so repo-aegis cannot tell whether this owner has a GitHub identity", dest);
+    return refuse("GH_IDENTITY_UNAVAILABLE", "the registry in the pinned home could not be read (it is encrypted or damaged; repo-aegis did not change it), so repo-aegis cannot tell whether this owner has a GitHub identity", dest);
   }
 
   const owners = registeredOwners(registry);
@@ -408,31 +446,45 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
     // an unreadable chain is not known, so the covered case keeps its refusal.
     return covered === null ? NOTHING : refuseChainUnreadable(dest);
   }
-  if (choice.kind === "refuse") return refuseText(choice.code, choice.reason);
+  // A person's account and a write: this helper never consults approvals (`approvalFor` is null above), so the
+  // core refusal's "an approval covers this" would be wrong here. Say what is true for this layer instead.
+  const needsHuman = (): GitCredentialResult =>
+    refuse(
+      "GH_IDENTITY_WRITE_NEEDS_HUMAN",
+      "this would run as a person's GitHub account, and the git subcommand is not one known to only read (an alias, or one that cannot be read from the process list), so it may be a push; the person-only mapping is a registry choice, repo-aegis created no setting for it",
+      dest,
+      { by: "person", step: "runs the push from a terminal (this helper does not consult approvals for a person's account, so an approval does not help here)" },
+    );
+  if (choice.kind === "refuse") return choice.code === "GH_IDENTITY_WRITE_NEEDS_HUMAN" ? needsHuman() : refuseText(choice.code, choice.reason);
   // An agent that may only read as the person (N3): the next helper answers, but only for a subcommand known to
   // read. An alias or an unreadable subcommand could be a push, and a push as the person needs a login-bound approval.
   if (choice.column === "person") {
     if (parent.kind === "remote" && parent.sub !== null && KNOWN_READ_SUBCOMMANDS.has(parent.sub)) return NOTHING;
-    return refuse(
-      "GH_IDENTITY_WRITE_NEEDS_HUMAN",
-      "this would run as a person's GitHub account, and the git subcommand is not one known to only read (an alias, or one that cannot be read from the process list), so it may be a push",
-      dest,
-    );
+    return needsHuman();
   }
 
   if (choice.identity.kind !== "github-app") {
-    return refuse("GH_IDENTITY_UNAVAILABLE", "the agent identity of this owner is not a GitHub App", dest);
+    return refuse(
+      "GH_IDENTITY_UNAVAILABLE",
+      "the agent identity of this owner is not a GitHub App (the registry maps a GitHub login there; a person set that, repo-aegis did not)",
+      dest,
+      { by: "person", command: "repo-aegis engagements set-identity <id> --agent <app-name>", note: "`repo-aegis status` shows the current mapping; changing it affects only this owner's agent pushes" },
+    );
   }
   // git compares URL patterns against the path as sent (case and .git kept); the normalised form counts too.
   const matchCtx = { path: (request.firstPath ?? "").replace(/^\/+/, ""), altPath: `${dest.owner}/${dest.repo}`.toLowerCase() };
   // A5: configuration and environment that could redirect or capture the token. Checked before any mint.
   const entries = deps.readConfig(deps.cwd, deps.env);
   if (entries === null) {
-    return refuse("AGENT_PUSH_CREDENTIAL_CONFIG", "git's configuration could not be read", dest);
+    return refuse("AGENT_PUSH_CREDENTIAL_CONFIG", "git's configuration could not be read (git failed to start, or a config file is unreadable; repo-aegis did not cause it)", dest, {
+      by: "person",
+      command: "git config --list --show-origin",
+      note: "it shows which file fails to read; repair or remove that file",
+    });
   }
   const violation = credentialConfigViolation(entries, matchCtx, deps.env);
   if (violation !== null) {
-    return refuse("AGENT_PUSH_CREDENTIAL_CONFIG", `${violation}, which could redirect or capture the token`, dest);
+    return refuse("AGENT_PUSH_CREDENTIAL_CONFIG", `${violation}, which could redirect or capture the token; repo-aegis did not set it`, dest, configFix(violation));
   }
 
   // `store` goes to every helper in the list: one that persists would save the App token.
@@ -440,14 +492,19 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
   if (storing !== null) {
     return refuse(
       "AGENT_PUSH_CREDENTIAL_STORE",
-      `the App token would be saved by a later credential helper (${storing}), because git sends \`store\` to every helper; scope that helper away from https://github.com (credential.https://github.com.helper with a reset entry) or reorder, then re-run \`repo-aegis install git-credential\``,
+      `the App token would be saved by a later credential helper (${storing}), because git sends \`store\` to every helper; scope that helper away from https://github.com (credential.https://github.com.helper with a reset entry) or reorder, then re-run \`repo-aegis install git-credential\`; repo-aegis did not add that helper`,
       dest,
+      { by: "person", command: "git config --list --show-origin", note: "it lists the helpers in order and names the files that set them; scope the later one away from https://github.com or move it before repo-aegis's, then re-run `repo-aegis install git-credential`" },
     );
   }
 
   const taaadPath = deps.resolveTaaad(home);
   if (taaadPath === null) {
-    return refuse("GH_BINARY_UNTRUSTED", "no pinned taaad is known to use (run `repo-aegis install shim`)", dest);
+    return refuse("GH_BINARY_UNTRUSTED", "no pinned taaad is known to use (repo-aegis pins taaad only when `repo-aegis install shim` runs, so none is pinned yet or the pin was removed)", dest, {
+      by: "person",
+      command: "repo-aegis install shim",
+      note: "it needs taaad v0.6.0 or later installed first; re-running it is safe",
+    });
   }
   const scope: IdentityScope = chain ? "contents-write" : "read";
   // The audit record names the approval that let an unreadable process list through (the id, never its login).
@@ -472,7 +529,7 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
       reason: err instanceof MintError ? err.reason : "failed",
       ...coveredBy,
     });
-    return refuse(code, err instanceof MintError ? err.message : "the token could not be minted", dest);
+    return refuse(code, err instanceof MintError ? err.message : "the token could not be minted (taaad failed; repo-aegis did not cause it)", dest);
   }
   auditBestEffort({
     identity: choice.identity.name,
@@ -505,10 +562,10 @@ export function runGitCredential(
     // before anything can throw. Guard the rest the same way.
     try {
       if (readRequest(parseCredentialInput(stdin)).forGithub && deps.presence() !== "person") {
-        return refuse("GH_IDENTITY_UNAVAILABLE", "the credential helper faulted");
+        return refuse("GH_IDENTITY_UNAVAILABLE", "the credential helper hit an internal error (not a setting you made, and not one repo-aegis wrote)");
       }
     } catch {
-      return refuse("GH_IDENTITY_UNAVAILABLE", "the credential helper faulted");
+      return refuse("GH_IDENTITY_UNAVAILABLE", "the credential helper hit an internal error (not a setting you made, and not one repo-aegis wrote)");
     }
     return NOTHING;
   }

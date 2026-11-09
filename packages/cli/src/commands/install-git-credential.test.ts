@@ -344,6 +344,10 @@ describe("pre-push: AGENT_PUSH_NEEDS_APP (I15)", { skip: !cliBuilt() }, () => {
       assert.equal(r.status, 2, `${url}\n${r.stderr}`);
       assert.ok(r.stderr.includes("AGENT_PUSH_NEEDS_APP"), url);
       assert.ok(r.stderr.includes("git push https://github.com/o/r.git <branch>"), r.stderr);
+      // U7: the cause (an SSH remote goes as the person's key), who created the mapping, and that no approval helps.
+      assert.match(r.stderr, /this push's remote is an SSH one, which goes out as the person's SSH key/, url);
+      assert.match(r.stderr, /a person mapped it; repo-aegis maps none by itself/, url);
+      assert.match(r.stderr, /No approval covers this: an approval cannot make an SSH push use the App's token/, url);
     }
   });
 
@@ -360,6 +364,12 @@ describe("pre-push: AGENT_PUSH_NEEDS_APP (I15)", { skip: !cliBuilt() }, () => {
     const bad = prePush("https://github.com/o/r.git");
     assert.equal(bad.status, 2, bad.stderr);
     assert.ok(bad.stderr.includes("GIT_CREDENTIAL_HELPER_ORDER"), bad.stderr);
+    // U7: the cause, that repo-aegis only puts its helper first when `install git-credential` runs, the fix line,
+    // and that no approval changes which helper git asks first.
+    assert.match(bad.stderr, /not the first helper git runs for https:\/\/github\.com/);
+    assert.match(bad.stderr, /puts its helper first only when `install git-credential` runs/);
+    assert.match(bad.stderr, /repo-aegis install git-credential \(it adds only repo-aegis's own helper entry, so re-running it is safe/);
+    assert.match(bad.stderr, /No approval covers this: an approval cannot change which helper git asks first/);
 
     const pin = { node: realpathSync(process.execPath), cli: realpathSync(cliPath) };
     writeFileSync(globalCfg, `[credential "https://github.com"]\n\thelper = \n\thelper = ${helperCommand(pin, home)}\n`);
