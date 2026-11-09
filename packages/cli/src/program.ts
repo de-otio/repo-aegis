@@ -92,6 +92,10 @@ export async function buildProgram(): Promise<Command> {
       "--remote-url <url>",
       "with --push-ref/--range: the destination remote URL (git passes it to pre-push as $2); enables the destination checks CROSS_ORG_PUSH and PUBLIC_PUSH_NEEDS_HUMAN and prints the push receipt",
     )
+    .option(
+      "--remote-ref <ref>",
+      "with --push-ref/--range: the ref git will update on the remote (pre-push's $remote_ref); lets a live prompt approval for exactly this push stand in for a person",
+    )
     .option("--history", "scan full git history with `git log -G` per pattern (slow)")
     .option("--since <revspec>", "with --history: lower-bound revspec (only commits reachable forward of this point)")
     .option("--max-file-bytes <n>", "skip files larger than this (default 1 MiB)", v => parseInt(v, 10))

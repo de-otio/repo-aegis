@@ -156,6 +156,41 @@ describe("pre-push script — remote URL pass-through", () => {
   });
 });
 
+describe("pre-push script — the remote ref (what a prompt approval is bound to)", () => {
+  it("passes git's $remote_ref on the --push-ref path (a new ref), not the local one", () => {
+    const calls = runPrePush(
+      "remote-ref-new",
+      ["origin", "https://github.com/acme/svc.git"],
+      `refs/heads/feat ${LOCAL_SHA} refs/heads/main ${ZERO}\n`,
+    );
+    assert.equal(calls.length, 1);
+    assert.match(calls[0]!, /check --push-ref refs\/heads\/feat /);
+    assert.match(calls[0]!, /--remote-ref refs\/heads\/main(?: |$)/);
+  });
+
+  it("passes git's $remote_ref on the --range path (an update), where no ref was passed at all before", () => {
+    const calls = runPrePush(
+      "remote-ref-update",
+      ["origin", "https://github.com/acme/svc.git"],
+      `HEAD ${LOCAL_SHA} refs/heads/rel ${REMOTE_SHA}\n`,
+    );
+    assert.equal(calls.length, 1);
+    assert.match(calls[0]!, new RegExp(`check --range ${REMOTE_SHA}\\.\\.${LOCAL_SHA}`));
+    assert.match(calls[0]!, /--remote-ref refs\/heads\/rel(?: |$)/);
+  });
+
+  it("passes the right ref for each line of a multi-ref push", () => {
+    const calls = runPrePush(
+      "remote-ref-multi",
+      ["origin", "https://github.com/acme/svc.git"],
+      `refs/heads/a ${LOCAL_SHA} refs/heads/a ${ZERO}\nrefs/tags/v1 ${LOCAL_SHA} refs/tags/v1 ${REMOTE_SHA}\n`,
+    );
+    assert.equal(calls.length, 2);
+    assert.match(calls[0]!, /--remote-ref refs\/heads\/a(?: |$)/);
+    assert.match(calls[1]!, /--remote-ref refs\/tags\/v1(?: |$)/);
+  });
+});
+
 describe("pre-push script — chaining to the repo's own pre-push", () => {
   it("replays git's ref list to a chained .git/hooks/pre-push (BSD mktemp needs a template)", () => {
     // Before the template fix, `mktemp` with no argument printed nothing on

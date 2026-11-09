@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A yes at Claude Code's permission prompt now carries down to the layers below it, for that exact
+  command, for 2 minutes** (prompt approvals, `doc/design/egress-guard.md` §4a.1). When the agent hook
+  asks about a `git push` or a `gh` write in `default` or `acceptEdits` mode, it records the verb,
+  repository and destination ref (or API endpoint); git's pre-push hook and the `gh` shim then accept
+  that one command instead of sending the person to a terminal. Records live one file each under
+  `$REPO_AEGIS_HOME/prompt-approvals/`, are matched exactly (no wildcard), are never read by the agent
+  hook itself (so a "no" followed by a different command still asks), and are never written in `auto`,
+  `bypassPermissions`, `plan`, `dontAsk` or an unknown mode, or by any host other than Claude Code.
+  The prompt says which case applies. `approve --list` shows `source terminal|prompt` for every
+  entry, and `--revoke p<id>` / `--revoke all` cover them; each record and each use is an audit record
+  with `source: "prompt"`. The credential helper and the `gh` account-write path consult no prompt
+  approvals.
+- `repo-aegis check --remote-ref <ref>`: the ref git will update on the remote, which pre-push passes
+  on both of its paths.
+- `Edit(<home>/prompt-approvals/**)` joins the `permissions.deny` rules `install claude-md` writes.
+
+### Changed
+
+- **The generated pre-push script passes `--remote-ref "$remote_ref"`, so re-run `repo-aegis install
+  hooks`.** Until you do, `status` and `doctor` report the pre-push hook as stale
+  (`HOOKS_SCRIPT_STALE`), and a yes at the prompt cannot reach it: the push is refused as before, and
+  its message says to run `repo-aegis install hooks`. Nothing else about the old script's behaviour
+  changes.
+- `decideEgress`'s `ask` decision now lists every (intent, target) that asked, in `asked`.
+
 ## [0.13.1] - 2026-11-09
 
 ### Fixed

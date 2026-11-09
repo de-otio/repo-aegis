@@ -440,9 +440,17 @@ Two decisions fixed here so they are not relitigated later:
 uses only `$1`. Pass `$2` through:
 
 ```
-repo-aegis check --push-ref "$local_ref" --remote "$remote_name" --remote-url "$2"
-repo-aegis check --range "$range" --remote-url "$2"
+repo-aegis check --push-ref "$local_ref" --remote "$remote_name" --remote-ref "$remote_ref" --remote-url "$2"
+repo-aegis check --range "$range" --remote-ref "$remote_ref" --remote-url "$2"
 ```
+
+`--remote-ref` (added with prompt approvals, §4a.1) is the ref git will update
+**on the remote**, on both paths. `$local_ref` is the source side and only ever
+reaches `--push-ref`, for a new ref; an update passes no ref at all. A prompt
+approval is bound to the destination ref, so `check` reads it from
+`--remote-ref`. A script from before the flag sends none, so no prompt approval
+can match there (it fails closed), and `status` / `doctor` report
+`HOOKS_SCRIPT_STALE`: run `repo-aegis install hooks` once.
 
 `check` gains, when `--remote-url` is present:
 
@@ -458,8 +466,9 @@ repo-aegis check --range "$range" --remote-url "$2"
   `treatAsPublicDestination` rule as §1, so an unknown visibility counts as
   public after one live lookup fails) and no TTY on stderr (`isatty(2)`;
   stdin is always git's ref list, so it is never the signal) and
-  `REPO_AEGIS_EGRESS_HUMAN` unset and no live approval → exit 2 with a reason
-  naming the destination and the escapes (`repo-aegis approve <org>/<repo>`).
+  `REPO_AEGIS_EGRESS_HUMAN` unset and no live approval (a terminal approval, or
+  a prompt approval for exactly this push, §4a.1) → exit 2 with a reason naming
+  the destination and the escapes (`repo-aegis approve <org>/<repo>`).
 - otherwise one stderr line: `repo-aegis: pushing <ref> → <org>/<repo>
   (<visibility>)`.
 
@@ -651,6 +660,98 @@ What this does not change: `REPO_AEGIS_EGRESS_HUMAN` keeps its contract
 (one invocation, a human's hand on the keyboard); the agent-side rule
 stays "never set it, never work around a refusal" — the recovery is now
 "ask the human for an approval" instead of "ask the human to run it".
+
+#### 4a.1. Prompt approvals — a yes at the agent's own prompt carries down
+
+*Added after 0.13.1.* On Claude Code the hook's `ask` is a permission prompt, and
+a person's yes there used to reach nothing below it: the push then met the
+pre-push hook, which wanted a person again, and the operator was sent to a
+terminal to type the command the agent had just been allowed to run. The honest
+mistake the guard stops is private content published to a public repository, or
+an irreversible verb, with no person's yes; a yes at the prompt **is** a
+person's yes, for **this command only**.
+
+The agent hook writes a **prompt approval** when it asks, and the two layers
+below the prompt (git's pre-push hook and the `gh` shim) may honour it:
+
+- **The record.** One file per approval,
+  `$REPO_AEGIS_HOME/prompt-approvals/p<8 hex>.json` (0600, directory 0700), written
+  by `recordPromptApproval` in core (`egress-approval.ts`): the exact verb
+  (`git-push`, `gh-pr-create`, …), `org`/`repo`, the destination `ref` for a push
+  or the `endpoint` for a mutating `gh api`, the permission mode, the host's
+  session id (audit only, not matched), and an expiry **120 seconds** after
+  creation. The lifetime is a constant: no flag, no environment variable. It is
+  not consumed on use (pre-push sees one push; the shim sees one command).
+- **A separate directory, not the terminal store.** `egress-approvals.json` and
+  every terminal matcher (`findApproval`, `findLoginApproval`,
+  `findAccountBoundApproval`, `findApprovalWithAnyLogin`,
+  `findUncoveringStarApproval`) are unchanged and never read it. An older pinned
+  binary does not know the directory exists, so it cannot mistake a prompt record
+  for a terminal approval (a terminal approval with no ref matches every verb).
+  One file per approval also means no read-modify-write and no lock between
+  concurrent hooks. A prompt id starts with `p`; a terminal id is eight hex
+  digits and never does.
+- **What it is bound to, exactly** (`promptBindingOf`; no wildcard anywhere).
+  `git push` binds the **destination** side of the first refspec, normalised:
+  `main`, `HEAD:main`, `+feat:refs/heads/rel` and `refs/tags/v1` give `main`,
+  `main`, `rel` and `v1`; bare `HEAD` gives the current branch (read with
+  `git symbolic-ref`, only on the ask path). Nothing is written, so nothing below
+  can honour a yes, when the refspec is missing or unparsed, is a delete
+  (`:main`), holds a glob, variable or revision syntax, or names a detached
+  `HEAD`; when the destination is unresolved (GraphQL mutation, opaque URL, your
+  own account, an ambiguous target), a wildcard, or not a plausible GitHub name;
+  for a verb with no repository destination or no layer below the hook (`gh gist
+  create`, `npm publish`, an unrecognised `gh` shape); or for a `gh api` with no
+  endpoint. A second refspec, `--follow-tags` or `--tags` is not bound: pre-push
+  refuses the extra ref, and re-running that command gets its own prompt.
+- **Where it is honoured.** Pre-push: verb `git-push`, the same org/repo, and a
+  ref equal to the `--remote-ref` the script passes (§2); a terminal approval is
+  tried first. The `gh` shim: the verb, org/repo and (for `gh api`) endpoint from
+  the shim's own parse of argv (`egress-check.ts`), after the terminal finder.
+  A record for a PR never lets a push through, and the reverse. Each use is an
+  `egress-approval-use` audit record with `source: "prompt"`. The credential
+  helper and the `gh` identity layer consult **no** prompt approvals: a write as
+  a person-mapped account still needs a terminal approval carrying that login.
+- **The hook never reads them (F1).** The record is written **before** the person
+  answers, so after a "no" it is still live. If the hook honoured it, a second,
+  different command to the same repository would pass on the first one's record.
+  `decideEgress` therefore gets `findPromptApproval` only from the layers below
+  the prompt; the hook passes none, so after a "no" every command asks again.
+- **Only where a person answered (F9).** The hook writes only when the adapter
+  is `claude` and the payload's `permission_mode` is exactly `default` or
+  `acceptEdits` (case-sensitive; an allowlist, not a denylist). In `auto` a
+  classifier answers the prompt; in `bypassPermissions`, `plan` and `dontAsk`
+  nobody does; a missing, unknown or non-string mode counts as none of these.
+  The ask reason says which case applies, in one fixed sentence (no payload
+  text): *a yes here lets this `<verb>` to `<org>/<repo>` [ref `<ref>`] through
+  git's pre-push hook / the gh shim for 2 minutes; any other command asks
+  again*, or *in this permission mode a yes does not reach the layers below; a
+  person mints an approval from a terminal*. Copilot, Cursor, Antigravity and
+  Codex never write one.
+- **Compound commands.** The `ask` from `decideEgress` carries `asked`, every
+  (intent, target) that judged `ask` (a `git push … && gh pr create …`, or a
+  remote with several push URLs); the hook writes one record per eligible entry.
+- **An agent cannot write one.** The permissions deny list (`install claude-md`)
+  includes `Edit(<home>/prompt-approvals/**)`, and the mint command is still
+  refused in agent text. `prompt-approvals/` is runtime state like
+  `egress-approvals.json` and has the same, absent, uninstall treatment.
+- **Audited.** Each record is an `egress-approval-mint` with `source: "prompt"`
+  (verb, scope, ref or endpoint, expiry, mode, session,
+  `layer: "hook guard-egress"`), never the command text. `approve --list` shows
+  both kinds with their `source`, and `--revoke p…` / `--revoke all` cover prompt
+  records.
+
+*Known residual (accepted).* Because the record exists before the answer, a
+command the hook does **not** recognise as egress (a script, a Makefile target,
+any shape the parser drops) could repeat the **identical** verb, destination and
+ref within 120 seconds and pass the lower layers after a "no". It is bounded by
+the exact binding and two minutes, and it is not matched on session, because the
+lower layers cannot see one. If the person takes more than 120 seconds to
+answer, or the command runs a long build before `git push`, the record has
+expired: pre-push then refuses (its text says a yes covers 2 minutes), and a
+re-run prompts again. Terminal `--ref` approvals are bound to the local ref at
+pre-push and never match an update of an existing branch; making them bind
+`--remote-ref` too is a separate change.
 
 *Added 2026-11-02 (issue #151, decision D7): `*` covers only your own orgs.*
 A `*` approval used to match every owner, so one minted for a personal release
@@ -935,6 +1036,17 @@ every agent and every human, with no repo-aegis involvement at all.
   subprocess's `PATH`.
 - **`install-shim.test.ts`** — `ghShimIsFirstOnPath` agrees with `checkShim`
   on every case but the stale one, where a reachable shim is still reachable.
+- **Prompt approvals (§4a.1)** — `egress-prompt-approval.test.ts` (binding,
+  mode allowlist, file modes and TTL, exact match, malformed files, invisibility
+  to every terminal matcher, revoke and list);
+  `egress-policy-prompt-approval.test.ts` (the hook's decision ignores a
+  matching record, the shim honours it, `asked`);
+  `hook-guard-egress-prompt-approval.test.ts` (the built hook: modes, the
+  never-read invariant after a "no", Copilot/Cursor/Codex, failures, audit);
+  `check-egress.test.ts` (pre-push: remote ref, other verb, expiry, old script);
+  `egress-check.test.ts` (the shim); `agent-publish-path.test.ts` (a real
+  `git push` through the rendered pre-push script: `default` passes, `auto` is
+  refused).
 - **Pre-push integration** — against a local bare remote whose configured URL
   parses to a foreign org: push exits 2 with `CROSS_ORG_PUSH`; same org, public
   cached, `isatty(2)` false → `PUBLIC_PUSH_NEEDS_HUMAN`; with

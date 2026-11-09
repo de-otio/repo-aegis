@@ -21,7 +21,9 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
   appendAuditRecord,
+  approvalSource,
   decideEgress,
+  findPromptApprovalDefault,
   recordWorkingTree,
   describeDestinationForReceipt,
   describeVerb,
@@ -180,6 +182,9 @@ export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
       humanPresent,
       // A shell has no prompt to offer, so `ask` degrades to `deny` in core.
       capabilities: { ask: false },
+      // The shim is a layer BELOW the agent's permission prompt: a person's yes there, written by the hook for
+      // exactly this command, may stand in for a person here (the hook itself never reads it: F1).
+      findPromptApproval: findPromptApprovalDefault,
     });
   } catch (err) {
     return { kind: "fault", message: `egress policy failed: ${(err as Error).message}` };
@@ -224,6 +229,7 @@ export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
         cwd,
         details: {
           id: decision.approval.id,
+          source: approvalSource(decision.approval),
           layer: "gh shim",
           ...(decision.intent && { verb: describeVerb(decision.intent.verb) }),
           ...(decision.destination && { destination: `${decision.destination.org}/${decision.destination.repo}` }),

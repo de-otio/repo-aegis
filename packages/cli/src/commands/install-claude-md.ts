@@ -14,6 +14,7 @@ import {
   leakContextFlagPath,
   appendAuditRecord,
   approvalsPath,
+  PROMPT_APPROVALS_DIR,
   denySetCachePath,
   destinationCachePath,
   markersDir,
@@ -326,7 +327,7 @@ function mergeFirstTouchHook(
 // What is denied is deliberately narrow, because the sandbox enforces it on
 // the agent's own Bash too: the files whose tampering bypasses the guard, and
 // nothing the tools write at run time. Denied: the registry file and its `.age`
-// ciphertext, the approvals store, `hooks/**` (the git hook scripts), `bin/**`
+// ciphertext, the approvals store, `prompt-approvals/**` (a yes at the agent prompt, recorded by the hook), `hooks/**` (the git hook scripts), `bin/**`
 // (the `gh` shim) and `markers/**` (the rendered deny set the write scan
 // reads: editing it silently drops markers). NOT denied, on purpose: `state/`
 // (audit log, lock, caches) and the rest of the home. Denying the whole
@@ -424,7 +425,9 @@ export function registryDenyPlan(pin: EnforcementPin = currentEnforcementPin()):
   // denied wherever the home is (even `$HOME` or a work tree): the risky-directory
   // test is for BROADER denies only. A markers directory moved OUT of the home is
   // a path of the operator's choosing and may itself be broad, so that one is tested.
-  const dirs = [join(home, "hooks"), join(home, "bin")];
+  // prompt-approvals/ is where the agent hook records a person's yes at the host's prompt for the layers below it
+  // to read: a record an agent wrote itself would be an approval it minted for itself.
+  const dirs = [join(home, "hooks"), join(home, "bin"), join(home, PROMPT_APPROVALS_DIR)];
   const markers = markersDir(home);
   if (markers === home || markers.startsWith(home + "/")) {
     dirs.push(markers);
@@ -487,7 +490,7 @@ function legacyDenyPair(list: readonly unknown[]): string[] {
 
 /** Basenames/globs of the paths this install protects, for recognising its own rules. */
 const OUR_RULE_SHAPE =
-  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|destinations\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers)\/\*\*)\)$/;
+  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|destinations\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers|prompt-approvals)\/\*\*)\)$/;
 
 /** Shape of the rules `registryDenyPlan` writes for a pin: `<...>/@de-otio/repo-aegis/**`, or a file named `node`. */
 const OUR_PIN_RULE_SHAPE = /^Edit\(\/\/(?:.+\/@de-otio\/repo-aegis\/\*\*|.+\/node)\)$/;

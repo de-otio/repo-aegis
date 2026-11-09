@@ -60,9 +60,13 @@ import { resolveCachedDestination } from "./destination-cache.js";
 import {
   approvalScopeOf,
   findApproval,
+  findPromptApproval,
   findUncoveringStarApproval,
+  promptBindingOf,
   type ApprovalScope,
   type EgressApproval,
+  type PromptApproval,
+  type PromptBinding,
   type StarApprovalGap,
 } from "./egress-approval.js";
 import {
@@ -233,8 +237,28 @@ export type EgressDecision =
       intent?: EgressIntent;
       destination?: Destination;
     }
-  | { action: "ask"; code: EgressCode; reason: string; destination?: Destination; intent: EgressIntent }
+  | {
+      action: "ask";
+      code: EgressCode;
+      reason: string;
+      destination?: Destination;
+      intent: EgressIntent;
+      /**
+       * EVERY (intent, target) that judged `ask`, not only the first one this decision reports: a compound
+       * `git push … && gh pr create …`, or a remote with several push URLs, has more than one. The agent hook
+       * writes one prompt approval per eligible entry (doc/design/egress-guard.md §4a.1). The destination is the
+       * full target (not the printable one), `null` when the command has none.
+       */
+      asked: Array<{ intent: EgressIntent; destination: Destination | null }>;
+    }
   | { action: "deny"; code: EgressCode; reason: string; destination?: Destination; intent: EgressIntent };
+
+/**
+ * Added to rule g's refusal where prompt approvals are honoured (the `gh` shim): what a yes at an agent prompt does
+ * and does not cover, so the refusal after a "no", or after the two minutes, is not a dead end.
+ */
+export const PROMPT_APPROVAL_DENY_SENTENCE =
+  "A yes at an agent prompt covers only the same command to the same destination, for 2 minutes; re-run it and answer the prompt.";
 
 /** Human-only escape for the "is a person present" test. Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE`. */
 export const EGRESS_HUMAN_ENV = "REPO_AEGIS_EGRESS_HUMAN";
@@ -403,6 +427,14 @@ export interface DecideEgressOptions {
   /** Injectable for tests; defaults to the approvals store. */
   findApproval?: ApprovalFinder;
   /**
+   * Looks up a live PROMPT approval: a person's yes at the agent host's own prompt, for one exact command, for two
+   * minutes (egress-approval.ts). Rule g consults it only AFTER the terminal finder found nothing, and only when
+   * this is set. The agent hook never sets it, which is what keeps a "no" at the prompt from letting a different
+   * command through (F1): only the layers below the prompt (the `gh` shim, pre-push) pass it. Absent means prompt
+   * approvals are ignored.
+   */
+  findPromptApproval?: PromptApprovalFinder;
+  /**
    * Injectable for tests: the lookup behind rule g's "a `*` approval is live
    * but does not cover this" sentence. When omitted it follows
    * {@link findApproval}: the real store is read only when the real finder is
@@ -418,6 +450,12 @@ export interface DecideEgressOptions {
    */
   lookupVisibility?: VisibilityLookup;
 }
+
+/** Looks up the live prompt approval matching a binding exactly. See {@link DecideEgressOptions.findPromptApproval}. */
+export type PromptApprovalFinder = (binding: PromptBinding) => PromptApproval | null;
+
+/** Default {@link PromptApprovalFinder}: the `prompt-approvals/` directory under `REPO_AEGIS_HOME`. */
+export const findPromptApprovalDefault: PromptApprovalFinder = binding => findPromptApproval(binding);
 
 /**
  * Looks up a live `*` approval that exists but does NOT cover `destination`
@@ -1651,6 +1689,16 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
     } catch {
       approval = null;
     }
+    // A person's yes at the agent prompt for exactly this command (verb, destination, endpoint), only where the
+    // caller has a layer below the prompt to honour it (never the hook itself: F1).
+    if (approval === null && opts.findPromptApproval !== undefined) {
+      try {
+        const binding = promptBindingOf(intent, destination, () => null, opts.cwd);
+        approval = binding === null ? null : opts.findPromptApproval(binding);
+      } catch {
+        approval = null;
+      }
+    }
     if (approval !== null) {
       const shown = destination && printable(destination);
       return { action: "allow", approval, intent, ...(shown && { destination: shown }) };
@@ -1766,6 +1814,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         reason,
         ...(shownDestination && { destination: shownDestination }),
         intent,
+        asked: [{ intent, destination }],
       };
     }
     return deny(
@@ -1773,6 +1822,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       `${head}: re-run it from a terminal, ` +
         (approveCommand === null ? "" : `mint an approval first (\`${approveCommand}\`), `) +
         `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).` +
+        (opts.findPromptApproval === undefined ? "" : ` ${PROMPT_APPROVAL_DENY_SENTENCE}`) +
         starGap +
         hint,
       shownDestination,
@@ -1785,6 +1835,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
 
   let askDecision: EgressDecision | null = null;
   let approvedDecision: EgressDecision | null = null;
+  const askedAll: Array<{ intent: EgressIntent; destination: Destination | null }> = [];
   const single = (d: Destination): Destination => {
     const { alsoTargets: _dropped, ...rest } = d;
     return rest;
@@ -1794,10 +1845,14 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   for (const t of targets) {
     const d = judgeTarget(t);
     if (d.action === "deny") return d;
-    if (d.action === "ask" && askDecision === null) askDecision = d;
+    if (d.action === "ask") {
+      askedAll.push(...d.asked);
+      if (askDecision === null) askDecision = d;
+    }
     if (d.action === "allow" && d.approval !== undefined && approvedDecision === null) approvedDecision = d;
   }
-  return askDecision ?? approvedDecision ?? { action: "allow" };
+  if (askDecision !== null && askDecision.action === "ask") return { ...askDecision, asked: askedAll };
+  return approvedDecision ?? { action: "allow" };
 }
 
 /**
@@ -1808,13 +1863,18 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
 export function decideEgress(opts: DecideEgressOptions): EgressDecision {
   let ask: EgressDecision | null = null;
   let approved: EgressDecision | null = null;
+  const askedAll: Array<{ intent: EgressIntent; destination: Destination | null }> = [];
   for (const intent of opts.intents) {
     const d = decideOne(intent, opts);
     if (d.action === "deny") return d;
-    if (d.action === "ask" && ask === null) ask = d;
+    if (d.action === "ask") {
+      askedAll.push(...d.asked);
+      if (ask === null) ask = d;
+    }
     if (d.action === "allow" && d.approval !== undefined && approved === null) approved = d;
   }
-  return ask ?? approved ?? { action: "allow" };
+  if (ask !== null && ask.action === "ask") return { ...ask, asked: askedAll };
+  return approved ?? { action: "allow" };
 }
 
 /**

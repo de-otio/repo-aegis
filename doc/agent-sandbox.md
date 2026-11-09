@@ -18,6 +18,19 @@ from vendor documentation and have not been run end to end.
   (`repo-aegis approve <owner>/<repo>` or `<owner>/*`, run by a person in a
   terminal) covers it for that owner and that approval's lifetime.
 
+- **A yes at Claude Code's permission prompt for a publish.** In `default` and
+  `acceptEdits` mode, when the hook asks about a `git push` or a `gh` write and
+  the user says yes, that yes now carries down for **that exact command** (same
+  verb, same repository and ref or endpoint) for 2 minutes: git's pre-push hook
+  and the `gh` shim honour it, so the user is not sent to a terminal for a
+  command they just approved. It does **not** carry in `auto` mode (a classifier
+  answers the prompt, not a person), `bypassPermissions`, `plan` or `dontAsk`,
+  and the prompt says so. Run `repo-aegis install hooks` once after upgrading:
+  the pre-push script now passes the ref being updated, and an older script
+  cannot honour the yes (`repo-aegis doctor` reports it as a stale hook). A write
+  as a person-mapped account still needs an approval minted by a person from a
+  terminal.
+
 ## What does not work inside the sandbox
 
 **Minting a GitHub App token.** taaad-signer reads the macOS keychain, shows a

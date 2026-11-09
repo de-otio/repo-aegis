@@ -273,6 +273,8 @@ point with its own logic; see [`hook`](#hook-coding-agent-entry-points).
 | `--range <revspec>` | — | scan added lines in a commit range, e.g. `<remote>..<local>` |
 | `--push-ref <ref>` | — | scan a ref the remote does not have yet, relative to `refs/remotes/<remote>/*` (used by pre-push for new branches and tags) |
 | `--remote <name>` | `origin` | with `--push-ref`: remote whose tracking refs bound the scan |
+| `--remote-url <url>` | — | with `--push-ref`/`--range`: the destination (git passes it to pre-push as `$2`); enables the destination checks (see `check --remote-url`) |
+| `--remote-ref <ref>` | — | with `--push-ref`/`--range`: the ref git will update **on the remote** (pre-push's `$remote_ref`, passed by the generated script on both paths). A live prompt approval (`approve --list` shows `source prompt`) for exactly `git-push` to this destination and this ref stands in for a person; without it none can match. A script from before this flag sends none: run `repo-aegis install hooks` |
 | `--history` | — | scan full git history with `git log -G <pattern>` per pattern |
 | `--since <revspec>` | — | with `--history`: lower-bound revspec |
 | `--max-file-bytes <n>` | 1048576 (1 MiB) | per-file size cap; larger files reported as `skipped: too-large` |
@@ -921,7 +923,9 @@ reports the count per event.
 3. Adds `permissions.deny` **`Edit(...)`** rules to `settings.json` for the
    files whose tampering bypasses the guard, and nothing else: the registry
    file and its `.age` ciphertext, the approvals store
-   (`egress-approvals.json`), the destination cache (`destinations.json`: rules e-g read a cached entry's class and visibility, so a forged "private" entry for a public repo would skip the person check; every writer treats a failed write as a cache miss), `hooks/**` (the git hook scripts), `bin/**`
+   (`egress-approvals.json`), the prompt approvals directory
+   (`prompt-approvals/**`: an agent that could write one would have approved
+   itself), the destination cache (`destinations.json`: rules e-g read a cached entry's class and visibility, so a forged "private" entry for a public repo would skip the person check; every writer treats a failed write as a cache miss), `hooks/**` (the git hook scripts), `bin/**`
    (the `gh` shim), `markers/**` (the rendered deny set the write scan and
    the hooks read; editing it silently drops markers) and two files under
    `state/` that an enforcement path trusts: `deny-set.cache.json` (an
@@ -945,7 +949,7 @@ reports the count per event.
    `markers add`, `suggest-markers --auto-accept-above`, `init`) already fail
    earlier, because they rewrite the denied registry file. A
    registry relocated to `$HOME`, `/` or a git work tree is denied as a file
-   only, with a warning. `hooks/**`, `bin/**` and `markers/**` are narrow
+   only, with a warning. `hooks/**`, `bin/**`, `prompt-approvals/**` and `markers/**` are narrow
    subdirectories and are denied wherever the home is; only a markers directory
    moved out of the home (`REPO_AEGIS_MARKERS_DIR`) into `$HOME`, `/` or a work
    tree is not denied, with a warning. The rest of `state/` is left writable on
@@ -1430,7 +1434,8 @@ checkout at <path>`).
 
 The generated pre-push hook passes git's `$2` (the remote URL) to both
 `check --push-ref … --remote-url <url>` and `check --range … --remote-url
-<url>`. Before the content scan, `check`:
+<url>`, and, with prompt approvals, git's `$remote_ref` (the ref being updated on the
+remote) as `--remote-ref <ref>` on both. Before the content scan, `check`:
 
 1. parses the URL (GitHub only; a local path or a non-GitHub host skips
    these checks — fail open — but a URL-shaped value that does not resolve
@@ -1444,7 +1449,13 @@ The generated pre-push hook passes git's `$2` (the remote URL) to both
    offline, no TTY involved;
 4. refuses with **`PUBLIC_PUSH_NEEDS_HUMAN`** (exit 2) when the destination
    is public-facing and no human is present (a live `repo-aegis approve`
-   for it stands in for the person). The destination's class and
+   for it stands in for the person, and so does a live **prompt approval**
+   for exactly this push: verb `git-push`, this repository and this
+   `--remote-ref`, which the agent hook records when a person answers its
+   prompt in `default` or `acceptEdits` mode and which lasts 2 minutes; a
+   terminal approval is tried first. Without `--remote-ref`, an older
+   installed script, none can match and the refusal says to run `repo-aegis
+   install hooks`). The destination's class and
    visibility are this repository's own when the URL is its origin; when
    the URL names another repository, they come from that repository's
    checkout via the destination cache (see above). A visibility that is
@@ -1782,7 +1793,18 @@ unregistered owner prints a warning that the approval will not help until a
 person registers the owner (`engagements add`, or `upstreams add <owner>/<repo>`
 for a fork's upstream). A refusal that finds a live `*` approval that does not
 apply names it and says why. Stored at `$REPO_AEGIS_HOME/egress-approvals.json`
-(0600); not consumed on use (a push passes two layers). Mint, every use
+(0600); not consumed on use (a push passes two layers).
+
+**Prompt approvals.** `--list` also shows the approvals the agent hook records
+when a person answers its permission prompt (Claude Code, `default` or
+`acceptEdits` mode only; design §4a.1). Each entry is tagged `source terminal`
+or `source prompt` (and in `--json`, `source` on every entry). A prompt
+approval has an id starting with `p`, is bound to one exact `verb` (and the
+`ref` of a push, or the `endpoint` of a mutating `gh api`) for one repository,
+lives 120 seconds (shown in seconds), and is honoured by the pre-push hook and
+the `gh` shim only, never by the agent hook. They live one file each under
+`$REPO_AEGIS_HOME/prompt-approvals/`; `--revoke p<id>` removes one and
+`--revoke all` removes both kinds. They cannot be minted from the command line. Mint, every use
 (with the layer) and revoke are audit records (`egress-approval-mint`,
 `egress-approval-use`, `egress-approval-revoke`). The agent hook answers
 an approved publish with an explicit `allow` whose reason names the

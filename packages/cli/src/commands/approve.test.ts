@@ -2,12 +2,12 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv } from "../_test-utils.js";
 import { approve, type ApproveOptions } from "./approve.js";
-import { approvalsPath, listApprovals } from "@de-otio/repo-aegis-core";
+import { approvalsPath, auditLogPath, listApprovals, listPromptApprovals, recordPromptApproval } from "@de-otio/repo-aegis-core";
 
 const T0 = new Date("2026-09-12T18:00:00.000Z");
 
@@ -82,6 +82,60 @@ describe("approve", () => {
     // --list and --revoke need no TTY: they publish nothing.
     assert.equal(run(undefined, { list: true, stderrIsTTY: false, json: true }).exitCode, undefined);
   });
+  it("--list shows the source of both kinds (text and JSON), prompt ones in seconds; --revoke p… and --revoke all cover them", () => {
+    const home = join(root, "home");
+    run(undefined, { revoke: "all", json: true });
+    run("acme/term", { json: true });
+    const p1 = recordPromptApproval({
+      binding: { verb: "git-push", org: "acme", repo: "svc", ref: "main" },
+      permissionMode: "default",
+      home,
+      now: T0,
+    })!;
+    const p2 = recordPromptApproval({
+      binding: { verb: "gh-api-mutating", org: "acme", repo: "svc", endpoint: "repos/acme/svc/issues" },
+      permissionMode: "acceptEdits",
+      home,
+      now: T0,
+    })!;
+
+    const json = JSON.parse(run(undefined, { list: true, json: true }).stdout) as { list: Array<{ id: string; source: string; verb?: string }> };
+    assert.deepEqual(
+      json.list.map(a => a.source).sort(),
+      ["prompt", "prompt", "terminal"],
+      "every entry carries its source, terminal ones included",
+    );
+    assert.equal(json.list.find(a => a.id === p1.id)?.verb, "git-push");
+
+    const text = run(undefined, { list: true }).stdout;
+    assert.match(text, /3 live approval\(s\)/);
+    assert.match(text, /acme\/term  by .*  source terminal  expires /);
+    assert.match(text, new RegExp(`${p1.id}  acme/svc \\(ref main\\)  by .*  source prompt  verb git-push  expires .*\\(120 s left\\)`));
+    assert.match(text, /\(endpoint repos\/acme\/svc\/issues\)  by .*  source prompt  verb gh-api-mutating/);
+
+    const one = run(undefined, { revoke: p1.id, json: true });
+    assert.deepEqual((JSON.parse(one.stdout) as { revoked: string[] }).revoked, [p1.id]);
+    assert.deepEqual(listPromptApprovals(home, T0).map(a => a.id), [p2.id]);
+    assert.equal(listApprovals(path, T0).length, 1, "the terminal approval is untouched");
+
+    const all = run(undefined, { revoke: "all", json: true });
+    assert.equal((JSON.parse(all.stdout) as { revoked: string[] }).revoked.length, 2);
+    assert.deepEqual(listPromptApprovals(home, T0), []);
+    assert.match(run(undefined, { list: true }).stdout, /no live approvals/);
+  });
+
+  it("a minted terminal approval is audited with source terminal", () => {
+    const home = join(root, "home");
+    mkdirSync(join(home, "state"), { recursive: true });
+    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    run("acme/audited", { json: true });
+    const lines = readFileSync(auditLogPath(home), "utf8").trim().split("\n");
+    const mint = lines.map(l => JSON.parse(l) as { action: string; details: Record<string, unknown> }).find(l => l.action === "egress-approval-mint");
+    assert.equal(mint?.details["source"], "terminal");
+    rmSync(join(home, "state", "audit-log.json"), { force: true });
+    run(undefined, { revoke: "all", json: true });
+  });
+
   it("records the mapped person's login and prints it; a '*' approval and an unmapped owner carry none", () => {
     const reg = join(root, "identities.yaml");
     writeFileSync(

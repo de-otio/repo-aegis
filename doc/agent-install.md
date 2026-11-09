@@ -470,7 +470,7 @@ own terminal with `sudo`; `--user-settings` writes `~/.claude/settings.json`
 instead. See [`doc/configuration.md`](configuration.md#the-claude-code-managed-drop-in).
 
 It also adds `permissions.deny` **Edit** rules for the registry file and its
-`.age`, the approvals store, the destination cache (`destinations.json`), `hooks/**`, `bin/**`, `markers/**` (the rendered
+`.age`, the approvals store, the destination cache (`destinations.json`), `hooks/**`, `bin/**`, `prompt-approvals/**` (the hook's record of a yes at the agent prompt), `markers/**` (the rendered
 deny set) and `state/deny-set.cache.json` plus the uninstall ledger under the
 repo-aegis home
 (default `~/.config/repo-aegis`), so the agent cannot register an owner by

@@ -212,6 +212,25 @@ describe("resolveHookState", () => {
     assert.equal(state.scripts["pre-push"].current, false);
   });
 
+  it("a pre-push script from before --remote-ref is stale, and the fix names `install hooks` (prompt approvals)", () => {
+    const fx = makeFixture("stale-no-remote-ref");
+    const hooksDir = expectedHooksDir(fx);
+    writeCorrectHooks(hooksDir);
+    const prePushPath = join(hooksDir, "pre-push");
+    // The script exactly as the previous release rendered it: the same text without the new argument.
+    const current = renderHookScript("pre-push", PIN);
+    const old = current.split(' --remote-ref "$remote_ref"').join("");
+    assert.notEqual(old, current, "control: the current script passes --remote-ref");
+    writeFileSync(prePushPath, old, { mode: 0o755 });
+    chmodSync(prePushPath, 0o755);
+    gitConfig(fx, ["core.hooksPath", hooksDir]);
+
+    const state = fx.run(() => resolveHookState(fx.repoDir, PIN));
+    assert.equal(state.code, "HOOKS_SCRIPT_STALE");
+    assert.equal(state.fix, "repo-aegis install hooks");
+    assert.equal(state.scripts["pre-push"].current, false);
+  });
+
   it("T8: a hook rendered for a different pin is installed but stale (HOOKS_SCRIPT_STALE)", () => {
     const fx = makeFixture("stale-other-pin");
     const hooksDir = expectedHooksDir(fx);
