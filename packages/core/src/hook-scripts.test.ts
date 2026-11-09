@@ -444,7 +444,7 @@ describe("pre-push script: pin gone, PATH fallback", () => {
       const r = runFallback(label, "pre-push", gonePin(label), have);
       assert.equal(r.status, 0, r.stderr);
       assert.equal(r.argv.length, 1, JSON.stringify(r.argv));
-      assert.match(r.argv[0]!, /^check --push-ref refs\/heads\/main --remote origin --remote-url git@github\.com:acme\/svc\.git$/);
+      assert.match(r.argv[0]!, /^check --push-ref refs\/heads\/main --remote origin --remote-ref refs\/heads\/main --remote-url git@github\.com:acme\/svc\.git$/);
       assert.match(r.stderr, /repo-aegis: WARNING: the pinned enforcement binary is missing or not usable \(.*no-node.*no-cli\.js\)/);
       assert.ok(r.stderr.includes(`(${have}, pinned 0.14.0) instead`), r.stderr);
       assert.ok(r.stderr.includes("/bin/repo-aegis"), "names the path it ran");
@@ -455,7 +455,7 @@ describe("pre-push script: pin gone, PATH fallback", () => {
   it("an existing-ref push goes through the fallback too (check --range)", () => {
     const r = runFallback("range", "pre-push", gonePin("range"), "0.14.0", `refs/heads/main ${LOCAL_SHA} refs/heads/main ${REMOTE_SHA}\n`);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.argv[0]!, /^check --range 2{40}\.\.1{40} --remote-url /);
+    assert.match(r.argv[0]!, /^check --range 2{40}\.\.1{40} --remote-ref \S+ --remote-url /);
   });
 
   for (const have of ["0.13.9", "0.9.0"]) {

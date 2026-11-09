@@ -129,8 +129,10 @@ describe("T15: renderDropIn (D8.2, D8.4)", () => {
       it("the prompt-approval revoker fails open on a failing id and on a missing pin; every other hook still blocks", () => {
         const byArgs = (needle: string) => dropInHookCommands(spec).find(c => c.command.includes(needle))!.command;
         const revoker = byArgs("hook prompt-submit");
-        assert.equal((revoker.match(/exit 0/g) ?? []).length, 3, "uid mismatch, failing id, missing pin: all exit 0");
-        assert.ok(!revoker.includes("exit 2"));
+        // Every exit in the revoker (uid mismatch, failing id, missing pin, the PATH fallback's refusals) is 0.
+        assert.ok((revoker.match(/exit 0/g) ?? []).length >= 3, "uid mismatch, failing id, missing pin: all exit 0");
+        assert.ok(!/exit [1-9]/.test(revoker), "no exit other than 0 in the fail-open revoker");
+        assert.match(revoker, /exit 0$/);
         for (const other of ["hook guard-egress", "hook check-write", "hook egress-receipt"]) {
           assert.match(byArgs(other), /exit 2$/, other);
         }
