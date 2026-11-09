@@ -60,7 +60,7 @@ do not guess:
 Before installing, check:
 
 ```sh
-node --version          # CI tests Node 20, 22 and 24; package.json has no `engines` field
+node --version          # CI tests Node 22 and 24; package.json has no `engines` field
 npm --version
 which repo-aegis        # is it already installed?
 ```

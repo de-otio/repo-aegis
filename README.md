@@ -75,7 +75,7 @@ in [doc/guide-data-leak-prevention.md](doc/guide-data-leak-prevention.md).
 
 ## Requirements
 
-- macOS or Linux, with git. Node.js 20 or later (CI tests 20, 22 and 24).
+- macOS or Linux, with git. Node.js 22 or later (CI tests 22 and 24).
 - `gh` (GitHub CLI), if you want `gh` commands checked.
 - `sudo`, for the root-owned Claude Code settings file. Without it, use `--user-settings`.
 - Full protection is for **Claude Code**. **Codex CLI**, **Cursor**, **Copilot CLI** and

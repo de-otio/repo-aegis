@@ -5,9 +5,10 @@
 # version of this (tag scanning, a config-tamper guard, and a strict scheduled
 # profile) with the action pins kept current.
 #
-# Assumes the consuming repo has either a `.repo-aegis.yml` at the repo root
-# (declaring class + allowed engagements) or sets the `registry` input on the
-# action step.
+# Assumes the consuming repo has a `.repo-aegis.yml` at the repo root
+# (declaring class + allowed engagements). The action takes no registry, so on
+# a hosted runner the deny set is empty and only the deny-set-independent checks
+# run; see doc/github-action.md#registry-availability.
 #
 # Two rules this file demonstrates, both of which matter more than they look:
 #
@@ -68,9 +69,12 @@ jobs:
           # Don't fail the job here — we want to post the comment first, then
           # fail explicitly below.
           fail-on-hits: 'false'
-          # Both default to 'true'; stated explicitly because they are the two
-          # settings you should think about before changing.
-          require-deny-set: 'true'
+          # redact-attribution defaults to 'true'; stated explicitly because it
+          # is the setting to think hardest about before changing.
+          # require-deny-set defaults to 'true' and fails the run when the deny
+          # set is empty. A hosted runner has no registry, so it is 'false'
+          # here; keep the default on a runner that has rendered markers.
+          require-deny-set: 'false'
           redact-attribution: 'true'
 
       - name: Comment on PR with findings

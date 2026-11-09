@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking-ish: Node.js 20 is no longer tested or documented as supported.** CI tests Node 22 and
+  24, and the README and `doc/agent-install.md` now say Node.js 22 or later. No `package.json` has an
+  `engines` field, so nothing changes at install time.
+- This repo's own `leak-scan` and `leak-scan-strict` workflows install repo-aegis 0.13.1 (they
+  were pinned to 0.10.2), and `dependabot-auto-merge.yml` is deleted.
+
+### Removed
+
+- **The Action's `registry` input.** It only exported `REPO_AEGIS_REGISTRY`, but `audit` and
+  `check` build the deny set from rendered marker files, so the scan saw no patterns: red under the
+  default `require-deny-set` floor, a silent pass without it. The action never rendered markers
+  from the registry, so the input could not work. A workflow that needs a registry installs the CLI
+  itself and runs `repo-aegis render` (see `doc/github-action.md`).
+- **The Action's `hits-json` output.** It was deprecated in 0.8.0 with removal promised for 0.9.0.
+  Use `results-file`, the path to the JSON under `RUNNER_TEMP`. Only the exit code and that path
+  are step outputs now.
+
 ### Fixed
 
 - **Documentation now matches the code.** The README says what `init` does: it asks nothing, uses no

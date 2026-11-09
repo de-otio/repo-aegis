@@ -171,6 +171,19 @@ if main:
         if needle not in body:
             errors.append(f"action.yml: missing {why} ({needle})")
 
+    # 8) The removed `hits-json` output must stay removed: it put the scan
+    #    payload in a step output, the shape that invites `run:` interpolation.
+    if "hits-json" in body or "hits-json" in (main.get("outputs") or {}):
+        errors.append("action.yml: the hits-json output was removed; do not reintroduce it")
+
+    # 9) The `registry` input was removed: exporting REPO_AEGIS_REGISTRY alone
+    #    never produced a deny set (the CLI builds it from rendered marker
+    #    files), so the input only turned a clear failure into a confusing one.
+    if "registry" in (main.get("inputs") or {}):
+        errors.append("action.yml: the registry input was removed; it never produced a deny set")
+    if "REPO_AEGIS_REGISTRY" in yaml.dump(main):
+        errors.append("action.yml: nothing may export REPO_AEGIS_REGISTRY (no registry input)")
+
 if errors:
     sys.stderr.write("FAIL: composite action validation errors:\n")
     for err in errors:
