@@ -71,9 +71,23 @@ export type MintFailureReason =
  * MATCHED here, never copied into the message: it can name an owner (a customer) and it is printed to agents.
  * Patterns follow taaad v0.6's `taaad mint` error texts; anything unrecognised is the generic failure.
  */
-export function classifyMintFailure(status: number | null, stderr: string): MintError {
+export function classifyMintFailure(
+  status: number | null,
+  stderr: string,
+  /** Whether this process runs inside the agent's sandbox (Claude Code's sandbox runtime sets SANDBOX_RUNTIME). */
+  inSandbox: boolean = process.env["SANDBOX_RUNTIME"] !== undefined,
+): MintError {
   const e = (reason: MintFailureReason, message: string, kind: MintError["kind"] = "unavailable"): MintError =>
     new MintError(kind, message, reason);
+  // Seen 2026-11-09: inside the default Claude Code sandbox taaad-signer fails BEFORE its presence prompt (no
+  // Touch ID dialog appears), plausibly because the sandbox blocks the keychain or the helper's GitHub call. The
+  // hint names the likely cause without claiming it; it is added only where a sandbox could explain the failure.
+  const sandboxHint = inSandbox
+    ? ". This command ran inside the agent's sandbox, which most likely stopped taaad-signer before its presence " +
+      "prompt (keychain or network); an App token cannot be minted from inside it. Your human runs the command " +
+      "from a terminal, or lets this one command run outside the sandbox"
+    : "";
+  const statusPart = status === null ? "" : ` (taaad exit status ${status})`;
   switch (status) {
     case 2:
       return e("tty", "taaad refused to print a token to a terminal");
@@ -82,6 +96,18 @@ export function classifyMintFailure(status: number | null, stderr: string): Mint
     case 4:
       return e("denied", "your human declined taaad's presence prompt; stop and ask them before retrying");
   }
+  // taaad ≥ 0.7 may print one fixed line `taaad: error=<code>[ status=<n>]` carrying taaad-signer's own error code
+  // (SignerError.code). Only an allowlisted code is used, verbatim; nothing else from stderr is ever copied.
+  const coded = /^taaad: error=([a-z][a-z-]{0,30})(?: status=(-?\d{1,6}))?\s*$/m.exec(stderr);
+  if (coded !== null && SIGNER_CODES.has(coded[1]!)) {
+    const code = coded[1]!;
+    const detail = coded[2] === undefined ? "" : ` status=${coded[2]}`;
+    if (code === "presence-denied") return e("denied", `your human declined taaad's presence prompt (taaad error=${code}); stop and ask them before retrying`);
+    if (code === "rate-limited") return e("rate-limited", `taaad's presence-prompt limit is reached (taaad error=${code}); wait a few minutes and retry`);
+    if (code === "app-mismatch") return e("installation-mismatch", `the App's installation belongs to a different account than the destination owner (taaad error=${code})`, "installation-mismatch");
+    const sandboxable = code === "keychain" || code === "github" || code === "protocol" || code === "missing" || code === "internal";
+    return e("signer", `taaad-signer failed at step error=${code}${detail}, so no token was signed${sandboxable ? sandboxHint : ""}`);
+  }
   if (/User interaction is not allowed/i.test(stderr)) {
     return e("screen-locked", "taaad-signer could not show its presence prompt (Touch ID), most likely because the screen is locked; retry when your human is at the machine");
   }
@@ -89,7 +115,7 @@ export function classifyMintFailure(status: number | null, stderr: string): Mint
     return e("timeout", "nobody answered taaad's presence prompt (Touch ID) in time; retry when your human is at the machine");
   }
   if (/taaad-signer/i.test(stderr)) {
-    return e("signer", "taaad-signer failed, so no token was signed; your human can run the same command from a terminal to see taaad's own message");
+    return e("signer", `taaad-signer failed${statusPart}, so no token was signed${sandboxHint || "; your human can run the same command from a terminal to see taaad's own message"}`);
   }
   if (/has no install_id/i.test(stderr)) {
     return e("not-installed", "the App has no installation yet (taaad has no installation id for it)");
@@ -103,8 +129,24 @@ export function classifyMintFailure(status: number | null, stderr: string): Mint
   if (/not accessible to the parent installation|\b(404|422)\b|not found/i.test(stderr)) {
     return e("repo-not-covered", "GitHub would not issue a token for this repository: the App's installation does not include it");
   }
-  return e("failed", "taaad exited with a failure and minted nothing; your human can run the same command from a terminal to see taaad's own message");
+  return e("failed", `taaad exited with a failure${statusPart} and minted nothing${sandboxHint || "; your human can run the same command from a terminal to see taaad's own message"}`);
 }
+
+/** taaad-signer's machine-readable error codes (taaad `SignerError.code`), used verbatim when taaad prints them. */
+const SIGNER_CODES: ReadonlySet<string> = new Set([
+  "internal",
+  "missing",
+  "protocol",
+  "not-found",
+  "presence-denied",
+  "rate-limited",
+  "github",
+  "widened",
+  "keychain",
+  "exists",
+  "bad-key",
+  "app-mismatch",
+]);
 
 /**
  * Longer than taaad's own wait: taaad-signer gives a person 240 s to answer its presence prompt (Touch ID),

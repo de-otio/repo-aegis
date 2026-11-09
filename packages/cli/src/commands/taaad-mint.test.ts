@@ -74,6 +74,32 @@ describe("classifyMintFailure: taaad's exit-1 texts become a fixed reason (stder
       for (const leak of ["customer-a-org", "ghs_", "example-bot"]) assert.ok(!e.message.includes(leak), leak);
     });
   }
+  it("a taaad `error=<code>` line names the signer step verbatim, allowlisted codes only", () => {
+    const coded = classifyMintFailure(1, "error: taaad mint: customer-a-org\ntaaad: error=keychain status=-25308\n", false);
+    assert.equal(coded.reason, "signer");
+    assert.match(coded.message, /step error=keychain status=-25308/);
+    assert.ok(!coded.message.includes("customer-a-org"), "only the code is copied");
+    assert.equal(classifyMintFailure(1, "taaad: error=presence-denied", false).reason, "denied");
+    assert.equal(classifyMintFailure(1, "taaad: error=rate-limited", false).reason, "rate-limited");
+    assert.equal(classifyMintFailure(1, "taaad: error=app-mismatch", false).kind, "installation-mismatch");
+    // An unknown code, or free text after it, is not trusted: the line is ignored.
+    const unknown = classifyMintFailure(1, "taaad: error=customer-a-org", false);
+    assert.equal(unknown.reason, "failed");
+    assert.ok(!unknown.message.includes("customer-a-org"));
+    assert.equal(classifyMintFailure(1, "taaad: error=keychain and more text", false).reason, "failed");
+  });
+
+  it("inside the agent sandbox, signer and generic failures say the sandbox is the likely cause; outside, they don't", () => {
+    for (const stderr of ["taaad-signer exited 7", "something new", "taaad: error=keychain", "taaad: error=github"]) {
+      assert.match(classifyMintFailure(1, stderr, true).message, /inside the agent's sandbox/, stderr);
+      assert.doesNotMatch(classifyMintFailure(1, stderr, false).message, /sandbox/, stderr);
+    }
+    // Not for failures a sandbox cannot explain.
+    assert.doesNotMatch(classifyMintFailure(1, "taaad: error=widened", true).message, /sandbox/);
+    assert.doesNotMatch(classifyMintFailure(1, "app example-bot has no install_id yet", true).message, /sandbox/);
+    assert.match(classifyMintFailure(1, "something new", false).message, /exit status 1/);
+  });
+
   it("the exit code wins over stderr for 3 and 4", () => {
     assert.equal(classifyMintFailure(3, "taaad-signer: User interaction is not allowed").reason, "rate-limited");
     assert.equal(classifyMintFailure(4, "taaad-signer: User interaction is not allowed").reason, "denied");
