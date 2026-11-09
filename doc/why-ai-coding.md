@@ -1,8 +1,8 @@
 # Why repo-aegis matters for AI-assisted coding
 
-> The dominant new leak vector in multi-customer work, why prose-only
-> rules don't catch it, and how the deterministic gate is shaped to
-> compensate.
+> A leak path that AI tooling adds to multi-customer work, why
+> prose-only rules don't catch it, and how the deterministic gate is
+> shaped to compensate.
 
 AI coding agents (Claude Code, Cursor, Copilot, Aider, Cline, Continue)
 absorb whatever context they're given — file paths, tool output, prior
@@ -15,8 +15,10 @@ of that value, or just working on that customer's code — sits at the
 top of the agent's attention and gets emitted by reflex when a
 "concrete example" is needed.
 
-This is the dominant new leak vector for anyone using AI tooling on
-multi-customer work. It compounds three other AI-specific dynamics:
+This is the failure mode repo-aegis was built after: the author hit it
+repeatedly in day-to-day multi-customer work. There is no published
+measurement of how common it is, so treat it as an observation, not a
+ranking. It compounds three other AI-specific dynamics:
 
 - **Agents write fast.** A leak that lands between "agent generates"
   and "human notices" has a much shorter window than for hand-written
@@ -36,14 +38,14 @@ repo-aegis is designed around that failure mode:
 - **Deterministic gate, not a rule.** Pre-commit hook running
   `repo-aegis check --staged` catches what soft instructions cannot
   filter. Same for a Claude Code PostToolUse hook on every
-  Write/Edit/MultiEdit — empirically the highest-leverage single
-  leak-prevention mechanism for AI coding workflows.
+  Write/Edit/MultiEdit — the earliest point at which a slip can be
+  caught, before it reaches a commit.
 - **Self-correction loop, not just a block.** `repo-aegis check`
   returns structured hit data with `--json` and stable exit codes
   (0 = clean, 1 = hit, 2 = error). The agent reads the output,
   identifies which engagement's marker was tripped, and revises on
-  the next turn. Self-catch is empirically more reliable than
-  pre-write blocking — the agent gets concrete feedback ("you
+  the next turn. The aim is that the agent fixes the slip itself, not
+  only that it is blocked: it gets concrete feedback ("you
   wrote `betaco` in a customer-A repo") rather than an abstract
   refusal.
 - **Engagement-scoped deny sets.** Inside customer-A's own repo,
