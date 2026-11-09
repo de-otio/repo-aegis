@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { loadRegistry, type AncestorInfo, type IdentityPresence } from "@de-otio/repo-aegis-core";
+import { loadRegistry, mintApproval, type AncestorInfo, type IdentityPresence } from "@de-otio/repo-aegis-core";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { hermeticGitEnv, scrubGitEnv } from "../_test-utils.js";
 import { parseShowScopeList } from "../git-credential-config.js";
@@ -382,6 +382,132 @@ describe("git-credential get: the parent chain (A7, review finding)", () => {
       parentFromAncestry(realChain(["push", "origin", "main"], [url, "https://github.com/o/other.git"]), "o/r.git"),
       { kind: "remote", sub: "remote-https" },
     );
+  });
+});
+
+describe("git-credential get: an unreadable process list (U2, U5)", () => {
+  const unreadable = (): GitCredentialDeps => deps({ ancestry: () => ({ ancestors: [], complete: false }) });
+  const approvalsFile = (): string => join(home, "egress-approvals.json");
+  const approve = (target: { org: string; repo: string }, over: { login?: string; ref?: string; now?: Date } = {}): string =>
+    mintApproval({ target, path: approvalsFile(), ...over }).id;
+
+  it("no approval: the text names a sandbox as the likely cause and three remedies, all a person's", () => {
+    const r = get(request(), unreadable());
+    assertRefused(r, "AGENT_PUSH_CHAIN_UNREADABLE");
+    assert.match(r.stderr, /sandbox/i);
+    assert.match(r.stderr, /process list/);
+    assert.match(r.stderr, /A person runs the push from a terminal\./);
+    assert.match(r.stderr, /A person runs, from a terminal: repo-aegis approve o\/r \(agents may then push to it for the approval's lifetime\)\./);
+    assert.match(r.stderr, /A person lets the agent's command run outside the sandbox\./);
+    assert.match(r.stderr, /Agents: do not run that yourself/);
+    assert.match(r.stderr, /doc\/agent-guide\.md#agent_push_chain_unreadable/);
+    assert.ok(!/(agent|you) (may|can|should) (disable|leave|run outside)/i.test(r.stderr), "never tells an agent to leave the sandbox");
+    assert.equal(calls(), 0);
+  });
+
+  it("no approval and no usable path: still refused, and no approve command is offered", () => {
+    const r = get("protocol=https\nhost=github.com\n\n", unreadable());
+    assertRefused(r, "AGENT_PUSH_CHAIN_UNREADABLE");
+    assert.ok(!r.stderr.includes("repo-aegis approve"), r.stderr);
+    assert.equal(calls(), 0);
+  });
+
+  it("an approval for the repository covers it: a contents-write token, one stderr line, no other change", () => {
+    const id = approve({ org: "o", repo: "r" }, { login: "example-user" });
+    const r = get(request(), unreadable());
+    assert.match(r.stdout, /^username=x-access-token\npassword=ghs_exampletoken0123456789abcdef\n/);
+    assert.equal(r.stderr, `repo-aegis: approval ${id} covers an unreadable process list for o/r\n`);
+    assert.match(argv(), /^mint --app example-bot --repo o\/r --permissions contents-write --json$/);
+    assert.equal(calls(), 1);
+  });
+
+  it("an approval for the whole owner covers it; the owner and repository match case-insensitively", () => {
+    const id = approve({ org: "o", repo: "*" }, { login: "example-user" });
+    assert.match(get(request("O/R.git"), unreadable()).stderr, new RegExp(`approval ${id} covers`));
+    assert.equal(calls(), 1);
+  });
+
+  it("the audit record names the approval id and what it covered", () => {
+    const id = approve({ org: "o", repo: "r" }, { login: "example-user" });
+    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    const saved = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = home;
+    try {
+      get(request(), unreadable());
+    } finally {
+      if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
+      else process.env["REPO_AEGIS_HOME"] = saved;
+    }
+    const lines = readFileSync(join(home, "state", "audit.log"), "utf8").trim().split("\n");
+    const rec = JSON.parse(lines[lines.length - 1]!) as { action: string; details: Record<string, unknown> };
+    assert.equal(rec.action, "git-credential");
+    assert.deepEqual(
+      { ...rec.details },
+      { identity: "bot", kind: "github-app", owner: "o", repo: "r", scope: "contents-write", verb: "push", approval: id, covers: "AGENT_PUSH_CHAIN_UNREADABLE" },
+    );
+    assert.ok(!lines.join("\n").includes("example-user"), "the person's login is not copied into the log");
+  });
+
+  it("an approval that does not cover it leaves the refusal: another repo or owner, no login, `*`, a ref, expired", () => {
+    const longAgo = new Date("2020-01-01T00:00:00Z");
+    approve({ org: "o", repo: "other" }, { login: "example-user" });
+    approve({ org: "p", repo: "*" }, { login: "example-user" });
+    approve({ org: "o", repo: "r" }); // no login: the owner had no mapped person at mint time
+    approve({ org: "*", repo: "*" });
+    approve({ org: "o", repo: "r" }, { login: "example-user", ref: "main" });
+    approve({ org: "o", repo: "r" }, { login: "example-user", now: longAgo });
+    assertRefused(get(request(), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
+    assert.equal(calls(), 0);
+  });
+
+  it("a chain that WAS read and shows a non-git caller is refused even with a covering approval", () => {
+    approve({ org: "o", repo: "r" }, { login: "example-user" });
+    const direct: AncestorInfo[] = [
+      { pid: 9, ppid: 8, comm: "git", argv: ["git", "credential", "fill"] },
+      { pid: 8, ppid: 1, comm: "zsh", argv: ["zsh"] },
+    ];
+    assertRefused(get(request(), deps({ ancestry: () => direct })), "AGENT_CREDENTIAL_DIRECT_FILL");
+    const shell: AncestorInfo[] = [{ pid: 8, ppid: 1, comm: "zsh", argv: ["zsh"] }];
+    assertRefused(get(request(), deps({ ancestry: () => shell })), "AGENT_CREDENTIAL_DIRECT_FILL");
+    assert.equal(calls(), 0);
+  });
+
+  it("a request naming two paths or two hosts is not covered, and git's configuration is still checked", () => {
+    approve({ org: "o", repo: "*" }, { login: "example-user" });
+    assertRefused(get(request("o/r.git", "path=o/s.git\n"), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
+    assertRefused(get("protocol=https\nhost=github.com\nhost=example.com\npath=o/r.git\n\n", unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
+    assertRefused(get(request(), deps({ ancestry: () => ({ ancestors: [], complete: false }), readConfig: () => null })), "AGENT_PUSH_CREDENTIAL_CONFIG");
+    assert.equal(calls(), 0);
+  });
+
+  it("a covered request for an owner with no agent identity is not handed to the person's own helper", () => {
+    approve({ org: "q", repo: "*" }, { login: "example-user" });
+    assertRefused(get(request("q/r.git"), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
+    approve({ org: "p", repo: "*" }, { login: "example-user" });
+    assertRefused(get(request("p/r.git"), unreadable()), "GH_IDENTITY_WRITE_NEEDS_HUMAN");
+    assert.equal(calls(), 0);
+  });
+
+  it("a person present is not subject to any of it: nothing, as before", () => {
+    assert.deepEqual(get(request(), deps({ ancestry: () => ({ ancestors: [], complete: false }) }, "person")), { stdout: "", stderr: "" });
+  });
+
+  it("the approval store is the pinned home's, not REPO_AEGIS_HOME's", () => {
+    const elsewhere = join(tmp, `elsewhere${n}`);
+    mkdirSync(elsewhere, { recursive: true });
+    const saved = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = elsewhere;
+    try {
+      // An approval only in the caller's home does not count...
+      mintApproval({ target: { org: "o", repo: "r" }, login: "example-user", path: join(elsewhere, "egress-approvals.json") });
+      assertRefused(get(request(), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
+      // ...and one in the pinned home counts whatever the caller's environment says.
+      approve({ org: "o", repo: "r" }, { login: "example-user" });
+      assert.match(get(request(), unreadable()).stdout, /^username=/);
+    } finally {
+      if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
+      else process.env["REPO_AEGIS_HOME"] = saved;
+    }
   });
 });
 

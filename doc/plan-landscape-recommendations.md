@@ -358,3 +358,23 @@ files.
 ## 5. Phase 0 findings
 
 _To be filled in by the Phase 0 spike._
+
+### TU2 spike: can the credential helper confirm git's remote helper without the process list?
+
+**Answer: no reliable signal exists. Nothing was implemented on it; the unreadable-chain path rests on the approval (U5) instead.**
+
+Method (2026-11-09, git 2.56.0, macOS, one 30-minute box). A local HTTP server answered every request with `401` and `WWW-Authenticate: Basic`. `git ls-remote` against it ran a stub credential helper that recorded what it received (argv, stdin, the names of the `GIT_*` environment variables, the kinds of open file descriptors, its parent). The server needed a local port, which the default Claude Code sandbox refuses, so the experiment ran with the sandbox off. The comparison run, `git credential fill` with the same attributes on stdin, was refused by repo-aegis's own egress hook and was not rerun around it; its behaviour is taken from git's source and the definition of the protocol, and is marked below as reasoned, not observed.
+
+What git passes to a helper, from the observed run:
+
+| Channel | Content | Distinguishes git's remote helper from an arbitrary caller? |
+|---|---|---|
+| argv | `<helper> get` | No. The same for any caller of the helper. |
+| stdin | `capability[]=authtype`, `capability[]=state`, `protocol`, `host`, `path` (with `credential.useHttpPath`), `wwwauth[]` after a `401` | No. These are the credential-protocol attributes. `git credential fill` reads the same lines from its own stdin and forwards them to the helper, so any caller can supply a `wwwauth[]` line. (Reasoned.) |
+| environment | `GIT_EXEC_PATH`, `GIT_DIR`, `GIT_PREFIX`, `GIT_EDITOR`, `GIT_CONFIG_PARAMETERS` | No. git sets these for every child it starts, from any subcommand, and a shell can set them too. There is no variable that only `git-remote-http(s)` sets. |
+| file descriptors | stdin and stdout are pipes, plus inherited pipes and directory handles from the harness | No. No git-specific descriptor. |
+| parent | `git-remote-http` (visible here only because `ps` worked) | Yes, but only through the process list, which is the thing that is unreadable. |
+
+Other routes considered and rejected without more experiments: `getppid()` gives a pid, not an identity (only `sysctl`/`ps`/`proc_pidpath` turn it into a name, and the sandbox blocks those reads); a socket or pipe credential carried by git does not exist; a nonce in the git config would have to be readable by the caller too (the caller is the same user), so it separates nothing; `GIT_TRACE*` variables are the opposite of a signal, since the helper refuses when they are set.
+
+Conclusion: whatever git hands the helper, a caller can hand it too. This matches the threat model in §0: the process list was only ever a check against an accidental `git credential fill`, not against a deliberate caller. Where it cannot be read, "cannot tell" is covered by a person's approval (U5), which is the only signal that a person decided agents may push here.
