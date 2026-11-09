@@ -219,6 +219,8 @@ drafted there), and a calendar note for about May 2027:
 - ggshield or Nightfall ship local, per-repository dictionaries.
 - Any host ships a native "this workspace belongs to engagement X" concept.
 
+Done: the list is in doc/analysis-landscape-2026-11.md §5.
+
 ## 3. Execution: tasks, waves and models
 
 ### 3.1 Model assignment rule
