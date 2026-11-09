@@ -1093,8 +1093,22 @@ probed — neither depends on visibility.
 
 ### `repo-aegis audit`
 
-Composite repo health check, useful as a CI step or before publishing
-a tarball / VSIX.
+Composite local repo health check, useful as a CI step. It reads files and
+git state only; it makes no network calls and extracts no archives.
+
+The org sweep and the published-archive scan are not part of it any more:
+`--org`, `--published` and their companions (`--no-secret-scan`, `--token`,
+`--max-queries`, `--accept-cross-border`) moved to
+[`repo-aegis-scan audit`](#repo-aegis-scan-audit). For one release the old flags
+still parse (they are hidden from `--help`), print the exact replacement
+command, run nothing, and exit **2**:
+
+```
+repo-aegis: `audit --org` and `audit --published` moved to `repo-aegis-scan audit --org example-org --accept-cross-border` (install: `npm install -g @de-otio/repo-aegis-scan`). Run `repo-aegis audit` without those flags for the local checks.
+```
+
+A job that ran `repo-aegis audit --org X` now needs two steps: `repo-aegis audit`
+for the local checks and `repo-aegis-scan audit --org X` for the sweep.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -1104,13 +1118,7 @@ a tarball / VSIX.
 | `--no-fixture-check` | — | skip fixture/__fixtures__/testdata directory scan |
 | `--no-remote-check` | — | skip the remote-vs-class consistency check |
 | `--no-hooks-check` | — | skip the git-hooks liveness check (`core.hooksPath` wiring); the generated CI workflow always sets this — hooks are never installed on a CI runner |
-| `--org <org>` | — | run a one-shot GitHub code-search sweep against this org (needs token) |
-| `--published <pkg-or-tarball>` | — | scan a packed npm tarball, VSIX bundle, or npm package name |
-| `--no-secret-scan` | — | with `--published`: skip the universal secret-shape scan over archive contents |
 | `--ignore-allowlist-comments` | off | report findings a `repo-aegis: allow` comment suppresses (audit-grade strict) |
-| `--token <env-var>` | `GH_TOKEN` | env var holding the GitHub token for `--org` |
-| `--max-queries <n>` | 30 | cap on `--org` seed-derived queries per run |
-| `--accept-cross-border` | off | consent to sending `--org` seed substrings to GitHub |
 | `--min-patterns <n>` | 0 | exit **2** if the computed deny set has fewer than `<n>` patterns (see `check`) |
 | `--require-deny-set` | off | sugar for `--min-patterns 1` |
 | `--redact-attribution` | off | strip engagement attribution from output (see `check`) |
@@ -1164,7 +1172,31 @@ visible in `audit` output even though `check` doesn't block on it.
 Engagement and `_private_infra` hits are never informational, at any
 path.
 
-### `audit --org` notes
+### `repo-aegis-scan audit`
+
+Moved here from `repo-aegis audit --org` / `--published` so the gate CLI imports no
+HTTP client and never runs `npm pack`. It lives in `@de-otio/repo-aegis-scan`
+(`npm install -g @de-otio/repo-aegis-scan`). Behaviour, check names (`org-scan`,
+`published`), finding codes and the JSON envelope are the same as before; the
+differences are that only these two checks run, and that at least one of `--org` /
+`--published` is required (neither is a usage error, exit **2**).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--org <org>` | — | run a one-shot GitHub code-search sweep against this org (needs token) |
+| `--published <pkg-or-tarball>` | — | scan a packed npm tarball, VSIX bundle, or npm package name |
+| `--no-secret-scan` | — | with `--published`: skip the universal secret-shape scan over archive contents |
+| `--token <env-var>` | `GH_TOKEN` | env var holding the GitHub token for `--org` |
+| `--max-queries <n>` | 30 | cap on `--org` seed-derived queries per run |
+| `--accept-cross-border` | off | consent to sending `--org` seed substrings to GitHub |
+| `--min-patterns <n>` / `--require-deny-set` | 0 / off | exit **2** if the deny set has fewer than `<n>` patterns; `REPO_AEGIS_MIN_PATTERNS` applies too (see `check`) |
+| `--redact-attribution` | off | strip engagement attribution from output (see `check`) |
+| `--verbose` | off | reveal literal matches (NEVER from hooks) |
+| `--cwd <dir>`, `--registry-path <path>`, `--home <dir>`, `--json` | — | as on `repo-aegis` |
+
+Exit code: 1 if a check fails, 2 on usage error or an unmet floor, 0 if clean.
+
+#### `--org` notes
 
 Sending markers (or substrings derived from them) to GitHub Code
 Search is a cross-border data transfer. The `--accept-cross-border`
@@ -1172,7 +1204,7 @@ flag (or the `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1` env var) is a
 hard gate for compliance. The seed query budget is capped at
 `--max-queries` (default 30).
 
-### `audit --published` notes
+#### `--published` notes
 
 Accepts:
 - npm tarball path (`.tgz`)

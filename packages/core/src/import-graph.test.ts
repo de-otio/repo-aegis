@@ -237,3 +237,91 @@ describe("hot-path determinism guard", () => {
     );
   });
 });
+
+// ---- the gate path carries no network code --------------------------------
+//
+// `audit --org` / `--published` used to live in `cli/commands/audit.ts`, which
+// imported the scan package (an HTTP client). They moved to `repo-aegis-scan
+// audit` so that nothing the gate loads can reach GitHub or run `npm pack`.
+// The guard below keeps it that way: it walks the CLI's gate modules — plus
+// the local `audit`, which stays in the CLI — and fails if any of them reaches
+// `packages/scan/` (directly or through core) or names an HTTP client.
+//
+// The honest mistake this stops: someone re-adding an "optional" network step
+// to a gate command because the sweep code is one import away.
+
+const NETWORK_FREE_ENTRY_POINTS: string[] = [
+  ...GATE_PATH_ENTRY_POINTS,
+  "packages/cli/dist/commands/audit.js",
+  "packages/cli/dist/commands/git-credential.js",
+  "packages/cli/dist/commands/hook-check-write.js",
+  "packages/cli/dist/commands/hook-guard-egress.js",
+  "packages/cli/dist/commands/hook-scan-bash-output.js",
+];
+
+const NETWORK_PACKAGE_PATTERNS: RegExp[] = [/(?:^|[\\/])packages[\\/]scan[\\/]/];
+
+// A package name standing alone as a string literal (`"@octokit/request"`,
+// `` `@de-otio/repo-aegis-scan` ``). Prose that merely mentions the scan
+// package — the moved-flag message tells people to install it — has a space,
+// not a quote, in front of the name, so it does not match.
+const NETWORK_STRING_LITERALS: RegExp[] = [
+  /["'`]@de-otio\/repo-aegis-scan["'`/]/,
+  /["'`]@octokit\//,
+];
+
+describe("gate path carries no network code (audit --org/--published moved to repo-aegis-scan)", () => {
+  let repoRoot: string;
+  let reachable: Set<string>;
+
+  before(() => {
+    repoRoot = findRepoRoot();
+    reachable = walkImportGraph(NETWORK_FREE_ENTRY_POINTS, repoRoot);
+  });
+
+  it("no gate or local-audit module resolves under packages/scan/", () => {
+    const offenders = [...reachable].filter(p =>
+      NETWORK_PACKAGE_PATTERNS.some(re => re.test(relative(repoRoot, p))),
+    );
+    assert.equal(
+      offenders.length,
+      0,
+      `gate path imports the scan package (network code):\n` +
+        offenders.map(o => `  ${relative(repoRoot, o)}`).join("\n"),
+    );
+  });
+
+  it("no reachable file names the scan package or an HTTP client as a string literal", () => {
+    const offenders: Array<{ file: string; literal: string }> = [];
+    for (const file of reachable) {
+      const source = readFileSync(file, "utf8");
+      for (const re of NETWORK_STRING_LITERALS) {
+        if (re.test(source)) offenders.push({ file: relative(repoRoot, file), literal: String(re) });
+      }
+    }
+    assert.equal(
+      offenders.length,
+      0,
+      `gate-path file(s) name a network package:\n` +
+        offenders.map(o => `  ${o.file}  (${o.literal})`).join("\n"),
+    );
+  });
+
+  // Positive control. Without it, a walker that silently stopped following
+  // imports would make the two tests above pass forever.
+  it("control: the same walk from the moved code DOES reach the scan package and the HTTP client", () => {
+    const moved = walkImportGraph(["packages/scan/dist/audit.js"], repoRoot);
+    assert.ok(
+      [...moved].some(p => NETWORK_PACKAGE_PATTERNS.some(re => re.test(relative(repoRoot, p)))),
+      "expected the scan audit module to resolve under packages/scan/",
+    );
+    assert.ok(
+      [...moved].some(p => /octokit-client\.js$/.test(p)),
+      "expected the scan audit module to reach the octokit client",
+    );
+    const literalHit = [...moved].some(p =>
+      NETWORK_STRING_LITERALS.some(re => re.test(readFileSync(p, "utf8"))),
+    );
+    assert.ok(literalHit, "expected the literal detector to fire on the moved code");
+  });
+});

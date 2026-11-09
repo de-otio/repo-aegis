@@ -71,7 +71,11 @@ in [doc/guide-data-leak-prevention.md](doc/guide-data-leak-prevention.md).
   for different clients at the same time without anyone switching the active `gh` account.
   See [Setting up identities](doc/configuration.md#setting-up-identities-a-walkthrough).
 - **Enforces in CI too.** `repo-aegis install ci` generates GitHub Actions workflows that run the
-  same checks on the server. Bypassing a local hook does not get past them.
+  same checks on the server. Bypassing a local hook does not get past them. The checks that need
+  the network are a separate package so the gate never loads them: `repo-aegis-scan audit --org`
+  sweeps an org's code search for your markers, and `repo-aegis-scan audit --published` scans a
+  packed tarball before you publish it (both were flags of `repo-aegis audit`; see
+  [doc/cli-reference.md](doc/cli-reference.md#repo-aegis-scan-audit)).
 
 ## Requirements
 

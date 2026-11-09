@@ -103,7 +103,8 @@ jobs:
       #   1. Pack ONCE. Scan the artifact, then publish THAT artifact. Packing
       #      again at publish time would mean the bytes that were scanned and
       #      the bytes that ship are two different archives.
-      #   2. Scan with the JUST-BUILT CLI (packages/cli/dist), not the
+      #   2. Scan with the JUST-BUILT scanner (packages/scan/dist — `audit
+      #      --published` lives in the scan package, not the gate CLI), not the
       #      published one. A released regression must not be able to bless its
       #      own tarball.
       #
@@ -139,13 +140,8 @@ jobs:
             echo "==> Packing ${name} from ${dir}"
             tgz=$(cd "$dir" && npm pack --silent --pack-destination "$PACK_DIR")
             echo "==> Scanning ${PACK_DIR}/${tgz}"
-            node packages/cli/dist/index.js audit \
+            node packages/scan/dist/index.js audit \
               --published "${PACK_DIR}/${tgz}" \
-              --no-marker-scan \
-              --no-lockfile-check \
-              --no-fixture-check \
-              --no-remote-check \
-              --no-hooks-check \
               --json
             printf '%s\t%s\n' "$pkg" "${PACK_DIR}/${tgz}" >> "$PACK_DIR/manifest.txt"
           done
