@@ -100,7 +100,7 @@ describe("buildIdentityList", () => {
       const bad = buildIdentityList(reg);
       assert.equal(bad.identities[0]!.loginProblem, problem, JSON.stringify(login));
       const text = identityListLines(bad).join("\n");
-      assert.match(text, new RegExp(`alice: gh-login ${NOT_A_VALID_LOGIN.replace(/[()]/g, "\\$&")}`), text);
+      assert.ok(text.includes(`alice: gh-login ${NOT_A_VALID_LOGIN}`), text);
       assert.ok(login.trim() === "" || !text.includes(login), "the bad login is not echoed");
     }
   });
