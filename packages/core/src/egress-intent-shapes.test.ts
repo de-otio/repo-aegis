@@ -136,6 +136,84 @@ describe("runners and interpreters: not modelled, so no intent at the hook (the 
   });
 });
 
+describe("remote and container runners: a publish run through them is unresolved (no shim or pre-push there)", () => {
+  const PUBLISHING: Array<[string, "git-push" | "gh-unknown"]> = [
+    ["ssh host 'git push origin main'", "git-push"],
+    ["ssh host git push origin main", "git-push"],
+    ["ssh -p 22 -i key host gh pr create --repo o/r --title t --body b", "gh-unknown"],
+    ["ssh -t host 'cd x && git push origin main'", "git-push"],
+    ["sudo ssh host git push origin main", "git-push"],
+    ["docker exec ctr git push origin main", "git-push"],
+    ["docker exec -it -u root ctr git push origin main", "git-push"],
+    ["docker exec ctr sh -c 'git push origin main'", "git-push"],
+    ["docker run --rm -e A=1 -v /a:/b img gh pr create --repo o/r --title t", "gh-unknown"],
+    ["docker container exec ctr git push origin main", "git-push"],
+    ["docker compose run svc gh pr create --repo o/r --title t", "gh-unknown"],
+    ["podman exec ctr git push origin main", "git-push"],
+    ["podman run --rm img gh pr create --repo o/r --title t", "gh-unknown"],
+    ["kubectl exec pod -- git push origin main", "git-push"],
+    ["kubectl exec -n ns -c c pod -- gh pr create --repo o/r --title t", "gh-unknown"],
+    ["devcontainer exec --workspace-folder . git push origin main", "git-push"],
+    ["nix-shell --pure --run 'gh pr create --repo o/r --title t'", "gh-unknown"],
+    ["nix-shell shell.nix --run 'git push origin main'", "git-push"],
+    ["nix develop -c gh pr create --repo o/r --title t", "gh-unknown"],
+    ["nix shell nixpkgs#gh --command gh pr create --repo o/r --title t", "gh-unknown"],
+    ["vagrant ssh -c 'git push origin main'", "git-push"],
+    ["vagrant ssh default --command 'gh pr create --repo o/r --title t'", "gh-unknown"],
+    ["wsl git push origin main", "git-push"],
+    ["wsl -d Ubuntu -- gh pr create --repo o/r --title t", "gh-unknown"],
+    ["distrobox enter box -- git push origin main", "git-push"],
+    ["distrobox-enter -n box -- git push origin main", "git-push"],
+    ["toolbox run git push origin main", "git-push"],
+    ["toolbox run -c fedora gh pr create --repo o/r --title t", "gh-unknown"],
+  ];
+  for (const [c, verb] of PUBLISHING) {
+    it(`${c} → one unresolved intent`, () => {
+      const i = only(c);
+      assert.equal(i.verb, verb);
+      assert.equal(i.unresolved, "unparsed-shape");
+    });
+  }
+
+  it("a runner that runs nothing publishing is no intent, and so is a mention inside a quoted echo", () => {
+    for (const c of [
+      "ssh host ls",
+      "ssh host 'echo git push'",
+      "ssh host echo git push",
+      "ssh host gh pr view 1",
+      "ssh -t host htop",
+      "docker exec ctr cat file",
+      "docker exec ctr echo git push",
+      "docker run --rm img echo hi",
+      "docker ps",
+      "docker build -t x .",
+      "podman exec ctr ls -la",
+      "kubectl exec pod -- ls",
+      "kubectl get pods",
+      "devcontainer exec --workspace-folder . npm test",
+      "nix-shell --run 'ls'",
+      "nix develop -c make",
+      "nix build",
+      "vagrant ssh -c 'uptime'",
+      "vagrant up",
+      "wsl ls",
+      "distrobox enter box -- ls",
+      "toolbox run ls",
+      "toolbox list",
+    ]) {
+      assert.deepEqual(all(c), [], c);
+    }
+  });
+});
+
+describe("a flag that is not a value flag is not skipped over the command", () => {
+  it("sudo -h and watch -p take no value: the push behind them resolves", () => {
+    assert.equal(only("sudo -h git push origin main").verb, "git-push");
+    assert.equal(only("watch -p git push https://github.com/stranger/r main").remote, "https://github.com/stranger/r");
+    assert.equal(only("sudo --host h git push origin main").verb, "git-push"); // --host still takes a value
+  });
+});
+
 describe("process substitution: <(…) and >(…) are commands of their own", () => {
   it("cat <(gh …)", () => {
     const i = only("cat <(gh issue create -R stranger/r -b x)");

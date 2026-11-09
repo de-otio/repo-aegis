@@ -628,7 +628,7 @@ const WRAPPER_SPECS = new Map<string, WrapperSpec>([
     "sudo",
     {
       value: new Set([
-        "-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-T", "-U",
+        "-u", "-g", "-p", "-C", "-D", "-r", "-t", "-T", "-U",
         "--user", "--group", "--host", "--prompt", "--close-from", "--chdir", "--role", "--type",
       ]),
     },
@@ -641,7 +641,7 @@ const WRAPPER_SPECS = new Map<string, WrapperSpec>([
   ["caffeinate", { value: new Set(["-t", "-w"]) }],
   // `busybox sh -c …`: the applet name follows.
   ["busybox", { value: NO_VALUE_FLAGS }],
-  ["watch", { value: new Set(["-n", "--interval", "-p"]) }],
+  ["watch", { value: new Set(["-n", "--interval"]) }],
   ["flock", { value: new Set(["-w", "-E", "--timeout", "--wait", "--conflict-exit-code"]), positionals: 1 }],
   [
     "xargs",
@@ -665,6 +665,168 @@ function bundledFlagTakesNext(spec: WrapperSpec, t: string): boolean {
     if (spec.value.has(`-${bundle[k]!}`)) return k === bundle.length - 1;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Remote and container runners
+// ---------------------------------------------------------------------------
+
+/**
+ * A program that runs a command somewhere the `gh` shim and the pre-push hook do not exist (another host, a
+ * container, a pod, a nix environment): `ssh host git push …`, `docker exec ctr gh pr create …`. The command
+ * word is the runner, so the hook would see nothing, and no layer below judges it either.
+ */
+interface RemoteRunnerSpec {
+  /** The first positional must be one of these (`docker exec|run`, `kubectl exec`, `nix develop`); absent: no subcommand. */
+  sub?: ReadonlySet<string>;
+  /** Words that may come before the subcommand (`docker container exec`, `docker compose run`). */
+  prefix?: ReadonlySet<string>;
+  /** Flags that take a value (the next word, unless it is attached with `=`). */
+  value: ReadonlySet<string>;
+  /** Flags whose value is itself a command line: `vagrant ssh -c TEXT`, `nix-shell --run TEXT`. */
+  text?: ReadonlySet<string>;
+  /** Flags after which every remaining word is the command: `nix develop -c gh pr create`. */
+  command?: ReadonlySet<string>;
+  /** Positional words between the options and the command (the host, the container, the pod). 99: the command is only ever behind `--` or a flag. */
+  positionals: number;
+  /** The words after the options are a command to run (false: only `text` / `command` flags run something). */
+  exec: boolean;
+}
+
+const set = (...w: string[]): ReadonlySet<string> => new Set(w);
+
+const DOCKER_SPEC: RemoteRunnerSpec = {
+  sub: set("exec", "run"),
+  prefix: set("container", "compose"),
+  value: set(
+    "-H", "--host", "-c", "--context", "--config", "-l", "--log-level",
+    "-e", "--env", "-u", "--user", "-w", "--workdir", "-v", "--volume", "--name", "-p", "--publish", "--entrypoint",
+    "--network", "--net", "--label", "--env-file", "--mount", "--platform", "--hostname", "-h", "--cpus", "-m", "--memory",
+    "--pull", "--restart", "--security-opt", "--cap-add", "--cap-drop", "--add-host", "--detach-keys", "-a", "--attach",
+    "--log-driver", "--tmpfs", "--device", "--group-add", "--ipc", "--pid", "--shm-size", "--dns", "--profile", "-f", "--file",
+    "-p", "--project-name",
+  ),
+  positionals: 1,
+  exec: true,
+};
+
+const REMOTE_RUNNERS = new Map<string, RemoteRunnerSpec>([
+  [
+    "ssh",
+    {
+      value: set("-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-E", "-e", "-S", "-W", "-w", "-O", "-B", "-I", "-m", "-Q"),
+      positionals: 1,
+      exec: true,
+    },
+  ],
+  ["docker", DOCKER_SPEC],
+  ["podman", DOCKER_SPEC],
+  ["nerdctl", DOCKER_SPEC],
+  [
+    "kubectl",
+    {
+      sub: set("exec"),
+      value: set("-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-s", "--server", "--as", "--cluster", "-f", "--filename", "--pod-running-timeout", "--request-timeout", "--user", "--token"),
+      positionals: 1,
+      exec: true,
+    },
+  ],
+  [
+    "oc",
+    {
+      sub: set("exec", "rsh"),
+      value: set("-n", "--namespace", "-c", "--container", "--context", "--kubeconfig", "-s", "--server", "--as", "--cluster", "--user", "--token"),
+      positionals: 1,
+      exec: true,
+    },
+  ],
+  [
+    "devcontainer",
+    {
+      sub: set("exec"),
+      value: set("--workspace-folder", "--config", "--container-id", "--id-label", "--remote-env", "--user", "--log-level", "--docker-path", "--override-config"),
+      positionals: 0,
+      exec: true,
+    },
+  ],
+  ["wsl", { value: set("-d", "--distribution", "-u", "--user", "--cd", "--distribution-id"), positionals: 0, exec: true }],
+  ["wsl.exe", { value: set("-d", "--distribution", "-u", "--user", "--cd", "--distribution-id"), positionals: 0, exec: true }],
+  ["distrobox", { sub: set("enter"), value: set("-n", "--name"), positionals: 99, exec: true }],
+  ["distrobox-enter", { value: set("-n", "--name"), positionals: 99, exec: true }],
+  ["toolbox", { sub: set("run"), value: set("-c", "--container", "-d", "--distro", "-r", "--release"), positionals: 0, exec: true }],
+  ["vagrant", { sub: set("ssh"), value: set("-p", "--plugin-version"), text: set("-c", "--command"), positionals: 99, exec: false }],
+  ["nix-shell", { value: set("-p", "--packages", "-I", "--arg", "--argstr", "--attr", "-A"), text: set("--run", "--command"), positionals: 99, exec: false }],
+  [
+    "nix",
+    {
+      sub: set("develop", "shell"),
+      value: set("-f", "--file", "--override-input", "--inputs-from", "-I", "--profile", "--expr"),
+      command: set("-c", "--command"),
+      positionals: 99,
+      exec: false,
+    },
+  ],
+]);
+
+/** The command lines a runner is handed, each to be parsed as a command of its own (parser-shaped: option arity, subcommand, position; never a scan of the text). */
+function remoteCommandLines(spec: RemoteRunnerSpec, args: readonly string[]): string[] {
+  const lines: string[] = [];
+  const asLines = (words: readonly string[]): void => {
+    if (words.length === 1) lines.push(words[0]!);
+    else if (words.length > 1) lines.push(words.map(quoteWord).join(" "));
+  };
+  const flagName = (t: string): { name: string; attached: string | undefined } => {
+    const eq = t.indexOf("=");
+    return t.startsWith("--") && eq > 0 ? { name: t.slice(0, eq), attached: t.slice(eq + 1) } : { name: t, attached: undefined };
+  };
+  const isFlag = (t: string): boolean => t.startsWith("-") && t !== "-";
+
+  // Flags whose value is a command line, or after which the command follows: wherever they sit.
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i]!;
+    if (t === "--" || !isFlag(t)) continue;
+    const { name, attached } = flagName(t);
+    if (spec.text?.has(name)) {
+      const v = attached ?? args[i + 1];
+      if (v !== undefined) lines.push(v);
+    } else if (spec.command?.has(name)) {
+      asLines(attached !== undefined ? [attached, ...args.slice(i + 1)] : args.slice(i + 1));
+    }
+  }
+  if (!spec.exec) return lines;
+
+  let i = 0;
+  const skipFlag = (): void => {
+    const { name, attached } = flagName(args[i]!);
+    i += spec.value.has(name) && attached === undefined ? 2 : 1;
+  };
+  if (spec.sub !== undefined) {
+    while (i < args.length && isFlag(args[i]!)) skipFlag();
+    if (spec.prefix?.has(args[i] ?? "") === true) {
+      i++;
+      while (i < args.length && isFlag(args[i]!)) skipFlag();
+    }
+    if (i >= args.length || !spec.sub.has(args[i]!)) return lines;
+    i++;
+  }
+  let positionals = 0;
+  while (i < args.length) {
+    const t = args[i]!;
+    if (t === "--") {
+      asLines(args.slice(i + 1));
+      return lines;
+    }
+    if (isFlag(t)) {
+      skipFlag();
+    } else if (positionals < spec.positionals) {
+      positionals++;
+      i++;
+    } else {
+      break;
+    }
+  }
+  asLines(args.slice(i));
+  return lines;
 }
 
 const SHELL_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"]);
@@ -3179,6 +3341,31 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
         intents.push({ ...i, segmentIndex, joinedBy: i.joinedBy ?? seg.joinedBy, precededByCd: i.precededByCd || precededByCd });
       }
     };
+    /** The kind of publish a runner's command lines contain, parsed on their own (no state is shared with this line), or null. */
+    const remoteRunKind = (lines: readonly string[], envRepo: string | undefined): "gh" | "git" | null => {
+      for (const text of lines) {
+        ctx.expansion.bytes += text.length;
+        if (ctx.expansion.bytes > PARSE_EXPANSION_BUDGET) throw new ExpansionLimitError();
+        let found: EgressIntent[];
+        if (ctx.depth >= MAX_NEST_DEPTH) {
+          const s = sentinelFor(text, base);
+          found = s === null ? [] : [s];
+        } else {
+          found = parseUnsafe(text, {
+            ...ctx,
+            depth: ctx.depth + 1,
+            envOverridden,
+            inheritedEnvRepo: envRepo,
+            dangerEnv: segDanger,
+            tainted: new Map(ctx.tainted),
+            ptyNames: new Map(ctx.ptyNames),
+            state: { change: undefined, strong: undefined },
+          });
+        }
+        if (found.length > 0) return found.some(i => i.verb === "git-push") ? "git" : "gh";
+      }
+      return null;
+    };
     /** Emit a fail-closed intent for what this segment hides. */
     const sentinel = (kind: "gh" | "git"): void => {
       emit(kind === "gh" ? unresolvedIntent(base, "gh-unknown", "unparsed-shape") : unresolvedGitIntent(base));
@@ -3261,7 +3448,13 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
             if (inner !== null) intent = { ...inner, wrapper: { kind: "dot-gh", as: dotGh.as } };
           }
         } else if (cmd === "npm" || cmd === "pnpm" || cmd === "yarn") intent = classifyNpm(cmd, args, base);
-        else if (hasExpansion(word)) {
+        else if (REMOTE_RUNNERS.has(cmd)) {
+          // `ssh host git push …`, `docker exec ctr gh pr create …`: the command runs where neither the gh shim nor
+          // the pre-push hook exists. Parse what the runner is handed as a command of its own; if it is a
+          // `git push` or a `gh <write>`, that publish is unjudged, so it is an unresolved intent.
+          const kind = remoteRunKind(remoteCommandLines(REMOTE_RUNNERS.get(cmd)!, args), envRaw);
+          if (kind !== null) sentinel(kind);
+        } else if (hasExpansion(word)) {
           // `$GH issue create`, `$(which gh) pr comment 5`: the command is whatever the expansion yields.
           const kind = hiddenCommandKind(args);
           if (kind !== null) sentinel(kind);

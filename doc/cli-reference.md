@@ -1823,7 +1823,7 @@ now reports, unless `--no-egress-checks`:
 | Check | Fires when | Fix |
 |---|---|---|
 | `PUSH_DEFAULT_IMPLICIT` | global `push.default` is unset or not `nothing` | `git config --global push.default nothing` |
-| `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` | no shim; another `gh` precedes it on `PATH`; the shim on `PATH` is an earlier release's script | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
+| `SHIM_MISSING` / `SHIM_NOT_FIRST` (**fail**) / `SHIM_STALE` | no shim; another `gh` precedes it on `PATH` (a **fail**: the shim is the only guard for a `gh` call the hook does not parse, such as `find -exec gh …` or an interpreter's `os.system`); the shim on `PATH` is an earlier release's script | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
 | `ENFORCEMENT_UNPINNED` (**fail**) | an installed git hook, the shim or a Claude Code hook command calls `repo-aegis` by name (an install from before the enforcement pin) | `repo-aegis install hooks` / `install shim` / `install claude-md` |
 | `ENFORCEMENT_PIN_MISSING` (**fail**) | a pinned node or CLI path no longer exists, so that hook exits 1 and that shim refuses publishing verbs | `repo-aegis install hooks` / `repo-aegis install shim` |
 | `MULTIPLE_INSTALLS` (warn) | more than one `repo-aegis` on `PATH` (each listed with its version), or the first one is not the pinned one | keep one install, then re-run `install hooks` and `install shim` |

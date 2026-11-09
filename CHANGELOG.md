@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does. The shim therefore needs to be first on `PATH` for those shapes (`repo-aegis doctor`,
   `SHIM_NOT_FIRST`). `EGRESS_PTY_WRAPPER` is still refused where the parser sees the wrapper
   through a variable or a substitution.
+- **Remote and container runners are read as a shape, because no layer below them exists.** The shim and
+  the pre-push hook run only on this machine, so `ssh host 'git push …'`, `ssh host gh pr create …`,
+  `docker|podman exec|run … git push`, `kubectl exec pod -- gh …`, `devcontainer exec`,
+  `nix-shell --run`, `nix develop -c`, `vagrant ssh -c`, `wsl`, `distrobox enter --` and `toolbox run`
+  are now an unresolved intent when what they run is a `git push` or a `gh <write>`, so rule h refuses
+  or asks as before. It is a parse of the runner's options and the command it is handed, not a scan of
+  text: `ssh host ls`, `docker exec ctr cat file` and `ssh host 'echo git push'` stay allowed.
+- `sudo -h` and `watch -p` take no value (they were skipped over the command): `sudo -h git push origin main`
+  and `watch -p git push` now resolve to the push.
+- `SHIM_NOT_FIRST` is a stated FAIL in `doctor` (it already failed by default; the severity is now
+  explicit and pinned by a test). The shim is the only guard for the shapes the hook no longer reads.
 - A bundle of short flags that ends in a value-taking flag is now read as taking the next word:
   `env -iC /tmp git push origin main` and `sudo -Eu root git push …` resolve to the push, so rule b′
   and the destination checks still see it.

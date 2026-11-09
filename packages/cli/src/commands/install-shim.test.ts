@@ -371,6 +371,7 @@ describe("checkShim", () => {
     });
     assert.equal(checks[0]?.code, "SHIM_NOT_FIRST");
     assert.equal(checks[0]?.ok, false);
+    assert.equal(checks[0]?.severity, "fail");
     assert.ok(checks[0]?.fix?.includes(join(home, "bin")));
   });
 
@@ -383,6 +384,7 @@ describe("checkShim", () => {
     const checks = checkShim({ REPO_AEGIS_HOME: home, PATH: empty });
     assert.equal(checks[0]?.code, "SHIM_NOT_FIRST");
     assert.equal(checks[0]?.ok, false);
+    assert.equal(checks[0]?.severity, "fail");
   });
 
   it("ok when the shim is installed and first on PATH", () => {

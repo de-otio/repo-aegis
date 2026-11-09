@@ -70,6 +70,8 @@ const PTY_FORMS: ReadonlyArray<readonly [label: string, command: string, wrapper
   ["braced variable", "S=script; ${S} -q /dev/null git push origin main", /script/],
   ["variable holding unbuffer, gh", "U=unbuffer; $U gh issue create --repo acme/svc --title x", /unbuffer/],
   ["$(which script)", "$(which script) -q /dev/null git push origin main", /script/],
+  ["ssh -tt localhost", "ssh -tt localhost gh issue create --repo acme/svc", /ssh -t/],
+  ["ssh -t host", "ssh -t localhost 'git push origin main'", /ssh -t/],
   ["backtick which", "`which unbuffer` gh issue create --repo acme/svc", /unbuffer/],
 ];
 
@@ -86,8 +88,6 @@ const NOT_RECOGNISED_AT_THE_HOOK: ReadonlyArray<readonly [label: string, command
   ["expect -c", "expect -c 'spawn gh issue create --repo acme/svc; interact'"],
   ["faketty", "faketty gh issue create --repo acme/svc --title x"],
   ["socat pty", "socat - EXEC:'gh issue create --repo acme/svc',pty"],
-  ["ssh -tt localhost", "ssh -tt localhost gh issue create --repo acme/svc"],
-  ["ssh -t host", "ssh -t localhost 'git push origin main'"],
   ["multiplexer, new session", "tmux new-session -d 'gh issue create --repo acme/svc --title x'"],
   ["multiplexer, send-keys", "tmux send-keys -t 0 'gh issue create --repo acme/svc' Enter"],
   ["screen -dm", "screen -dm gh issue create --repo acme/svc --title x"],

@@ -313,10 +313,26 @@ are data to it. A word-level re-read of the command used to catch
 positives landed on `sed`, `echo` and heredocs; it was removed (P1-C of the
 complexity review) because the layer below already judges those shapes when
 they actually run: the `gh` shim sees the real argument vector of every `gh`
-call however it was spawned, and the pre-push hook sees every push. That makes
-the shim, first on `PATH`, the only guard for those shapes (`doctor` reports
-`SHIM_NOT_FIRST`). A resolved or unresolved destination is judged by rule h
-before anything else.
+call on this machine however it was spawned, and the pre-push hook sees every
+push made here. That makes the shim, first on `PATH`, the only guard for those
+shapes (`doctor` reports `SHIM_NOT_FIRST` as a failure). It does not reach a
+command that runs somewhere else: see the remote and container runners in the
+known gaps below, which the parser reads as a shape for exactly that reason. A
+resolved or unresolved destination is judged by rule h before anything else.
+
+**Remote and container execution.** The shim and the pre-push hook exist only
+on this machine, so a `git push` or `gh <write>` run through `ssh host …`,
+`docker|podman|nerdctl exec|run …`, `docker compose exec|run`, `kubectl|oc exec`,
+`devcontainer exec`, `nix-shell --run`, `nix develop|shell -c`, `vagrant ssh -c`,
+`wsl`, `distrobox enter -- …` or `toolbox run` has no layer below the hook. The
+parser reads these runners as a shape (the runner's own options and its host,
+container or pod are skipped by arity; what follows, a `-c` / `--run` text or
+the exec'd words, is parsed as a command of its own). If that command is a
+`git push` or `gh <write>`, the result is one **unresolved** intent, so rule h
+refuses or asks as for any unnameable destination. This is a parse, not a scan
+of text: `ssh host ls`, `docker exec ctr cat file` and `ssh host 'echo git push'`
+are no intent. What it cannot see (a script already on the remote host or in
+the image that publishes, or a runner that is not listed) is not guarded.
 
 Known gaps, stated so nobody assumes coverage: the fork parent that `gh` can
 pick through the API for a `gh` write verb other than `gh pr create` (R5; D10
@@ -325,7 +341,11 @@ resolve through remotes, but that is not proven); a `GH_REPO` exported from a
 shell startup file, which the hook cannot see and only the shim reads (R8, see
 `doctor`'s `SHELL_STARTUP_OVERRIDES`); and, on hook-only installs, an ssh
 redirect from a persistent change the hook cannot see, which the pre-push hook
-still refuses (R11, `PREPUSH_HOOK_MISSING`). Owners whose names contain `_`
+still refuses (R11, `PREPUSH_HOOK_MISSING`); and execution on another host or in
+a container, where neither the shim nor the pre-push hook exists (the runners
+listed above are read as a shape; any other way to get a command onto a remote
+machine, or a publish that a remote script performs by itself, is not guarded).
+Owners whose names contain `_`
 (Enterprise Managed Users) cannot be registered, so rule h refuses them
 permanently for an agent. Visibility from the
 `repo-aegis.visibility` cache. Class from `readRepoConfig(cwd)` when the
