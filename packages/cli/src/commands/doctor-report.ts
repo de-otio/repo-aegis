@@ -26,6 +26,11 @@ export interface Finding {
   repo?: string;
   /** Appended to a collapsed line (for example ` [would fix]`). */
   suffix?: string;
+  /**
+   * For a SKIP: why it was skipped, and for whom. Skips that share a key become one line,
+   * `SKIP 2 checks for gh account X: <reason>`, so one cause is not printed once per code.
+   */
+  skip?: { key: string; subject?: string; reason: string };
 }
 
 export interface ReportLine {
@@ -57,11 +62,11 @@ export function collapseFindings(findings: readonly Finding[], verbose: boolean)
   const groups = new Map<string, Finding[]>();
   const order: Array<Finding | string> = [];
   for (const f of findings) {
-    if (verbose || f.repo === undefined) {
+    if (verbose || (f.repo === undefined && f.skip === undefined)) {
       order.push(f);
       continue;
     }
-    const key = `${f.label}\u0000${f.code}`;
+    const key = f.skip !== undefined ? `skip\u0000${f.skip.key}` : `${f.label}\u0000${f.code}`;
     const group = groups.get(key);
     if (group === undefined) {
       groups.set(key, [f]);
@@ -81,6 +86,17 @@ export function collapseFindings(findings: readonly Finding[], verbose: boolean)
         notes: first.notes ?? [],
         ...(first.fix !== undefined && { fix: first.fix }),
         count: 1,
+        fixesDiffer: false,
+      });
+      continue;
+    }
+    if (first.skip !== undefined) {
+      lines.push({
+        label: first.label,
+        code: first.code,
+        text: `${members.length} checks${first.skip.subject !== undefined ? ` for ${first.skip.subject}` : ""}: ${first.skip.reason}`,
+        notes: [],
+        count: members.length,
         fixesDiffer: false,
       });
       continue;
@@ -138,4 +154,21 @@ export function fixFirstLines(lines: readonly ReportLine[]): string[] {
     ...shown,
     ...(rest > 0 ? [`  ... and ${rest} more failing code(s): repo-aegis doctor --verbose lists each fix`] : []),
   ];
+}
+
+/**
+ * The count the summary prints: FAIL lines as printed, not the repositories inside a collapsed line.
+ * `doctor: 2 failing (1 machine, 1 across 219 repositories)`. The exit code and `--json`'s `summary.failed`
+ * keep counting repositories and machine findings; only the text counts what it shows.
+ */
+export function failingSummary(findings: readonly Finding[], lines: readonly ReportLine[]): string {
+  const failing = lines.filter(l => l.label === "FAIL").length;
+  const machine = findings.filter(f => f.label === "FAIL" && f.repo === undefined).length;
+  const repos = new Set(findings.filter(f => f.label === "FAIL" && f.repo !== undefined).map(f => f.repo));
+  const repoLines = failing - machine;
+  const parts = [
+    ...(machine > 0 ? [`${machine} machine`] : []),
+    ...(repoLines > 0 ? [`${repoLines} across ${repos.size} ${repos.size === 1 ? "repository" : "repositories"}`] : []),
+  ];
+  return `${failing} failing${parts.length > 0 ? ` (${parts.join(", ")})` : ""}`;
 }

@@ -186,7 +186,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`HOOKS_PATH_LOCAL_DUPLICATE: 14 repositories (repo-aegis doctor --json lists them)`), the text ends
   with a short "Fix these first" list (each FAIL once, with its fix command), and the per-finding `fix:`
   lines move behind the new `doctor --verbose`, which also lists every repository. `--json` still lists
-  everything and gains `fix` on each repository result.
+  everything and gains `fix` on each repository result. The text summary counts the FAIL lines it prints
+  (`doctor: 2 failing (1 machine, 1 across 219 repositories)`), and SKIPs that share a reason (two
+  checks for one gh account, or `gh` absent) print as one line.
 
 ### Removed
 

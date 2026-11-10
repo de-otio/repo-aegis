@@ -44,7 +44,7 @@ import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { findWorkingTrees, defaultScanRoots } from "../repo-walk.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { checkLabel, isFailure, isReportable, PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
-import { collapseFindings, fixFirstLines, renderLines, type Finding } from "./doctor-report.js";
+import { collapseFindings, failingSummary, fixFirstLines, renderLines, type Finding } from "./doctor-report.js";
 import { checkShim } from "./install-shim.js";
 import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
 import { gitCredentialOrderChecks } from "./doctor-git-credential-checks.js";
@@ -340,7 +340,20 @@ export function reportFindings(
   const out: Finding[] = [];
   for (const c of machine) {
     if (!isReportable(c)) continue;
-    out.push({ label: checkLabel(c), code: c.code, line: `${c.code} — ${c.detail}`, ...(c.fix !== undefined && { fix: c.fix }) });
+    const label = checkLabel(c);
+    out.push({
+      label,
+      code: c.code,
+      line: `${c.code} — ${c.detail}`,
+      ...(c.fix !== undefined && { fix: c.fix }),
+      ...(label === "SKIP" && {
+        skip: {
+          key: `${c.account ?? ""}\u0000${c.skipReason ?? c.detail}`,
+          ...(c.account !== undefined && { subject: `gh account ${c.account}` }),
+          reason: c.skipReason ?? c.detail.replace(/^skipped: /, ""),
+        },
+      }),
+    });
   }
   for (const r of results) {
     // A repository whose hooks are live is listed only for its other findings, which carry the path themselves.
@@ -518,8 +531,8 @@ export function doctor(opts: DoctorOptions): void {
     } else {
       emitText(
         showWouldFix
-          ? `doctor: ${failed} failing, ${fixedCount} fixed (pass --fix --yes to apply)${tail}`
-          : `doctor: ${failed} failing, ${fixedCount} fixed${tail}`,
+          ? `doctor: ${failingSummary(findings, lines)}, ${fixedCount} fixed (pass --fix --yes to apply)${tail}`
+          : `doctor: ${failingSummary(findings, lines)}, ${fixedCount} fixed${tail}`,
       );
     }
     for (const text of fixFirst.slice(1)) emitText(text);

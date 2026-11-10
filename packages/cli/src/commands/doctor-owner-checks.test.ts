@@ -643,7 +643,9 @@ describe("doctor — owner checks end to end", () => {
       ...w.env,
       PATH: `${join(w.aegisHome, "bin")}${delimiter}${empty}${delimiter}${join(root, "git-only")}`,
     });
-    assert.match(r.stdout, /SKIP GH_LOGIN_UNREGISTERED — skipped: `gh` is not installed/);
+    // The three gh-backed checks skip for one reason: one SKIP line, not three.
+    assert.match(r.stdout, /SKIP 3 checks: `gh` is not installed/);
+    assert.doesNotMatch(r.stdout, /SKIP GH_LOGIN_UNREGISTERED/);
     assert.doesNotMatch(r.stdout, /FAIL GH_/);
   });
 
@@ -860,7 +862,7 @@ describe("ghOwnerChecks — another account's token needs a terminal confirmatio
     assert.match(alice.detail, /only the active account was checked/);
     const bob = byCode(checks, "GH_LOGIN_UNREGISTERED").find(c => c.account === "bob")!;
     assert.equal(bob.skipped, true);
-    assert.match(bob.detail, /needs a y\/N confirmation at a terminal/);
+    assert.match(bob.detail, /needs a y\/N at a terminal/);
     // Nothing of bob's was learned.
     assert.equal(byCode(checks, "GH_MEMBER_ORG_UNREGISTERED").find(c => c.account === "bob")!.skipped, true);
   });
@@ -1227,7 +1229,22 @@ describe("doctor — recalibrated severities (X-9, P3-C)", () => {
     assert.match(r.stdout, /FAIL OWNER_IDENTITY_UNMAPPED/);
     assert.doesNotMatch(r.stdout, /TAAAD_AGENT_WRITABLE/, "no owner maps to an App, so taaad is not mentioned");
     assert.match(r.stdout, /Fix these first:\n\s+map each owner to an identity/);
+    assert.match(r.stdout, /doctor: 1 failing \(1 machine\), 0 fixed/, "the summary counts printed FAIL lines");
     assert.equal(r.exitCode, 1, "requireIdentity with an unmapped owner is refused today, so it still fails the run");
+  });
+
+  it("an account that was not checked (no terminal to confirm) gets one SKIP line, not one per code", () => {
+    const stub = makeStub([
+      { login: "alice", token: TOKEN_ALICE, orgs: ["example-org"] },
+      { login: "bob", token: TOKEN_BOB, orgs: ["other-org"] },
+    ]);
+    const w = makeWorld("x9-skip", "always_block: []\npersonalOrgs:\n  - alice\n  - example-org\nengagements: []\n", stub.path);
+    satisfyGuard(w);
+    installHooks(w);
+    const r = runDoctor({ ...docOpts(w), ghOptions: { policy: "permissive", confirm: () => false } }, w.env);
+    const skips = r.stdout.split("\n").filter(l => /^\s+SKIP /.test(l));
+    assert.equal(skips.length, 1, r.stdout);
+    assert.match(skips[0]!, /SKIP 2 checks for gh account bob: reading another account's token needs a y\/N at a terminal \(run doctor from your terminal to check it\)/);
   });
 
   it("--verbose and --json still give every item the default text collapses", () => {

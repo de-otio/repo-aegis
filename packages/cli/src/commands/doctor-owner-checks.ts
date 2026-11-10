@@ -715,7 +715,7 @@ interface AccountFacts {
   apiLogin: string | null;
   /** `gh api user/orgs` slugs, lower-cased; null when the call failed. */
   orgs: string[] | null;
-  /** Why an unreachable account was not checked, when it is not simply an invalid token. */
+  /** Why an unreachable account was not checked, when it is not simply an invalid token (the reason only, no subject). */
   skipNote?: string;
 }
 
@@ -822,8 +822,8 @@ export function ghOwnerChecks(
           orgs: null,
           skipNote:
             redirect !== null
-              ? "was not checked: gh is configured to redirect requests (see GH_CONFIG_REDIRECT)"
-              : "was not checked: reading another account's token needs a y/N confirmation at a terminal, and there was none (or it was declined)",
+              ? "gh is configured to redirect requests (see GH_CONFIG_REDIRECT)"
+              : "reading another account's token needs a y/N at a terminal (run doctor from your terminal to check it)",
         });
       }
     }
@@ -860,12 +860,14 @@ export function ghOwnerChecks(
     const who = `gh account ${account}`;
 
     if (!f.reachable) {
+      const skipReason = f.skipNote ?? "its token is invalid or could not be read";
       const detail =
         f.skipNote !== undefined
-          ? `skipped: ${who} ${f.skipNote}`
+          ? `skipped: ${who} was not checked: ${f.skipNote}`
           : `skipped: ${who} is logged in but its token is invalid or could not be read, so it was not checked`;
-      checks.push({ code: "GH_LOGIN_UNREGISTERED", ok: true, skipped: true, account, detail });
-      checks.push({ code: "GH_MEMBER_ORG_UNREGISTERED", ok: true, skipped: true, account, detail });
+      // The same reason for both codes: the report prints them as one SKIP line (`skipReason`).
+      checks.push({ code: "GH_LOGIN_UNREGISTERED", ok: true, skipped: true, account, skipReason, detail });
+      checks.push({ code: "GH_MEMBER_ORG_UNREGISTERED", ok: true, skipped: true, account, skipReason, detail });
       continue;
     }
 
