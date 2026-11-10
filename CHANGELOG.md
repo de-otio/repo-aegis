@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-10
+
+### Fixed
+
+- **A fetch or pull from the Claude Code sandbox works again for owners mapped to a person's
+  account.** 0.13.1 answered these reads with the mapped login's token but ran the push-time
+  configuration checks first, and the sandbox always sets a proxy variable
+  (`DOCKER_HTTPS_PROXY`), so every read was refused with `AGENT_PUSH_CREDENTIAL_CONFIG`. A known
+  read now skips those checks; a later helper that would save the token still refuses it. Pushes
+  are unchanged.
+
 ## [0.13.1] - 2026-11-09
 
 ### Fixed
