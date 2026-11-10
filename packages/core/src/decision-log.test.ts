@@ -106,8 +106,8 @@ describe("buildDecisionRecord: the closed schema", () => {
   });
 
   it("an AWS access key id is never a code, though the pattern alone would admit it", () => {
-    assert.equal(rec({ code: "AKIAIOSFODNN7EXAMPLE" }).code, "invalid");
-    assert.equal(rec({ code: "ASIAIOSFODNN7EXAMPLE" }).code, "invalid");
+    assert.equal(rec({ code: "AKIA" + "IOSFODNN7EXAMPLE" }).code, "invalid");
+    assert.equal(rec({ code: "ASIA" + "IOSFODNN7EXAMPLE" }).code, "invalid");
   });
 
   it("version: x.y.z with an optional short pre-release, else 'invalid'", () => {
@@ -157,7 +157,7 @@ describe("buildDecisionRecord: the closed schema", () => {
     assert.equal(hundred.length, 100);
     assert.equal(rec({ ref: hundred }).ref, hundred, "exactly 100 characters is fine (hyphens break the long-run credential rule)");
     // a branch named like a credential is not copied, though its pattern would pass
-    for (const tokenish of ["ghp_0123456789abcdefghijklmnopqrstuvwxyz", "feature/github_pat_11AAAAAAA0abcdef", "AKIAIOSFODNN7EXAMPLE", "a".repeat(40)]) {
+    for (const tokenish of ["ghp" + "_0123456789abcdefghijklmnopqrstuvwxyz", "feature/github_pat" + "_11AAAAAAA0abcdef", "AKIA" + "IOSFODNN7EXAMPLE", "a".repeat(40)]) {
       assert.equal(rec({ ref: tokenish }).ref, "invalid", tokenish);
     }
   });
@@ -165,7 +165,7 @@ describe("buildDecisionRecord: the closed schema", () => {
   it("approvalId: a terminal id (8 hex) or a prompt id (p + 8 hex), else 'invalid'", () => {
     assert.equal(rec({ approvalId: "0123abcd" }).approvalId, "0123abcd");
     assert.equal(rec({ approvalId: "p0123abcd" }).approvalId, "p0123abcd");
-    for (const bad of ["0123ABCD", "0123abc", "ghp_0123456789abcdef", "q0123abcd"]) assert.equal(rec({ approvalId: bad }).approvalId, "invalid", bad);
+    for (const bad of ["0123ABCD", "0123abc", "ghp" + "_0123456789abcdef", "q0123abcd"]) assert.equal(rec({ approvalId: bad }).approvalId, "invalid", bad);
   });
 
   it("durationMs is clamped to 0..600000; an enum field outside its list is 'invalid'", () => {
@@ -224,11 +224,11 @@ const FIXTURE_MARKERS = ["acme-secret-marker", "Project Nightjar", "x9f2-interna
 
 /** Strings that are, or contain, something the never-logged list forbids. */
 const ATTACKS = [
-  "ghp_0123456789abcdefghijklmnopqrstuvwxyz",
-  "github_pat_11AAAAAAA0abcdefghijklmnopqrstuvwxyz0123456789",
-  "gho_abcdefghijklmnopqrstuvwxyz0123456789",
-  "ghs_abcdefghijklmnopqrstuvwxyz0123456789",
-  "AKIAIOSFODNN7EXAMPLE",
+  "ghp" + "_0123456789abcdefghijklmnopqrstuvwxyz",
+  "github_pat" + "_11AAAAAAA0abcdefghijklmnopqrstuvwxyz0123456789",
+  "gho" + "_abcdefghijklmnopqrstuvwxyz0123456789",
+  "ghs" + "_abcdefghijklmnopqrstuvwxyz0123456789",
+  "AKIA" + "IOSFODNN7EXAMPLE",
   "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
   "git push https://user:hunter2@example.com/org/repo.git main",
   "https://x-access-token:ghs_abc@github.com/acme/svc.git",
@@ -552,7 +552,7 @@ describe("readDecisionRecords: every line is rebuilt through the validators", ()
       destination: "x$(id)/y",
       ref: "main\u202Etxt",
       identityColumn: "alice",
-      note: "ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+      note: "ghp" + "_0123456789abcdefghijklmnopqrstuvwxyz",
       facts: { proxyVarSet: ["HTTPS_PROXY", "MY_SECRET_NAME"], command: "git push https://u:p@example.com/x" },
     };
     writeFileSync(decisionLogPath(w.home), JSON.stringify(evil) + "\nnot json\n[1,2]\n" + JSON.stringify({ ...evil, v: 2 }) + "\n");

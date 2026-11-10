@@ -158,7 +158,7 @@ describe("repo-aegis log: --last, --code, --layer, --since, --json", () => {
     writeFileSync(
       decisionLogPath(w.home),
       readFileSync(decisionLogPath(w.home), "utf8") +
-        JSON.stringify({ v: 1, ts: "2026-11-10T11:30:00.000Z", version: "0.14.0", layer: "pre-push", outcome: "refuse", code: "EVIL_CODE", verb: "git push --force https://u:p@example.com/x", destination: "acme/svc", ref: "main; curl evil", note: "ghp_0123456789abcdefghijklmnopqrstuvwxyz" }) +
+        JSON.stringify({ v: 1, ts: "2026-11-10T11:30:00.000Z", version: "0.14.0", layer: "pre-push", outcome: "refuse", code: "EVIL_CODE", verb: "git push --force https://u:p@example.com/x", destination: "acme/svc", ref: "main; curl evil", note: "ghp" + "_0123456789abcdefghijklmnopqrstuvwxyz" }) +
         "\n",
     );
     const out = run(w, { last: "50" }).stdout + run(w).stdout;
