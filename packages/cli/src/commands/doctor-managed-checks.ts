@@ -109,7 +109,8 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
     checks.push(
       detail === null
         ? { code: "MANAGED_DROPIN_STALE", ok: true, detail: current === null ? "no drop-in file to compare" : "the drop-in is what would be written now" }
-        : { code: "MANAGED_DROPIN_STALE", ok: false, detail, fix: installFix },
+        : // WARN: the drop-in still applies; it is out of date relative to what would be written now.
+          { code: "MANAGED_DROPIN_STALE", ok: false, severity: "warn", detail, fix: installFix },
     );
   }
 
@@ -129,6 +130,9 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
         : {
             code: "MANAGED_DROPIN_NOT_ROOT_OWNED",
             ok: false,
+            // WARN: the drop-in applies and nothing is refused; the weakness is who can edit it
+            // (the same standing as SUDO_NOPASSWD and ENFORCEMENT_IN_USER_SETTINGS).
+            severity: "warn",
             detail: `${problems.join("; ")}: a user who can write there can change what enforces`,
             fix: `${removeLine(paths.file)}, fix the ownership or mode, then ${installFix}`,
           },
@@ -158,6 +162,7 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
   // MANAGED_DROPIN_ORPHANED (D8.11)
   {
     const reasons: string[] = [];
+    let pinGone = false;
     if (current !== null) {
       if (ledger === null) reasons.push("the ledger has no entry for it");
       const gone = new Set<string>();
@@ -165,7 +170,8 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
         if (unusable(p.node, "exec")) gone.add(p.node);
         if (unusable(p.cli, "read")) gone.add(p.cli);
       }
-      if (gone.size > 0) reasons.push(`its pin points at missing files (${[...gone].join(", ")}), so every hook blocks (exit 2)`);
+      pinGone = gone.size > 0;
+      if (pinGone) reasons.push(`its pin points at missing files (${[...gone].join(", ")}), so every hook blocks (exit 2)`);
     }
     checks.push(
       reasons.length === 0
@@ -173,6 +179,8 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
         : {
             code: "MANAGED_DROPIN_ORPHANED",
             ok: false,
+            // FAIL only when a hook is refused today (the pin points at missing files); a missing ledger entry is bookkeeping.
+            ...(pinGone ? {} : { severity: "warn" as const }),
             detail: `${paths.file} exists, but ${reasons.join(" and ")}`,
             fix: `${installFix}   (re-pins and records it)   or remove it: ${removeLine(paths.file)}`,
           },
@@ -185,6 +193,8 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
       ? {
           code: "MANAGED_DROPIN_LEDGER_STALE",
           ok: false,
+          // WARN: bookkeeping only. A drop-in that is really gone is GUARD_HOOK_UNREGISTERED's FAIL.
+          severity: "warn",
           detail: `the ledger records a drop-in at ${paths.file}, but there is no such file (removed by hand?)`,
           fix: "repo-aegis install claude-md --uninstall   (clears the record), or `repo-aegis install claude-md` to write it again",
         }

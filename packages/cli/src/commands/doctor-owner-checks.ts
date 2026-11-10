@@ -148,6 +148,9 @@ export function registryStateChecks(load: RegistryLoad): DoctorCheck[] {
  * one per owner: with the owners kept out of the text, per-owner lines read as the same line repeated.
  */
 export function ownerIdentityChecks(registry: Registry): DoctorCheck[] {
+  // P3-C: with no identity defined in the registry at all, "unmapped" is every owner and says nothing: the
+  // person has not opted in to identities. The finding only means something once an identity exists.
+  if ((registry.identities?.size ?? 0) === 0) return [];
   const mapped = registry.identityMap ?? new Map();
   const required = registry.requireIdentity === true;
   const unmapped = [...registeredOwners(registry)].filter(owner => !mapped.has(owner)).sort();
@@ -213,24 +216,30 @@ export function agentRemoteSshCheck(
   }
 }
 
+/** True when some owner's agent identity is a GitHub App, i.e. an agent call for it needs a minted App token. */
+export function hasAppAgentIdentity(registry: Registry): boolean {
+  for (const entry of registry.identityMap?.values() ?? []) if (entry.agent?.kind === "github-app") return true;
+  return false;
+}
+
 /**
  * `TAAAD_AGENT_WRITABLE` (doc/plan-owner-identity.md A4, as amended by §2.1 / Q5): the taaad that
- * `repo-aegis gh` mints App tokens through must be pinned by `install shim` (a FAILURE when a github-app
- * identity is mapped and nothing is pinned: no token can be minted). Whether it is root-owned is a WARNING
- * only. The pin is always reported (paths of tools, never owners).
- * Nothing is returned when no github-app identity is mapped and nothing is pinned: there is nothing to say.
+ * the `gh` shim mints App tokens through must be pinned by `install shim` (a FAILURE when an owner's AGENT
+ * identity is a github-app and nothing is pinned: no token can be minted, so calls for that owner are refused).
+ * Whether it is root-owned is a WARNING only. The pin is always reported (paths of tools, never owners).
+ *
+ * Reported ONLY when some owner actually maps an App in its `agent` column (X-9). taaad mints the agent's App
+ * token; a registry with no App agent identity has no use for it, so there is nothing to pin, nothing refused
+ * and nothing to warn about, whether or not a taaad happens to be installed or pinned.
  */
 export function taaadChecks(registry: Registry, home: string = repoAegisHome()): DoctorCheck[] {
-  const appMapped = [...(registry.identityMap?.values() ?? [])].some(
-    e => e.person?.kind === "github-app" || e.agent?.kind === "github-app",
-  );
+  if (!hasAppAgentIdentity(registry)) return [];
   const pin = readPinnedTaaad(home);
   const fix = "install taaad v0.6.0 or later, then re-run `repo-aegis install shim`";
   const hardenFix =
     "optional: install taaad into a root-owned prefix (for example `sudo pipx install --global taaad`), remove any " +
     "user-level copy, then re-run `repo-aegis install shim`";
   if (pin === null) {
-    if (!appMapped) return [];
     return [
       {
         code: "TAAAD_AGENT_WRITABLE",
@@ -706,7 +715,7 @@ interface AccountFacts {
   apiLogin: string | null;
   /** `gh api user/orgs` slugs, lower-cased; null when the call failed. */
   orgs: string[] | null;
-  /** Why an unreachable account was not checked, when it is not simply an invalid token. */
+  /** Why an unreachable account was not checked, when it is not simply an invalid token (the reason only, no subject). */
   skipNote?: string;
 }
 
@@ -813,8 +822,8 @@ export function ghOwnerChecks(
           orgs: null,
           skipNote:
             redirect !== null
-              ? "was not checked: gh is configured to redirect requests (see GH_CONFIG_REDIRECT)"
-              : "was not checked: reading another account's token needs a y/N confirmation at a terminal, and there was none (or it was declined)",
+              ? "gh is configured to redirect requests (see GH_CONFIG_REDIRECT)"
+              : "reading another account's token needs a y/N at a terminal (run doctor from your terminal to check it)",
         });
       }
     }
@@ -851,12 +860,14 @@ export function ghOwnerChecks(
     const who = `gh account ${account}`;
 
     if (!f.reachable) {
+      const skipReason = f.skipNote ?? "its token is invalid or could not be read";
       const detail =
         f.skipNote !== undefined
-          ? `skipped: ${who} ${f.skipNote}`
+          ? `skipped: ${who} was not checked: ${f.skipNote}`
           : `skipped: ${who} is logged in but its token is invalid or could not be read, so it was not checked`;
-      checks.push({ code: "GH_LOGIN_UNREGISTERED", ok: true, skipped: true, account, detail });
-      checks.push({ code: "GH_MEMBER_ORG_UNREGISTERED", ok: true, skipped: true, account, detail });
+      // The same reason for both codes: the report prints them as one SKIP line (`skipReason`).
+      checks.push({ code: "GH_LOGIN_UNREGISTERED", ok: true, skipped: true, account, skipReason, detail });
+      checks.push({ code: "GH_MEMBER_ORG_UNREGISTERED", ok: true, skipped: true, account, skipReason, detail });
       continue;
     }
 
@@ -865,6 +876,8 @@ export function ghOwnerChecks(
     checks.push({
       code: "GH_LOGIN_UNREGISTERED",
       ok: loginRegistered,
+      // WARN (P3-C): rule h refusing egress to an unregistered owner is its designed outcome; registering is the person's call.
+      ...(loginRegistered ? {} : { severity: "warn" as const }),
       account,
       detail:
         (loginRegistered
@@ -890,11 +903,14 @@ export function ghOwnerChecks(
     checks.push({
       code: "GH_MEMBER_ORG_UNREGISTERED",
       ok: unregistered.length === 0,
+      // INFO (X-9): the fix itself says "or leave it". Not registering an organisation you belong to is a
+      // choice (rule h then refuses egress to it, as intended), so it is a count, not a failure.
+      ...(unregistered.length === 0 ? {} : { severity: "info" as const, names: unregistered }),
       account,
       detail:
         (unregistered.length === 0
           ? `${who}: every organisation it belongs to is a registered owner`
-          : `${who}: belongs to ${unregistered.length} organisation(s) that are not registered owners, so rule h refuses non-interactive egress to them`) +
+          : `${who}: belongs to ${unregistered.length} organisation(s) that are not registered owners (listed in --json); rule h refuses non-interactive egress to them until you register them, which is optional`) +
         note,
       ...(unregistered.length === 0
         ? {}

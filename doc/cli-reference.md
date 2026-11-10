@@ -1007,6 +1007,7 @@ fifth silently isn't.
 | `--yes` | off | apply `--fix` changes; without it, `--fix` only reports what it would do |
 | `--no-egress-checks` | — | skip the egress-guard checks (see [`doctor` — egress-guard checks](#doctor--egress-guard-checks)) |
 | `--claude-home <dir>` | `~/.claude` | Claude Code home for the guard-hook check |
+| `--verbose` | off | print every finding with its `fix:` line; without it, repeated per-repository findings of one code collapse into one line with a count and the fixes appear once, in a closing `Fix these first:` list (`--json` always lists everything) |
 
 Behaviour:
 1. Walk every working tree under the scan roots; resolve each one's
@@ -1870,26 +1871,28 @@ now reports, unless `--no-egress-checks`:
 
 | Check | Fires when | Fix |
 |---|---|---|
-| `PUSH_DEFAULT_IMPLICIT` | global `push.default` is unset or not `nothing` | `git config --global push.default nothing` |
-| `SHIM_MISSING` / `SHIM_NOT_FIRST` (**fail**) / `SHIM_STALE` | no shim; another `gh` precedes it on `PATH` (a **fail**: the shim is the only guard for a `gh` call the hook does not parse, such as `find -exec gh …` or an interpreter's `os.system`); the shim on `PATH` is an earlier release's script | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
+| `PUSH_DEFAULT_IMPLICIT` (warn) | global `push.default` is unset or not `nothing` | `git config --global push.default nothing` |
+| `SHIM_MISSING` (**fail**) / `SHIM_NOT_FIRST` (**fail**) / `SHIM_STALE` (warn) | no shim; another `gh` precedes it on `PATH` (a **fail**: the shim is the only guard for a `gh` call the hook does not parse, such as `find -exec gh …` or an interpreter's `os.system`); the shim on `PATH` is an earlier release's script (it still runs, so a warning) | `repo-aegis install shim`; fix `PATH` order; `repo-aegis install shim` |
 | `ENFORCEMENT_UNPINNED` (**fail**) | an installed git hook, the shim or a Claude Code hook command calls `repo-aegis` by name (an install from before the enforcement pin) | `repo-aegis install hooks` / `install shim` / `install claude-md` |
 | `ENFORCEMENT_PIN_MISSING` (**fail**) | a pinned node or CLI path no longer exists, so the hook or shim falls back to the `repo-aegis` on `PATH` when it is at least the pinned version, and refuses otherwise | `repo-aegis install hooks` / `repo-aegis install shim` / `repo-aegis install claude-md` |
 | `MULTIPLE_INSTALLS` (warn) | more than one `repo-aegis` on `PATH` (each listed with its version), or the first one is not the pinned one | keep one install, then re-run `install hooks` and `install shim` |
-| `GUARD_HOOK_UNREGISTERED` | neither the managed drop-in nor Claude Code `settings.json` has a `guard-egress` entry | `repo-aegis install claude-md` |
-| `MANAGED_DROPIN_STALE` / `MANAGED_DROPIN_NOT_ROOT_OWNED` / `MANAGED_DROPIN_UNREADABLE` (**fail**) | the managed drop-in differs from what would be written now; it or a directory above it is owned by a user, writable by group or others or a symlink; it is not `0644` (directories `0755`) | `repo-aegis install claude-md` |
-| `MANAGED_DROPIN_ORPHANED` / `MANAGED_DROPIN_LEDGER_STALE` (**fail**) | the drop-in has no ledger entry or its pin points at missing files (every hook blocks); or the ledger names a drop-in that is gone | `repo-aegis install claude-md`, or remove it: `sudo rm '<path>'` (printed); `install claude-md --uninstall` clears a stale ledger |
+| `GUARD_HOOK_UNREGISTERED` (**fail**) | neither the managed drop-in nor Claude Code `settings.json` has a `guard-egress` entry | `repo-aegis install claude-md` |
+| `MANAGED_DROPIN_UNREADABLE` (**fail**) | the managed drop-in is not `0644` (directories `0755`), so Claude Code starts without it | `repo-aegis install claude-md` |
+| `MANAGED_DROPIN_STALE` / `MANAGED_DROPIN_NOT_ROOT_OWNED` (warn) | the managed drop-in differs from what would be written now; it or a directory above it is owned by a user, writable by group or others or a symlink. It still applies, so these are warnings | `repo-aegis install claude-md` |
+| `MANAGED_DROPIN_ORPHANED` (**fail** when its pin points at missing files, warn when only the ledger entry is missing) / `MANAGED_DROPIN_LEDGER_STALE` (warn) | the drop-in has no ledger entry or its pin points at missing files (every hook blocks); or the ledger names a drop-in that is gone | `repo-aegis install claude-md`, or remove it with the `sudo rm` line `doctor` prints; `install claude-md --uninstall` clears a stale ledger |
 | `MANAGED_HOOKS_DISABLED` / `MANAGED_SOURCE_SHADOWED` / `MANAGED_HOOKS_NOT_FIRING` (**fail**) | another managed file sets `disableAllHooks: true`; a macOS `com.anthropic.claudecode` profile outranks the files; or a Claude Code session started after the last heartbeat (server-managed policy and MDM keys make Claude Code ignore drop-ins, invisibly) | check `/status` in Claude Code lists `(drop-ins)`; have the policy owner add the hooks, or `install claude-md --user-settings` |
 | `SUDO_NOPASSWD` (warn) | `sudo -n -k true` succeeds, so an agent with a fake terminal can rewrite or remove the drop-in: no stronger than the user file | require a sudo password for this account |
 | `ENFORCEMENT_IN_USER_SETTINGS` (warn) | repo-aegis hooks are in `~/.claude/settings.json`, which must stay per machine | `repo-aegis install claude-md` |
-| `CLASS_VISIBILITY_UNRESOLVED` (per repo) | a repo with a GitHub remote has no explicit class or no cached visibility | `repo-aegis classify --apply && repo-aegis status` in that repo |
-| `PERSONAL_ORG_UNREGISTERED` (per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
+| `CLASS_VISIBILITY_UNRESOLVED` (warn, per repo) | a repo with a GitHub remote has no explicit class or no cached visibility (a third party's clone, say, that you have not classified) | `repo-aegis classify --apply && repo-aegis status` in that repo |
+| `PERSONAL_ORG_UNREGISTERED` (warn, per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
 | `REGISTRY_UNREADABLE` (**fail**) | the registry exists but does not parse or validate, or a newer repo-aegis wrote it (`schemaVersion` above what this build reads), so rule h asks (agent hook) or refuses (pre-push, the shim) every non-interactive egress that has a destination | repair the file (`repo-aegis status` shows why); for a newer schema, upgrade repo-aegis, then `repo-aegis install hooks` and `repo-aegis install claude-md` |
 | `REGISTRY_ENCRYPTED` (warn) | the registry is encrypted at rest, so repo-aegis runs as if there were none: rule h and the GitHub identity mapping are off; marker scanning is unaffected. Encryption at rest is removed in 0.15.0 | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal) |
 | `OWNERS_UNDECLARED` (**fail**) | the registry loads but declares no owners, so rule h is inert | `repo-aegis engagements add --personal-org <login>` (a person, at a terminal) |
 | `GIT_CREDENTIAL_HELPER_ORDER` (**fail**, only when some owner is mapped to an `agent` identity) | the repo-aegis git credential helper is not installed, is from another install (a moved CLI or Node), or another helper answers first for `https://github.com` (a reset entry, a system-scope helper, `gh auth setup-git`); an agent's HTTPS push there would be authenticated as the person | a person runs `repo-aegis install git-credential` from a terminal |
-| `OWNER_IDENTITY_UNMAPPED` (warn; **fail** when `requireIdentity` is set) | registered owners have no identity entry (no `person` and no `agent`); one finding with the count, the owners are named only in `--json` (`names`; registered owners can be customer names) | `repo-aegis identity add`, then `repo-aegis engagements set-identity` (a person, at a terminal) |
-| `GH_LOGIN_UNREGISTERED` | a logged-in `gh` account's login is not a registered owner | `--personal-org <login>` (a person, at a terminal) |
-| `GH_MEMBER_ORG_UNREGISTERED` | an organisation a logged-in `gh` account belongs to is not registered | `--personal-org` or `--github-org`, or leave it and let rule h refuse it |
+| `OWNER_IDENTITY_UNMAPPED` (warn; **fail** when `requireIdentity` is set) | registered owners have no identity entry (no `person` and no `agent`); one finding with the count, the owners are named only in `--json` (`names`; registered owners can be customer names). Not reported at all while the registry defines no identity | `repo-aegis identity add`, then `repo-aegis engagements set-identity` (a person, at a terminal) |
+| `TAAAD_AGENT_WRITABLE` (**fail** when an owner's `agent` identity is a GitHub App and no taaad is pinned; warn when the pinned taaad is not root-only-writable) | taaad mints the App token for agent calls. Reported **only** when some owner maps an App as its `agent` identity; a registry without one never mentions taaad | install taaad v0.6.0 or later, then `repo-aegis install shim`; optionally a root-owned prefix |
+| `GH_LOGIN_UNREGISTERED` (warn) | a logged-in `gh` account's login is not a registered owner | `--personal-org <login>` (a person, at a terminal) |
+| `GH_MEMBER_ORG_UNREGISTERED` (info) | an organisation a logged-in `gh` account belongs to is not registered: a count per account, the organisations are in `--json` (`names`) | `--personal-org` or `--github-org`, or leave it and let rule h refuse it |
 | `REGISTERED_ORG_NOT_MEMBER` (info) | a registered owner is no checked account's login or organisation (normal for archived engagements) | none required |
 | `REGISTRY_AGENT_WRITABLE` (warn) | Claude Code `settings.json` has no `permissions.deny` `Edit` rule covering the registry file, its `.age`, the approvals store, `hooks/` and `bin/` | `repo-aegis install claude-md`; verify with a sandboxed `touch` |
 | `GH_BINARY_UNTRUSTED` (warn) | the `gh` first on `PATH` is under `$HOME`, the cwd or a temp directory, sits in a group/world-writable or non-root directory, or is not the standard install | install gh from your package manager; keep user-writable directories out of `PATH` ahead of it |
@@ -1942,6 +1945,22 @@ prints `no failures`.
 Only `fail`-severity findings make `doctor` exit 1. `warn` (`WARN`), `info`
 (`INFO`) and `SKIP` lines are reported and never change the exit code; JSON
 checks carry `severity`, `skipped` and, for gh findings, `account`.
+
+**What fails.** A finding is a `fail` only when something is refused today, or
+a guard that should run is silently inert (hooks not live, the shim absent or
+shadowed, the guard hook unregistered, an unreadable registry or drop-in,
+`ENFORCEMENT_UNPINNED` / `ENFORCEMENT_PIN_MISSING`, `OWNERS_UNDECLARED`, a
+helper order that lets an agent push as the person). What is the person's
+choice, or what the fix itself says may be left alone, is `warn`; purely
+informational is `info`.
+
+**A short report.** Repeated per-repository findings of one code collapse into
+one line with a count, for example
+`HOOKS_PATH_LOCAL_DUPLICATE: 14 repositories (repo-aegis doctor --json lists them)`.
+The text then ends with a `Fix these first:` list: each `fail` code once, with
+its fix command (at most five entries). The per-finding `fix:` lines appear
+only with `--verbose`, which also lists every repository instead of collapsing.
+`--json` always lists everything and is unaffected by `--verbose`.
 
 JSON gains `machine: DoctorCheck[]` and per-repo `checks: DoctorCheck[]`;
 `summary.failed` counts the failing ones. `--claude-home <dir>` points the guard-hook

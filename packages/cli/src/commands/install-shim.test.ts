@@ -470,6 +470,7 @@ describe("checkShim", () => {
       PATH: [join(home, "bin"), other].join(delimiter),
     });
     assert.equal(checks[0]?.code, "SHIM_STALE");
+    assert.equal(checks[0]?.severity, "warn", "X-9: the older shim is first on PATH and still runs");
     assert.equal(checks[0]?.ok, false);
     assert.equal(checks[0]?.fix, "repo-aegis install shim");
     // And `install shim` is the fix: it rewrites the stale file and the check clears.

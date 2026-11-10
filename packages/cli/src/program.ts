@@ -766,6 +766,10 @@ export async function buildProgram(): Promise<Command> {
       "skip the egress-guard checks (push.default, gh shim on PATH, guard hook registered, class + visibility resolved per repo, registered owners vs every logged-in gh account, pre-push hook, shell startup overrides)",
     )
     .option("--claude-home <dir>", "override default ~/.claude location (for the guard-hook check)")
+    .option(
+      "--verbose",
+      "print every finding with its fix; by default repeated per-repository findings of one code collapse into one line with a count and the fixes appear once, in a closing 'Fix these first' list (--json always lists everything)",
+    )
     .action((opts, cmd) => doctor(withGlobals(opts, cmd)));
 
   return program;

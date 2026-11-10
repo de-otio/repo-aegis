@@ -482,18 +482,23 @@ function healthyRepo(fx: Fixture, name: string): string {
 }
 
 describe("doctor — egress checks: PUSH_DEFAULT_IMPLICIT", () => {
-  it("fires when the GLOBAL push.default is unset, and prints the one-line fix", () => {
+  it("fires when the GLOBAL push.default is unset, as a WARN that never fails the run, and prints the one-line fix under --verbose", () => {
     const fx = makeFixture("push-default-unset");
     healthyRepo(fx, "repo-a"); // no remote: contributes no per-repo checks
 
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
-      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })));
+      exitCode = runDoctorCapturingExit(() =>
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome, verbose: true })),
+      );
     });
 
-    assert.equal(exitCode, 1, "an implicit push.default must fail the sweep");
-    assert.match(stdout, /FAIL PUSH_DEFAULT_IMPLICIT/);
+    // X-9: a recommended personal git setting; nothing is refused and no guard is inert without it.
+    assert.equal(exitCode, undefined, "an implicit push.default is a warning, not a failure");
+    assert.match(stdout, /WARN PUSH_DEFAULT_IMPLICIT/);
+    assert.doesNotMatch(stdout, /FAIL PUSH_DEFAULT_IMPLICIT/);
     assert.match(stdout, /fix: git config --global push\.default nothing/);
+    assert.doesNotMatch(stdout, /Fix these first/, "a warning is not in the fix-first list");
   });
 
   it("is clean when the GLOBAL push.default is `nothing`", () => {
@@ -522,8 +527,8 @@ describe("doctor — egress checks: PUSH_DEFAULT_IMPLICIT", () => {
       exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })));
     });
 
-    assert.equal(exitCode, 1);
-    assert.match(stdout, /FAIL PUSH_DEFAULT_IMPLICIT/);
+    assert.equal(exitCode, undefined);
+    assert.match(stdout, /WARN PUSH_DEFAULT_IMPLICIT/);
   });
 
   it("--no-egress-checks (egressChecks: false) runs none of them", () => {
@@ -554,12 +559,16 @@ describe("doctor — egress checks: per-repo", () => {
 
     let exitCode: number | undefined;
     const { stdout } = captureStdout(() => {
-      exitCode = runDoctorCapturingExit(() => fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })));
+      exitCode = runDoctorCapturingExit(() =>
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome, verbose: true })),
+      );
     });
 
-    assert.equal(exitCode, 1);
+    // P3-C: an unclassified clone is a WARN; it never fails the run.
+    assert.equal(exitCode, undefined);
     assert.match(stdout, /unclassified-repo/);
-    assert.match(stdout, /FAIL CLASS_VISIBILITY_UNRESOLVED/);
+    assert.match(stdout, /WARN CLASS_VISIBILITY_UNRESOLVED/);
+    assert.doesNotMatch(stdout, /FAIL CLASS_VISIBILITY_UNRESOLVED/);
     assert.match(stdout, /fix: repo-aegis classify --apply/);
   });
 
@@ -639,8 +648,8 @@ describe("doctor — egress checks: per-repo", () => {
       );
     });
 
-    assert.equal(exitCode, 1);
-    assert.match(stdout, /FAIL CLASS_VISIBILITY_UNRESOLVED/);
+    assert.equal(exitCode, undefined);
+    assert.match(stdout, /WARN CLASS_VISIBILITY_UNRESOLVED/);
   });
 
   it("a repo with NO GitHub remote gets no per-repo checks at all", () => {
@@ -670,18 +679,19 @@ describe("doctor — egress checks: per-repo", () => {
     const { stdout } = captureStdout(() => {
       exitCode = runDoctorCapturingExit(() =>
         withEnv("REPO_AEGIS_REGISTRY", registryPath, () =>
-          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome })),
+          fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome, verbose: true })),
         ),
       );
     });
 
-    assert.equal(exitCode, 1);
-    assert.match(stdout, /FAIL PERSONAL_ORG_UNREGISTERED/);
+    // P3-C: an org the person has not registered is a WARN, not a failure.
+    assert.equal(exitCode, undefined);
+    assert.match(stdout, /WARN PERSONAL_ORG_UNREGISTERED/);
     assert.match(stdout, /fix: repo-aegis engagements add --personal-org acme/);
     // The detail line must not carry the org — an unregistered org can be a
     // customer's, and `detail` is the line that gets copied into a ticket.
     const detailLine =
-      stdout.split("\n").find(l => l.includes("FAIL PERSONAL_ORG_UNREGISTERED")) ?? "";
+      stdout.split("\n").find(l => l.includes("WARN PERSONAL_ORG_UNREGISTERED")) ?? "";
     assert.notEqual(detailLine, "", "expected a PERSONAL_ORG_UNREGISTERED detail line");
     assert.doesNotMatch(detailLine, /acme/);
   });
@@ -771,8 +781,8 @@ describe("doctor — egress checks: JSON shape", () => {
     );
     assert.ok(r.checks.every(c => !c.ok));
 
-    // 1 machine failure + 1 repo carrying failing checks.
-    assert.equal(parsed.summary.failed, 2);
+    // PUSH_DEFAULT_IMPLICIT, CLASS_VISIBILITY_UNRESOLVED and PERSONAL_ORG_UNREGISTERED are all warnings now.
+    assert.equal(parsed.summary.failed, 0);
   });
 });
 
@@ -791,7 +801,7 @@ describe("doctor — egress checks: shim and guard hook", () => {
 
     assert.equal(exitCode, 1);
     assert.match(stdout, /FAIL SHIM_MISSING/);
-    assert.match(stdout, /fix: repo-aegis install shim/);
+    assert.match(stdout, /Fix these first:\n[^\n]*repo-aegis install shim/);
     assert.doesNotMatch(stdout, /GUARD_HOOK_UNREGISTERED/);
   });
 
@@ -831,7 +841,7 @@ describe("doctor — egress checks: shim and guard hook", () => {
 
     assert.equal(exitCode, 1);
     assert.match(stdout, /FAIL GUARD_HOOK_UNREGISTERED/);
-    assert.match(stdout, /fix: repo-aegis install claude-md/);
+    assert.match(stdout, /Fix these first:\n[^\n]*repo-aegis install claude-md/);
     assert.doesNotMatch(stdout, /SHIM_MISSING/);
   });
 });

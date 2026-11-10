@@ -81,6 +81,11 @@ export interface DoctorCheck {
    * customer names). Emitted in `--json` only.
    */
   names?: string[];
+  /**
+   * For a skipped check: the reason alone, without the subject. Skips of one account with the same reason are
+   * printed as one `SKIP n checks for gh account X: <reason>` line.
+   */
+  skipReason?: string;
   /** The gh account a finding applies to, when it applies to one (the login, shown in `detail` as well). */
   account?: string;
   /**

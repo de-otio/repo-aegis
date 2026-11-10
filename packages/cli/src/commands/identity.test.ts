@@ -757,14 +757,14 @@ describe("status and doctor see identities", () => {
     assert.equal(fail[0]!.severity, undefined, "no severity means fail");
   });
 
-  it("a fully mapped registry has no findings; a v2 registry warns for every owner", () => {
+  it("a fully mapped registry has no findings; a registry that defines no identity (v2) has none either (P3-C)", () => {
     const mapped = V3.replace("plain-org # keep me", "{ name: plain-org, person: me }").replace(
       "    githubOrgs:\n      - customer-b-org\n",
       "    githubOrgs:\n      - customer-b-org\n    person: work\n",
     );
     assert.deepEqual(ownerIdentityChecks(loadRegistry(setup(mapped).registryPath)), []);
-    const v2 = ownerIdentityChecks(loadRegistry(setup(V2).registryPath));
-    assert.deepEqual(v2.flatMap(c => c.names ?? []), ["customer-a-org", "plain-org"]);
+    // "Unmapped" is every owner when no identity exists at all, and says nothing: the person has not opted in.
+    assert.deepEqual(ownerIdentityChecks(loadRegistry(setup(V2).registryPath)), []);
   });
 });
 

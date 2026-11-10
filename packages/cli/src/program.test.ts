@@ -150,7 +150,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   },
   {
     path: "doctor",
-    flags: ["--claude-home", "--fix", "--no-egress-checks", "--scan-root", "--yes"],
+    flags: ["--claude-home", "--fix", "--no-egress-checks", "--scan-root", "--verbose", "--yes"],
     subcommands: [],
   },
   { path: "egress-check", flags: [], subcommands: [] },

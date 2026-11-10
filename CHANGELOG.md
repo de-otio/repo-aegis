@@ -178,6 +178,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taaad-signer's own connection to GitHub does not go through the sandbox's proxy (it fails with
   `NSURLErrorDomain -1003`), so the old "keychain or network" guess is replaced, and the text says
   that adding api.github.com to the sandbox allowlist does not help.
+- **`doctor` fails only when something is refused today or a guard is silently inert, and its report is
+  short** (X-9, which also covers P3-C). Moved from fail to **warn**: `PUSH_DEFAULT_IMPLICIT`,
+  `GH_LOGIN_UNREGISTERED`, `PERSONAL_ORG_UNREGISTERED`, `CLASS_VISIBILITY_UNRESOLVED`, `SHIM_STALE`,
+  `MANAGED_DROPIN_STALE`, `MANAGED_DROPIN_NOT_ROOT_OWNED`, `MANAGED_DROPIN_LEDGER_STALE`, and
+  `MANAGED_DROPIN_ORPHANED` when only the ledger entry is missing (a pin on missing files still fails).
+  `GH_MEMBER_ORG_UNREGISTERED` is now **info** with a count (its own fix says "or leave it"). A fresh
+  install plus a clone of someone else's repository gives no FAIL; a hook that is not installed, a shim
+  that is missing or not first on `PATH`, and the other inert-guard codes still fail, and the exit code
+  contract is unchanged (1 when any FAIL).
+  `OWNER_IDENTITY_UNMAPPED` is reported only once the registry defines an identity, and
+  `TAAAD_AGENT_WRITABLE` only when some owner maps a GitHub App as its agent identity.
+  Repeated per-repository findings of one code collapse into one line with a count
+  (`HOOKS_PATH_LOCAL_DUPLICATE: 14 repositories (repo-aegis doctor --json lists them)`), the text ends
+  with a short "Fix these first" list (each FAIL once, with its fix command), and the per-finding `fix:`
+  lines move behind the new `doctor --verbose`, which also lists every repository. `--json` still lists
+  everything and gains `fix` on each repository result. The text summary counts the FAIL lines it prints
+  (`doctor: 2 failing (1 machine, 1 across 219 repositories)`), and SKIPs that share a reason (two
+  checks for one gh account, or `gh` absent) print as one line.
 
 ### Removed
 
