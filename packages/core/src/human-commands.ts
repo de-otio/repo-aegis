@@ -544,28 +544,58 @@ function writesManagedSettings(command: string): boolean {
   return cdsInto || regions.flat().some(isManagedSettingsWord);
 }
 
-/** Programs and words that WRITE or copy a file (or run text that can): next to a `pause.json` word they mean a write. */
-const PAUSE_FILE_WRITERS = new Set([
+/** Programs and words that WRITE or copy a file (or run text that can): next to a state-file word they mean a write. */
+const STATE_FILE_WRITERS = new Set([
   "cp", "mv", "tee", "install", "ln", "dd", "rsync", "touch", "truncate", "sed", "perl", "python", "python3", "node",
   "ruby", "ed", "open", "write", "writefile", "writefilesync", "copyfile", "copyfilesync", "rename", "renamesync",
 ]);
 
 /**
- * A command line that writes the emergency pause's state file (complexity-review P1-E): a redirect to, or a
- * `cp`/`mv`/`tee`/`install`/`ln`/`dd`/`sed`, or an interpreter's `open(`/`writeFile` on, a word ending in `pause.json`
- * (any letter case), anywhere on a line that also names a `repo-aegis` path (`~/.config/repo-aegis/…`,
- * `$REPO_AEGIS_HOME/…`, a `cd` into it). It is the pause's person-only gate for the one route the Edit deny rule and
- * `check-write` cannot see, a shell. Reading the file (`cat`, `ls`) is not refused. Accepted false positive: a
- * write to some other `pause.json` inside a checkout whose path says `repo-aegis`. Not seen: a name built at run time.
+ * `curl -o FILE` / `-O` / `--output` / `--remote-name`, `wget -O FILE` / `-o FILE` / `--output-document`: they write a
+ * file named by a flag, so they are a writer only with that flag (a plain `curl URL` writes to stdout). A short-flag
+ * cluster counts (`-sSo`, `-fsSLo`), and so does an attached value (`-o/path`).
  */
-function writesPauseFile(command: string): boolean {
-  if (!/repo[-_]aegis/i.test(command) || !/pause\.json/i.test(command)) return false;
-  if (/>>?\s*["']?[^\s"'<>;&|]*pause\.json/i.test(command)) return true;
-  for (const { words } of splitRegions(command)) {
-    if (!words.some(w => /pause\.json$/i.test(normalizePath(w)))) continue;
-    if (words.some(w => PAUSE_FILE_WRITERS.has(tokenBase(w)))) return true;
+function isDownloadWriter(words: readonly string[]): boolean {
+  const bases = words.map(tokenBase);
+  if (bases.includes("curl") && words.some(w => /^-[A-Za-z]*[oO]/.test(w) || w === "--output" || w === "--remote-name")) return true;
+  return bases.includes("wget") && words.some(w => /^-[A-Za-z]*[oO]/.test(w) || w === "--output-document" || w === "--output-file");
+}
+
+/**
+ * The person-only state files, by name, and the kind a shell write to each is refused as:
+ *   - `pause.json`, the emergency pause: `pause`;
+ *   - `egress-approvals.json`, the human egress approvals: `approve` (an agent that wrote one would be minting its own
+ *     approval, which is exactly what the `approve` refusal says, so it reuses that kind and its fix, `repo-aegis approve`).
+ */
+const STATE_FILES: ReadonlyArray<{ name: string; kind: HumanOnlyKind }> = [
+  { name: "pause\\.json", kind: "pause" },
+  { name: "egress-approvals\\.json", kind: "approve" },
+];
+
+/**
+ * A command line that writes one of the person-only state files in the repo-aegis home, `pause.json` (complexity-review
+ * P1-E) or `egress-approvals.json`: a redirect to a word naming it (`>`, `>>`, `>|`, `2>`, `&>`), or a
+ * `cp`/`mv`/`tee`/`install`/`ln`/`dd`/`sed`, a `curl -o` / `wget -O`, or an interpreter's `open(`/`writeFile`, on a word
+ * ending in the name (any letter case), anywhere on a line that also names a `repo-aegis` path (`~/.config/repo-aegis/…`,
+ * `$REPO_AEGIS_HOME/…`, a `cd` into it). It is those files' person-only gate for the one route the Edit deny rule and
+ * `check-write` cannot see, a shell. Quotes and backslashes are read away first (`'pause.json'`, `pause'.json'`,
+ * `> "$REPO_AEGIS_HOME"/pause.json`). Reading the file (`cat`, `ls`, `jq`, `grep`) is not refused. Accepted false
+ * positive: a write to some other `pause.json` inside a checkout whose path says `repo-aegis`. Not seen: a name built at
+ * run time. Returns the kind to refuse as, or null.
+ */
+function writesStateFile(command: string): HumanOnlyKind | null {
+  const plain = command.replace(/["'\\]/g, "");
+  if (!/repo[-_]aegis/i.test(plain)) return null;
+  for (const { name, kind } of STATE_FILES) {
+    if (!new RegExp(name, "i").test(plain)) continue;
+    if (new RegExp(`>>?\\|?\\s*[^\\s<>;&|]*${name}`, "i").test(plain)) return kind;
+    const ending = new RegExp(`${name}$`, "i");
+    for (const { words } of splitRegions(command)) {
+      if (!words.some(w => ending.test(normalizePath(w)))) continue;
+      if (words.some(w => STATE_FILE_WRITERS.has(tokenBase(w))) || isDownloadWriter(words)) return kind;
+    }
   }
-  return false;
+  return null;
 }
 
 /**
@@ -580,7 +610,8 @@ export function findHumanOnlyCommand(command: string): HumanOnlyHit | null {
     /* fall through to the program-word search */
   }
   try {
-    if (writesPauseFile(command)) return { kind: "pause" };
+    const stateKind = writesStateFile(command);
+    if (stateKind !== null) return { kind: stateKind };
   } catch {
     /* fall through to the program-word search */
   }

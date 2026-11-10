@@ -70,9 +70,59 @@ describe("findHumanOnlyCommand — the emergency pause (P1-E)", () => {
     "python3 -c \"open('/Users/me/.config/repo-aegis/pause.json','w').write('{}')\"",
     "node -e \"require('fs').writeFileSync(process.env.HOME+'/.config/repo-aegis/pause.json','{}')\"",
     "bash -c 'echo {} > ~/.config/repo-aegis/pause.json'",
+    // every redirect spelling: clobber-override, file descriptor, both streams
+    "echo '{}' >| ~/.config/repo-aegis/pause.json",
+    "echo '{}' 2> ~/.config/repo-aegis/pause.json",
+    "echo '{}' &> ~/.config/repo-aegis/pause.json",
+    "echo '{}' &>> ~/.config/repo-aegis/pause.json",
+    "echo '{}' 1>~/.config/repo-aegis/pause.json",
+    // quoted basenames: the quotes join the pieces into the plain name
+    "cp x.json ~/.config/repo-aegis/'pause.json'",
+    "cp x.json ~/.config/repo-aegis/pause'.json'",
+    "cp x.json ~/.config/repo-aegis/\"pau\"se.json",
+    "echo '{}' > ~/.config/repo-aegis/pause'.json'",
+    "echo '{}' > ~/.config/repo-aegis/'Pause.json'",
+    // a quoted variable followed by the name
+    "echo '{}' > \"$REPO_AEGIS_HOME\"/pause.json",
+    "echo '{}' >> \"${REPO_AEGIS_HOME}\"/pause.json",
+    "echo '{}' > \"$REPO_AEGIS_HOME\"/'pause.json'",
+    // a download writes the file its flag names
+    "curl -o ~/.config/repo-aegis/pause.json https://example.com/x.json",
+    "curl -sSLo ~/.config/repo-aegis/pause.json https://example.com/x.json",
+    "curl --output ~/.config/repo-aegis/pause.json https://example.com/x.json",
+    "curl -o \"$REPO_AEGIS_HOME/pause.json\" https://example.com/x.json",
+    "wget -O ~/.config/repo-aegis/pause.json https://example.com/x.json",
+    "wget -qO ~/.config/repo-aegis/pause.json https://example.com/x.json",
+    "wget --output-document=~/.config/repo-aegis/pause.json https://example.com/x.json",
+    "cd ~/.config/repo-aegis && curl -o pause.json https://example.com/x.json",
   ];
   for (const command of FILE_WRITES) {
     it(`refuses a shell write to the pause file: ${JSON.stringify(command)}`, () => assert.deepEqual(findHumanOnlyCommand(command), { kind: "pause" }));
+  }
+
+  // The egress approvals file is person-only too: an agent that wrote one would be minting its own approval, so a shell
+  // write to it is refused as the `approve` kind (same refusal, same fix: `repo-aegis approve`).
+  const APPROVALS_WRITES: readonly string[] = [
+    "cp a ~/.config/repo-aegis/egress-approvals.json",
+    "cp a \"$REPO_AEGIS_HOME/egress-approvals.json\"",
+    "cp a $REPO_AEGIS_HOME/Egress-Approvals.JSON",
+    "mv a /Users/me/.config/repo-aegis/egress-approvals.json",
+    "echo '[]' > ~/.config/repo-aegis/egress-approvals.json",
+    "echo '[]' >> ~/.config/repo-aegis/egress-approvals.json",
+    "echo '[]' >| ~/.config/repo-aegis/egress-approvals.json",
+    "echo '[]' &> ~/.config/repo-aegis/egress-approvals.json",
+    "echo '[]' > \"$REPO_AEGIS_HOME\"/egress-approvals.json",
+    "echo '[]' > ~/.config/repo-aegis/egress-approvals'.json'",
+    "cat x.json | tee ~/.config/repo-aegis/egress-approvals.json",
+    "ln -s /tmp/x.json ~/.config/repo-aegis/egress-approvals.json",
+    "cd ~/.config/repo-aegis && cp /tmp/x.json egress-approvals.json",
+    "sed -i s/a/b/ ~/.config/repo-aegis/egress-approvals.json",
+    "curl -o ~/.config/repo-aegis/egress-approvals.json https://example.com/x.json",
+    "python3 -c \"open('/Users/me/.config/repo-aegis/egress-approvals.json','w').write('[]')\"",
+    "bash -c 'echo [] > ~/.config/repo-aegis/egress-approvals.json'",
+  ];
+  for (const command of APPROVALS_WRITES) {
+    it(`refuses a shell write to the approvals file: ${JSON.stringify(command)}`, () => assert.deepEqual(findHumanOnlyCommand(command), { kind: "approve" }));
   }
 
   const FILE_READS: readonly string[] = [
@@ -85,6 +135,25 @@ describe("findHumanOnlyCommand — the emergency pause (P1-E)", () => {
     "git commit -m 'cp x ~/.config/repo-aegis/pause.json is refused'",
     "repo-aegis resume",
     "repo-aegis status",
+    // reads of either file, in every spelling a read takes
+    "cat \"$REPO_AEGIS_HOME\"/pause.json",
+    "cat ~/.config/repo-aegis/'pause.json'",
+    "cat ~/.config/repo-aegis/pause'.json'",
+    "jq . \"$REPO_AEGIS_HOME/pause.json\"",
+    "ls -la \"$REPO_AEGIS_HOME\"/pause.json",
+    "cat ~/.config/repo-aegis/pause.json > /tmp/copy.json",
+    "cat ~/.config/repo-aegis/pause.json 2>&1",
+    "cat ~/.config/repo-aegis/pause.json 2>/dev/null",
+    "grep -c expiresAt ~/.config/repo-aegis/pause.json | wc -l",
+    "cat ~/.config/repo-aegis/egress-approvals.json",
+    "ls -la ~/.config/repo-aegis/egress-approvals.json",
+    "jq . ~/.config/repo-aegis/egress-approvals.json",
+    "grep acme ~/.config/repo-aegis/egress-approvals.json",
+    "echo '[]' > /tmp/egress-approvals.json",
+    "curl https://example.com/x.json",
+    "curl -s https://example.com/x.json | jq . > /tmp/out.json",
+    "wget -O /tmp/x.json https://example.com/x.json",
+    "git commit -m 'cp a ~/.config/repo-aegis/egress-approvals.json is refused'",
   ];
   for (const command of FILE_READS) {
     it(`allows ${JSON.stringify(command)}`, () => assert.equal(findHumanOnlyCommand(command), null));

@@ -11,10 +11,12 @@
 //   - the directory is compared after `realpath` on both sides, from the nearest existing ancestor when the file
 //     or its directory does not exist yet, so a symlinked directory (`ln -s ~/.config/repo-aegis $TMPDIR/x`, then a
 //     write to `$TMPDIR/x/pause.json`) is the home;
-//   - a symlinked FILE is followed (the write lands on its target), and the target's name is judged too.
+//   - a symlinked FILE is followed (the write lands on its target), and the target's name is judged too. A link
+//     whose target does not exist yet (dangling) is followed with `readlink`, because a write through it CREATES the
+//     target; up to a few hops, and a chain that loops or runs too long is read as protected.
 // The directory comparison is case-insensitive as well: a false refusal of a differently-cased sibling directory
 // costs a re-worded path, a missed one costs the guard.
-import { realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { APPROVALS_FILE, PAUSE_FILE, repoAegisHome } from "@de-otio/repo-aegis-core";
 
@@ -47,15 +49,47 @@ function kindOfName(name: string): ProtectedStateFile | null {
   return null;
 }
 
-/** The protected state file `filePath` (resolved against `cwd`) would write, or null. */
+/** Most symlink hops followed before a chain is given up on and read as protected. */
+const MAX_LINK_HOPS = 8;
+
+/**
+ * Every place a write to `target` could land: the path as spelled with its directory resolved, and, while it is a
+ * symlink, each link's target in turn (a link's target is read with `readlink` and resolved against the link's own
+ * directory, so a DANGLING link, which `realpath` cannot follow, still reveals where a write would create the file).
+ * `loop` is true when the chain is longer than {@link MAX_LINK_HOPS} or comes back on itself.
+ */
+function writeCandidates(target: string): { candidates: string[]; loop: boolean } {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  let cur = target;
+  for (let hop = 0; hop <= MAX_LINK_HOPS; hop++) {
+    const realDir = realpathLoose(dirname(cur));
+    const spelled = join(realDir, basename(cur));
+    candidates.push(spelled, realpathLoose(cur));
+    if (seen.has(spelled)) return { candidates, loop: true };
+    seen.add(spelled);
+    let link: string;
+    try {
+      if (!lstatSync(spelled).isSymbolicLink()) return { candidates, loop: false };
+      link = readlinkSync(spelled);
+    } catch {
+      return { candidates, loop: false }; // does not exist (yet), or cannot be read: the write would create it as spelled
+    }
+    cur = resolve(realDir, link);
+  }
+  return { candidates, loop: true };
+}
+
+/**
+ * The protected state file `filePath` (resolved against `cwd`) would write, or null. A symlink chain that loops or
+ * runs past {@link MAX_LINK_HOPS} counts as protected (`pause`): no honest write goes through one.
+ */
 export function protectedStateFile(filePath: string, cwd: string, home: string = repoAegisHome()): ProtectedStateFile | null {
   const homeReal = realpathLoose(resolve(home)).toLowerCase();
-  const target = resolve(cwd, filePath);
-  // The path as spelled, with its directory resolved; then the file itself, if it is a link to somewhere else.
-  const candidates = [join(realpathLoose(dirname(target)), basename(target)), realpathLoose(target)];
+  const { candidates, loop } = writeCandidates(resolve(cwd, filePath));
   for (const c of candidates) {
     const kind = kindOfName(basename(c));
     if (kind !== null && dirname(c).toLowerCase() === homeReal) return kind;
   }
-  return null;
+  return loop ? "pause" : null;
 }

@@ -134,6 +134,9 @@ export function readPause(opts: PauseReadOptions = {}): PauseRead {
     }
     // lstat, not stat: a symlink to somewhere else is not the file a person wrote.
     if (!st.isFile() || st.size > PAUSE_FILE_MAX_BYTES) return { kind: "invalid" };
+    // A hard link shares its content with a name check-write cannot tie to the pause (a write through the other
+    // name would revive or forge a pause). `mintPause` writes a fresh file, so a person's pause has one name.
+    if (st.nlink > 1) return { kind: "invalid" };
     // The name as stored, not as looked up: on a case-insensitive file system `Pause.json` answers to `pause.json`.
     if (!readdirSync(dirname(path)).includes(basename(path))) return { kind: "invalid" };
     if (process.platform !== "win32") {

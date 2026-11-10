@@ -62,8 +62,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aside writes a `paused-allow` audit record (layer, verb, `owner/repo`), and `scan-after-write` drops the
   match preview from the advisory payload it prints at exit 0. The pause file's stored name must be exactly
   `pause.json`, and `check-write` judges the state files by what they are (any letter case, symlinked directories
-  and files), which also closes a pre-existing gap for `egress-approvals.json` (`APPROVALS_FILE_WRITE_REFUSED`). A
-  shell command that writes `pause.json` under a `repo-aegis` path is refused as a person-only command.
+  and files, a dangling link included, followed up to eight hops; a loop or a longer chain counts as protected),
+  which also closes a pre-existing gap for `egress-approvals.json` (`APPROVALS_FILE_WRITE_REFUSED`). A pause file
+  with more than one hard link is no pause. A shell command that writes `pause.json` under a `repo-aegis` path
+  (any redirect, `cp`/`mv`/`tee`/`curl -o`/`wget -O` and the like, quoted or not) is refused as a person-only
+  command, and a write to `egress-approvals.json` the same way (refused as `approve`). Under a machine-wide pause
+  a `CROSS_ORG_WRITE` refusal now says the pause does not lift cross-org checks and that `pause --repo` does.
+  `scan-after-write` writes its `paused-allow` record only when the pause lifted something.
 
 ### Changed
 

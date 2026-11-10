@@ -10,11 +10,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { cliBuilt, runCli } from "../_subprocess-utils.js";
-import { mintPause, pausePath } from "@de-otio/repo-aegis-core";
+import { auditLogPath, mintPause, pausePath } from "@de-otio/repo-aegis-core";
 
 const HOUR = 3_600_000;
 const NOTICE = /repo-aegis: paused until \d\d:\d\d(?:, cross-org checks stay on)? \(resume: repo-aegis resume\)/;
@@ -92,6 +92,22 @@ describe("hook check-write under a pause", { skip: SKIP }, () => {
     const r = crossOrgWrite(home, src, dest);
     assert.equal(r.code, 2);
     assert.equal((r.json as { code: string }).code, "CROSS_ORG_WRITE");
+    // the refusal says a machine-wide pause is on, that it does not lift this, and what does
+    const error = (r.json as { error: string }).error;
+    assert.match(error, /A machine-wide pause is active and does not lift cross-org checks/);
+    assert.match(error, /repo-aegis pause --repo <owner>\/<repo>/);
+    assert.match(error, /cross-org write refused: file /, "the original refusal is still first");
+  });
+
+  it("no pause, or one scoped to another repository: the cross-org refusal does not mention a pause", () => {
+    const src = repo("src", "git@github.com:alpha-org/src.git", "alpha");
+    const dest = repo("dest", "git@github.com:beta-org/dest.git", "beta");
+    for (const home of [aegisHome("none"), aegisHome("active", "beta-org/dest"), aegisHome("expired")]) {
+      const r = crossOrgWrite(home, src, dest);
+      assert.equal(r.code, 2);
+      // (the path in the message can hold "pause": this test's temp directory does)
+      assert.doesNotMatch((r.json as { error: string }).error, /pause is active|does not lift|repo-aegis pause/i);
+    }
   });
 
   it("a pause scoped to the session's repository lifts it for that repository, with the notice as the systemMessage", () => {
@@ -163,6 +179,36 @@ describe("hook check-write under a pause", { skip: SKIP }, () => {
       assert.equal(r.code, 2, file_path);
       assert.equal((r.json as { code: string }).code, "PAUSE_FILE_WRITE_REFUSED", file_path);
     }
+  });
+
+  it("a DANGLING symlink to the pause file or the approvals file is refused: a write through it would create the file", () => {
+    // `none`: neither file exists, so `realpath` of the link fails and only `readlink` shows where it leads
+    const home = aegisHome("none");
+    const cwd = repo("cwd", "git@github.com:alpha-org/src.git", "alpha");
+    const direct = join(tmp, `dangling-pause${n++}`);
+    symlinkSync(join(home, "pause.json"), direct);
+    const approvals = join(tmp, `dangling-approvals${n++}`);
+    symlinkSync(join(home, "egress-approvals.json"), approvals);
+    const hop2 = join(tmp, `hop2-${n++}`);
+    symlinkSync(direct, hop2);
+    const relative = join(tmp, `dangling-rel${n++}`);
+    symlinkSync(join(basename(home), "pause.json"), relative); // relative to the link's directory, `tmp`, which holds the home
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      [direct, "PAUSE_FILE_WRITE_REFUSED"],
+      [approvals, "APPROVALS_FILE_WRITE_REFUSED"],
+      [hop2, "PAUSE_FILE_WRITE_REFUSED"],
+      [relative, "PAUSE_FILE_WRITE_REFUSED"],
+    ];
+    for (const [file_path, code] of cases) {
+      const r = runCli(home, cwd, ["hook", "check-write"], { input: JSON.stringify({ tool_input: { file_path } }) });
+      assert.equal(r.code, 2, file_path);
+      assert.equal((r.json as { code: string }).code, code, file_path);
+    }
+    // control: a dangling link to an ordinary file is an ordinary write
+    const harmless = join(tmp, `dangling-harmless${n++}`);
+    symlinkSync(join(tmp, `not-yet${n++}.txt`), harmless);
+    const ok = runCli(home, cwd, ["hook", "check-write"], { input: JSON.stringify({ tool_input: { file_path: harmless } }) });
+    assert.equal(ok.code, 0, ok.stderr);
   });
 
   it("the egress approvals file is protected the same way: its exact name, case variants and a symlinked directory", () => {
@@ -252,6 +298,33 @@ describe("hook scan-after-write under a pause: detection is not paused", { skip:
     const r = runCli(home, cwd, ["hook", "scan-after-write"], { input: JSON.stringify({ tool_input: { file_path: file }, cwd }) });
     assert.equal(r.code, 0);
     assert.match((r.json as Out).systemMessage ?? "", NOTICE);
+  });
+
+  it("`paused-allow` is audited only when the pause lifted something: a hit turned advisory, not a clean write", () => {
+    const records = (home: string): Array<{ action: string; details?: Record<string, unknown> }> => {
+      const log = auditLogPath(home);
+      return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(l => l !== "").map(l => JSON.parse(l) as { action: string; details?: Record<string, unknown> }) : [];
+    };
+    const withAudit = (): string => {
+      const home = aegisHome("active");
+      writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+      return home;
+    };
+    const cwd = repo("cwd", "git@github.com:alpha-org/src.git", "alpha");
+    // a clean file: nothing lifted, so no record
+    const cleanHome = withAudit();
+    const clean = join(tmp, `clean${n++}.txt`);
+    writeFileSync(clean, "nothing here\n");
+    const c = runCli(cleanHome, cwd, ["hook", "scan-after-write"], { input: JSON.stringify({ tool_input: { file_path: clean }, cwd }) });
+    assert.equal(c.code, 0);
+    assert.match((c.json as Out).systemMessage ?? "", NOTICE, "still says it is paused");
+    assert.deepEqual(records(cleanHome).filter(r => r.action === "paused-allow"), []);
+    // a marker hit: the pause turned a block into advice, so one record
+    const hitHome = withAudit();
+    assert.equal(scan(hitHome, cwd).code, 0);
+    const allowed = records(hitHome).filter(r => r.action === "paused-allow");
+    assert.equal(allowed.length, 1);
+    assert.deepEqual(allowed[0]!.details, { layer: "hook scan-after-write", verb: "write" });
   });
 
   it("after expiry the hit blocks again (exit 1)", () => {

@@ -5,7 +5,7 @@
 // each way a file can be wrong has a test that fails if the reader lets it through. The clock is pinned (`T0`).
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -143,6 +143,23 @@ describe("pause: a file that fails a check is no pause (fail closed)", () => {
     const link = fresh();
     symlinkSync(target, link);
     assert.equal(readPause({ path: link, now: T0 }).kind, "invalid");
+  });
+
+  it("a hard-linked pause file is no pause (a write through the other name could revive or forge one), and is one again once the link is gone", () => {
+    const path = fresh();
+    raw(path, good());
+    assert.equal(readPause({ path, now: T0 }).kind, "active", "control: one name");
+    const other = fresh();
+    linkSync(path, other);
+    assert.equal(readPause({ path, now: T0 }).kind, "invalid");
+    assert.equal(readPause({ path: other, now: T0 }).kind, "invalid");
+    unlinkSync(other);
+    assert.equal(readPause({ path, now: T0 }).kind, "active", "one name again");
+    // an EXPIRED file counts the same: it must not read as `expired` either, so a revived write is not honoured
+    const expired = fresh();
+    raw(expired, good({ createdAt: iso(-2 * HOUR), expiresAt: iso(-HOUR) }));
+    linkSync(expired, fresh());
+    assert.equal(readPause({ path: expired, now: T0 }).kind, "invalid");
   });
 
   it("a case-variant name (Pause.json, PAUSE.JSON) is no pause, even where the file system opens it as pause.json", () => {

@@ -115,6 +115,9 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
       const lifted = exitCode === EXIT_HIT || (exitCode !== 0 && paused.repo !== undefined);
       const hits = (value as { hits?: unknown }).hits;
       const finalCode = lifted ? 0 : exitCode;
+      // The audit record says "a pause let something through", so it is written only when the pause lifted a refusal
+      // (a marker hit turned advisory, a cross-org or registry refusal lifted by a scoped pause): not for a clean write.
+      if (lifted) recordPausedAllow("hook scan-after-write", { verb: "write" });
       const found = finalCode === 0 && Array.isArray(hits) && hits.length > 0 ? `; ${hits.length} marker hit(s) found, advisory while paused` : "";
       // At exit 0 this payload goes to stdout, which lands in the transcript, where a refusal's stderr would not:
       // a hit's `matchPreview` is the first characters of what matched, so it is dropped here (path, line, column
@@ -138,7 +141,6 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   }
   if (!existsSync(filePath)) process.exit(0);
   paused = pauseCoveringWorkingRepo(cwd ?? process.cwd());
-  if (paused !== null) recordPausedAllow("hook scan-after-write", { verb: "write" });
 
   // Missing: no registry => no engagements, no orgs. Treat the whole world as one boundary and scan with an empty
   // deny set. The agent would have run `repo-aegis init` already if engagement scoping were in use; the hook should

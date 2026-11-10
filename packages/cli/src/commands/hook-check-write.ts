@@ -238,7 +238,12 @@ export async function hookCheckWrite(): Promise<void> {
       error:
         `cross-org write refused: file ${filePath} lives in a working tree ` +
         `whose trust boundary (${decision.destOrgs.join(", ") || "unknown"}) ` +
-        `does not overlap the launcher's (${decision.srcOrgs.join(", ") || "unknown"})`,
+        `does not overlap the launcher's (${decision.srcOrgs.join(", ") || "unknown"})` +
+        // Here only a machine-wide pause can be in force (a scoped one that covers this repository returned above).
+        (paused !== null
+          ? ". A machine-wide pause is active and does not lift cross-org checks; a person can lift them for one " +
+            "repository with `repo-aegis pause --repo <owner>/<repo>`, from their own terminal"
+          : ""),
       details: {
         srcOrgs: decision.srcOrgs,
         destOrgs: decision.destOrgs,
