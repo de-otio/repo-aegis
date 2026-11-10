@@ -1062,3 +1062,21 @@ describe("checkGuardHook — the pinned form (D7)", () => {
     assert.equal(checkGuardHook(mention).every(c => c.ok), false);
   });
 });
+
+describe("install-claude-md — text output", () => {
+  it("prints one line per hook and no command text or deny rules; --verbose prints both", () => {
+    const claudeHome = makeClaudeHome("text-output");
+    const aegisHome = aegisHomeFor("text-output");
+    withEnv("REPO_AEGIS_HOME", aegisHome, () => {
+      const out = captureOutput(() => installClaudeMd({ claudeHome }));
+      assert.match(out.stdout, /PreToolUse\(Bash\)\s+guard-egress\s+registered\n/);
+      assert.match(out.stdout, /UserPromptSubmit\s+prompt-submit\s+registered\n/);
+      assert.doesNotMatch(out.stdout, /command: /);
+      assert.doesNotMatch(out.stdout, /rule: /);
+      assert.ok(out.stdout.length < 3000, `compact output, got ${out.stdout.length} bytes`);
+      const again = captureOutput(() => installClaudeMd({ claudeHome, verbose: true }));
+      assert.match(again.stdout, /PreToolUse\(Bash\)\s+guard-egress\s+already registered\n {4}command: /);
+      assert.match(again.stdout, /\n {2}rule: /);
+    });
+  });
+});

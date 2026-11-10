@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-10
+
+### Fixed
+
+- **`upgrade` names the safe order for removing a legacy drop-in.** With a root-owned drop-in still installed and the
+  egress guard not yet in `~/.claude/settings.json`, the `run yourself:` line now starts with
+  `repo-aegis install claude-md  &&`, ahead of the removal command. Before, it listed only the removal, and following it
+  left no egress guard until `install claude-md` ran.
+- **`install claude-md` prints one line per hook.** It used to echo every hook's full pinned command (~20 KB) and all
+  deny rules. It now prints the event, the hook name and whether it was registered, the pin once, and the deny-rule
+  count. `--verbose` prints the full text.
+
 ## [0.15.0] - 2026-11-10
 
 **Less to install, less to trust.** 0.15.0 is 0.14.0 plus the deletions of the complexity review: the root-owned managed

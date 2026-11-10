@@ -39,7 +39,7 @@ import { compareVersions } from "../semver.js";
 import { recordVersion } from "../version-notice.js";
 import { gitCredentialHelperStale, type GitCredentialCheckOptions } from "./doctor-git-credential-checks.js";
 import { canonical, unusable } from "./doctor-pin-checks.js";
-import { defaultClaudeHome, installClaudeMd, readSettingsFile } from "./install-claude-md.js";
+import { checkGuardHook, defaultClaudeHome, readSettingsFile } from "./install-claude-md.js";
 import { installGitCredential } from "./install-git-credential.js";
 import { writeHookScripts } from "./install-hooks.js";
 import { checkShim, installShim, shimBinDir, shimPathFor } from "./install-shim.js";
@@ -436,12 +436,20 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
     const legacy = detectLegacyDropIn(deps.legacyManaged);
     if (legacy === null) quiet("claude-md", { state: "not-installed", detail: "no legacy managed drop-in is installed" });
     else {
+      // Removing the drop-in before its hooks are registered in settings.json leaves no egress guard at all: so when
+      // they are not, `install claude-md` comes first, in the same command line.
+      const claudeHome = opts.claudeHome ?? defaultClaudeHome();
+      const registered = checkGuardHook(claudeHome).every(c => c.ok);
+      const installer = `repo-aegis install claude-md${opts.claudeHome !== undefined ? ` --claude-home ${opts.claudeHome}` : ""}`;
+      const removal = legacy.commands.join("  ;  ");
       add(
         "claude-md",
         "run-yourself",
         `a legacy root-owned managed drop-in is still installed (${legacy.files.join(", ")}); repo-aegis no longer writes or updates it, so its hooks stay pinned to an old Node and CLI. ` +
-          "Removing it needs root, so run the command in your own terminal",
-        legacy.commands.join("  ;  "),
+          (registered
+            ? "The hooks are registered in settings.json, so it can go; removing it needs root, so run the command in your own terminal"
+            : `The hooks are not yet registered in ${join(claudeHome, "settings.json")}: run \`${installer}\` FIRST, then remove the drop-in (it needs root, so in your own terminal); removing it first leaves no egress guard`),
+        registered ? removal : `${installer}  &&  ${removal}`,
       );
     }
   }

@@ -313,6 +313,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "--print-only",
       "--uninstall",
       "--user-settings",
+      "--verbose",
     ],
     subcommands: [],
   },
