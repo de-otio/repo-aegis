@@ -1035,6 +1035,33 @@ every run and get muted (`audit --no-hooks-check` is what the
 generated CI workflow sets instead). `doctor` is a developer-machine
 sweep, run on demand or on a schedule.
 
+### `repo-aegis upgrade [--dry-run] [--json] [--claude-home <dir>]`
+
+One command after upgrading the package. It finds every stale install the way `doctor` does (the same
+check functions) and re-runs the matching installer, in this order, one line per step:
+
+| Step | Stale when | Runs |
+|---|---|---|
+| `hooks` | `<home>/hooks/pre-commit` or `pre-push` is not what this release writes (`HOOKS_SCRIPT_STALE`), or one is missing or not executable | rewrites both scripts (the part of `install hooks` that goes stale; `core.hooksPath` is not touched) |
+| `shim` | the `gh` shim is an earlier release's script, or was rendered for another pin or home (`SHIM_STALE`; judged whether or not the shim is first on `PATH`) | `install shim` (keeps the taaad pin the shim already carries when `PATH` has no taaad) |
+| `claude-md` | the managed drop-in differs from what `install claude-md` would write (`MANAGED_DROPIN_STALE`) | `install claude-md`: a root write, behind a `sudo` password and a typed `y` |
+| `git-credential` | a repo-aegis credential helper for `https://github.com` is configured, but it is another install's (`GIT_CREDENTIAL_HELPER_ORDER`'s stale case) | `install git-credential` (global git config) |
+
+- **Never installs what was not installed.** A missing shim, no drop-in, no helper: that step is `not-installed`/`current` in `--json` and silent in text.
+- **Steps that need a person** (`claude-md`, `git-credential`) run only when a person is at a terminal (the same test `install git-credential` and `approve` use); their own prompts and gates still apply. With none attached they are **not run and not failures**: they are listed under `run yourself:` with the exact command. `upgrade` is not person-only, because every installer it runs is one an agent may already run; it is not in `core/human-commands.ts`.
+- `--dry-run` prints what each step would do and changes nothing, including the "last version seen" record below.
+- Output ends `next: repo-aegis doctor`. With nothing stale it prints `nothing to upgrade` first, and running it again is always a no-op.
+- Exit 0 when nothing is left stale or only `run yourself:` items remain; **1** when an installer failed (the installer's own message is on stderr). `--claude-home` is passed to the `claude-md` step and to its `run yourself:` line.
+- `--json` prints one object: `{ "action": "upgrade", "dryRun", "version", "steps": [{ "step", "status", "detail", "command"? }], "runYourself": [{ "step", "command" }], "nothingToUpgrade", "failed", "next" }`. `status` is `current`, `not-installed`, `upgraded`, `would-upgrade`, `failed` or `run-yourself`.
+
+**The once-per-version notice.** The version last seen is recorded in `<home>/state/last-version`. The first
+command after a newer version is installed prints one line on stderr, `repo-aegis <version> is new here: run
+`repo-aegis upgrade``, and records the version; `upgrade` (not `--dry-run`, and only when no installer failed) and
+`init` record it too. It is printed from interactive commands and the git hooks' `check` calls only: never from
+`hook ...` (Claude Code's hook commands keep a clean stdout and an unchanged stderr), `git-credential` (stdout is
+the credential protocol), `gh`, `egress-check`, `egress-readback`, `explain` (it is read-only and creates nothing), `uninstall`, or a CI run (`CI` set). When the
+state directory cannot be written nothing is printed, since the notice could not stay "once".
+
 ---
 
 ## Repo classification

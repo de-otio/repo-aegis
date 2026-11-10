@@ -148,6 +148,29 @@ By hand:
 
 `repo-aegis uninstall` removes all of it (see below).
 
+## Upgrading
+
+```sh
+npm install -g @de-otio/repo-aegis@latest
+repo-aegis upgrade
+repo-aegis doctor
+```
+
+Most releases change something repo-aegis generated onto your machine: the git hook scripts, the `gh`
+wrapper, the root-owned Claude Code settings file, the credential helper's pin. Until those are
+rewritten, `doctor` reports them as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`,
+`MANAGED_DROPIN_STALE`) and the new behaviour does not apply. `repo-aegis upgrade` finds each stale
+one the way `doctor` does, re-runs its installer in a fixed order (hooks, shim, claude-md,
+git-credential) and prints one line per step. It installs nothing you did not install, and a second
+run says `nothing to upgrade`. `--dry-run` shows what it would do and changes nothing.
+
+Two steps need a person: the root-owned settings file (`sudo` asks for your password) and the git
+credential helper (it decides which GitHub account an agent pushes as). Where no person is at a
+terminal, for example when an agent runs `upgrade`, they are not run and not counted as failures.
+They are listed under `run yourself:` with the exact command to type. After you upgrade, the first
+command you run prints `repo-aegis <version> is new here: run `repo-aegis upgrade``, once, on stderr.
+It never appears in a Claude Code hook's output or in the git credential helper's.
+
 ## Documentation
 
 | Doc                                          | For                                                                     |

@@ -31,8 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocks the prompt (its pinned command exits 0, not 2, if the pinned binary is gone). So a yes followed
   by the person typing before the push, and a "no" followed by the person's next message, both mean the
   push asks again. `repo-aegis approve --revoke prompt` does the same by hand and leaves terminal
-  approvals alone. Re-run `repo-aegis install claude-md` once to register it; with the managed drop-in,
-  `doctor` reports `MANAGED_DROPIN_STALE` until you do.
+  approvals alone. Re-run `repo-aegis install claude-md` once to register it, or run
+  `repo-aegis upgrade`; with the managed drop-in, `doctor` reports `MANAGED_DROPIN_STALE` until you do.
 - Prompt approvals bind more exactly: a mutating `gh api` binds the HTTP method as well as the endpoint
   (a yes to a PATCH is not a yes to a DELETE); `gh pr|issue edit|merge|comment|review <n>` and
   `gh release create|edit|upload <tag>` bind the number or tag when one is given (no target: the
@@ -41,6 +41,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented: for scripted `claude -p` runs, pass an explicit `--permission-mode` other than
   `default`/`acceptEdits`. The hook input has no headless indicator, and `permission_mode` reads
   `default` there too.
+- **`repo-aegis upgrade [--dry-run] [--json]`: one command after an upgrade.** It finds every stale
+  install the way `doctor` does (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`, `MANAGED_DROPIN_STALE`, a
+  credential helper pinned to another install) and re-runs the matching installer in a fixed order
+  (hooks, shim, claude-md, git-credential), one line per step, ending `next: repo-aegis doctor`.
+  After upgrading the package, run it instead of the three `install` commands. It never installs what
+  was not installed, a second run prints `nothing to upgrade`, and `--dry-run` changes nothing. The
+  two steps that need a person (the managed drop-in's `sudo` write, the credential helper) run only
+  at a person's terminal; otherwise they are listed under `run yourself:` with the exact command and
+  are not counted as failures. Exit 1 only when an installer failed. An agent may run `upgrade`: it
+  only re-runs installers an agent may already run, so it is not in the person-only commands.
+- **A once-per-version notice.** The version last seen is kept in `<home>/state/last-version`. The first
+  command after a newer version is installed prints one stderr line, ``repo-aegis <version> is new
+  here: run `repo-aegis upgrade` ``, and records the version (so does `upgrade`, and `init`). It is
+  never printed by `hook ...` (Claude Code's hook JSON on stdout stays clean), `git-credential`
+  (stdout is the credential protocol), `gh`, `egress-check`, `egress-readback`, `explain` (read-only),
+  `uninstall` or a CI run.
 
 ### Changed
 
@@ -80,7 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the destination checks still see it.
 
 - **The generated pre-push script passes `--remote-ref "$remote_ref"`, so re-run `repo-aegis install
-  hooks`.** Until you do, `status` and `doctor` report the pre-push hook as stale
+  hooks` (or run `repo-aegis upgrade`).** Until you do, `status` and `doctor` report the pre-push hook as stale
   (`HOOKS_SCRIPT_STALE`), and a yes at the prompt cannot reach it: the push is refused as before, and
   its message says to run `repo-aegis install hooks`. Nothing else about the old script's behaviour
   changes.
@@ -100,7 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ENFORCEMENT_PIN_MISSING` stays a `doctor` failure. **The generated scripts and hook commands
   changed, so existing installs show as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`,
   `MANAGED_DROPIN_STALE`) until you re-run `repo-aegis install hooks`, `repo-aegis install shim` and
-  `repo-aegis install claude-md`.**
+  `repo-aegis install claude-md`, or run `repo-aegis upgrade`.**
 - **An encrypted registry is treated as no registry.** Encryption at rest is deprecated and goes
   away in 0.15.0. Until then an encrypted registry no longer refuses every publish or every
   Write: the hooks, pre-push, the `gh` shim and the write hooks run as if there were none (rule h

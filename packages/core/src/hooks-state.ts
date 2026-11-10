@@ -378,3 +378,12 @@ function buildScripts(dir: string, pin: EnforcementPin): Record<HookName, HookSc
     "pre-push": inspectScript(dir, "pre-push", pin),
   };
 }
+
+/**
+ * What is on disk in a hooks directory, judged the way {@link resolveHookState} judges the one git uses:
+ * present, executable, and equal to the script this `pin` would render. For callers (`upgrade`) that ask
+ * about repo-aegis's own `<home>/hooks`, which needs no git repository and no `core.hooksPath`.
+ */
+export function inspectHookScripts(dir: string, pin: EnforcementPin): Record<HookName, HookScriptState> {
+  return buildScripts(dir, pin);
+}

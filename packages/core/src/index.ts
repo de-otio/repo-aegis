@@ -236,7 +236,7 @@ export {
   type PinGuardOptions,
 } from "./enforcement-pin.js";
 export type { HookName } from "./hook-scripts.js";
-export { resolveHookState } from "./hooks-state.js";
+export { inspectHookScripts, resolveHookState } from "./hooks-state.js";
 export type {
   HookState,
   HookScriptState,

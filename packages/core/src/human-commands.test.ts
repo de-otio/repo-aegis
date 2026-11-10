@@ -191,6 +191,16 @@ const MISSES: ReadonlyArray<string> = [
   "repo-aegis status",
   "repo-aegis doctor",
   "repo-aegis install git-credential",
+  // `upgrade` only re-runs the installers an agent may already run (hooks, shim, claude-md, git-credential:
+  // none is in the person-only list). The two that need a person keep their own TTY and sudo gates inside
+  // `upgrade`, which lists them instead of running them, so it is not a person-only command.
+  "repo-aegis upgrade",
+  "repo-aegis upgrade --dry-run",
+  "repo-aegis --json upgrade --dry-run",
+  "node packages/cli/dist/index.js upgrade --json",
+  "repo-aegis install hooks",
+  "repo-aegis install shim",
+  "repo-aegis install claude-md",
   "repo-aegis check --path docs/gh-notes.md",
   "git commit -m 'repo-aegis gh -- pr view'",
   "echo gh git-credential",

@@ -19,6 +19,8 @@ import { check } from "./commands/check.js";
 import { render } from "./commands/render.js";
 import { engagementsList } from "./commands/engagements-list.js";
 import { emitError } from "./format.js";
+import { repoAegisHome } from "@de-otio/repo-aegis-core";
+import { noticeApplies, recordsVersion, recordVersion, versionNotice } from "./version-notice.js";
 
 function packageVersion(): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -26,6 +28,13 @@ function packageVersion(): string {
     version: string;
   };
   return pkg.version;
+}
+
+/** The names from the program down to `cmd` (`["install", "hooks"]`); empty for the program itself. */
+function commandPath(cmd: Command): string[] {
+  const out: string[] = [];
+  for (let c: Command | null = cmd; c !== null && c.parent !== null; c = c.parent) out.unshift(c.name());
+  return out;
 }
 
 // Helper: merge global opts with command-specific opts. Per-command
@@ -53,13 +62,31 @@ export async function buildProgram(): Promise<Command> {
 
   // Translate --home / --registry-path into the env vars that paths.ts
   // reads at call time. Runs before any subcommand action.
-  program.hook("preAction", () => {
+  program.hook("preAction", (_thisCommand, actionCommand) => {
     const g = program.opts() as {
       home?: string;
       registryPath?: string;
     };
     if (g.home) process.env["REPO_AEGIS_HOME"] = g.home;
     if (g.registryPath) process.env["REPO_AEGIS_REGISTRY"] = g.registryPath;
+    // Once per version, on stderr, from interactive commands and git hooks only (never `hook`, `git-credential`
+    // or `gh`: their output is read as data). Must never stop a command from running.
+    try {
+      const path = commandPath(actionCommand);
+      if (noticeApplies(path)) versionNotice({ home: repoAegisHome(), version: packageVersion(), write: s => void process.stderr.write(s) });
+    } catch {
+      /* a notice is never worth a failed command */
+    }
+  });
+
+  // `init` writes this version's hooks, shim and drop-in, so the notice has nothing to say after it.
+  program.hook("postAction", (_thisCommand, actionCommand) => {
+    try {
+      const path = commandPath(actionCommand);
+      if (recordsVersion(path) && actionCommand.opts()["migrateClassify"] !== true) recordVersion(repoAegisHome(), packageVersion());
+    } catch {
+      /* best-effort */
+    }
   });
 
   program
@@ -145,6 +172,7 @@ export async function buildProgram(): Promise<Command> {
   const { uninstallSweepRepos } = await import("./commands/uninstall-sweep-repos.js");
   const { doctor } = await import("./commands/doctor.js");
   const { waive } = await import("./commands/waive.js");
+  const { upgrade } = await import("./commands/upgrade.js");
 
   engagements
     .command("add [id]")
@@ -767,6 +795,20 @@ export async function buildProgram(): Promise<Command> {
     )
     .option("--claude-home <dir>", "override default ~/.claude location (for the guard-hook check)")
     .action((opts, cmd) => doctor(withGlobals(opts, cmd)));
+
+  // One command after upgrading the package: re-run the installers whose generated output `doctor` calls stale.
+  // Allowed for agents: it only re-runs installers an agent may already run, and the two that need a person
+  // (the managed drop-in's sudo write, the credential helper) are listed, not run, when no person is at a terminal.
+  program
+    .command("upgrade")
+    .description(
+      "after upgrading repo-aegis: re-run the installers whose output is stale (git hook scripts, the gh shim, the managed Claude Code drop-in, the git credential helper), one line per step. Steps that need a person at a terminal (the drop-in's sudo write, the credential helper) are listed under `run yourself:` when none is attached. Never installs what was not installed.",
+    )
+    .option("--dry-run", "report what would be done; change nothing")
+    .option("--claude-home <dir>", "override default ~/.claude location (for the claude-md step)")
+    .action((opts, cmd) => {
+      upgrade(withGlobals(opts, cmd), { version: packageVersion() });
+    });
 
   return program;
 }
