@@ -899,14 +899,9 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
   if (denyInstall.legacyRemoved.length > 0) {
     emitText(`removed ${denyInstall.legacyRemoved.length} broader deny rule(s) written by an earlier build`);
   }
-  if (verbose) {
-    for (const rule of denyInstall.plan.rules) emitText(`  rule: ${rule}`);
-    for (const line of denyAdviceLines(denyInstall.plan)) emitText(`  ${line}`);
-  } else {
-    for (const w of denyInstall.plan.warnings) emitText(`  warning: ${w}`);
-    emitText(`  verify in a sandboxed Bash session: touch ${denyInstall.plan.verifyPath}   (it should fail with a permission error)`);
-    emitText("  (--verbose prints each hook command and deny rule)");
-  }
+  if (verbose) for (const rule of denyInstall.plan.rules) emitText(`  rule: ${rule}`);
+  for (const line of denyAdviceLines(denyInstall.plan)) emitText(`  ${line}`);
+  if (!verbose) emitText("  (--verbose prints each hook command and deny rule)");
   if (legacy !== null) {
     emitText("");
     for (const line of legacyDropInLines(legacy)) emitText(line);
