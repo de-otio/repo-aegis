@@ -29,6 +29,9 @@
  *
  * - `command`: a shell command the host is about to run. `cwd` is where it
  *   will run, if the payload says (never the hook's own `process.cwd()`).
+ *   `permissionMode` and `sessionId` are the host's root `permission_mode` and `session_id`, filled ONLY by the
+ *   Claude-Code-family parser (`parsePreToolUse`) and only when plain strings of at most 64 characters: they
+ *   are what lets the hook decide whether a "yes" at the host's prompt is a person's (prompt approvals).
  * - `skip`: a well-formed payload that is not this hook's business — a tool
  *   that is not a shell, or no command field. The policy does not run.
  * - `malformed`: the payload is not something this adapter understands (not
@@ -38,7 +41,7 @@
  *   it must not contain payload text.
  */
 export type ParsedHookInput =
-  | { kind: "command"; command: string; cwd?: string }
+  | { kind: "command"; command: string; cwd?: string; permissionMode?: string; sessionId?: string }
   | { kind: "skip" }
   | { kind: "malformed"; reason: string };
 
@@ -48,6 +51,9 @@ export type ParsedHookInput =
  * - `allow` without a reason: the common case; nothing to say.
  * - `allow` with a reason: a human approval stood in for a person; the reason
  *   names it, on the channel the host shows decision reasons on.
+ * - `allow` with a `notice`: nothing is wrong with the command, but the person should know something about the
+ *   guard (the registry is encrypted, so rule h is off; the pin is gone and the PATH fallback ran). Rendered only
+ *   by an adapter whose host shows a `systemMessage` on exit 0 (Claude Code); the others drop it, silently.
  * - `ask`: a person should confirm. The core only produces it for an adapter
  *   with `hasAsk: true`; an adapter without one must still render it as a
  *   deny (never as an allow) should one reach it.
@@ -57,7 +63,7 @@ export type ParsedHookInput =
  *   a host that fails closed on a non-zero exit needs exit 0 here.
  */
 export type HookVerdict =
-  | { action: "allow"; reason?: string }
+  | { action: "allow"; reason?: string; notice?: string }
   | { action: "ask"; reason: string }
   | { action: "deny"; reason: string }
   | { action: "error" };

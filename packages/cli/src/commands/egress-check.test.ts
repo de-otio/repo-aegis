@@ -3,7 +3,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, fakeGh, withEnv, withStreamTty, PERSON_ANCESTRY, UNDER_CLAUDE_ANCESTRY } from "../_test-utils.js";
@@ -11,10 +11,13 @@ import { cliBuilt, runCli } from "../_subprocess-utils.js";
 import { buildGhCommand, egressCheck, egressReadback, parsePrRef, shellQuote } from "./egress-check.js";
 import {
   approvalsPath,
+  auditLogPath,
   mintApproval,
+  recordPromptApproval,
   revokeApprovals,
   setAncestryReaderForTests,
   type AncestorInfo,
+  type PromptBinding,
 } from "@de-otio/repo-aegis-core";
 
 // FIXTURE LOCATION, deliberately not the temp dir: rule d refuses a payload
@@ -263,6 +266,110 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
     assert.match(r2.stderr, /repo-aegis approve acme\/svc/);
   });
 
+  // Prompt approvals (doc/design/egress-guard.md §4a.1): a person's yes at an agent's permission prompt, recorded by the
+  // agent hook for ONE command. The shim honours it only for the same verb, the same repository and (for `gh api`) the
+  // same endpoint.
+  describe("a prompt approval (the agent hook's record of a yes at the prompt)", () => {
+    const PR = ["egress-check", "--cwd", "", "--", "pr", "create", "--title", "t", "--body", "b", "--repo", "acme/svc"];
+    const shim = (h: string, args: string[]) => {
+      const a = [...args];
+      a[a.indexOf("--cwd") + 1] = publicRepo;
+      return runCli(h, publicRepo, a);
+    };
+    function promptHome(name: string): string {
+      const h = join(root, name);
+      mkdirSync(join(h, "markers"), { recursive: true });
+      writeFileSync(join(h, "markers", "_always.txt"), "");
+      return h;
+    }
+    const record = (h: string, binding: PromptBinding) =>
+      recordPromptApproval({ binding, permissionMode: "default", home: h })!;
+
+    it("allows the same gh verb to the same repository, and names the approval in the verdict", () => {
+      const h = promptHome("prompt-pr");
+      const a = record(h, { verb: "gh-pr-create", org: "acme", repo: "svc" });
+      const r = shim(h, PR);
+      assert.equal(r.code, 0, r.stderr);
+      const v = JSON.parse(r.stdout) as { action: string; approval?: { id: string } };
+      assert.equal(v.action, "allow");
+      assert.equal(v.approval?.id, a.id);
+    });
+
+    it("refuses another verb on the same repository, and a push record for a PR", () => {
+      const h = promptHome("prompt-other-verb");
+      record(h, { verb: "gh-pr-create", org: "acme", repo: "svc" });
+      for (const args of [
+        ["egress-check", "--cwd", "", "--", "release", "create", "v1", "--repo", "acme/svc", "--notes", "n"],
+        ["egress-check", "--cwd", "", "--", "issue", "comment", "5", "--repo", "acme/svc", "--body", "b"],
+        ["egress-check", "--cwd", "", "--", "pr", "create", "--title", "t", "--body", "b", "--repo", "acme/other"],
+      ]) {
+        const r = shim(h, args);
+        assert.equal(r.code, 2, args.join(" "));
+        assert.match(r.stderr, /A yes at an agent prompt covers only the same command to the same destination, for 2 minutes/);
+      }
+      const h2 = promptHome("prompt-push-record");
+      record(h2, { verb: "git-push", org: "acme", repo: "svc", ref: "main" });
+      assert.equal(shim(h2, PR).code, 2, "a git-push record does not cover gh pr create");
+    });
+
+    it("gh api: the exact endpoint is allowed, another endpoint on the same repository is refused", () => {
+      const h = promptHome("prompt-api");
+      record(h, { verb: "gh-api-mutating", org: "acme", repo: "svc", endpoint: "repos/acme/svc/issues", method: "POST" });
+      const api = (endpoint: string) => ["egress-check", "--cwd", "", "--", "api", "-X", "POST", endpoint, "-f", "title=x"];
+      assert.equal(shim(h, api("repos/acme/svc/issues")).code, 0);
+      assert.equal(shim(h, api("/repos/acme/svc/issues")).code, 0, "one leading slash is the same endpoint");
+      assert.equal(shim(h, api("repos/acme/svc/pulls")).code, 2);
+      assert.equal(shim(h, api("repos/acme/svc/issues/1/comments")).code, 2);
+    });
+
+    it("gh api: the HTTP method is part of the yes (a PATCH approval does not cover a DELETE or a fields-only POST)", () => {
+      const h = promptHome("prompt-api-method");
+      record(h, { verb: "gh-api-mutating", org: "acme", repo: "svc", endpoint: "repos/acme/svc/issues/1", method: "PATCH" });
+      const call = (...flags: string[]) => ["egress-check", "--cwd", "", "--", "api", ...flags, "repos/acme/svc/issues/1"];
+      assert.equal(shim(h, call("-X", "PATCH", "-f", "state=closed")).code, 0);
+      assert.equal(shim(h, call("--method=patch", "-f", "state=closed")).code, 0, "any spelling of the same method");
+      assert.equal(shim(h, call("-X", "DELETE")).code, 2, "DELETE is not PATCH");
+      assert.equal(shim(h, call("-f", "state=closed")).code, 2, "gh's default for fields is POST");
+    });
+
+    it("gh pr merge: the PR number is part of the yes (12 is not 13, and a bare merge is not 12)", () => {
+      const h = promptHome("prompt-target");
+      record(h, { verb: "gh-pr-merge", org: "acme", repo: "svc", target: "12" });
+      const merge = (...n: string[]) => ["egress-check", "--cwd", "", "--", "pr", "merge", ...n, "--repo", "acme/svc"];
+      assert.equal(shim(h, merge("12")).code, 0);
+      assert.equal(shim(h, merge("13")).code, 2);
+      assert.equal(shim(h, merge()).code, 2);
+    });
+
+    it("an expired record allows nothing", () => {
+      const h = promptHome("prompt-expired");
+      recordPromptApproval({
+        binding: { verb: "gh-pr-create", org: "acme", repo: "svc" },
+        permissionMode: "default",
+        home: h,
+        now: new Date(Date.now() - 10 * 60_000),
+      });
+      assert.equal(shim(h, PR).code, 2);
+    });
+
+    it("records the use in the audit log with source prompt", () => {
+      const h = promptHome("prompt-audit");
+      mkdirSync(join(h, "state"), { recursive: true });
+      writeFileSync(join(h, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+      const a = record(h, { verb: "gh-pr-create", org: "acme", repo: "svc" });
+      assert.equal(shim(h, PR).code, 0);
+      const log = readFileSync(auditLogPath(h), "utf8");
+      const use = log
+        .trim()
+        .split("\n")
+        .map(l => JSON.parse(l) as { action: string; details: Record<string, unknown> })
+        .find(l => l.action === "egress-approval-use");
+      assert.equal(use?.details["id"], a.id);
+      assert.equal(use?.details["source"], "prompt");
+      assert.equal(use?.details["layer"], "gh shim");
+    });
+  });
+
   // Issue #113: a GraphQL mutation names its target by node id; the cwd is
   // not its destination. The shim must neither judge nor receipt it as the
   // (private) checkout it happens to run from.
@@ -435,22 +542,26 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     assert.equal(r.code, 0, r.stderr);
   });
 
-  it("an unreadable registry (corrupt YAML) refuses, and says it could not be read", () => {
+  it("an unreadable registry (corrupt YAML) refuses, and says it does not parse", () => {
     const h = registryHome("h-corrupt", "engagements: [\n");
     const r = runCli(h, privateRepo, STRANGER_ISSUE);
     assert.equal(r.code, 2, r.stdout);
     const p = JSON.parse(r.stderr.trim()) as Refusal;
     assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(p.error, /could not be read/);
-    assert.match(p.error, /repair/);
+    assert.match(p.error, /does not parse or validate/);
+    assert.match(p.error, /A person repairs /);
+    assert.match(p.error, /No approval covers this/, "the shim has no prompt: it denies");
   });
 
-  it("an encrypted registry (ciphertext only) refuses", () => {
+  it("an encrypted registry (ciphertext only) is read as no registry: rule h does not refuse (rule g stops the unknown destination)", () => {
     const h = registryHome("h-encrypted");
     writeFileSync(join(h, "engagements.yaml.age"), "age-encryption.org/v1\n");
     const r = runCli(h, privateRepo, STRANGER_ISSUE);
     assert.equal(r.code, 2, r.stdout);
-    assert.equal((JSON.parse(r.stderr.trim()) as Refusal).code, "UNREGISTERED_OWNER_EGRESS");
+    const p = JSON.parse(r.stderr.trim()) as Refusal & { details: { ruleH?: string } };
+    assert.equal(p.code, "PUBLIC_EGRESS_NEEDS_HUMAN");
+    assert.equal(p.details.ruleH, "skipped:encrypted");
+    assert.doesNotMatch(p.error, /encrypt/, "no encrypted wording in a refusal that is not about the registry");
   });
 
   it("no registry file: rule h is skipped (the unknown destination is stopped by rule g instead)", () => {
@@ -467,13 +578,14 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     assert.equal((JSON.parse(r.stderr.trim()) as Refusal).code, "PUBLIC_EGRESS_NEEDS_HUMAN");
   });
 
-  it("a registry from a newer schema is unreadable, so it refuses too (the hook has the same case)", () => {
+  it("a registry from a newer schema is unreadable, so it refuses too, with the upgrade text (the hook has the same case)", () => {
     const h = registryHome("h-newer", "schemaVersion: 99\nengagements: []\n");
     const r = runCli(h, privateRepo, STRANGER_ISSUE);
     assert.equal(r.code, 2, r.stdout);
     const p = JSON.parse(r.stderr.trim()) as Refusal;
     assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(p.error, /could not be read/);
+    assert.match(p.error, /written by a newer repo-aegis than the one running this check/);
+    assert.match(p.error, /A person upgrades repo-aegis/);
   });
 
   it("a hostile owner name never reaches the refusal or its details (review M2)", () => {
@@ -493,7 +605,7 @@ describe("egress-check — rule h: unregistered owner (subprocess)", { skip: cli
     assert.equal(p.code, "UNREGISTERED_OWNER_EGRESS");
     // PR 2a: a repository that is not a literal owner/repo is an UNRESOLVED destination (`*`), never a named one.
     assert.equal(p.details.destination?.org, "*");
-    // The hostile string contains `| sh` inside a substitution: since the backstop, a shell reading a pipe is itself
+    // The hostile string contains `| sh` inside a substitution: a shell reading a pipe is itself
     // unresolved, and its intent is reported first. Either unresolved text is the right outcome; what matters is that nothing leaks.
     assert.match(p.error, /not a literal <owner>\/<repo>|could not take this command line apart/);
     for (const frag of ["evil.example", "$(", "engagements add", "repo-aegis approve"]) {

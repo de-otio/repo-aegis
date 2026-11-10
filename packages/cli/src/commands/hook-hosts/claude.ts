@@ -11,5 +11,5 @@ export const claudeAdapter: HostAdapter = {
   hasAsk: true,
   parse: parsePreToolUse,
   oversized: oversizedByToolName,
-  render: v => renderPreToolUse(v, true),
+  render: v => renderPreToolUse(v, true, true),
 };

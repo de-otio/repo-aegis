@@ -140,9 +140,27 @@ describe("ENFORCEMENT_PIN_MISSING", () => {
 
     const c = find(checks(h.env, pin), "ENFORCEMENT_PIN_MISSING");
     assert.equal(c.ok, false);
+    assert.equal(c.severity, undefined, "no severity override: it is still a failure");
     assert.equal(c.severity ?? "fail", "fail");
     assert.ok(c.detail.includes(gone.cli), c.detail);
+    assert.ok(
+      c.detail.includes(
+        "so the pre-commit hook, pre-push hook fall(s) back to the repo-aegis on PATH when it is at least the pinned version and refuse(s) otherwise",
+      ),
+      c.detail,
+    );
     assert.equal(c.fix, "repo-aegis install hooks");
+  });
+
+  it("stays a failure for a pin that records a version (the fallback is a stopgap, not a fix)", () => {
+    const pin = realPin("missing-cli-versioned");
+    const h = makeHome("missing-cli-versioned");
+    const gone = { node: pin.node, cli: join(root, "missing-cli-versioned", "gone", "index.js"), version: "0.14.0" };
+    writeHooks(h, name => renderHookScript(name, gone));
+    const c = find(checks(h.env, pin), "ENFORCEMENT_PIN_MISSING");
+    assert.equal(c.ok, false);
+    assert.equal(c.severity, undefined);
+    assert.ok(c.detail.includes(gone.cli), c.detail);
   });
 
   it("fails when the pinned node does not exist (shim), naming the path", () => {

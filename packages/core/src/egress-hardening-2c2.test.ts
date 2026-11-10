@@ -100,14 +100,18 @@ describe("C1: the arguments after `sh -c TEXT` are $0, $1, … of TEXT", () => {
     [`bash -c 'command "$@"' _ ${STRANGER_ISSUE}`, "gh-issue-create"],
     [`env FOO=1 sh -c '"$@"' sh ${STRANGER_ISSUE}`, "gh-issue-create"],
     [`zsh -c '"$@"' z ${STRANGER_ISSUE}`, "gh-issue-create"],
-    [`sh -c '"$*"' sh ${STRANGER_ISSUE}`, "gh-unknown"], // "$*" is ONE word: the command word is the whole text, which gh cannot run
+    [`sh -c '"$*"' sh ${STRANGER_ISSUE}`, "none"], // "$*" is ONE word: the command word is the whole text, which no program can run
   ];
 
   for (const [command, verb] of FORMS) {
     it(`parses ${command}`, () => {
       const intents = parseEgressIntents(command);
+      if (verb === "none") {
+        assert.deepEqual(intents, [], "one word with spaces is not gh");
+        return;
+      }
       assert.ok(intents.length > 0, "an intent, not silence");
-      if (verb !== "gh-unknown") assert.ok(intents.some(i => i.verb === verb), JSON.stringify(intents));
+      assert.ok(intents.some(i => i.verb === verb), JSON.stringify(intents));
     });
   }
 
@@ -142,17 +146,14 @@ describe("C1: the arguments after `sh -c TEXT` are $0, $1, … of TEXT", () => {
 
   it("the arguments are quoted: a hostile one cannot become a second command", () => {
     const intents = parseEgressIntents(`bash -c 'gh issue create "$@"' _ --repo 'acme/x; gh issue create --repo stranger/r'`);
-    // The argument is ONE word: the parsed command has an opaque repo, and the backstop (the accepted
-    // false positive) also reports the quoted mention. Nothing resolves to the stranger.
+    // The argument is ONE word: the parsed command has an opaque repo. Nothing resolves to the stranger.
     assert.ok(intents.length >= 1);
     assert.ok(intents.every(i => i.unresolved !== undefined), JSON.stringify(intents));
     assert.ok(intents.every(i => i.repoFlag === undefined || i.repoFlag.includes(";")));
   });
 
-  it("with no reference to them, the words are still read: a mention nothing runs is unresolved (backstop)", () => {
-    const intents = parseEgressIntents(`sh -c 'true' sh ${STRANGER_ISSUE}`);
-    assert.ok(intents.length > 0, "the backstop reports the mention");
-    assert.ok(intents.every(i => i.unresolved !== undefined));
+  it("with no reference to them, the words are just arguments: a mention nothing runs is no intent", () => {
+    assert.deepEqual(parseEgressIntents(`sh -c 'true' sh ${STRANGER_ISSUE}`), []);
   });
 
   it("everyday: a nested shell that runs a literal command, and one that is handed registered arguments", () => {

@@ -216,19 +216,18 @@ describe("dot gh --as bot — everything else is judged as for plain gh (§3.2 s
   });
 });
 
-describe("dot gh — any other wrapper shape stays refused (D5)", () => {
-  it("T11: node options, NODE_OPTIONS, another script, a script in a variable", () => {
+describe("dot gh — any other wrapper shape is not recognised, so the hook has nothing to judge (D5)", () => {
+  it("T11: node options, NODE_OPTIONS, another script, a script in a variable: no intent, allowed at the hook", () => {
+    // The `gh` shim judges the `gh` call such a command ends up making; the hook no longer reads its text.
     for (const cmd of [
       `node --require x /p/dot.mjs gh --as bot ${CREATE}`,
       `NODE_OPTIONS=--require=x node /p/dot.mjs gh --as bot ${CREATE}`,
       `node /p/other.mjs gh --as bot ${CREATE}`,
       `node "$S" gh --as bot ${CREATE}`,
     ]) {
-      const d = decide(cmd);
-      assert.equal(d.action, "deny", cmd);
-      assert.notEqual(code(d), "DOT_GH_WRITE_NEEDS_BOT", cmd);
+      assert.deepEqual(parseEgressIntents(cmd), [], cmd);
+      assert.equal(decide(cmd).action, "allow", cmd);
     }
-    assert.equal(code(decide(`node /p/other.mjs gh --as bot ${CREATE}`)), "UNREGISTERED_OWNER_EGRESS");
   });
 });
 
@@ -240,7 +239,8 @@ describe("the refusal text (§3.3)", () => {
   it("T15: names the corrected command literally", () => {
     assert.ok(reason.includes("dot gh --as bot <the same gh arguments>"), reason);
     assert.ok(reason.startsWith("repo-aegis: dot gh write without --as bot: refused."), reason);
-    assert.ok(reason.endsWith("[DOT_GH_WRITE_NEEDS_BOT]"), reason);
+    assert.ok(reason.endsWith("[DOT_GH_WRITE_NEEDS_BOT; details: repo-aegis explain DOT_GH_WRITE_NEEDS_BOT]"), reason);
+    assert.match(reason, /Only a person can run it: no\. \[/, reason);
   });
 
   it("T15: carries no gh argument, no repository and no identity from the command", () => {

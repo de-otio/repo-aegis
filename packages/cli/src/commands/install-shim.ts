@@ -339,6 +339,9 @@ export function checkShim(env: NodeJS.ProcessEnv = process.env): DoctorCheck[] {
       {
         code: "SHIM_NOT_FIRST",
         ok: false,
+        // FAIL, stated explicitly: the shim is the only guard for a `gh` call the hook does not parse
+        // (`find -exec gh …`, an interpreter, a pty wrapper), so a shadowed shim must fail `doctor`.
+        severity: "fail",
         detail: "the `gh` shim is installed but no `gh` is reachable on PATH, so it never runs",
         fix: `put ${binDir} first on PATH`,
       },
@@ -349,6 +352,7 @@ export function checkShim(env: NodeJS.ProcessEnv = process.env): DoctorCheck[] {
       {
         code: "SHIM_NOT_FIRST",
         ok: false,
+        severity: "fail",
         detail: "the `gh` shim is installed but another `gh` comes first on PATH, so the shim never runs",
         fix: `put ${binDir} first on PATH`,
       },
@@ -379,6 +383,8 @@ export function checkShim(env: NodeJS.ProcessEnv = process.env): DoctorCheck[] {
       {
         code: "SHIM_STALE",
         ok: false,
+        // WARN: the older shim is first on PATH and still runs; it is out of date, not absent or shadowed.
+        severity: "warn",
         detail: "the `gh` shim on PATH was written by an earlier repo-aegis release and differs from this one's",
         fix: "repo-aegis install shim",
       },

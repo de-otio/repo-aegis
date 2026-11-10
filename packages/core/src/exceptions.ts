@@ -19,6 +19,27 @@ export class RegistryParseError extends Error {
 }
 
 /**
+ * The registry parses but its `schemaVersion` is newer than this build reads.
+ * A subclass of {@link RegistryParseError}, so every existing
+ * `instanceof RegistryParseError` check (and its message) is unchanged;
+ * `loadRegistryState` and the callers that must tell "upgrade repo-aegis" from
+ * "repair the file" read `found` and `max`.
+ */
+export class RegistrySchemaTooNewError extends RegistryParseError {
+  constructor(path: string, public readonly found: number, public readonly max: number) {
+    super(
+      path,
+      new Error(
+        `registry schemaVersion ${found} is newer than this build supports ` +
+          `(max ${max}); ` +
+          `registry written by a newer repo-aegis — please upgrade`,
+      ),
+    );
+    this.name = "RegistrySchemaTooNewError";
+  }
+}
+
+/**
  * Raised by `loadRegistry` when the plaintext registry path is absent
  * but a sibling `<path>.age` ciphertext exists. The user (or the agent
  * on their behalf) must run `repo-aegis registry decrypt --identity

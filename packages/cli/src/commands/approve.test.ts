@@ -2,12 +2,12 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv } from "../_test-utils.js";
 import { approve, type ApproveOptions } from "./approve.js";
-import { approvalsPath, listApprovals } from "@de-otio/repo-aegis-core";
+import { approvalsPath, auditLogPath, listApprovals, listPromptApprovals, recordPromptApproval } from "@de-otio/repo-aegis-core";
 
 const T0 = new Date("2026-09-12T18:00:00.000Z");
 
@@ -82,6 +82,74 @@ describe("approve", () => {
     // --list and --revoke need no TTY: they publish nothing.
     assert.equal(run(undefined, { list: true, stderrIsTTY: false, json: true }).exitCode, undefined);
   });
+  it("--list shows the source of both kinds (text and JSON), prompt ones in seconds; --revoke p… and --revoke all cover them", () => {
+    const home = join(root, "home");
+    run(undefined, { revoke: "all", json: true });
+    run("acme/term", { json: true });
+    const p1 = recordPromptApproval({
+      binding: { verb: "git-push", org: "acme", repo: "svc", ref: "main" },
+      permissionMode: "default",
+      home,
+      now: T0,
+    })!;
+    const p2 = recordPromptApproval({
+      binding: { verb: "gh-api-mutating", org: "acme", repo: "svc", endpoint: "repos/acme/svc/issues", method: "POST" },
+      permissionMode: "acceptEdits",
+      home,
+      now: T0,
+    })!;
+
+    const json = JSON.parse(run(undefined, { list: true, json: true }).stdout) as { list: Array<{ id: string; source: string; verb?: string }> };
+    assert.deepEqual(
+      json.list.map(a => a.source).sort(),
+      ["prompt", "prompt", "terminal"],
+      "every entry carries its source, terminal ones included",
+    );
+    assert.equal(json.list.find(a => a.id === p1.id)?.verb, "git-push");
+
+    const text = run(undefined, { list: true }).stdout;
+    assert.match(text, /3 live approval\(s\)/);
+    assert.match(text, /acme\/term  by .*  source terminal  expires /);
+    assert.match(text, new RegExp(`${p1.id}  acme/svc \\(ref main\\)  by .*  source prompt  verb git-push  expires .*\\(120 s left\\)`));
+    assert.match(text, /\(endpoint repos\/acme\/svc\/issues\)  by .*  source prompt  verb gh-api-mutating/);
+
+    const one = run(undefined, { revoke: p1.id, json: true });
+    assert.deepEqual((JSON.parse(one.stdout) as { revoked: string[] }).revoked, [p1.id]);
+    assert.deepEqual(listPromptApprovals(home, T0).map(a => a.id), [p2.id]);
+    assert.equal(listApprovals(path, T0).length, 1, "the terminal approval is untouched");
+
+    const all = run(undefined, { revoke: "all", json: true });
+    assert.equal((JSON.parse(all.stdout) as { revoked: string[] }).revoked.length, 2);
+    assert.deepEqual(listPromptApprovals(home, T0), []);
+    assert.match(run(undefined, { list: true }).stdout, /no live approvals/);
+  });
+
+  it("--revoke prompt removes the prompt approvals only: terminal ones stay (text and JSON)", () => {
+    const home = join(root, "home");
+    run(undefined, { revoke: "all", json: true });
+    const t = JSON.parse(run("acme/keep", { json: true }).stdout) as { approval: { id: string } };
+    const p1 = recordPromptApproval({ binding: { verb: "gh-pr-create", org: "acme", repo: "svc" }, permissionMode: "default", home, now: T0 })!;
+    const p2 = recordPromptApproval({ binding: { verb: "git-push", org: "acme", repo: "svc", ref: "main" }, permissionMode: "acceptEdits", home, now: T0 })!;
+    const j = JSON.parse(run(undefined, { revoke: "prompt", json: true }).stdout) as { revoked: string[] };
+    assert.deepEqual([...j.revoked].sort(), [p1.id, p2.id].sort());
+    assert.deepEqual(listPromptApprovals(home, T0), []);
+    assert.deepEqual(listApprovals(path, T0).map(a => a.id), [t.approval.id]);
+    assert.match(run(undefined, { revoke: "prompt" }).stdout, /revoked 0 approval\(s\)/);
+    run(undefined, { revoke: "all", json: true });
+  });
+
+  it("a minted terminal approval is audited with source terminal", () => {
+    const home = join(root, "home");
+    mkdirSync(join(home, "state"), { recursive: true });
+    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    run("acme/audited", { json: true });
+    const lines = readFileSync(auditLogPath(home), "utf8").trim().split("\n");
+    const mint = lines.map(l => JSON.parse(l) as { action: string; details: Record<string, unknown> }).find(l => l.action === "egress-approval-mint");
+    assert.equal(mint?.details["source"], "terminal");
+    rmSync(join(home, "state", "audit-log.json"), { force: true });
+    run(undefined, { revoke: "all", json: true });
+  });
+
   it("records the mapped person's login and prints it; a '*' approval and an unmapped owner carry none", () => {
     const reg = join(root, "identities.yaml");
     writeFileSync(
@@ -125,6 +193,8 @@ describe("approve — mint-time scope warnings (issue #151, D7, plan §3.2/§3.9
     writeFileSync(join(root, "owners.yaml"), OWNERS_REGISTRY);
     writeFileSync(join(root, "no-personal.yaml"), NO_PERSONAL_REGISTRY);
     writeFileSync(join(root, "damaged.yaml"), "engagements: [unclosed\n");
+    writeFileSync(join(root, "newer.yaml"), "schemaVersion: 99\nengagements: []\n");
+    writeFileSync(join(root, "encrypted.yaml.age"), "age-encryption.org/v1\n");
   });
   after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -194,8 +264,28 @@ describe("approve — mint-time scope warnings (issue #151, D7, plan §3.2/§3.9
   it("an unreadable registry gets a content-free warning that no approval helps until it is repaired", () => {
     const w = warningsOf("acme/svc", "damaged.yaml");
     assert.equal(w.length, 1);
-    assert.match(w[0]!, /registry could not be read/);
+    assert.match(w[0]!, /registry does not parse or validate/);
     assert.match(w[0]!, /will not help before then/);
+    assert.doesNotMatch(w[0]!, /encrypt/);
+  });
+
+  it("a registry from a newer repo-aegis says to upgrade, not to repair", () => {
+    const w = warningsOf("acme/svc", "newer.yaml");
+    assert.equal(w.length, 1);
+    assert.match(w[0]!, /written by a newer repo-aegis/);
+    assert.match(w[0]!, /upgrades repo-aegis/);
+  });
+
+  it("an encrypted registry gets its own sentence: rule h is off while it is encrypted, and no 'could not be read' text", () => {
+    for (const target of ["acme/svc", "stranger/*"]) {
+      const w = warningsOf(target, "encrypted.yaml");
+      assert.equal(w.length, 1, target);
+      assert.match(w[0]!, /Rule h is off while the registry is encrypted/);
+      assert.doesNotMatch(w[0]!, /could not be read|damaged/);
+    }
+    const star = warningsOf("*", "encrypted.yaml");
+    assert.ok(star.some(n => /rule h is off while it is encrypted/.test(n)), star.join("|"));
+    assert.ok(!star.some(n => /declares no personalOrgs/.test(n)), "an encrypted registry is not an empty one");
   });
 
   it("never lists registry contents: the warning for one owner names no other owner, engagement or upstream", () => {

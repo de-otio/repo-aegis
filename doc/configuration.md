@@ -272,7 +272,14 @@ All of this is run by a person, from their own terminal. Agents cannot run it.
    **The first `set-identity` turns `requireIdentity` on.** From then on an agent's write to a
    registered owner with no mapping at all is refused (`GH_IDENTITY_UNMAPPED_OWNER`). Map every
    owner `doctor` lists under `OWNER_IDENTITY_UNMAPPED`, or run `repo-aegis identity require --off`.
-4. **Optional, for agent pushes as the App:** `repo-aegis install git-credential` (see below).
+
+   **Move an owner from an App to a person:** `--agent none` clears just the agent column and
+   `--person none` just the person column; the other column is left as it is. For example,
+   `repo-aegis engagements set-identity customer-a --person work --agent none` maps the person and
+   drops the App in one step. Running `--person work` alone on an owner that already has an `agent`
+   leaves the App in place (and prints `identities unchanged` if the person was already set).
+   `--clear` removes both columns.
+4. **Recommended for agent pushes** (as the mapped person account, or as an App you opt in to): `repo-aegis install git-credential` (see below).
    Without it, pushes keep using your own credential; with it, an agent's push to an App-mapped
    owner must use the HTTPS remote.
 5. **Check:** `repo-aegis status` shows the mappings; `repo-aegis doctor` should report no
@@ -322,7 +329,7 @@ URL, a `repos/<owner>/<repo>/…` endpoint, `GH_REPO` or the working directory's
   account with one warning line on stderr, and carries no token.
 
 Every injecting call prints `repo-aegis: as <identity> (<kind>) for <owner>/<repo>` and appends
-a record (never the token) to `<home>/state/gh-decisions.jsonl`.
+a record (never the token, never the login) to the decision log, `<home>/state/decisions.jsonl` (see "The decision log" below).
 
 **taaad and root ownership.** App tokens are minted by taaad, the only holder of the App private
 keys. App identities need taaad v0.6.0 or later (`taaad mint`). taaad's optional macOS helper,
@@ -342,23 +349,27 @@ do not need taaad. repo-aegis runs `gh` for the call from
 a trusted location only (the same vetting `doctor` applies: not under your home directory, the
 current directory or a temp directory; not group- or world-writable).
 
-### Git pushes as the agent's App (the credential helper)
+### Git pushes by an agent (the credential helper)
 
-For an owner mapped to an `agent` identity (a `github-app`), an agent's HTTPS
-push can carry a token narrowed to that one repository. `repo-aegis install
-git-credential` (a person, at a terminal) puts the repo-aegis helper first in the
-global git config for `https://github.com` and sets
+The helper **only chooses the account**; whether a push may go is decided by the pre-push rules
+(rule g for a public destination, rule h cross-org) and the Bash hook. By default (D1) an owner
+mapped to a `person` identity (a `gh-login`) is pushed as that login. An owner mapped to an `agent`
+identity (a `github-app`) is **opt-in**: the push then carries a token narrowed to that one
+repository. `repo-aegis install git-credential` (a person, at a terminal) puts the repo-aegis helper
+first in the global git config for `https://github.com` and sets
 `credential.https://github.com.useHttpPath=true`; what it added is recorded in
 `<home>/state/git-credential-install.json` and `--uninstall` removes exactly that
 (see [cli-reference.md](cli-reference.md#repo-aegis-install-git-credential---uninstall)).
 
-- With a person present the helper prints nothing and your own helpers answer as before; the same for an owner with no `agent` identity.
-- An agent's push over SSH to such an owner is refused by the pre-push hook (`AGENT_PUSH_NEEDS_APP`): push over HTTPS.
-- The helper needs the pinned taaad: the one `install shim` recorded in the shim at `<home>/bin/gh` (see "Identities in practice"). With none it refuses (`GH_BINARY_UNTRUSTED`).
-- Helper order matters: a reset entry, a system-scope helper such as `osxkeychain`, or `gh auth setup-git` can put another helper first, and that one answers with your credential. The install checks this and refuses with instructions rather than guess; `doctor` fails with `GIT_CREDENTIAL_HELPER_ORDER` when an owner has an agent identity and the order is wrong.
-- **Accepted limit: the process chain is a heuristic, even inside the sandbox.** The helper answers only a request made by git's HTTPS remote helper: `git-remote-https` must be its parent or grandparent (a plain shell may sit between), its argv must be `[git-remote-https, <remote>, https://github.com/<path>]` with the request's path (case and `.git` aside), and no `git credential…` command may sit between. That stops `git credential fill` run by hand and a renamed copy of `sh` posing as the remote helper with a bare name. It does not stop a same-user process that sets its own name and argv to match all of that: the process list is not a security boundary (the same limit as presence detection, `process-ancestry.ts`). The narrowing of the token to one repository and one scope is what bounds the harm.
-- HTTPS pushes to an owner that has only a `person` identity are refused (`GH_IDENTITY_WRITE_NEEDS_HUMAN`) unless a login-bound approval covers them (`repo-aegis approve <owner>/<repo>`, run by a person from a terminal: the same approval `repo-aegis gh` honours). With one, the helper gives git that login's own token from the trusted gh, never the active gh account's, after every check an App token passes. A subcommand known to read (`fetch`, `pull`, `clone`, `ls-remote`, `archive`, `remote`, `submodule`) needs no approval: the helper answers it with that same login's token, so a fetch never runs as whichever account gh or the keychain has active. An alias or an unreadable subcommand is judged as a push. SSH pushes to such an owner are not touched by the helper and go through the pre-push rules as before.
-- Settings that could redirect or capture the token make the helper refuse (`AGENT_PUSH_CREDENTIAL_CONFIG`): a credential helper in the repository's own config, `http.proxy`, `http.sslVerify=false`, `http.sslCAInfo`, `http.extraHeader` or `http.sslBackend` outside system scope, and trace, proxy or TLS variables in the environment. A global proxy or CA bundle you rely on therefore needs to go in the system config, or be given up for agent pushes.
+- With a person present the helper prints nothing and your own helpers answer as before; the same for an unmapped owner, a missing registry, and an encrypted one (which also prints a note on stderr: `repo-aegis registry decrypt` makes it readable). A registry that exists but cannot be read (it does not parse, or a newer repo-aegis wrote it) refuses a push with `GH_IDENTITY_UNAVAILABLE`, because git's next helper would answer with whichever account it holds; `doctor` says whether to repair the file or upgrade.
+- An agent's push over SSH to an owner with an App is refused by the pre-push hook (`AGENT_PUSH_NEEDS_APP`): push over HTTPS.
+- An owner with an App needs the pinned taaad: the one `install shim` recorded in the shim at `<home>/bin/gh` (see "Identities in practice"). With none it refuses (`GH_BINARY_UNTRUSTED`). An App token cannot be minted from inside the Claude Code sandbox (the signer's network connection is blocked; see [agent-sandbox.md](agent-sandbox.md)); a person-mapped owner mints nothing and works there.
+- Helper order matters: a reset entry, a system-scope helper such as `osxkeychain`, or `gh auth setup-git` can put another helper first, and that one answers with your credential. The install checks this and refuses with instructions rather than guess, with one exception: on stock macOS (a system `osxkeychain` and no global entry for github.com yet) it writes an empty reset entry, its own line, and `osxkeychain` back after it, and `--uninstall` removes all three. `doctor` fails with `GIT_CREDENTIAL_HELPER_ORDER` when an owner has an agent identity and the order is wrong.
+- **Accepted limit: the process chain is a heuristic, even inside the sandbox.** It is used only to tell a known read (`fetch`, `pull`, `clone`, `ls-remote`, `archive`, `remote`, `submodule`) from a push: `git-remote-https` must be the helper's parent or grandparent (a plain shell may sit between), its argv must be `[git-remote-https, <remote>, https://github.com/<path>]` with the request's path (case and `.git` aside), and no `git credential…` command may sit between. Anything that does not match, and a process list that cannot be read, counts as a push, never as a read, so the helper never refuses on it. A same-user process can set its own name and argv: the process list is not a security boundary (the same limit as presence detection, `process-ancestry.ts`).
+- A push to an owner that has only a `person` identity is answered with that login's own token from the trusted gh, never the active gh account's, with one stderr line naming the account it ran as. No approval is read. A known read gets the same login's token and prints nothing, so a fetch never runs as whichever account gh or the keychain has active. SSH pushes to such an owner are not touched by the helper and go through the pre-push rules as before.
+- Settings that could capture the token make the helper refuse (`AGENT_PUSH_CREDENTIAL_CONFIG`): a credential helper in the repository's own config, and `GIT_TRACE_CURL`, `GIT_CURL_VERBOSE`, `GIT_TRACE_PACKET` or `GIT_TRACE_REDACT=0` in the environment (each would write the token to a trace). A proxy (`HTTPS_PROXY`, `http.proxy`), a CA bundle, `http.extraHeader` and `http.sslBackend` do not refuse: the default Claude Code sandbox sets a proxy on every command, a CONNECT proxy cannot read TLS, and planting a CA bundle is an attack, not an accident. `http.sslVerify=false` and `GIT_SSL_NO_VERIFY` give the token and print a `repo-aegis: warning:` line.
+- A helper after repo-aegis's that would persist the token refuses it (`AGENT_PUSH_CREDENTIAL_STORE`). An **App** token is refused for any storing helper (`osxkeychain`, `store`, ...): the person's later pushes would then run as the App. A person's own login token, push or read, is refused only for `store` (plaintext in `~/.git-credentials`) and for a helper repo-aegis does not recognise; the OS stores (`osxkeychain`, `libsecret`, `wincred`, a credential manager) and `cache` pass, because saving the person's token in the person's own keychain changes nothing about which account later pushes use.
+- **A repository with its own `core.hooksPath`** (husky and other hooks managers set it in the repository's config). Git then runs only that directory, so repo-aegis's global pre-push guard does not run, and since the helper no longer judges pushes it would hand the person's token to a script-run push (`npm run release`) that nothing checks. So a push as the person's account is refused (`AGENT_PUSH_GUARD_NOT_RUNNING`) when the repository's own `core.hooksPath` is not repo-aegis's hooks directory **and** the destination is not recorded as private (offline, from the same `repo-aegis.visibility` cache pre-push reads; `repo-aegis classify` records it). A repository recorded as private, a global `core.hooksPath`, a known read and an App identity are not affected. To fix it for good, chain repo-aegis's hook from the repository's own hooks directory: have its `pre-push` run `<home>/hooks/pre-push "$@"`. **Known residual:** `git push --no-verify` skips the pre-push hook whatever the helper says; repo-aegis guards against honest mistakes, not a determined agent.
 
 ## Reviewed-benign waivers (`waivers:`)
 
@@ -407,6 +418,49 @@ which repo is read). `repo-aegis status --json` does not report which source a
 value came from: its `repo` object carries `class`, `classExplicit` (`false`
 means the default is in use) and `engagements`.
 
+## The registry's five states
+
+Every layer (the agent hook, the `gh` shim, the pre-push hook, the `gh` identity
+layer, the write hooks and `doctor`) reads the registry through one loader and
+gets one of five states. They cannot disagree about which one applies.
+
+| State | What it is | Rule h (unregistered owner) | The write hooks | `doctor` |
+|---|---|---|---|---|
+| `loaded` | the file parses and validates | judges, unless it declares no owners | read it | `OWNERS_UNDECLARED` (fail) when it declares no owners |
+| `missing` | no registry file | skipped, with a note | an empty registry | nothing |
+| `encrypted` | only `engagements.yaml.age` exists | skipped, with a note: repo-aegis runs **as if there were no registry** | an empty registry (not an error) | `REGISTRY_ENCRYPTED` (warn) |
+| `unparseable` | the file exists but does not parse or validate | the agent hook **asks** a person (a host with no prompt denies); pre-push and the shim refuse | `REGISTRY_ERROR`, exit 2 | `REGISTRY_UNREADABLE` (fail) |
+| `newer-schema` | the file parses but its `schemaVersion` is above what this build reads (`3`) | as `unparseable`, with an "upgrade repo-aegis" fix | `REGISTRY_ERROR` with the newer-schema text, exit 2 | `REGISTRY_UNREADABLE` (fail), fix: upgrade, then `install hooks` and `install claude-md` |
+
+An error the loader does not recognise counts as `unparseable`: it never reads
+as "no registry".
+
+**Encryption at rest is deprecated** and is removed in 0.15.0. Until then,
+`registry encrypt` still works, but an encrypted registry switches off rule h and
+the GitHub identity mapping (a registry-reading command such as `status` still
+says `REGISTRY_ENCRYPTED`). Marker scanning (`_always` and the engagement marker
+files) is not affected. `registry decrypt --identity <key>` brings the registry
+back; a person runs it.
+
+**What an encrypted registry quietly widens.** With no registry, an engagement
+has no `githubOrgs`, so the cross-org boundary collapses to the repository's own
+`origin` org. Two engagements under **one** org (say, two customers hosted in the
+same GitHub org) stop being separate boundaries: a write or push from one
+engagement's checkout into the other's is no longer a cross-org event, and
+nothing refuses it. Rule h is off at the same time, so an unregistered owner is
+not refused either. To keep this from being silent, every layer says so: the
+write hooks (`check-write`, `scan-after-write`) and the agent's egress hook show
+the person a one-line notice as the JSON `systemMessage` (Claude Code drops
+stderr on exit 0), once per call; pre-push prints it on stderr once per push;
+`doctor` warns `REGISTRY_ENCRYPTED`. And because an agent must not be able to put
+the machine into this state, `registry encrypt` refuses unless a person's
+terminal is attached (`REGISTRY_ENCRYPT_NEEDS_TTY`).
+
+The `ask` on an unreadable registry is not a way through for a push: the pre-push
+hook refuses until the registry can be read. When a newer repo-aegis has written
+the registry (schema skew), upgrade repo-aegis, then run `repo-aegis install hooks`
+and `repo-aegis install claude-md`, so the hooks run the new version.
+
 ## The pinned enforcement binary
 
 The git hooks (`pre-commit`, `pre-push`) and the `gh` shim run the scanner by
@@ -416,9 +470,11 @@ install shim` resolve two paths and write them into the generated scripts:
 - the Node executable (`process.execPath`, canonicalised), and
 - the CLI entry (the `dist/index.js` of the install that is running, canonicalised).
 
-Every call in the scripts is `"$__ra_node" "$__ra_cli" …`; no call by name
-remains. The paths are shell-quoted when rendered, and a path containing a
-newline or NUL refuses the install (`PIN_PATH_UNSUPPORTED`).
+Every call in the scripts is `"$__ra_node" "$__ra_cli" …`; the only other way
+in is the fallback below. The paths are shell-quoted when rendered, and a path
+containing a newline or NUL refuses the install (`PIN_PATH_UNSUPPORTED`). A third
+line, `__ra_version='<version>'`, records the version of the CLI that was
+pinned.
 
 Why: a name is looked up on the caller's `PATH`, and an agent can usually write
 to a directory in the user's home that comes first on it. A `repo-aegis` (or a
@@ -427,18 +483,39 @@ exits 0 there would switch off the pre-commit scan, the pre-push scan and the
 shim's egress check. Two installs on one machine also meant the person's
 terminal and the agent's shell enforced different versions.
 
-**Fail closed.** If a pinned file is missing or not usable (a Node upgrade
-through a version manager moves `process.execPath`; an install was removed):
+**A pin that is gone no longer locks you out, and no longer opens a hole.** If a
+pinned file is missing or not usable (a Node upgrade through a version manager
+moves `process.execPath`; an install was removed), the script does not look at
+`PATH` while the pin works. When it does not, it falls back to the `repo-aegis`
+on `PATH` **only if that one is at least as new as the pinned version**, prints a
+`WARNING` that names both versions and the re-pin command, and runs it. Otherwise
+it refuses:
 
-| Script | Result |
+| The `repo-aegis` found on `PATH` | Result |
 |---|---|
-| `pre-commit`, `pre-push` | exit 1, naming the missing path and `repo-aegis install hooks` |
-| `gh` shim | publishing verbs refused with exit 2, naming the missing path and `repo-aegis install shim`; every other `gh` verb still passes through |
+| none | refuse: "no repo-aegis is on PATH" |
+| older than the pinned version | refuse, naming both versions ("an older repo-aegis may not read this machine's registry") |
+| first line of `--version` is not exactly `MAJOR.MINOR.PATCH` (a prerelease, `v0.14.0`, empty, a crash) | refuse; what it printed is never echoed |
+| at least as new | run it, with a warning |
+| (the pin has no recorded version: an install from before 0.14.0) | refuse, and say so; no fallback |
 
-There is no environment variable that turns this off, because an agent could set
-it. A person re-runs the installer from a terminal. **After moving or upgrading
-Node, or reinstalling repo-aegis, re-run `repo-aegis install hooks` and
-`repo-aegis install shim`.**
+When a Claude Code hook runs through the fallback, the `repo-aegis` it runs shows
+the person a one-line notice (the JSON `systemMessage`, on every answer, an allow
+included, because stderr is dropped on exit 0); the fallback tells it so with
+`REPO_AEGIS_PIN_FALLBACK=1`, which only ever adds that notice.
+
+Refusals exit as before: `pre-commit` and `pre-push` exit 1, the `gh` shim exits 2
+for any call but `--version`, `help` and `completion`, and every Claude Code hook
+command exits 2. The comparison is numeric (0.9.0 is older than 0.14.0); a
+prerelease suffix on the pinned version is dropped, which only raises the floor.
+The reason for the floor: a `repo-aegis` older than the pinned one may not read
+this machine's registry (a newer schema), which is the lockout this replaces.
+
+There is no environment variable that turns any of this off, because an agent
+could set it. A person re-runs the installer from a terminal. **After moving or
+upgrading Node, or reinstalling repo-aegis, re-run `repo-aegis install hooks`,
+`repo-aegis install shim` and `repo-aegis install claude-md`.** `doctor` keeps
+reporting `ENFORCEMENT_PIN_MISSING` as a failure until you do.
 
 How it shows up elsewhere:
 
@@ -449,7 +526,7 @@ How it shows up elsewhere:
   `MULTIPLE_INSTALLS` (see `doc/agent-guide.md`).
 - `install claude-md` writes every Claude Code hook command (`check-write`,
   `guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`,
-  `first-touch`) into the [managed drop-in](#the-claude-code-managed-drop-in)
+  `prompt-submit`, `first-touch`) into the [managed drop-in](#the-claude-code-managed-drop-in)
   (or, with `--user-settings`, into `settings.json`) as a pinned one-line `sh`
   command: shell-quoted absolute paths to
   the node and CLI, `exec`'d so the tool call on stdin reaches the CLI, and an
@@ -509,9 +586,9 @@ each Claude Code release (unverified). The hook contract itself (exit codes,
 matchers) is at <https://code.claude.com/docs/en/hooks>.
 
 The path comes from the platform and your uid, never from a stored record. The
-file holds only `hooks` and `permissions.deny`: the five hooks (`check-write`,
-`guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`; plus
-`first-touch` when you asked for it), a SessionStart heartbeat, and the same
+file holds only `hooks` and `permissions.deny`: the six hooks (`check-write`,
+`guard-egress`, `scan-after-write`, `scan-bash-output`, `egress-receipt`,
+`prompt-submit`; plus `first-touch` when you asked for it), a SessionStart heartbeat, and the same
 `Edit(//…)` deny rules as before (registry, approvals, hooks, shim, markers, the
 pinned CLI package and the pinned Node).
 
@@ -641,18 +718,55 @@ file exists) or an empty directory.
   cannot lock anyone out.
 - Systems without `/usr/bin/id` (NixOS, Guix) use `--user-settings`.
 
+## The decision log
+
+Every refusal, ask and fallback of every entry point (pre-commit, pre-push, the agent egress hook, the write hooks, the
+`gh` shim, the git credential helper, prompt approvals) is recorded in one JSON Lines file, **on by default**, so a
+refusal can be debugged from what actually decided it instead of by rebuilding those facts by hand. Read it with
+`repo-aegis log` (see the CLI reference); an agent may.
+
+| File | What |
+|---|---|
+| `<home>/state/decisions.jsonl` | the log: mode 0600, directory 0700 |
+| `<home>/state/decisions.jsonl.1` ... `.3` (an agent's write or delete of them is refused by `check-write` and the shell-write rule; no `Edit` deny rule, so sandboxed hooks can still append) | rotated generations: at **10 MiB** the file is renamed to `.1` (`.1` to `.2`, `.2` to `.3`, the old `.3` dropped), so at most three are kept. Rotation runs under a lock with a **200 ms** cap; if the lock is not had in time the record is written without rotating (an over-size file is harmless, a hook waiting on a lock is not) |
+| `<home>/state/decision-log.json` | the switch, `{"enabled": false}` only after `repo-aegis log --off`. Missing, unreadable or unparseable means **on**. Person-only: written by `log --off` (a person's terminal), refused to an agent's write tools (`Edit(<home>/state/decision-log.json)` is among the deny rules `install claude-md` writes, and `hook check-write` refuses it) and to an agent's shell (`AGENT_RAN_HUMAN_COMMAND`). `log --on` only turns recording back on |
+| `$TMPDIR/repo-aegis-<uid>/decisions.jsonl` | the **fallback**, used when the primary cannot be written (a read-only home, or a sandbox that only writes the working directory and `$TMPDIR`; the Claude Code default sandbox has not been verified to deny the home, so this is treated as possible). Same modes; its records carry `facts.logFallback: true`. `repo-aegis log` reads both and merges them by time (the fallback only from a directory this user owns that is not group- or world-writable: in a shared `/tmp` another user could plant lines); `doctor` reports `DECISION_LOG_FALLBACK` (info) when the fallback holds records newer than the primary's last |
+| `<home>/state/gh-decisions.jsonl` | **legacy**: the `gh` shim wrote it before the decision log existed. It is no longer written; `repo-aegis log` reads it once so the history does not vanish on upgrade |
+
+**Writing never changes a decision.** A record that cannot be written (neither the home nor `$TMPDIR`) is reported:
+the refusal ends `(not logged)` instead of `(logged: repo-aegis log --last 1)`, and `doctor` says
+`DECISION_LOG_UNWRITABLE` (warn). The `gh` shim's identity injection included: an `inject` whose record could not be
+written still runs (this reverses the earlier rule, D4, under which it was a fault).
+
+**What a record holds** is fixed by the type of the one function that builds it, not by a scrubber: no free-form field
+exists, and every string is checked against a closed pattern or list (a value that fails is written as `"invalid"`).
+It names layer, outcome, refusal code, the parsed command shape (`git push`, `gh pr create`; never an argument),
+`owner/repo`, a validated ref name, the identity column, an approval id, and the facts that decided: which proxy
+variables were set (names only), whether `ps` was readable, whether stderr was a terminal, the sandbox guess, the
+registry's state, the permission mode. **Never** logged: tokens or anything token-shaped, marker patterns or matched
+text, file contents, command text or arguments, environment values, URLs, file-system paths, approval or pause
+reasons, the `gh` account login, hostnames. A branch can be named after a customer, and that is accepted: `owner/repo`
+and ref names are what a person needs to debug, and the registry already holds the owners on this machine. The log is
+for this machine; do not paste it into a public issue.
+
+`repo-aegis uninstall` removes all of these files, including the `$TMPDIR` fallback directory for the `$TMPDIR` it runs
+under (a sandbox's own `$TMPDIR` may differ; its copy is the sandbox's to clear).
+
 ## Environment variables
 
 | Var | Effect |
 |---|---|
 | `REPO_AEGIS_HOME` | Override `~/.config/repo-aegis` as the config home. Stderr warning printed on every TTY invocation when set; suppressed in hook context. |
 | `REPO_AEGIS_REGISTRY` | Override the registry path independently from home. Set by the `--registry-path` global flag. |
+| `REPO_AEGIS_MARKERS_DIR` | Override the directory of rendered marker files (default `markers/` under the config home). |
 | `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER` | Equivalent to passing `--accept-cross-border` to `audit --org`. The user must set this themselves; agents do not auto-set. |
 | `REPO_AEGIS_NEW_REF_FULL_SCAN` | Set to `1` to force `check --push-ref` to fall back to a full-history scan unconditionally, bypassing the boundary-based incremental logic. Escape hatch for the rare case where the boundary derivation itself is suspect. |
 | `REPO_AEGIS_WAIVE_NONINTERACTIVE` | Set to `1` to let `repo-aegis waive` run with stdin that isn't a TTY. `waive` refuses otherwise, specifically so a hook, script, or coding agent cannot mint a waiver on its own behalf. A human deliberately scripting a waiver still has to set this themselves. |
 | `REPO_AEGIS_MIN_PATTERNS` | Minimum deny-set size; `check` and `audit` exit 2 below it. Equivalent to `--min-patterns <n>`. The composite Action sets it from its `require-deny-set` / `min-patterns` inputs rather than splicing a flag into a user-supplied `args` string, where a consumer could overwrite it. |
 | `REPO_AEGIS_REDACT_ATTRIBUTION` | Set to `1` to strip engagement attribution from output. Equivalent to `--redact-attribution`. Set by the Action and by every generated CI workflow, because a job log, a PR comment, and an issue body are publication channels. |
 | `REPO_AEGIS_ASSUME_PUBLIC` | Set to `1` to assert this repo is public-facing, which turns private-registry egress enforcement **on**. Exists for CI: a fresh clone has no cached `repo-aegis.visibility`, while a workflow knows the answer from `github.event.repository.private`. **One-directional by design** — there is no counterpart that asserts "private". An env var that switches findings *off* would be a waiver nobody reviewed, reachable from a shell profile or a workflow edit, with none of the audit trail `waive` insists on. One-directional also needs no anti-spoofing story: nobody gains by asserting the stricter value. |
+| `REPO_AEGIS_VISIBILITY_LOOKUP` | Set to `0` to stop the live `gh` lookup of a repository's visibility. An unknown visibility then stays unknown, and is refused without a person. For machines where a hook must never spawn `gh`, and for the test suite. |
+| `REPO_AEGIS_EGRESS_HUMAN` | Set to `1` for one invocation to declare that a person is running it, so the egress guard treats it as a human action. Ignored when an agent host is detected above the process (for example Claude Code). Never honoured by `approve`, the owner adds (`engagements add --github-org` / `--personal-org`, `upstreams add`) or `init --migrate-classify`, which need a terminal. An agent must never set it. |
 
 `REPO_AEGIS_REVEAL_MATCHES` is **not** an env var. The previous
 env-var path was deliberately removed because env vars propagate to

@@ -16,7 +16,9 @@
 //      environment unchanged, as it always has.
 //
 // FAULTS (D4). A mapped WRITE never silently falls back to the active account: any throw between choosing
-// and spawning is `GH_IDENTITY_UNAVAILABLE` and `gh` is not run. An unmapped call keeps warn-and-run. A mapped
+// and spawning is `GH_IDENTITY_UNAVAILABLE` and `gh` is not run. (P1-I reversed ONE half of D4: a decision record
+// that cannot be written no longer stops an inject. The log has a fallback file and doctor reports an unwritable
+// one; refusing every identity-mapped call from a sandbox because a log was read-only would be the lockout.) An unmapped call keeps warn-and-run. A mapped
 // READ whose identity cannot be produced runs as the active gh account with one warning line naming the code
 // and the reason (doc/plan-landscape-recommendations.md U4): a read publishes nothing, and a read that
 // stopped for want of a token cost a person a round-trip for no protection. "Read" is the egress parser's
@@ -24,7 +26,7 @@
 //
 // THE TOKEN lives in one local variable and in the `gh` child's environment. See `gh-identity-token.ts`.
 import { spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { constants as osConstants, homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import {
@@ -40,17 +42,23 @@ import {
   ghCallInfo,
   checkTerminal,
   identityPresence,
-  loadRegistry,
+  loadRegistryState,
+  parseEgressIntents,
+  egressParseOptions,
+  pauseNotice,
+  pausePath,
   personLoginOf,
   refusal,
   registeredOwners,
   safeDestination,
-  statePath,
-  RegistryNotFoundError,
+  withLogTrailer,
+  type DecisionAppendResult,
+  type DecisionInput,
   type ChooseIdentityInput,
   type GhCallTarget,
   type EgressIntent,
   type Identity,
+  type PauseState,
   type IdentityChoice,
   type IdentityPresence,
   type IdentityScope,
@@ -59,7 +67,9 @@ import {
   type TerminalCheck,
 } from "@de-otio/repo-aegis-core";
 import type { OutputOptions } from "../format.js";
-import { evaluateEgress, readbackResult, type AllowVerdict, type EgressEvaluation } from "./egress-check.js";
+import { firstIntentDestination, pauseCoveringIntents, recordPausedAllow } from "../pause-scope.js";
+import { buildGhCommand, evaluateEgress, readbackResult, recordedDenyLine, type AllowVerdict, type EgressEvaluation } from "./egress-check.js";
+import { recordDecision, verbWords } from "../decision.js";
 import { gitSpawnViolation, readCredentialConfig, type ConfigEntry } from "../git-credential-config.js";
 import { resolveTrustedGh } from "./doctor-owner-checks.js";
 import { fetchLoginToken, ghChildEnv, mintAppToken, runGhAsNobody, tokensEqual } from "./gh-identity-token.js";
@@ -97,40 +107,18 @@ const HOME_SELECTING_VARS = ["REPO_AEGIS_REGISTRY", "REPO_AEGIS_MARKERS_DIR"] as
 
 const AUTH_GROUPS = ["auth", "config", "alias", "extension"];
 
-/** The decision log: JSON Lines under the pinned home's `state/`, written whatever the audit log's setting (A15). */
-export const DECISION_LOG_FILE = "gh-decisions.jsonl";
-
-export function decisionLogPath(home: string): string {
-  return join(statePath(home), DECISION_LOG_FILE);
+/**
+ * One decision record for this run (P1-I), written to the PINNED home's decision log (`gh-decisions.jsonl` is no longer
+ * written; `repo-aegis log` still reads it). Never throws, and its result never changes what the shim does: D4's "no
+ * unlogged identity use" half is covered by the fallback file and doctor's DECISION_LOG_* codes instead.
+ */
+function logShim(home: string, record: Pick<DecisionInput, "outcome" | "code" | "destination" | "identityColumn" | "approvalId"> & { verb: string }): DecisionAppendResult {
+  return recordDecision({ layer: "shim", host: "unknown", home, ...record, verb: logVerb(record.verb) });
 }
 
-interface DecisionRecord {
-  decision: "inject" | "refuse" | "fallback";
-  verb: string;
-  owner?: string;
-  repo?: string | null;
-  identity?: string;
-  kind?: string;
-  column?: string;
-  scope?: string;
-  approvalId?: string;
-  /** U5: the account-bound approval that let a repository git setting through (`approvalId` is the person-write approval). */
-  coveredBy?: string;
-  covers?: string;
-  code?: string;
-}
-
-/** Append one record. Throws when it cannot: on an injecting call that is a fault (D4), so no unlogged identity use. */
-function appendDecision(home: string, record: DecisionRecord): void {
-  const path = decisionLogPath(home);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const line = JSON.stringify({ ts: new Date().toISOString(), ...record }) + "\n";
-  appendFileSync(path, line, { mode: 0o600 });
-  try {
-    chmodSync(path, 0o600);
-  } catch {
-    /* platform-restricted */
-  }
+/** `gh api (mutating)` as the log's closed verb words: only lower-case words survive (`gh api mutating`). */
+function logVerb(verb: string): string {
+  return verb.replace(/[^a-z-]+/g, " ").trim();
 }
 
 /** A word that is safe to log and print as a verb: lower-case letters and hyphens only. */
@@ -278,7 +266,7 @@ export function findPlainGh(pathValue: string | undefined, home: string): string
 
 type IdentityOutcome =
   | { kind: "plain"; hint?: string; note?: string }
-  | { kind: "refuse"; code: string; reason: string }
+  | { kind: "refuse"; code: string; reason: string; logged?: DecisionAppendResult["written"] }
   | {
       kind: "inject";
       ghPath: string;
@@ -302,11 +290,24 @@ function spawnsGitHere(args: readonly string[]): boolean {
   return false;
 }
 
-function loadPinnedRegistry(home: string): { kind: "none" } | { kind: "unreadable" } | { kind: "ok"; registry: Registry } {
-  try {
-    return { kind: "ok", registry: loadRegistry(join(home, "engagements.yaml")) };
-  } catch (err) {
-    return err instanceof RegistryNotFoundError ? { kind: "none" } : { kind: "unreadable" };
+/**
+ * The registry in the pinned home, by the one core loader. `none` (with a note when it is encrypted: repo-aegis
+ * runs as if there were no registry); `unreadable` for a file that does not parse or a newer schema.
+ */
+function loadPinnedRegistry(
+  home: string,
+): { kind: "none"; note?: string } | { kind: "unreadable" } | { kind: "ok"; registry: Registry } {
+  const load = loadRegistryState(join(home, "engagements.yaml"));
+  switch (load.state) {
+    case "loaded":
+      return { kind: "ok", registry: load.registry };
+    case "missing":
+      return { kind: "none" };
+    case "encrypted":
+      return { kind: "none", note: "the registry is encrypted, so repo-aegis ran as if there were none and no GitHub identity was chosen" };
+    case "unparseable":
+    case "newer-schema":
+      return { kind: "unreadable" };
   }
 }
 
@@ -350,7 +351,7 @@ function decideIdentity(
     const first = chooseIdentity(baseInput(args, intents, [], registry ?? NO_REGISTRY, presence(), home, callerEnv));
     if (first.kind === "refuse") return refuseOutcome(first, home, verb);
   }
-  if (loaded.kind === "none") return { kind: "plain" };
+  if (loaded.kind === "none") return { kind: "plain", ...(loaded.note !== undefined && { note: loaded.note }) };
 
   // Targets: the cwd's remote is read only when the argv would use it.
   const ghRepoEnv = callerEnv["GH_REPO"];
@@ -377,7 +378,7 @@ function decideIdentity(
     if (presence() === "person") return { kind: "plain", note: "the registry could not be read, so no GitHub identity was chosen" };
     const named = targetsInfo();
     if (named.targets.length === 0 && !named.foreignHost) return { kind: "plain" };
-    return refuseUnavailable("the registry in the pinned home could not be read (it is encrypted or damaged; repo-aegis did not change it), so repo-aegis cannot tell whether this owner has a GitHub identity", verb, home, isWrite);
+    return refuseUnavailable("the registry in the pinned home could not be read (it does not parse or validate, or a newer repo-aegis wrote it; repo-aegis did not change it), so repo-aegis cannot tell whether this owner has a GitHub identity", verb, home, isWrite);
   }
   if (!hasMapping) return { kind: "plain" };
 
@@ -438,7 +439,7 @@ function decideIdentity(
                       { by: "person", command: "git config --list --show-origin", note: "it shows which file fails to read; repair or remove that file" },
                     ]
                   : [
-                      { by: "agent", command: "the same call from a checkout whose local git configuration sets none of core.hooksPath, core.fsmonitor, core.sshCommand, url.*.insteadOf, credential.helper or http.proxy-style options" },
+                      { by: "agent", command: "the same call from a checkout whose local git configuration sets none of core.hooksPath, core.fsmonitor, core.sshCommand, url.*.insteadOf or credential.helper" },
                       settingFix(hit),
                       { by: "person", command: "repo-aegis approve <owner>/<repo>", note: "account-bound: it covers this setting for the approval's lifetime, without changing the configuration" },
                     ],
@@ -530,12 +531,9 @@ interface Refusal {
 
 function refuseOutcome(choice: IdentityChoice | Refusal, home: string, verb: string): IdentityOutcome {
   if (choice.kind !== "refuse") return { kind: "plain" };
-  try {
-    appendDecision(home, { decision: "refuse", verb, code: choice.code });
-  } catch {
-    /* a refusal is not made worse by an unwritable log */
-  }
-  return { kind: "refuse", code: choice.code, reason: choice.reason };
+  // Written first, so the trailer the caller puts on the printed reason says what happened.
+  const written = logShim(home, { outcome: "refuse", verb, code: choice.code }).written;
+  return { kind: "refuse", code: choice.code, reason: choice.reason, logged: written };
 }
 
 /**
@@ -545,11 +543,7 @@ function refuseOutcome(choice: IdentityChoice | Refusal, home: string, verb: str
  * the fallback happened (best effort, like a refusal's record).
  */
 function readFallback(why: string, verb: string, home: string): IdentityOutcome {
-  try {
-    appendDecision(home, { decision: "fallback", verb, code: "GH_IDENTITY_UNAVAILABLE" });
-  } catch {
-    /* a read is not made worse by an unwritable log */
-  }
+  logShim(home, { outcome: "fallback", verb, code: "GH_IDENTITY_UNAVAILABLE" });
   return { kind: "plain", note: `GH_IDENTITY_UNAVAILABLE: ${why}, so this read runs as the active gh account` };
 }
 
@@ -624,19 +618,14 @@ function inject(
     }
   }
   const env = ghChildEnv(callerEnv, ghPath, trust, token);
-  // D6, A15: the record is written BEFORE the call, whatever the audit log's setting, and never holds the token.
-  // Failing to write it is a fault on a mapped call: no unlogged use of an identity.
-  appendDecision(home, {
-    decision: "inject",
+  // D6, A15: the record is written BEFORE the call, whatever the audit log's setting, and never holds the token (nor the
+  // login: the identity COLUMN is recorded). P1-I reversed D4 here: failing to write it no longer stops the call.
+  logShim(home, {
+    outcome: "inject",
     verb,
-    owner,
-    repo,
-    identity: identity.name,
-    kind: identity.kind,
-    column: choice.column,
-    scope,
+    destination: { org: owner, repo: repo ?? "*" },
+    identityColumn: choice.column,
     ...(choice.approvalId !== undefined && { approvalId: choice.approvalId }),
-    ...(covered !== undefined && { coveredBy: covered.id, covers: covered.setting }),
   });
   if (covered !== undefined) {
     // U5: also the audit log (when enabled), under the action every approval use is recorded as. Ids and the
@@ -775,6 +764,23 @@ export function runGhCommand(args: string[], opts: GhCommandOptions, deps: GhCom
   }
 }
 
+/** The pause covering this call (and the intents parsed for it, null on a parse fault), or null. */
+function pausedGhRun(args: readonly string[], cwd: string, home: string): { pause: PauseState; intents: EgressIntent[] | null } | null {
+  try {
+    const path = pausePath(home);
+    let intents: EgressIntent[] | null = null;
+    try {
+      intents = parseEgressIntents(buildGhCommand([...args]), egressParseOptions(process.env, cwd));
+    } catch {
+      intents = null; // a parse fault: a machine-wide pause still covers the call; a scoped one cannot say where it goes
+    }
+    const pause = pauseCoveringIntents(intents ?? [], cwd, { path });
+    return pause === null ? null : { pause, intents };
+  } catch {
+    return null;
+  }
+}
+
 function runPinned(
   args: string[],
   home: string,
@@ -783,23 +789,41 @@ function runPinned(
   deps: GhCommandDeps,
   io: { out: (t: string) => void; err: (t: string) => void },
 ): number {
+  // P1-E: a person's emergency pause (read from the pinned home). In scope, the egress decision is not made at all,
+  // and a refusal of the identity step below becomes a plain run as the caller; the intents are still parsed, for
+  // the identity step and to say where the call goes. Verbs that read or change tokens and gh's own config
+  // (`auth`, `config`, `alias`, `extension`) are identity surface, and keep their refusal: a pause never lets an
+  // agent read the person's token.
+  const paused = pausedGhRun(args, cwd, home);
+
   // 1. The egress decision, as `egress-check` makes it.
   let verdict: AllowVerdict | null = null;
   let intents: EgressIntent[] | null = null;
-  try {
-    const ev = (deps.evaluate ?? evaluateEgress)(args, cwd);
-    if (ev.kind === "deny") {
-      io.err(ev.stderrLine);
-      return 2;
+  if (paused !== null) {
+    io.err(`${pauseNotice(paused.pause)}\n`);
+    intents = paused.intents;
+    recordPausedAllow("shim", {
+      pause: paused.pause,
+      verb: intents !== null && intents[0] !== undefined ? verbWords(intents[0].verb) : "gh",
+      destination: intents === null ? null : firstIntentDestination(intents, cwd),
+      home,
+    });
+  } else {
+    try {
+      const ev = (deps.evaluate ?? evaluateEgress)(args, cwd);
+      if (ev.kind === "deny") {
+        io.err(recordedDenyLine(ev, home));
+        return 2;
+      }
+      if (ev.kind === "fault") {
+        io.err(`repo-aegis gh: the egress decision failed (${ev.message}); proceeding\n`);
+      } else {
+        verdict = ev.verdict;
+        intents = ev.intents;
+      }
+    } catch (err) {
+      io.err(`repo-aegis gh: the egress decision failed (${(err as Error).message}); proceeding\n`);
     }
-    if (ev.kind === "fault") {
-      io.err(`repo-aegis gh: the egress decision failed (${ev.message}); proceeding\n`);
-    } else {
-      verdict = ev.verdict;
-      intents = ev.intents;
-    }
-  } catch (err) {
-    io.err(`repo-aegis gh: the egress decision failed (${(err as Error).message}); proceeding\n`);
   }
 
   // 2 and 3. The identity.
@@ -817,6 +841,7 @@ function runPinned(
       ? {
           kind: "refuse",
           code: "GH_IDENTITY_UNAVAILABLE",
+          logged: logShim(home, { outcome: "refuse", verb: verbOf(args, intents ?? []), code: "GH_IDENTITY_UNAVAILABLE" }).written,
           reason: ownRefusal("GH_IDENTITY_UNAVAILABLE", "this gh call", "repo-aegis hit an internal error while preparing the GitHub identity for a mapped owner (not a setting you made, and not one repo-aegis wrote), and will not run it as the active account", [
             { by: "person", command: "repo-aegis doctor", note: "it reports whether the registry and the mapped account are usable; then re-run the command" },
           ], undefined, NO_APPROVAL_IDENTITY),
@@ -824,8 +849,13 @@ function runPinned(
       : { kind: "plain", note: "repo-aegis faulted while choosing a GitHub identity" };
   }
 
+  // The refusals a pause never converts: verbs that read or change tokens and gh's config, and running an alias or an
+  // extension (a name that is not a gh command: it can expand to anything, with the mapped token in its environment).
+  const firstWord = args.find(a => !a.startsWith("-"));
+  const aliasLike = firstWord !== undefined && !isGhBuiltinGroup(firstWord);
+  if (outcome.kind === "refuse" && paused !== null && !aliasLike && !args.some(a => AUTH_GROUPS.includes(a))) outcome = { kind: "plain" };
   if (outcome.kind === "refuse") {
-    io.err(refusalLine(outcome.code, outcome.reason, verbOf(args, intents ?? [])));
+    io.err(refusalLine(outcome.code, outcome.logged === undefined ? outcome.reason : withLogTrailer(outcome.reason, outcome.logged), verbOf(args, intents ?? [])));
     return 2;
   }
 
@@ -843,6 +873,12 @@ function runPinned(
     }
     ghPath = plain;
     env = callerEnv;
+    // P1-I: a call that parsed as an egress shape and ran as the caller is a decision worth one record (a plain read is
+    // not: it would be a record for every `gh pr view`). A pause records itself above.
+    if (paused === null && intents !== null && intents[0] !== undefined) {
+      const dest = firstIntentDestination(intents, cwd);
+      logShim(home, { outcome: "allow", verb: verbWords(intents[0].verb), ...(dest !== null && { destination: dest }) });
+    }
     if (outcome.note !== undefined) io.err(`repo-aegis gh: ${outcome.note}; proceeding\n`);
     if (outcome.hint !== undefined) io.err(`repo-aegis: ${outcome.hint}\n`);
   }

@@ -3,7 +3,8 @@
 // Test-only helpers shared across command test files.
 // Filename underscore-prefixed so it's clearly not a runtime module.
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { setAncestryReaderForTests, type AncestorInfo } from "@de-otio/repo-aegis-core";
 
@@ -322,4 +323,19 @@ export function hermeticGitEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv
   env["GIT_CONFIG_GLOBAL"] = "/dev/null";
   env["GIT_CONFIG_NOSYSTEM"] = "1";
   return { ...env, ...extra };
+}
+
+/**
+ * Point `$TMPDIR` at a fresh empty directory (the decision log's fallback lives under it: a suite that runs `doctor` must
+ * not read a fallback some other test left in the real one). Returns the restore-and-clean-up function.
+ */
+export function isolateTmpdir(): () => void {
+  const saved = process.env["TMPDIR"];
+  const dir = mkdtempSync(join(tmpdir(), "repo-aegis-isolated-tmp-"));
+  process.env["TMPDIR"] = dir;
+  return () => {
+    if (saved === undefined) delete process.env["TMPDIR"];
+    else process.env["TMPDIR"] = saved;
+    rmSync(dir, { recursive: true, force: true });
+  };
 }

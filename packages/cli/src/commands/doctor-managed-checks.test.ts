@@ -137,6 +137,7 @@ describe("T18: MANAGED_DROPIN_NOT_ROOT_OWNED (D8.7)", () => {
     chmodSync(e.sys.at("/etc"), 0o775);
     const c = byCode(checks(e), "MANAGED_DROPIN_NOT_ROOT_OWNED");
     assert.equal(c.ok, false);
+    assert.equal(c.severity, "warn", "X-9: the drop-in still applies; the weakness is who can edit it");
     assert.ok(c.detail.includes("/etc") && /writable by group or others/.test(c.detail), c.detail);
     assert.ok((c.fix ?? "").includes(`sudo rm '${e.paths.file}'`) || (c.fix ?? "").includes("repo-aegis install claude-md"), c.fix ?? "");
   });
@@ -211,6 +212,7 @@ describe("MANAGED_DROPIN_STALE (D8.7)", () => {
     const moved = makePin(join(tmp, `moved-${n++}`));
     const c = byCode(checks(e, { pin: moved }), "MANAGED_DROPIN_STALE");
     assert.equal(c.ok, false);
+    assert.equal(c.severity, "warn", "X-9: an out-of-date drop-in still applies");
     assert.match(c.fix ?? "", /repo-aegis install claude-md/);
   });
 
@@ -236,6 +238,7 @@ describe("D8.11: MANAGED_DROPIN_ORPHANED and MANAGED_DROPIN_LEDGER_STALE", () =>
     rmSync(inHome(e, () => managedLedgerPath()));
     const c = byCode(checks(e), "MANAGED_DROPIN_ORPHANED");
     assert.equal(c.ok, false);
+    assert.equal(c.severity, "warn", "X-9: a missing ledger entry is bookkeeping; nothing is refused");
     assert.ok((c.fix ?? "").includes(`sudo rm '${e.paths.file}'`), c.fix ?? "");
   });
 
@@ -247,6 +250,7 @@ describe("D8.11: MANAGED_DROPIN_ORPHANED and MANAGED_DROPIN_LEDGER_STALE", () =>
       if (!keepLedger) rmSync(inHome(e, () => managedLedgerPath()));
       const c = byCode(checks(e), "MANAGED_DROPIN_ORPHANED");
       assert.equal(c.ok, false, `keepLedger=${keepLedger}`);
+      assert.equal(c.severity, undefined, "a pin on missing files blocks every hook: a failure");
       assert.ok(c.detail.includes(e.pin.cli), c.detail);
       assert.ok((c.fix ?? "").includes(`sudo rm '${e.paths.file}'`));
     }
@@ -259,6 +263,7 @@ describe("D8.11: MANAGED_DROPIN_ORPHANED and MANAGED_DROPIN_LEDGER_STALE", () =>
     const found = checks(e);
     const c = byCode(found, "MANAGED_DROPIN_LEDGER_STALE");
     assert.equal(c.ok, false);
+    assert.equal(c.severity, "warn");
     assert.match(c.fix ?? "", /--uninstall/);
     assert.equal(byCode(found, "MANAGED_DROPIN_ORPHANED").ok, true);
   });

@@ -10,7 +10,9 @@
 //                                     PATH decides what enforces, and a missing one
 //                                     switches enforcement off (an older install).
 //   ENFORCEMENT_PIN_MISSING (fail)    a pinned node or CLI path no longer exists, so
-//                                     the script refuses until it is re-pinned.
+//                                     the script falls back to a repo-aegis on PATH
+//                                     that is at least the pinned version, and
+//                                     refuses otherwise, until it is re-pinned.
 //   MULTIPLE_INSTALLS (warn)          more than one `repo-aegis` is reachable on PATH,
 //                                     or the first one is not the pinned one: the
 //                                     person's terminal and the hooks run different code.
@@ -18,10 +20,10 @@
 // Pure readers. Nothing found on PATH is executed: a version comes from the
 // package.json next to the entry file, never from running it.
 import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parsePinFromScript, repoAegisHome, type EnforcementPin } from "@de-otio/repo-aegis-core";
-import { currentEnforcementPin } from "../enforcement-pin.js";
+import { currentEnforcementPin, versionOf } from "../enforcement-pin.js";
 import type { DoctorCheck } from "./doctor-checks.js";
 import { unpinnedClaudeHooks } from "./install-claude-md.js";
 import { SHIM_HEADER_LINE } from "./shim-script.js";
@@ -122,7 +124,7 @@ function pinMissingCheck(scripts: InstalledScript[]): DoctorCheck {
     ok: false,
     detail:
       `the pinned enforcement binary is missing or not usable (${[...missing].join(", ")}), so the ${broken.map(s => s.label).join(", ")} ` +
-      "refuse(s) to run: a moved or upgraded Node or a removed install does this",
+      "fall(s) back to the repo-aegis on PATH when it is at least the pinned version and refuse(s) otherwise",
     fix: fixFor(broken.map(s => s.installer)),
   };
 }
@@ -152,26 +154,6 @@ export function repoAegisOnPath(pathValue: string | undefined): Array<{ path: st
     found.push({ path: candidate, real });
   }
   return found;
-}
-
-/** The version in the repo-aegis package.json above `entry`, or null; never runs `entry`. */
-export function versionOf(entry: string): string | null {
-  let dir = dirname(entry);
-  for (let i = 0; i < 4; i++) {
-    const text = readText(join(dir, "package.json"));
-    if (text !== null) {
-      try {
-        const pkg = JSON.parse(text) as { name?: unknown; version?: unknown };
-        if (pkg.name === "@de-otio/repo-aegis" && typeof pkg.version === "string") return pkg.version;
-      } catch {
-        /* not JSON: keep walking */
-      }
-    }
-    const up = dirname(dir);
-    if (up === dir) break;
-    dir = up;
-  }
-  return null;
 }
 
 function multipleInstallsCheck(pathValue: string | undefined, pin: EnforcementPin): DoctorCheck {

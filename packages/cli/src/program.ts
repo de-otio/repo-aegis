@@ -19,6 +19,8 @@ import { check } from "./commands/check.js";
 import { render } from "./commands/render.js";
 import { engagementsList } from "./commands/engagements-list.js";
 import { emitError } from "./format.js";
+import { repoAegisHome } from "@de-otio/repo-aegis-core";
+import { noticeApplies, recordsVersion, recordVersion, versionNotice } from "./version-notice.js";
 
 function packageVersion(): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -26,6 +28,13 @@ function packageVersion(): string {
     version: string;
   };
   return pkg.version;
+}
+
+/** The names from the program down to `cmd` (`["install", "hooks"]`); empty for the program itself. */
+function commandPath(cmd: Command): string[] {
+  const out: string[] = [];
+  for (let c: Command | null = cmd; c !== null && c.parent !== null; c = c.parent) out.unshift(c.name());
+  return out;
 }
 
 // Helper: merge global opts with command-specific opts. Per-command
@@ -53,13 +62,35 @@ export async function buildProgram(): Promise<Command> {
 
   // Translate --home / --registry-path into the env vars that paths.ts
   // reads at call time. Runs before any subcommand action.
-  program.hook("preAction", () => {
+  program.hook("preAction", (_thisCommand, actionCommand) => {
     const g = program.opts() as {
       home?: string;
       registryPath?: string;
     };
     if (g.home) process.env["REPO_AEGIS_HOME"] = g.home;
     if (g.registryPath) process.env["REPO_AEGIS_REGISTRY"] = g.registryPath;
+    // Once per version, on stderr, from interactive commands and git hooks only (never `hook`, `git-credential`
+    // or `gh`: their output is read as data). Must never stop a command from running.
+    try {
+      const path = commandPath(actionCommand);
+      // `--json` (global or command level) means a machine reads this: neither print nor record, or the line is spent on nobody.
+      const json = actionCommand.optsWithGlobals()["json"] === true;
+      if (noticeApplies(path, process.env, json)) versionNotice({ home: repoAegisHome(), version: packageVersion(), write: s => void process.stderr.write(s) });
+    } catch {
+      /* a notice is never worth a failed command */
+    }
+  });
+
+  // `init` writes this release's hook scripts and its user-settings hooks, so the notice has nothing to say
+  // about them after it. It installs neither the shim nor the managed drop-in: a machine that has either got
+  // them from `install shim` / `install claude-md`, and `upgrade` finds those when they go stale.
+  program.hook("postAction", (_thisCommand, actionCommand) => {
+    try {
+      const path = commandPath(actionCommand);
+      if (recordsVersion(path) && actionCommand.opts()["migrateClassify"] !== true) recordVersion(repoAegisHome(), packageVersion());
+    } catch {
+      /* best-effort */
+    }
   });
 
   program
@@ -91,6 +122,10 @@ export async function buildProgram(): Promise<Command> {
     .option(
       "--remote-url <url>",
       "with --push-ref/--range: the destination remote URL (git passes it to pre-push as $2); enables the destination checks CROSS_ORG_PUSH and PUBLIC_PUSH_NEEDS_HUMAN and prints the push receipt",
+    )
+    .option(
+      "--remote-ref <ref>",
+      "with --push-ref/--range: the ref git will update on the remote (pre-push's $remote_ref); lets a live prompt approval for exactly this push stand in for a person",
     )
     .option("--history", "scan full git history with `git log -G` per pattern (slow)")
     .option("--since <revspec>", "with --history: lower-bound revspec (only commits reachable forward of this point)")
@@ -141,6 +176,7 @@ export async function buildProgram(): Promise<Command> {
   const { uninstallSweepRepos } = await import("./commands/uninstall-sweep-repos.js");
   const { doctor } = await import("./commands/doctor.js");
   const { waive } = await import("./commands/waive.js");
+  const { upgrade } = await import("./commands/upgrade.js");
 
   engagements
     .command("add [id]")
@@ -185,8 +221,8 @@ export async function buildProgram(): Promise<Command> {
       "map an engagement's orgs (or, with --personal-org, one personal org) to GitHub identities: --person is a gh-login identity, --agent a github-app identity. The first one sets requireIdentity. Needs a terminal; an agent must not run it.",
     )
     .option("--personal-org <org>", "target a personal org instead of an engagement <id>")
-    .option("--person <name>", "identity name acting when a person is present (kind gh-login)")
-    .option("--agent <name>", "identity name acting when no person is present (kind github-app)")
+    .option("--person <name>", "identity name acting when a person is present (kind gh-login); `none` clears just this column")
+    .option("--agent <name>", "identity name acting when no person is present (kind github-app); `none` clears just this column")
     .option("--clear", "remove both identities from the target")
     .action(async (id: string | undefined, opts, cmd) => {
       const { engagementsSetIdentity } = await import("./commands/identity.js");
@@ -204,6 +240,29 @@ export async function buildProgram(): Promise<Command> {
     .action(async (code: string | undefined, opts, cmd) => {
       const { explain } = await import("./commands/explain.js");
       explain(code, withGlobals(opts, cmd));
+    });
+
+  // The user docs that ship in dist/docs, for an agent helping its person from any repo. Read-only like `explain`.
+  program
+    .command("docs [topic]")
+    .description(
+      "print a doc that ships with repo-aegis (cli-reference, configuration, agent-guide, egress-guard, readme, changelog, …); with no topic, list them. `--path` prints the file path so you can Read or grep it. Read-only; works from any directory.",
+    )
+    .option("--path", "print the absolute path of the doc instead of its text")
+    .action(async (topic: string | undefined, opts, cmd) => {
+      const { docs } = await import("./commands/docs.js");
+      docs(topic, withGlobals(opts, cmd));
+    });
+
+  // The sandbox-shaped end-to-end flows against this install (P1-G). Read-only outside $TMPDIR; an agent may run it.
+  program
+    .command("selftest")
+    .description(
+      "run the real hooks, shim and credential helper through throwaway repositories under $TMPDIR, from the conditions you are in now (proxy variables, no process list, no TTY), and print one line per layer: pre-commit, pre-push, shim, credential helper, egress hook. Exit 0 when every layer is ok, 1 otherwise. Never touches your repositories, the registry, approvals or audit log, or the network. Run it first when anything is refused.",
+    )
+    .action(async (opts, cmd) => {
+      const { selftest } = await import("./commands/selftest.js");
+      selftest(withGlobals(opts, cmd));
     });
 
   // Registry schemaVersion 3: named GitHub identities. The mutators need a terminal and are human-only; `list` is read-only.
@@ -439,7 +498,7 @@ export async function buildProgram(): Promise<Command> {
 
   install
     .command("git-credential")
-    .description("make the repo-aegis credential helper the first git helper for https://github.com (global config; needs a terminal), so an agent's HTTPS push gets a token narrowed to one repository; sets credential.useHttpPath")
+    .description("make the repo-aegis credential helper the first git helper for https://github.com (global config; needs a terminal), so an agent's HTTPS push goes out as the account chosen for its owner (the mapped person login, or an App token narrowed to one repository); sets credential.useHttpPath, and on stock macOS an empty reset entry plus osxkeychain after ours")
     .option("--uninstall", "remove exactly what this command added (recorded in <home>/state/git-credential-install.json)")
     .action(async (opts, cmd) => {
       const { installGitCredential } = await import("./commands/install-git-credential.js");
@@ -450,7 +509,7 @@ export async function buildProgram(): Promise<Command> {
   // protocol lines on stdout; always exits 0 (git ignores a non-zero helper and asks the next one).
   program
     .command("git-credential <action>")
-    .description("git credential helper: `get` answers an agent's push to an owner with an agent identity; every refusal prints quit=true; store and erase are ignored (git calls this; configure it with `install git-credential`)")
+    .description("git credential helper: `get` answers an agent's push for a mapped owner with the mapped person's token or an App token; every refusal prints quit=true; store and erase are ignored (git calls this; configure it with `install git-credential`)")
     .action(async (action: string, opts, cmd) => {
       const { runGitCredential } = await import("./commands/git-credential.js");
       const { readFileSync } = await import("node:fs");
@@ -600,6 +659,15 @@ export async function buildProgram(): Promise<Command> {
       await hookGuardEgress(withGlobals(opts, cmd));
     });
 
+  // UserPromptSubmit: a person typing ends the life of any prompt approval (egress-guard.md §4a.1). Silent, exit 0.
+  hook
+    .command("prompt-submit")
+    .description("UserPromptSubmit hook: revoke prompt approvals (a yes at the agent's prompt covers one command); silent, never blocks the prompt")
+    .action(async () => {
+      const { hookPromptSubmit } = await import("./commands/hook-prompt-submit.js");
+      await hookPromptSubmit();
+    });
+
   hook
     .command("egress-receipt")
     .description("PostToolUse(Bash): after a command that published, return one line naming the destination (org/repo, visibility, class) as additionalContext")
@@ -730,10 +798,52 @@ export async function buildProgram(): Promise<Command> {
     .option("--ttl <duration>", "how long the approval lives: 15m (default), 2h, 90s, 1d — never more than 24h")
     .option("--note <text>", "why (audit trail only)")
     .option("--list", "list live approvals instead of minting one")
-    .option("--revoke <id|all>", "revoke one approval by id, or every one")
+    .option("--revoke <id|all|prompt>", "revoke one approval by id, every one, or only the prompt approvals (a yes at the agent's prompt; terminal approvals stay)")
     .action(async (target: string | undefined, opts, cmd) => {
       const { approve } = await import("./commands/approve.js");
       approve(target, withGlobals(opts, cmd));
+    });
+
+  // The emergency pause: a person-only, time-boxed off switch for "repo-aegis is wrong right now and I have to ship".
+  // Needs a terminal like `approve`, always expires (default 1h, cap 8h), and `resume` ends it early.
+  program
+    .command("pause")
+    .description(
+      "pause repo-aegis for a while (a person's terminal only; always expires: default 1h, at most 8h). With --repo <owner>/<repo> only that repository is paused. The hooks, egress guard, gh shim and git credential helper then stand aside (a machine-wide pause keeps the cross-org checks on; one with --repo lifts them for that repository); approve, pause, identity changes and uninstall stay person-only. End it early with `resume`.",
+    )
+    .option("--for <duration>", "how long: 30m, 2h, 90s (default 1h, never more than 8h)")
+    .option("--repo <owner/repo>", "pause only for this repository (its pushes and its working copy); default: everything on this machine")
+    .option("--reason <text>", "why (only its length is recorded)")
+    .option("--list", "show the active pause instead of setting one")
+    .action(async (opts, cmd) => {
+      const { pause } = await import("./commands/pause.js");
+      pause(withGlobals(opts, cmd));
+    });
+
+  program
+    .command("resume")
+    .description("end an emergency pause now (repo-aegis protects again); allowed for an agent, because it only turns protection back on")
+    .action(async (opts, cmd) => {
+      const { resume } = await import("./commands/pause.js");
+      resume(withGlobals(opts, cmd));
+    });
+
+  // The decision log (P1-I): on by default, read-only for an agent. When a refusal ends `(logged: repo-aegis log --last 1)`,
+  // this is the command to run, then `explain <code>`. `--off` is a person's (terminal-gated); `--on` is anyone's.
+  program
+    .command("log")
+    .description(
+      "print the decision log: what each repo-aegis hook, shim and credential helper decided and the facts it decided on (the last 20 refusals by code with their one fix line, or --last N records). Read-only; works from any directory; never holds a token, a path, a URL, a command or a marker. `--off` (a person's terminal only) switches recording off; `--on` switches it back on.",
+    )
+    .option("--since <duration>", "only records from the last 30m, 2h, 1d, ...")
+    .option("--code <CODE>", "only records with this refusal code")
+    .option("--layer <layer>", "only records of this layer: pre-commit, pre-push, egress-hook, check-write, scan-after-write, shim, credential-helper, prompt-submit, prompt-approval, pause")
+    .option("--last <n>", "the last n records, any outcome (`--last 1` is the record the refusal just wrote)")
+    .option("--off", "switch the decision log off (a person's terminal only; an agent that did would remove the data its next refusal needs)")
+    .option("--on", "switch the decision log back on")
+    .action(async (opts, cmd) => {
+      const { log } = await import("./commands/log.js");
+      log(withGlobals(opts, cmd));
     });
 
   // A client-side gate that is installed but disconnected looks exactly like
@@ -753,7 +863,26 @@ export async function buildProgram(): Promise<Command> {
       "skip the egress-guard checks (push.default, gh shim on PATH, guard hook registered, class + visibility resolved per repo, registered owners vs every logged-in gh account, pre-push hook, shell startup overrides)",
     )
     .option("--claude-home <dir>", "override default ~/.claude location (for the guard-hook check)")
+    .option(
+      "--verbose",
+      "print every finding with its fix; by default repeated per-repository findings of one code collapse into one line with a count and the fixes appear once, in a closing 'Fix these first' list (--json always lists everything)",
+    )
     .action((opts, cmd) => doctor(withGlobals(opts, cmd)));
+
+  // One command after upgrading the package: re-run the installers whose generated output `doctor` calls stale.
+  // Allowed for agents: it only re-runs installers an agent may already run, and the two that need a person
+  // (the managed drop-in's sudo write, the credential helper) are listed, not run, when no person is at a terminal.
+  program
+    .command("upgrade")
+    .description(
+      "after upgrading repo-aegis: re-run the installers whose output is stale (git hook scripts, the gh shim, the managed Claude Code drop-in, the git credential helper), one line per step. Steps that need a person at a terminal (the drop-in's sudo write, the credential helper) are listed under `run yourself:` when none is attached. Never installs what was not installed.",
+    )
+    .option("--dry-run", "report what would be done; change nothing")
+    .option("--force", "pin to this install even when it looks temporary (a git checkout, an npx cache, a project devDependency); once that copy is removed every commit and push is refused until `install hooks` runs from a lasting install; never overrides a version rollback")
+    .option("--claude-home <dir>", "override default ~/.claude location (for the claude-md step)")
+    .action((opts, cmd) => {
+      upgrade(withGlobals(opts, cmd), { version: packageVersion() });
+    });
 
   return program;
 }

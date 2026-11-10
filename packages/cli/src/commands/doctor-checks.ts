@@ -26,6 +26,7 @@ export type DoctorCheckCode =
   | "GH_CONFIG_REDIRECT"
   | "REGISTRY_AGENT_WRITABLE"
   | "REGISTRY_UNREADABLE"
+  | "REGISTRY_ENCRYPTED"
   // Owner identities (doc/plan-owner-identity.md §5.1, §12.2 Q4).
   | "OWNER_IDENTITY_UNMAPPED"
   // The taaad that mints App tokens must be root-owned (doc/plan-owner-identity.md A4, §13.3).
@@ -52,7 +53,13 @@ export type DoctorCheckCode =
   | "SSH_GITHUB_REDIRECT"
   // Phase U (doc/plan-landscape-recommendations.md): a duplicate local hooks path, and an SSH origin where agents need HTTPS.
   | "HOOKS_PATH_LOCAL_DUPLICATE"
-  | "AGENT_REMOTE_IS_SSH";
+  | "AGENT_REMOTE_IS_SSH"
+  // The person-only emergency pause (complexity-review P1-E): protection is deliberately off until it expires.
+  | "PAUSE_ACTIVE"
+  // The decision log (complexity-review P1-I): on by default; these say when it is off or cannot be written.
+  | "DECISION_LOG_OFF"
+  | "DECISION_LOG_FALLBACK"
+  | "DECISION_LOG_UNWRITABLE";
 
 /**
  * How loudly a failing check speaks. Only `fail` makes `doctor` exit 1.
@@ -80,6 +87,11 @@ export interface DoctorCheck {
    * customer names). Emitted in `--json` only.
    */
   names?: string[];
+  /**
+   * For a skipped check: the reason alone, without the subject. Skips of one account with the same reason are
+   * printed as one `SKIP n checks for gh account X: <reason>` line.
+   */
+  skipReason?: string;
   /** The gh account a finding applies to, when it applies to one (the login, shown in `detail` as well). */
   account?: string;
   /**

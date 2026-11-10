@@ -13,12 +13,6 @@ inputs:
     description: Additional CLI args (string, space-separated)
     required: false
     default: ''
-  registry:
-    description: >-
-      Path to a custom engagements.yaml. If omitted, the action falls back
-      to a checked-in .repo-aegis.yml or runs without one.
-    required: false
-    default: ''
   fail-on-hits:
     description: Whether the action fails the workflow on any hits (default true)
     required: false
@@ -28,9 +22,10 @@ inputs:
       Fail (exit 2) when the computed deny set is empty. Default true. A
       registry that failed to load — a fork PR cannot read secrets, a renamed
       secret, a bad path — otherwise produces a scan that matches nothing and
-      a green check indistinguishable from a real pass. Set to 'false' only if
-      you intend this repo to be scanned with no deny set (e.g. a scratch
-      repo).
+      a green check indistinguishable from a real pass. The action does not
+      take a registry: a hosted runner has none, so set this to 'false' there
+      (only the deny-set-independent checks then run). A runner that already
+      has rendered markers, such as a self-hosted one, keeps the default.
     required: false
     default: 'true'
   min-patterns:
@@ -56,23 +51,18 @@ inputs:
       reach every consumer's gate on their next run. Pass `latest` explicitly
       to opt into floating.
     required: false
-    default: '0.13.2'
+    default: '0.14.0'
 outputs:
   exit-code:
     description: Exit code of the repo-aegis invocation
     value: ${{ steps.run.outputs.exit-code }}
   results-file:
     description: >-
-      Path to a file under RUNNER_TEMP containing the run's JSON output. Prefer
-      this over hits-json — read it with `fs.readFileSync` in actions/github-script,
-      or `cat` it in a run block. Never interpolate scanner output into a `run:`
-      block; repo-derived paths in it can close your shell quoting.
+      Path to a file under RUNNER_TEMP containing the run's JSON output. Read
+      it with `fs.readFileSync` in actions/github-script, or `cat` it in a run
+      block. Never interpolate scanner output into a `run:` block; repo-derived
+      paths in it can close your shell quoting.
     value: ${{ steps.run.outputs.results-file }}
-  hits-json:
-    description: >-
-      DEPRECATED (removal in 0.9.0) — use results-file. The run's JSON output as
-      a string. Retained for one minor version for existing consumers.
-    value: ${{ steps.run.outputs.hits-json }}
 runs:
   using: composite
   steps:
@@ -106,18 +96,12 @@ runs:
       env:
         REPO_AEGIS_COMMAND: ${{ inputs.command }}
         REPO_AEGIS_ARGS: ${{ inputs.args }}
-        REPO_AEGIS_REGISTRY_INPUT: ${{ inputs.registry }}
         REPO_AEGIS_FAIL_ON_HITS: ${{ inputs.fail-on-hits }}
         REPO_AEGIS_REQUIRE_DENY_SET: ${{ inputs.require-deny-set }}
         REPO_AEGIS_MIN_PATTERNS_INPUT: ${{ inputs.min-patterns }}
         REPO_AEGIS_REDACT_INPUT: ${{ inputs.redact-attribution }}
       run: |
         set +e
-        # Forward registry path via env so the CLI picks it up.
-        if [ -n "${REPO_AEGIS_REGISTRY_INPUT}" ]; then
-          export REPO_AEGIS_REGISTRY="${REPO_AEGIS_REGISTRY_INPUT}"
-        fi
-
         # Fail closed. The CLI enforces the floor where the number is computed,
         # so the check applies identically to every subcommand and does not
         # depend on parsing JSON in bash. min-patterns wins when both are set,
@@ -141,20 +125,12 @@ runs:
         repo-aegis ${REPO_AEGIS_COMMAND} --json ${REPO_AEGIS_ARGS} > "${results_file}"
         rc=$?
 
-        # A random heredoc delimiter, not a fixed one. The payload contains
-        # repo-derived strings (file paths); with a fixed, publicly known
-        # delimiter, content that reproduced it at column 0 could inject
-        # arbitrary step outputs. Today's pretty-printed JSON indents every
-        # value so it cannot happen — but that is a property of the formatter,
-        # not a guarantee, and this costs one line.
-        delim="REPO_AEGIS_EOF_$(openssl rand -hex 16)"
+        # Only the exit code and the file path go into step outputs. The scan
+        # payload contains repo-derived strings (file paths) and stays in the
+        # file, never in an output a later step could interpolate.
         {
           echo "exit-code=${rc}"
           echo "results-file=${results_file}"
-          echo "hits-json<<${delim}"
-          cat "${results_file}"
-          echo ""
-          echo "${delim}"
         } >> "${GITHUB_OUTPUT}"
 
         cat "${results_file}"

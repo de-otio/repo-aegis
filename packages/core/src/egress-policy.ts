@@ -60,9 +60,13 @@ import { resolveCachedDestination } from "./destination-cache.js";
 import {
   approvalScopeOf,
   findApproval,
+  findPromptApproval,
   findUncoveringStarApproval,
+  promptBindingOf,
   type ApprovalScope,
   type EgressApproval,
+  type PromptApproval,
+  type PromptBinding,
   type StarApprovalGap,
 } from "./egress-approval.js";
 import {
@@ -73,6 +77,7 @@ import {
 } from "./registered-owners.js";
 import {
   refusal,
+  withRefusalTrailer,
   safeDestination,
   isSafeOwner,
   isPrintableDestination,
@@ -233,8 +238,28 @@ export type EgressDecision =
       intent?: EgressIntent;
       destination?: Destination;
     }
-  | { action: "ask"; code: EgressCode; reason: string; destination?: Destination; intent: EgressIntent }
+  | {
+      action: "ask";
+      code: EgressCode;
+      reason: string;
+      destination?: Destination;
+      intent: EgressIntent;
+      /**
+       * EVERY (intent, target) that judged `ask`, not only the first one this decision reports: a compound
+       * `git push … && gh pr create …`, or a remote with several push URLs, has more than one. The agent hook
+       * writes one prompt approval per eligible entry (doc/design/egress-guard.md §4a.1). The destination is the
+       * full target (not the printable one), `null` when the command has none.
+       */
+      asked: Array<{ intent: EgressIntent; destination: Destination | null }>;
+    }
   | { action: "deny"; code: EgressCode; reason: string; destination?: Destination; intent: EgressIntent };
+
+/**
+ * Added to rule g's refusal where prompt approvals are honoured (the `gh` shim): what a yes at an agent prompt does
+ * and does not cover, so the refusal after a "no", or after the two minutes, is not a dead end.
+ */
+export const PROMPT_APPROVAL_DENY_SENTENCE =
+  "A yes at an agent prompt covers only the same command to the same destination, for 2 minutes; re-run it and answer the prompt.";
 
 /** Human-only escape for the "is a person present" test. Same contract as `REPO_AEGIS_WAIVE_NONINTERACTIVE`. */
 export const EGRESS_HUMAN_ENV = "REPO_AEGIS_EGRESS_HUMAN";
@@ -362,13 +387,19 @@ export type ApprovalFinder = (
  * - `loaded`: read successfully. Rule h judges against its owner lists, and
  *   is skipped when it declares none.
  * - `missing`: no registry file exists. Rule h is skipped.
- * - `unreadable`: a file (or ciphertext) exists but could not be read:
- *   encrypted, unparseable, or a newer schema. Rule h refuses every
- *   non-interactive egress that has a destination, because no owner can be
- *   confirmed. Falling open here would let one corrupted line switch the
- *   rule off.
+ * - `encrypted`: only a `<registry>.age` ciphertext exists. repo-aegis runs as
+ *   if there were no registry (encryption at rest is deprecated), so rule h is
+ *   skipped and the note says so.
+ * - `unparseable`: the file exists but does not parse or validate.
+ * - `newer-schema`: the file parses but was written by a newer repo-aegis.
+ *   For both of the last two no owner can be confirmed: an interactive host is
+ *   asked, anything else is refused. Falling open here would let one
+ *   corrupted line switch the rule off.
  */
-export type RegistryState = "loaded" | "missing" | "unreadable";
+export type RegistryState = "loaded" | "missing" | "encrypted" | "unparseable" | "newer-schema";
+
+/** The two states in which a registry exists but cannot be read: rule h asks or refuses. */
+export const registryUnreadable = (s: RegistryState): boolean => s === "unparseable" || s === "newer-schema";
 
 export interface DecideEgressOptions {
   intents: EgressIntent[];
@@ -403,6 +434,14 @@ export interface DecideEgressOptions {
   /** Injectable for tests; defaults to the approvals store. */
   findApproval?: ApprovalFinder;
   /**
+   * Looks up a live PROMPT approval: a person's yes at the agent host's own prompt, for one exact command, for two
+   * minutes (egress-approval.ts). Rule g consults it only AFTER the terminal finder found nothing, and only when
+   * this is set. The agent hook never sets it, which is what keeps a "no" at the prompt from letting a different
+   * command through (F1): only the layers below the prompt (the `gh` shim, pre-push) pass it. Absent means prompt
+   * approvals are ignored.
+   */
+  findPromptApproval?: PromptApprovalFinder;
+  /**
    * Injectable for tests: the lookup behind rule g's "a `*` approval is live
    * but does not cover this" sentence. When omitted it follows
    * {@link findApproval}: the real store is read only when the real finder is
@@ -418,6 +457,12 @@ export interface DecideEgressOptions {
    */
   lookupVisibility?: VisibilityLookup;
 }
+
+/** Looks up the live prompt approval matching a binding exactly. See {@link DecideEgressOptions.findPromptApproval}. */
+export type PromptApprovalFinder = (binding: PromptBinding) => PromptApproval | null;
+
+/** Default {@link PromptApprovalFinder}: the `prompt-approvals/` directory under `REPO_AEGIS_HOME`. */
+export const findPromptApprovalDefault: PromptApprovalFinder = binding => findPromptApproval(binding);
 
 /**
  * Looks up a live `*` approval that exists but does NOT cover `destination`
@@ -1112,6 +1157,8 @@ export function unregisteredOwnerReason(
   destination: Pick<Destination, "org" | "repo" | "unresolved" | "unresolvedWhy" | "candidates">,
   state: RegistryState,
   registry: Pick<Registry, "allowedUpstreams"> & Partial<Pick<Registry, "personalOrgs" | "engagements">>,
+  /** For an unreadable registry: whether the decision is an `ask` (the approval line says what a yes does). */
+  ask: boolean = false,
 ): string {
   const verb = describeVerb(intent.verb);
   const code = "UNREGISTERED_OWNER_EGRESS";
@@ -1131,23 +1178,30 @@ export function unregisteredOwnerReason(
       : `${verb} (unresolved destination)`
     : `${verb} → ${target}`;
 
-  if (state === "unreadable") {
+  if (registryUnreadable(state)) {
+    const newer = state === "newer-schema";
+    const who = unresolved ? `this destination's owner` : `the owner "${owner}"`;
     return refusal({
       code,
       ...subject,
       what,
-      why:
-        `The registry could not be read (it is encrypted or damaged), so repo-aegis cannot confirm that ` +
-        (unresolved ? `this destination's owner` : `the owner "${owner}"`) +
-        ` is registered and refuses egress it cannot vouch for`,
-      approval: "No approval covers this",
+      why: newer
+        ? `The registry was written by a newer repo-aegis than the one running this check, so it cannot confirm that ${who} is registered`
+        : `The registry exists but does not parse or validate, so repo-aegis cannot confirm that ${who} is registered`,
+      approval: ask
+        ? "A person's yes at this prompt lets this one command run; a push is still refused by the pre-push hook until the registry can be read"
+        : "No approval covers this",
       fixes: [
-        { by: "person", when: "If the registry is encrypted", command: "repo-aegis registry decrypt --identity <key>" },
-        {
-          by: "person",
-          when: "If it is damaged",
-          step: `repairs ${registryPathLabel()}, then re-runs the command (\`repo-aegis status\` shows why it fails to load)`,
-        },
+        newer
+          ? {
+              by: "person",
+              step:
+                "upgrades repo-aegis, then runs `repo-aegis install hooks` and `repo-aegis install claude-md` so the hooks run the new version",
+            }
+          : {
+              by: "person",
+              step: `repairs ${registryPathLabel()}, then re-runs the command (\`repo-aegis status\` shows why it fails to load)`,
+            },
       ],
     });
   }
@@ -1342,7 +1396,8 @@ const DOT_GH_WRITE_NEEDS_BOT_REASON = [
   "Without --as, dot gh picks the account from the repository's owner, which for your user's own organisation is the user themself, so the agent would publish as them.",
   "Re-issue with --as bot as dot gh's first option:",
   "  dot gh --as bot <the same gh arguments>",
-  "If the bot lacks the permission (it has no issues, secrets, Actions or workflow-file access), stop and report it to your human; do not switch to --as owner or plain gh. [DOT_GH_WRITE_NEEDS_BOT]",
+  "If the bot lacks the permission (it has no issues, secrets, Actions or workflow-file access), stop and report it to your human; do not switch to --as owner or plain gh.",
+  // (the shared `[DOT_GH_WRITE_NEEDS_BOT; details: …]` trailer, with the version and next step, is added by `deny()`)
 ].join("\n");
 
 /** The owners a `gh` intent names literally: `--repo` / `-R` / `GH_REPO`, a URL or `o/r` positional, and a `repos/<o>/<r>/…` endpoint. */
@@ -1375,7 +1430,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   const deny = (code: EgressCode, reason: string, destination?: Destination): EgressDecision => ({
     action: "deny",
     code,
-    reason,
+    // X-10: the shape rules write their reason by hand; the shared trailer (version, next step, person-only,
+    // `[CODE; details: …]`) is appended here, once, for every code. A no-op for a reason built by `refusal()`.
+    reason: withRefusalTrailer(code, reason),
     ...(destination && { destination }),
     intent,
   });
@@ -1519,9 +1576,28 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   // not the destination cache, a local class, or an approval (D2).
   if (destination !== null && !opts.humanPresent) {
     let refused = false;
-    if (opts.registryState === "unreadable") {
-      // No owner can be confirmed, so none is admitted (D4, revised).
-      refused = true;
+    if (registryUnreadable(opts.registryState)) {
+      // No owner can be confirmed, so none is admitted (D4, revised). A host
+      // with an `ask` asks; the pre-push hook still refuses the push itself.
+      // A `gh` verb whose shim is not first on PATH has nothing below an
+      // unanswered ask, so it is denied instead (as rule g does).
+      const asks =
+        opts.capabilities.ask && !(opts.capabilities.ghShimOnPath === false && intent.verb.startsWith("gh-"));
+      return asks
+        ? {
+            action: "ask",
+            code: "UNREGISTERED_OWNER_EGRESS",
+            reason: unregisteredOwnerReason(intent, destination, opts.registryState, opts.registry, true),
+            ...(printable(destination) && { destination: printable(destination) }),
+            intent,
+            // Nothing to carry down: with the registry unreadable, pre-push refuses the push whatever the answer.
+            asked: [],
+          }
+        : deny(
+            "UNREGISTERED_OWNER_EGRESS",
+            unregisteredOwnerReason(intent, destination, opts.registryState, opts.registry),
+            printable(destination),
+          );
     } else if (opts.registryState === "loaded") {
       const owners = registeredOwners(opts.registry);
       // A registry that declares no owners has nothing to judge against. A
@@ -1537,7 +1613,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         }
       }
     }
-    // "missing": no registry file at all, rule h is skipped.
+    // "missing" (no registry file) and "encrypted" (run as if none): rule h is skipped.
     if (refused) {
       // A destination whose name is not a plausible GitHub owner/repo is not
       // attached to the decision: layers print it as JSON, and the refusal
@@ -1650,6 +1726,16 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       approval = (opts.findApproval ?? findApprovalDefault)(destination, intent.refspec, approvalScope);
     } catch {
       approval = null;
+    }
+    // A person's yes at the agent prompt for exactly this command (verb, destination, endpoint), only where the
+    // caller has a layer below the prompt to honour it (never the hook itself: F1).
+    if (approval === null && opts.findPromptApproval !== undefined) {
+      try {
+        const binding = promptBindingOf(intent, destination, () => null, opts.cwd);
+        approval = binding === null ? null : opts.findPromptApproval(binding);
+      } catch {
+        approval = null;
+      }
     }
     if (approval !== null) {
       const shown = destination && printable(destination);
@@ -1766,6 +1852,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
         reason,
         ...(shownDestination && { destination: shownDestination }),
         intent,
+        // Only a name that may be printed travels here too: the decision is serialised by some callers, and an invalid
+        // name could never be bound to a prompt approval anyway.
+        asked: [{ intent, destination: destination !== null && isPrintableDestination(destination) ? destination : null }],
       };
     }
     return deny(
@@ -1773,6 +1862,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
       `${head}: re-run it from a terminal, ` +
         (approveCommand === null ? "" : `mint an approval first (\`${approveCommand}\`), `) +
         `or a human sets ${EGRESS_HUMAN_ENV}=1 for this one invocation (an agent never sets it).` +
+        (opts.findPromptApproval === undefined ? "" : ` ${PROMPT_APPROVAL_DENY_SENTENCE}`) +
         starGap +
         hint,
       shownDestination,
@@ -1785,6 +1875,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
 
   let askDecision: EgressDecision | null = null;
   let approvedDecision: EgressDecision | null = null;
+  const askedAll: Array<{ intent: EgressIntent; destination: Destination | null }> = [];
   const single = (d: Destination): Destination => {
     const { alsoTargets: _dropped, ...rest } = d;
     return rest;
@@ -1794,10 +1885,14 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   for (const t of targets) {
     const d = judgeTarget(t);
     if (d.action === "deny") return d;
-    if (d.action === "ask" && askDecision === null) askDecision = d;
+    if (d.action === "ask") {
+      askedAll.push(...d.asked);
+      if (askDecision === null) askDecision = d;
+    }
     if (d.action === "allow" && d.approval !== undefined && approvedDecision === null) approvedDecision = d;
   }
-  return askDecision ?? approvedDecision ?? { action: "allow" };
+  if (askDecision !== null && askDecision.action === "ask") return { ...askDecision, asked: askedAll };
+  return approvedDecision ?? { action: "allow" };
 }
 
 /**
@@ -1808,13 +1903,18 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
 export function decideEgress(opts: DecideEgressOptions): EgressDecision {
   let ask: EgressDecision | null = null;
   let approved: EgressDecision | null = null;
+  const askedAll: Array<{ intent: EgressIntent; destination: Destination | null }> = [];
   for (const intent of opts.intents) {
     const d = decideOne(intent, opts);
     if (d.action === "deny") return d;
-    if (d.action === "ask" && ask === null) ask = d;
+    if (d.action === "ask") {
+      askedAll.push(...d.asked);
+      if (ask === null) ask = d;
+    }
     if (d.action === "allow" && d.approval !== undefined && approved === null) approved = d;
   }
-  return ask ?? approved ?? { action: "allow" };
+  if (ask !== null && ask.action === "ask") return { ...ask, asked: askedAll };
+  return approved ?? { action: "allow" };
 }
 
 /**

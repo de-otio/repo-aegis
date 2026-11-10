@@ -14,7 +14,7 @@
 // pushurl, not URLs this file made up.
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -348,28 +348,52 @@ describe("pre-push rule h — registry states match the hook and the shim (D4)",
     assert.match(r.stderr, /rule h \(unregistered-owner check\) skipped: the registry declares no owners/);
   });
 
-  it("an unparseable registry refuses, and says it could not be read", () => {
+  it("an unparseable registry refuses, and says it does not parse", () => {
     const ctx = setup("s-corrupt", "engagements: [\n");
     const repo = makeRepo("s-corrupt-repo", STRANGER);
     const r = refusalOf(pushCheck(ctx, repo, STRANGER));
     assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(r.error, /registry could not be read/);
+    assert.match(r.error, /does not parse or validate/);
+    assert.match(r.error, /No approval covers this/, "the pre-push hook cannot ask: no approval line about a prompt");
     assert.equal(r.details.ruleH, "applied");
   });
 
-  it("an encrypted registry (ciphertext only) refuses, even for an owner it would have listed", () => {
+  it("an encrypted registry (ciphertext only) runs as if there were none: rule h does not refuse, and stderr says so once", () => {
     const ctx = setup("s-encrypted", null);
     writeFileSync(`${ctx.registry}.age`, "age-encryption.org/v1\n");
-    const repo = makeRepo("s-encrypted-repo", "git@github.com:acme/x.git");
-    const r = refusalOf(pushCheck(ctx, repo, "git@github.com:acme/x.git"));
-    assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
-    assert.match(r.error, /registry could not be read/);
+    const repo = makeRepo("s-encrypted-repo", STRANGER);
+    const r = pushCheck(ctx, repo, STRANGER);
+    assert.equal(r.exitCode, undefined, r.stderr);
+    const lines = r.stderr.split("\n").filter(l => l.includes("registry is encrypted"));
+    assert.deepEqual(lines, [
+      "repo-aegis: registry is encrypted, so rule h was skipped and the cross-org check used only this repository's remote; a person runs `repo-aegis registry decrypt --identity <key>`",
+    ]);
+    assert.doesNotMatch(r.stderr, /no registry file exists/, "the encrypted line replaces the skip note");
   });
 
-  it("a registry from a newer schema is unreadable, so it refuses", () => {
+  it("an encrypted registry: the cross-org check still runs on the origin fallback (an empty registry, not a skipped check)", () => {
+    const ctx = setup("s-encrypted-cross", null);
+    writeFileSync(`${ctx.registry}.age`, "age-encryption.org/v1\n");
+    const repo = makeRepo("s-encrypted-cross-repo", "git@github.com:acme/x.git");
+    const r = refusalOf(pushCheck(ctx, repo, "git@github.com:other-org/y.git"));
+    assert.equal(r.code, "CROSS_ORG_PUSH", "an unregistered owner is not refused by rule h, but the origin's org is the boundary");
+  });
+
+  it("a registry from a newer schema (99) is unreadable: the agent's pre-push is refused UNREGISTERED_OWNER_EGRESS, with the upgrade text", () => {
     const ctx = setup("s-newer", "schemaVersion: 99\nengagements: []\n");
     const repo = makeRepo("s-newer-repo", STRANGER);
-    assert.equal(refusalOf(pushCheck(ctx, repo, STRANGER)).code, "UNREGISTERED_OWNER_EGRESS");
+    const r = refusalOf(pushCheck(ctx, repo, STRANGER));
+    assert.equal(r.code, "UNREGISTERED_OWNER_EGRESS");
+    assert.match(r.error, /written by a newer repo-aegis than the one running this check/);
+    assert.match(r.error, /upgrades repo-aegis, then runs `repo-aegis install hooks` and `repo-aegis install claude-md`/);
+    assert.doesNotMatch(r.error, /encrypt/);
+    assert.equal(r.details.ruleH, "applied");
+  });
+
+  it("a registry from a newer schema refuses even a destination the file would have listed", () => {
+    const ctx = setup("s-newer-listed", "schemaVersion: 99\npersonalOrgs:\n  - acme\nengagements: []\n");
+    const repo = makeRepo("s-newer-listed-repo", "git@github.com:acme/x.git");
+    assert.equal(refusalOf(pushCheck(ctx, repo, "git@github.com:acme/x.git")).code, "UNREGISTERED_OWNER_EGRESS");
   });
 
   it("an unreadable registry does not refuse a person at a terminal", () => {
@@ -942,6 +966,46 @@ describe("pre-push rule h — the shipped pre-push hook script, end to end (L4)"
     const r = realPush(ctx, repo, "[github.com]:stranger/r.git");
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /UNREGISTERED_OWNER_EGRESS/);
+  });
+
+  // P1-C (F8): the egress hook no longer reads a command's text for `git push` mentions, so a push spawned
+  // through a runner or an interpreter is no intent THERE. Git's own pre-push hook sees every real push,
+  // however it was spawned, and is the layer that judges it.
+  it("a push spawned by find -exec, a case body or an interpreter is no intent at the hook, and is still refused by pre-push", () => {
+    const hooks = join(tmp, "shipped-hooks");
+    const gitPush = (dest: string): string => `git -c core.hooksPath=${hooks} push origin main:refs/heads/${dest}`;
+    const shapes: Array<[string, (dest: string) => string]> = [
+      ["find -exec", d => `find . -maxdepth 0 -exec ${gitPush(d)} \\;`],
+      ["case body", d => `case x in x) ${gitPush(d)};; esac`],
+      ["python os.system", d => `python3 -c ${JSON.stringify(`import os,sys; sys.exit(os.system(${JSON.stringify(gitPush(d))}) >> 8)`)}`],
+    ];
+    const pythonOk = spawnSync("python3", ["--version"]).status === 0;
+    for (const [label, build] of shapes) {
+      if (label === "python os.system" && !pythonOk) continue;
+      const ctx = setup(`e2e-shape-${n++}`);
+      const repo = makeRepo(`e2e-shape-repo-${n}`, "git@github.com:acme/x.git", [
+        ["url.git@github.com:stranger/.pushInsteadOf", "git@github.com:acme/"],
+      ]);
+      const command = build(`e2e-${n++}`);
+      // `find -exec … ;` reports 0 for a failed child, so read stderr whatever the status.
+      const run = spawnSync("sh", ["-c", command], {
+        cwd: repo,
+        encoding: "utf8",
+        env: hermeticGitEnv({
+          PATH: `${binDir}:${process.env["PATH"] ?? ""}`,
+          GIT_SSH_COMMAND: "ssh",
+          HOME: ctx.userHome,
+          REPO_AEGIS_HOME: ctx.home,
+          REPO_AEGIS_REGISTRY: ctx.registry,
+          REPO_AEGIS_VISIBILITY_LOOKUP: "0",
+        }),
+      });
+      const stderr = run.stderr;
+      assert.match(stderr, /UNREGISTERED_OWNER_EGRESS/, `${label}: ${stderr}`);
+      assert.match(stderr, /stranger\/x/, label);
+      // …and the hook's parser reads none of them as a push: the layer below is the only guard.
+      assert.deepEqual(parseEgressIntents(command), [], label);
+    }
   });
 });
 

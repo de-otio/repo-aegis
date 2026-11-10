@@ -8,6 +8,7 @@ import {
   RegistryNotFoundError,
   RegistryParseError,
   RegistryEncryptedError,
+  RegistrySchemaTooNewError,
 } from "./exceptions.js";
 import {
   registryFileSchema,
@@ -169,6 +170,36 @@ export function loadRegistry(path: string = registryPath()): Registry {
   return parseRegistryText(text, path);
 }
 
+/** What {@link loadRegistryState} found. The `state` strings are {@link RegistryState}'s. */
+export type RegistryLoad =
+  | { state: "loaded"; registry: Registry }
+  | { state: "missing" }
+  | { state: "encrypted" }
+  | { state: "unparseable" }
+  | { state: "newer-schema"; found: number; max: number };
+
+/**
+ * {@link loadRegistry} that never throws: the one place the failure modes are
+ * told apart, so callers stop re-deriving the state from exceptions.
+ * NotFound is `missing`, Encrypted is `encrypted`, SchemaTooNew is
+ * `newer-schema`, and ANY other throw is `unparseable` (fail closed: an error
+ * this function does not recognise must never read as "no registry").
+ */
+export function loadRegistryState(
+  path: string = registryPath(),
+  /** Test seam: the loader whose throws are classified. */
+  load: (path: string) => Registry = loadRegistry,
+): RegistryLoad {
+  try {
+    return { state: "loaded", registry: load(path) };
+  } catch (err) {
+    if (err instanceof RegistryNotFoundError) return { state: "missing" };
+    if (err instanceof RegistryEncryptedError) return { state: "encrypted" };
+    if (err instanceof RegistrySchemaTooNewError) return { state: "newer-schema", found: err.found, max: err.max };
+    return { state: "unparseable" };
+  }
+}
+
 /**
  * Parse and validate registry text exactly as `loadRegistry` does (YAML,
  * schema, schemaVersion policy), without touching the filesystem. Mutators use
@@ -227,14 +258,7 @@ export function parseRegistryText(text: string, path: string = "<in-memory>"): R
   // wording is exactly what the user-facing tests assert on.
   const schemaVersion = validated.schemaVersion ?? 1;
   if (schemaVersion > MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION) {
-    throw new RegistryParseError(
-      path,
-      new Error(
-        `registry schemaVersion ${schemaVersion} is newer than this build supports ` +
-          `(max ${MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION}); ` +
-          `registry written by a newer repo-aegis — please upgrade`,
-      ),
-    );
+    throw new RegistrySchemaTooNewError(path, schemaVersion, MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION);
   }
 
   // Map zod's struct shape back to the domain types. The `passthrough()`

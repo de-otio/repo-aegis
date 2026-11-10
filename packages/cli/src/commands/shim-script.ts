@@ -101,7 +101,8 @@ ${SHIM_HEADER_LINE}
 # There is NO shell code after the \`exec\`: nothing here can see a token. The CLI runs by the absolute
 # path pinned at install time, never by name, so a \`repo-aegis\` or \`node\` first on PATH cannot decide
 # what enforces; and with the pinned binary gone the call is REFUSED (exit 2), reads included, because
-# every verb is now judged there. A person re-runs the installer.
+# every verb is now judged there, unless a repo-aegis on PATH is at least as new as the pinned version (the
+# shim then runs that one, with a warning). A person re-runs the installer.
 #
 # Written for bash 3.2 (macOS's stock /bin/bash): no GNU-only path
 # canonicalisation flags, no bash-4 array builtins, no associative arrays —
@@ -163,6 +164,12 @@ ${pinGuard({ blocked: "shim refused a gh call", fix: "repo-aegis install shim", 
 
 # --- 3. Hand over -------------------------------------------------------------
 # The registry and the approvals are read from the home pinned above, never from the caller's environment.
-exec "\$__ra_node" "\$__ra_cli" gh --home "\$__ra_home" -- "\$@"
+# With the pin gone the guard above has either refused or chosen \`__ra_fb\`: a repo-aegis on PATH that is at
+# least as new as the pinned version.
+if [ -n "\$__ra_fb" ]; then
+  exec "\$__ra_fb" gh --home "\$__ra_home" -- "\$@"
+else
+  exec "\$__ra_node" "\$__ra_cli" gh --home "\$__ra_home" -- "\$@"
+fi
 `;
 };

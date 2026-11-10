@@ -13,20 +13,21 @@
 import {
   appendAuditRecord,
   approvalsPath,
-  listApprovals,
+  listAllApprovals,
   mintApproval,
   parseApprovalTarget,
   parseTtl,
   revokeApprovals,
-  loadRegistry,
+  loadRegistryState,
   registeredOwners,
   safeDestination,
-  RegistryNotFoundError,
   DEFAULT_APPROVAL_TTL_MS,
   MAX_APPROVAL_TTL_MS,
+  type ListedApproval,
   type EgressApproval,
   type Registry,
 } from "@de-otio/repo-aegis-core";
+import { USAGE_AFTER_TERMINAL_GATE } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { requireTerminal } from "../require-terminal.js";
 
@@ -46,22 +47,25 @@ export interface ApproveOptions extends OutputOptions {
   now?: () => Date;
 }
 
-function describe(a: EgressApproval, now: Date): string {
-  const left = Math.max(0, Math.round((Date.parse(a.expiresAt) - now.getTime()) / 60_000));
-  const scope = `${a.org}/${a.repo}${a.ref !== undefined ? ` (ref ${a.ref})` : ""}`;
-  const as = a.login !== undefined ? `  as ${a.login}` : "";
-  return `${a.id}  ${scope}${as}  by ${a.by}  expires ${a.expiresAt} (${left} min left)`;
+/** A freshly minted approval is a terminal one; `--list` entries carry their own `source`. */
+function describe(a: EgressApproval | ListedApproval, now: Date): string {
+  const source = "source" in a && a.source === "prompt" ? "prompt" : "terminal";
+  const ms = Date.parse(a.expiresAt) - now.getTime();
+  // A prompt approval lives two minutes: "0 min left" would hide that it is live, so show seconds.
+  const left = source === "prompt" ? `${Math.max(0, Math.round(ms / 1000))} s left` : `${Math.max(0, Math.round(ms / 60_000))} min left`;
+  const endpoint = "endpoint" in a && a.endpoint !== undefined ? ` (endpoint ${a.endpoint})` : "";
+  const scope = `${a.org}/${a.repo}${a.ref !== undefined ? ` (ref ${a.ref})` : ""}${endpoint}`;
+  const as = "login" in a && a.login !== undefined ? `  as ${a.login}` : "";
+  const verb = "verb" in a ? `  verb ${a.verb}` : "";
+  return `${a.id}  ${scope}${as}  by ${a.by}  source ${source}${verb}  expires ${a.expiresAt} (${left})`;
 }
 
 /** The login of `owner`'s mapped `person` identity (a `gh-login`), or undefined: no registry, no mapping, or an app. */
 function mappedPersonLogin(owner: string, registryPath: string | undefined): string | undefined {
-  try {
-    const registry = registryPath === undefined ? loadRegistry() : loadRegistry(registryPath);
-    const person = registry.identityMap?.get(owner.toLowerCase())?.person;
-    return person !== undefined && person.kind === "gh-login" ? person.login : undefined;
-  } catch {
-    return undefined;
-  }
+  const load = loadRegistryState(registryPath);
+  if (load.state !== "loaded") return undefined;
+  const person = load.registry.identityMap?.get(owner.toLowerCase())?.person;
+  return person !== undefined && person.kind === "gh-login" ? person.login : undefined;
 }
 
 /**
@@ -71,13 +75,9 @@ function mappedPersonLogin(owner: string, registryPath: string | undefined): str
  * `safeDestination()` (the typed name is echoed into a terminal and pasted).
  */
 function mintWarnings(target: { org: string; repo: string }, registryPath: string | undefined): string[] {
-  let registry: Registry | null = null;
-  let unreadable = false;
-  try {
-    registry = registryPath === undefined ? loadRegistry() : loadRegistry(registryPath);
-  } catch (err) {
-    unreadable = !(err instanceof RegistryNotFoundError);
-  }
+  const load = loadRegistryState(registryPath);
+  const registry: Registry | null = load.state === "loaded" ? load.registry : null;
+  const unreadable = load.state === "unparseable" || load.state === "newer-schema";
   const owners = registry === null ? new Set<string>() : registeredOwners(registry);
 
   if (target.org === "*") {
@@ -86,7 +86,9 @@ function mintWarnings(target: { org: string; repo: string }, registryPath: strin
         "(npm publish), only. It does not cover customer orgs, allowed upstreams or unregistered owners: " +
         "approve <org>/* or <org>/<repo> for those.",
     ];
-    if (unreadable) {
+    if (load.state === "encrypted") {
+      notes.push("The registry is encrypted, so repo-aegis cannot say which owners '*' covers; rule h is off while it is encrypted.");
+    } else if (unreadable) {
       notes.push("The registry could not be read, so repo-aegis cannot say which owners '*' covers until it is repaired.");
     } else if ((registry?.personalOrgs ?? []).length === 0) {
       notes.push(
@@ -99,10 +101,20 @@ function mintWarnings(target: { org: string; repo: string }, registryPath: strin
 
   const safe = safeDestination(target.org, target.repo);
   if (safe === null) return [];
+  if (load.state === "encrypted") {
+    return [
+      "Rule h is off while the registry is encrypted (repo-aegis runs as if there were none), so it refuses nothing " +
+        "and this approval changes nothing about it. A person runs repo-aegis registry decrypt --identity <key> to turn rule h back on.",
+    ];
+  }
   if (unreadable) {
     return [
-      "The registry could not be read (it is encrypted or damaged), so rule h (UNREGISTERED_OWNER_EGRESS) " +
-        "refuses every non-interactive publish until a person repairs or decrypts it. This approval will not help before then.",
+      (load.state === "newer-schema"
+        ? "The registry was written by a newer repo-aegis than this one"
+        : "The registry does not parse or validate") +
+        ", so rule h (UNREGISTERED_OWNER_EGRESS) asks or refuses every non-interactive publish until a person " +
+        (load.state === "newer-schema" ? "upgrades repo-aegis" : "repairs it") +
+        ". This approval will not help before then.",
     ];
   }
   const exactUpstream =
@@ -135,7 +147,9 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
   const now = (opts.now ?? (() => new Date()))();
 
   if (opts.list) {
-    const live = listApprovals(path, now);
+    // Both kinds: a terminal approval a person minted, and a prompt approval the agent hook recorded when a person
+    // answered the host's own prompt (2 minutes, one exact command).
+    const live = listAllApprovals(path, now);
     if (opts.json) {
       emitJson({ action: "approve", list: live });
     } else if (live.length === 0) {
@@ -167,18 +181,18 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
     opts,
   );
   if (target === undefined || target.trim() === "") {
-    emitError({ code: "USAGE", error: "approve <org>/<repo> | <org>/* | *   (or --list / --revoke <id|all>)" }, opts);
+    emitError({ code: "USAGE", error: "approve <org>/<repo> | <org>/* | *   (or --list / --revoke <id|all>)" }, opts, USAGE_AFTER_TERMINAL_GATE);
   }
   const parsed = parseApprovalTarget(target);
   if (parsed === null) {
-    emitError({ code: "USAGE", error: `not a destination: ${JSON.stringify(target)} — use <org>/<repo>, <org>/*, or *` }, opts);
+    emitError({ code: "USAGE", error: `not a destination: ${JSON.stringify(target)} — use <org>/<repo>, <org>/*, or *` }, opts, USAGE_AFTER_TERMINAL_GATE);
   }
   let ttlMs = DEFAULT_APPROVAL_TTL_MS;
   if (opts.ttl !== undefined) {
     const t = parseTtl(opts.ttl);
-    if (t === null) emitError({ code: "USAGE", error: `--ttl must be like 15m, 2h, 90s or 1d (got ${JSON.stringify(opts.ttl)})` }, opts);
+    if (t === null) emitError({ code: "USAGE", error: `--ttl must be like 15m, 2h, 90s or 1d (got ${JSON.stringify(opts.ttl)})` }, opts, USAGE_AFTER_TERMINAL_GATE);
     if (t > MAX_APPROVAL_TTL_MS) {
-      emitError({ code: "USAGE", error: `--ttl may not exceed 24h: an approval is for a task, not a standing grant` }, opts);
+      emitError({ code: "USAGE", error: `--ttl may not exceed 24h: an approval is for a task, not a standing grant` }, opts, USAGE_AFTER_TERMINAL_GATE);
     }
     ttlMs = t;
   }
@@ -201,6 +215,7 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
       cwd: process.cwd(),
       details: {
         id: approval.id,
+        source: "terminal",
         scope: `${approval.org}/${approval.repo}`,
         ...(approval.ref !== undefined && { ref: approval.ref }),
         expiresAt: approval.expiresAt,

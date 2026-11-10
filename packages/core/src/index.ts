@@ -39,13 +39,14 @@ export type { AuditRecord } from "./audit-log.js";
 // ---- registry ------------------------------------------------------------
 export {
   loadRegistry,
+  loadRegistryState,
   parseRegistryText,
   isActive,
   resolveEngagement,
   ALWAYS_BLOCK_RESERVED_ID,
   MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION,
 } from "./registry.js";
-export type { Engagement, Registry, ResolveResult, Identity, OwnerIdentities } from "./registry.js";
+export type { Engagement, Registry, RegistryLoad, ResolveResult, Identity, OwnerIdentities } from "./registry.js";
 
 // ---- remote URL parser ---------------------------------------------------
 export {
@@ -215,6 +216,8 @@ export { isKnownNonSecret } from "./known-non-secrets.js";
 export { hookScriptDigest, renderHookScript } from "./hook-scripts.js";
 export {
   assertPinnable,
+  fallbackVerdict,
+  fallbackVerdictShell,
   parsePinFromScript,
   pinAssignments,
   pinGuard,
@@ -223,15 +226,17 @@ export {
   managedHookCommand,
   isManagedHookCommand,
   MANAGED_ID_PATH,
+  PIN_VERSION_PATTERN,
   pinProblem,
   shellQuote,
   shellUnquote,
   type EnforcementPin,
+  type FallbackVerdict,
   type ManagedHookContext,
   type PinGuardOptions,
 } from "./enforcement-pin.js";
 export type { HookName } from "./hook-scripts.js";
-export { resolveHookState } from "./hooks-state.js";
+export { inspectHookScripts, resolveHookState } from "./hooks-state.js";
 export type {
   HookState,
   HookScriptState,
@@ -353,6 +358,7 @@ export type {
   ApprovalFinder,
   RegistryState,
 } from "./egress-policy.js";
+export { registryUnreadable } from "./egress-policy.js";
 // Rule h (issue #151): the one definition of "a registered owner", shared by
 // every layer so the hook, the shim, pre-push and `doctor` cannot disagree.
 export {
@@ -369,20 +375,35 @@ export type { OwnerCandidate, RuleHStatus } from "./registered-owners.js";
 export {
   refusal,
   refusalTrailer,
+  withRefusalTrailer,
+  logTrailer,
+  withLogTrailer,
   safeDestination,
   isSafeOwner,
   isPrintableDestination,
   INVALID_DESTINATION_LABEL,
 } from "./refusal.js";
 export type { RefusalInput, RefusalFix } from "./refusal.js";
+// X-10: the single table of next step + person-only per refusal code, and the running version.
+export {
+  REFUSAL_GUIDE,
+  refusalGuideEntry,
+  refusalGuideLine,
+  repoAegisVersion,
+  USAGE_AFTER_TERMINAL_GATE,
+  HOOK_INPUT_TOO_LARGE_AFTER_WRITE,
+} from "./refusal-guide.js";
+export type { RefusalGuideEntry, RefusalGuideOverride } from "./refusal-guide.js";
 export {
   findApprovalDefault,
+  findPromptApprovalDefault,
+  PROMPT_APPROVAL_DENY_SENTENCE,
   findUncoveredStarDefault,
   uncoveredStarSentence,
   SHAPE_RULE_CODES,
   unregisteredOwnerReason,
 } from "./egress-policy.js";
-export type { UncoveredStarFinder, HumanPresence } from "./egress-policy.js";
+export type { UncoveredStarFinder, PromptApprovalFinder, HumanPresence } from "./egress-policy.js";
 // Is a person behind this terminal? The process-ancestry walk (issue #151, PR 2b).
 export {
   readProcessAncestry,
@@ -421,6 +442,7 @@ export {
   AGENT_RAN_HUMAN_COMMAND,
   AGENT_DETACHED_SESSION,
   findHumanOnlyCommand,
+  HUMAN_VERB_PATHS,
   humanCommandRefusal,
   findDetachedStart,
   detachedStartRefusal,
@@ -447,8 +469,27 @@ export {
   APPROVALS_FILE,
   DEFAULT_APPROVAL_TTL_MS,
   MAX_APPROVAL_TTL_MS,
+  // Prompt approvals: a person's yes at the agent host's own prompt, for one exact command, for 2 minutes.
+  PROMPT_APPROVALS_DIR,
+  PROMPT_APPROVAL_TTL_MS,
+  PROMPT_APPROVAL_MODES,
+  promptApprovalsDir,
+  promptBindingOf,
+  recordPromptApproval,
+  revokeAllPromptApprovals,
+  isTargetedPromptVerb,
+  listPromptApprovals,
+  findPromptApproval,
+  listAllApprovals,
+  approvalSource,
+  isPromptVerb,
 } from "./egress-approval.js";
 export type {
+  PromptApproval,
+  PromptBinding,
+  PromptVerb,
+  ListedApproval,
+  RecordPromptOptions,
   EgressApproval,
   ApprovalStore,
   MintOptions,
@@ -456,6 +497,22 @@ export type {
   ApprovalScopeRegistry,
   StarApprovalGap,
 } from "./egress-approval.js";
+
+// The person-only emergency pause (`repo-aegis pause`): one validated reader for every entry point.
+export {
+  PAUSE_FILE,
+  DEFAULT_PAUSE_MS,
+  MAX_PAUSE_MS,
+  pausePath,
+  readPause,
+  readActivePause,
+  pauseCovers,
+  pauseNotice,
+  parsePauseRepo,
+  mintPause,
+  clearPause,
+} from "./pause.js";
+export type { PauseState, PauseRead, PauseReadOptions, PauseDestination, MintPauseOptions } from "./pause.js";
 
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";
@@ -501,6 +558,7 @@ export {
   RegistryNotFoundError,
   RegistryParseError,
   RegistryEncryptedError,
+  RegistrySchemaTooNewError,
   NotAGitRepoError,
   AmbiguousQueryError,
   EngagementNotFoundError,
@@ -564,3 +622,65 @@ export type {
   IdentityChoice,
   ChooseIdentityInput,
 } from "./identity-choice.js";
+
+// The decision log (P1-I): a closed-schema record builder, a writer that never throws, and a reader that revalidates.
+export {
+  DECISION_LOG_VERSION,
+  DECISION_LOG_FILE,
+  DECISION_LOG_STATE_FILE,
+  LEGACY_GH_DECISIONS_FILE,
+  DECISION_LOG_ROTATE_BYTES,
+  DECISION_LOG_KEEP,
+  DECISION_LOG_LOCK_TIMEOUT_MS,
+  DECISION_MAX_DURATION_MS,
+  DECISION_LAYERS,
+  DECISION_HOSTS,
+  DECISION_OUTCOMES,
+  DECISION_REF_KINDS,
+  DECISION_IDENTITY_COLUMNS,
+  DECISION_PAUSED,
+  DECISION_SANDBOX_GUESSES,
+  DECISION_REGISTRY_STATES,
+  DECISION_HOOKS_PATH_SCOPES,
+  DECISION_PERMISSION_MODES,
+  DECISION_PROXY_VARS,
+  buildDecisionRecord,
+  parseDecisionRecord,
+  decisionLogPath,
+  decisionLogStatePath,
+  legacyGhDecisionsPath,
+  fallbackDecisionDir,
+  fallbackDecisionLogPath,
+  isDecisionLogEnabled,
+  setDecisionLogEnabled,
+  realDecisionLogOps,
+  setDecisionLogOpsForTests,
+  appendDecisionRecord,
+  recordDecisionTo,
+  readDecisionRecords,
+  fallbackHoldsNewer,
+  decisionLogWritable,
+  decisionLogFiles,
+  removeDecisionLogFiles,
+} from "./decision-log.js";
+export type {
+  DecisionInput,
+  DecisionRecord,
+  DecisionFacts,
+  DecisionFactsInput,
+  DecisionLayer,
+  DecisionHost,
+  DecisionOutcome,
+  DecisionRefKind,
+  DecisionIdentityColumn,
+  DecisionPaused,
+  DecisionSandboxGuess,
+  DecisionRegistryState,
+  DecisionHooksPathScope,
+  DecisionPermissionMode,
+  DecisionProxyVar,
+  DecisionLogOps,
+  AppendOptions as DecisionAppendOptions,
+  AppendResult as DecisionAppendResult,
+  LoggedDecision,
+} from "./decision-log.js";

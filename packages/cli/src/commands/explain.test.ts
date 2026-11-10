@@ -32,7 +32,10 @@ describe("the docs ship in the built package", () => {
   for (const name of ["agent-guide.md", "agent-sandbox.md"]) {
     it(`dist/docs/${name} exists and is the current doc/${name}`, () => {
       assert.ok(existsSync(join(distDocs, name)), `${name} is missing from dist/docs: did the build run scripts/copy-cli-docs.mjs?`);
-      assert.equal(readFileSync(join(distDocs, name), "utf8"), readFileSync(join(repoRoot, "doc", name), "utf8"), `${name} in dist is stale`);
+      // The copy re-points relative links at the shipped layout (`../README.md` -> `README.md`), so compare the text
+      // with every link target blanked; docs.test.ts checks that the links resolve.
+      const blank = (s: string): string => s.replace(/\]\([^)\s]*\)/g, "](…)");
+      assert.equal(blank(readFileSync(join(distDocs, name), "utf8")), blank(readFileSync(join(repoRoot, "doc", name), "utf8")), `${name} in dist is stale`);
     });
   }
 
@@ -260,7 +263,7 @@ describe("repo-aegis explain, run from a directory that is not the repo-aegis re
     const r = run("explain", "--list");
     assert.equal(r.code, 0, r.stderr);
     const lines = r.stdout.trim().split("\n");
-    for (const c of ["USAGE", "GH_IDENTITY_WRITE_NEEDS_HUMAN", "AGENT_PUSH_CHAIN_UNREADABLE", "HOOK_INPUT_TOO_LARGE"]) assert.ok(lines.includes(c), c);
+    for (const c of ["USAGE", "GH_IDENTITY_WRITE_NEEDS_HUMAN", "AGENT_PUSH_CREDENTIAL_STORE", "HOOK_INPUT_TOO_LARGE"]) assert.ok(lines.includes(c), c);
     assert.ok(lines.includes("sandbox (topic)"));
     const j = JSON.parse(run("explain", "--list", "--json").stdout) as { codes: string[]; topics: string[] };
     assert.ok(j.codes.includes("USAGE") && j.topics.includes("sandbox"));

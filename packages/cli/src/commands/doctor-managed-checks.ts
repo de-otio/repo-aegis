@@ -71,6 +71,34 @@ export function pinsInSettings(settings: SettingsJson | null): EnforcementPin[] 
 const removeLine = (file: string): string => `sudo rm '${file.replace(/'/g, `'\\''`)}'`;
 
 /**
+ * `MANAGED_DROPIN_STALE`: the drop-in at `current` (its text, or null when there is no file) is not the one
+ * `install claude-md` would write now. Pure over its inputs and never runs a tool, so `upgrade` asks it the
+ * same question `doctor` does without the sudo probe the other managed checks make.
+ */
+export function managedDropinStaleCheck(env: ManagedEnv, current: string | null, pin: EnforcementPin): DoctorCheck {
+  const paths = managedPaths(env.platform, env.uid);
+  let detail: string | null = null;
+  if (current !== null && paths !== null) {
+    try {
+      const expected = renderDropIn({
+        pin,
+        uid: String(env.uid),
+        file: paths.file,
+        firstTouch: current.includes(" hook first-touch"),
+        denyRules: registryDenyPlan(pin).rules,
+      });
+      if (expected !== current) detail = `${paths.file} differs from what \`repo-aegis install claude-md\` would write now (a moved or upgraded Node or repo-aegis, a new release, or an edit)`;
+    } catch (err) {
+      detail = `could not render the drop-in for comparison: ${(err as Error).message}`;
+    }
+  }
+  return detail === null
+    ? { code: "MANAGED_DROPIN_STALE", ok: true, detail: current === null ? "no drop-in file to compare" : "the drop-in is what would be written now" }
+    : // WARN (X-9): the drop-in still applies; it is out of date relative to what would be written now.
+      { code: "MANAGED_DROPIN_STALE", ok: false, severity: "warn", detail, fix: "repo-aegis install claude-md" };
+}
+
+/**
  * Every drop-in check of D8.7, D8.11 and D8.12, plus `SUDO_NOPASSWD`. Empty when
  * this platform has no managed location, or when there is neither a drop-in nor a
  * ledger entry: a machine without the drop-in is reported by the older checks
@@ -89,29 +117,7 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const installFix = "repo-aegis install claude-md";
 
-  // MANAGED_DROPIN_STALE
-  {
-    let detail: string | null = null;
-    if (current !== null) {
-      try {
-        const expected = renderDropIn({
-          pin,
-          uid: String(env.uid),
-          file: paths.file,
-          firstTouch: current.includes(" hook first-touch"),
-          denyRules: registryDenyPlan(pin).rules,
-        });
-        if (expected !== current) detail = `${paths.file} differs from what \`repo-aegis install claude-md\` would write now (a moved or upgraded Node or repo-aegis, a new release, or an edit)`;
-      } catch (err) {
-        detail = `could not render the drop-in for comparison: ${(err as Error).message}`;
-      }
-    }
-    checks.push(
-      detail === null
-        ? { code: "MANAGED_DROPIN_STALE", ok: true, detail: current === null ? "no drop-in file to compare" : "the drop-in is what would be written now" }
-        : { code: "MANAGED_DROPIN_STALE", ok: false, detail, fix: installFix },
-    );
-  }
+  checks.push(managedDropinStaleCheck(env, current, pin));
 
   // MANAGED_DROPIN_NOT_ROOT_OWNED
   {
@@ -129,6 +135,9 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
         : {
             code: "MANAGED_DROPIN_NOT_ROOT_OWNED",
             ok: false,
+            // WARN: the drop-in applies and nothing is refused; the weakness is who can edit it
+            // (the same standing as SUDO_NOPASSWD and ENFORCEMENT_IN_USER_SETTINGS).
+            severity: "warn",
             detail: `${problems.join("; ")}: a user who can write there can change what enforces`,
             fix: `${removeLine(paths.file)}, fix the ownership or mode, then ${installFix}`,
           },
@@ -158,6 +167,7 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
   // MANAGED_DROPIN_ORPHANED (D8.11)
   {
     const reasons: string[] = [];
+    let pinGone = false;
     if (current !== null) {
       if (ledger === null) reasons.push("the ledger has no entry for it");
       const gone = new Set<string>();
@@ -165,7 +175,8 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
         if (unusable(p.node, "exec")) gone.add(p.node);
         if (unusable(p.cli, "read")) gone.add(p.cli);
       }
-      if (gone.size > 0) reasons.push(`its pin points at missing files (${[...gone].join(", ")}), so every hook blocks (exit 2)`);
+      pinGone = gone.size > 0;
+      if (pinGone) reasons.push(`its pin points at missing files (${[...gone].join(", ")}), so every hook blocks (exit 2)`);
     }
     checks.push(
       reasons.length === 0
@@ -173,6 +184,8 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
         : {
             code: "MANAGED_DROPIN_ORPHANED",
             ok: false,
+            // FAIL only when a hook is refused today (the pin points at missing files); a missing ledger entry is bookkeeping.
+            ...(pinGone ? {} : { severity: "warn" as const }),
             detail: `${paths.file} exists, but ${reasons.join(" and ")}`,
             fix: `${installFix}   (re-pins and records it)   or remove it: ${removeLine(paths.file)}`,
           },
@@ -185,6 +198,8 @@ export function managedDropinChecks(ctx: ManagedDoctorContext): DoctorCheck[] {
       ? {
           code: "MANAGED_DROPIN_LEDGER_STALE",
           ok: false,
+          // WARN: bookkeeping only. A drop-in that is really gone is GUARD_HOOK_UNREGISTERED's FAIL.
+          severity: "warn",
           detail: `the ledger records a drop-in at ${paths.file}, but there is no such file (removed by hand?)`,
           fix: "repo-aegis install claude-md --uninstall   (clears the record), or `repo-aegis install claude-md` to write it again",
         }

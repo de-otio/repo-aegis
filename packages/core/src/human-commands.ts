@@ -11,7 +11,7 @@
 // terminal situation: an agent never mints its own go-ahead, even with a real
 // TTY. Refusal code: `AGENT_RAN_HUMAN_COMMAND`.
 //
-// This is a text-level check, in the spirit of the egress parser's backstop. It
+// This is a text-level check (the egress parser no longer reads text this way). It
 // finds the repo-aegis program word (`repo-aegis`, a path to it, `npx
 // @de-otio/repo-aegis`, `dist/index.js`, or a name this command line defines as
 // an alias, function or variable holding one of those) and then looks at the
@@ -27,12 +27,20 @@
 // The accepted false positive: a quoted MENTION of one of these commands next to
 // a repo-aegis word (`echo "repo-aegis approve"`). It is refused, and the agent
 // re-words it.
+//
+// Reading help is not running the command: a person-only verb whose ONLY arguments are `--help` / `-h`
+// (or `repo-aegis help <verb>`) is allowed, so an agent can tell its person the exact flags (P1-F).
+// Any other word next to it keeps the refusal. See {@link isHelpTokens}.
 import { refusal } from "./refusal.js";
 
 export const AGENT_RAN_HUMAN_COMMAND = "AGENT_RAN_HUMAN_COMMAND";
 
 export type HumanOnlyKind =
   | "approve"
+  // The emergency pause (P1-E): a global, time-boxed off switch only a person may set. `resume` only re-enables protection, so an agent may run it.
+  | "pause"
+  // Switching the decision log off (P1-I): an agent that did would remove the data the next refusal needs. `log --on` only turns it on.
+  | "log-off"
   | "owner-add"
   | "upstream-add"
   | "init-migrate"
@@ -124,29 +132,40 @@ const GH_REPO_FLAGS = new Set(["-R", "--repo"]);
  *     (`grep -rn "repo-aegis approve" doc/`).
  * A flag that RUNS something (`grep --pager`, `git -c`, `--exec`) is still read.
  */
-function regionWords(tokens: readonly string[], forDetached = false): string[] {
+function regionWords(tokens: readonly string[], forDetached = false): { words: string[]; wordTok: number[] } {
   const bases = tokens.map(tokenBase);
   const first = bases[0] ?? "";
   const isGit = bases.includes("git");
   const isGh = bases.includes("gh");
   const isGitOrGh = isGit || isGh;
   const words: string[] = [];
+  /** For each word, the index in `tokens` of the token it was split out of (the help check reads whole tokens). */
+  const wordTok: number[] = [];
+  const add = (tok: string, k: number): void => {
+    for (const w of tok.split(WORD_SPLIT)) {
+      if (w !== "") {
+        words.push(w);
+        wordTok.push(k);
+      }
+    }
+  };
   const lookup =
     forDetached &&
     (DETACH_LOOKUP_COMMANDS.has(first) || (first === "command" && (tokens[1] === "-v" || tokens[1] === "-V")));
   if (first === "cd" || first === "pushd" || first === "popd" || LOOKUP_COMMANDS.has(first) || lookup) {
-    return tokens.slice(0, 1).flatMap(t => t.split(WORD_SPLIT).filter(w => w !== ""));
+    add(tokens[0]!, 0);
+    return { words, wordTok };
   }
   const searching = SEARCH_COMMANDS.has(first);
   for (let k = 0; k < tokens.length; k++) {
     const tok = tokens[k]!;
     if (searching) {
       if (k === 0) {
-        words.push(...tok.split(WORD_SPLIT).filter(w => w !== ""));
+        add(tok, k);
       } else if (tok.startsWith("-")) {
-        words.push(...tok.split(WORD_SPLIT).filter(w => w !== ""));
+        add(tok, k);
         if (SEARCH_RUN_FLAGS.has(tok) && tokens[k + 1] !== undefined) {
-          words.push(...tokens[++k]!.split(WORD_SPLIT).filter(w => w !== ""));
+          add(tokens[++k]!, k);
         }
       }
       continue;
@@ -170,9 +189,9 @@ function regionWords(tokens: readonly string[], forDetached = false): string[] {
         }
       }
     }
-    for (const w of tok.split(WORD_SPLIT)) if (w !== "") words.push(w);
+    add(tok, k);
   }
-  return words;
+  return { words, wordTok };
 }
 
 /**
@@ -189,6 +208,10 @@ export function commandRegions(text: string): string[][] {
 
 interface Region {
   words: string[];
+  /** The region's quote-stripped shell tokens (what a command receives as arguments, plus redirections). */
+  tokens: string[];
+  /** For each word, the index in `tokens` of the token it came from. */
+  wordTok: number[];
   /** The unquoted character that ended the region (`)` / a backtick close a substitution), or "" at the end. */
   endedBy: string;
 }
@@ -204,13 +227,17 @@ function splitRegions(text: string, forDetached = false): Region[] {
   };
   const flush = (endedBy = ""): void => {
     endToken();
-    const words = regionWords(tokens, forDetached);
+    const { words, wordTok } = regionWords(tokens, forDetached);
     // An empty region is kept: it separates `$(…)` from whatever follows the next `;`.
-    if (words.length > 0 || endedBy !== "") regions.push({ words, endedBy });
+    if (words.length > 0 || endedBy !== "") regions.push({ words, tokens, wordTok, endedBy });
     tokens = [];
   };
+  // True right after an unquoted `>` or `<`: an `&` there belongs to the redirection (`2>&1`, `>&2`), not to a `&` separator.
+  let redirect = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i]!;
+    const afterRedirect = redirect;
+    redirect = false;
     if (quote === "'") {
       if (c === "'") quote = null;
       else buf += c;
@@ -234,6 +261,10 @@ function splitRegions(text: string, forDetached = false): Region[] {
       quote = c;
       continue;
     }
+    if (c === "&" && afterRedirect) {
+      buf += c;
+      continue;
+    }
     if (BARRIERS.has(c)) {
       flush(c);
       continue;
@@ -244,6 +275,7 @@ function splitRegions(text: string, forDetached = false): Region[] {
     }
     // `$'…'` ANSI-C quoting: the `$` is dropped when it opens a quote.
     if (c === "$" && text[i + 1] === "'") continue;
+    if (c === ">" || c === "<") redirect = true;
     buf += c;
   }
   flush();
@@ -459,6 +491,8 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
   // never mints). `--list` stays refused: its output names org scopes, which can be customer names.
   const revokeOnly = win.includes("--revoke") && !win.includes("--list");
   if (win.includes("approve") && !revokeOnly) return "approve";
+  if (win.includes("pause")) return "pause";
+  if (win.includes("log") && win.includes("--off")) return "log-off";
   const at = (word: string): number => win.indexOf(word);
   const eng = at("engagements");
   if (eng !== -1 && win.indexOf("add", eng) !== -1 && (win.includes("--personal-org") || win.includes("--github-org"))) {
@@ -488,6 +522,95 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
   if (win.includes("install") && win.includes("claude-md") && win.includes("--uninstall")) return "claude-md-uninstall";
   if (win.includes("uninstall") && win.includes("--yes")) return "claude-md-uninstall";
   return null;
+}
+
+/**
+ * The words a person-only verb is spelled with, per kind: the paths `repo-aegis <words…> --help` can name.
+ * Typed `Record<HumanOnlyKind, …>` so a new kind cannot be added without saying how its help is asked for;
+ * the help exemption and its table test both read it. A kind that is not a repo-aegis verb has no path.
+ */
+export const HUMAN_VERB_PATHS: Readonly<Record<HumanOnlyKind, ReadonlyArray<readonly string[]>>> = {
+  approve: [["approve"]],
+  pause: [["pause"]],
+  "log-off": [["log"]],
+  "owner-add": [["engagements", "add"]],
+  "upstream-add": [["upstreams", "add"]],
+  "init-migrate": [["init"]],
+  "init-force": [["init"]],
+  "identity-change": [["identity"], ["identity", "add"], ["identity", "remove"], ["identity", "require"], ["engagements", "set-identity"]],
+  "claude-md-uninstall": [["install", "claude-md"], ["uninstall"]],
+  "internal-entry": [["gh"], ["git-credential"]],
+  "managed-settings-write": [],
+};
+
+const HELP_FLAGS: ReadonlySet<string> = new Set(["--help", "-h"]);
+/** A verb's own switch that may sit next to `--help`: Commander prints the help and runs nothing (`repo-aegis log --off --help`, P1-I). */
+const HELP_COMPANION_FLAGS: ReadonlySet<string> = new Set(["--off"]);
+const HELP_VERB_WORDS: ReadonlySet<string> = new Set(Object.values(HUMAN_VERB_PATHS).flat(2));
+/** Verbs with subcommands, which have Commander's implicit `help` subcommand: `identity help add`. */
+const HELP_GROUPS: ReadonlySet<string> = new Set(
+  Object.values(HUMAN_VERB_PATHS).flatMap(paths => paths.filter(p => p.length > 1).map(p => p[0]!)),
+);
+/** Root options that take no value; they may sit next to `--help` (`repo-aegis --json approve --help`). */
+const GLOBAL_BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["--json", "--no-color"]);
+/** A redirection operator alone; its target is the next token: `>`, `2>>`, `<`, `>&`, `&>`. */
+const REDIRECT_OP = /^(?:[0-9]*(?:>>?|<|>&|<&)|&>>?)$/;
+/** A whole redirection in one token: `>file`, `2>>file`, `<file`, `&>file`, `2>&1`, `>&-`. Never `<<`, `<<<` or `>>>`. */
+const REDIRECT_ATTACHED = /^(?:[0-9]*[<>]&(?:[0-9]+-?|-)|(?:[0-9]*>>?|[0-9]*<|&>>?)[^<>&].*)$/;
+
+/** The tokens that are arguments: redirections (and their targets, which are never help) dropped. */
+function argumentTokens(tokens: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let k = 0; k < tokens.length; k++) {
+    const t = tokens[k]!;
+    if (REDIRECT_OP.test(t)) {
+      k++; // the next token is the target, whatever it says
+    } else if (!REDIRECT_ATTACHED.test(t)) {
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+/**
+ * True when the tokens after a repo-aegis program token only ask for help. Commander prints help and runs no
+ * action only when `--help` / `-h` is a whole argument, so this reads quote-stripped shell TOKENS, never the
+ * words {@link WORD_SPLIT} cuts out of them (`>--help`, `' --help'`, `gh,--help` and `a=--help` are not help).
+ * Every token must be exactly a verb word, exactly `--help` / `-h`, a global boolean flag, or a whole
+ * redirection (`2>&1`, `>file`, `</dev/null`; a redirection's target never counts), and at least one must be
+ * `--help` / `-h`. Or the help command: `help <verb...>`, `<group> help <verb...>`. Anything else (a target such
+ * as `x/y`, a flag such as `--ttl`, `--`, a second program word) keeps the refusal.
+ */
+function isHelpTokens(tokens: readonly string[]): boolean {
+  const t = argumentTokens(tokens).filter(w => !GLOBAL_BOOLEAN_FLAGS.has(w));
+  const h = t.indexOf("help");
+  if (h !== -1) {
+    const before = t.slice(0, h);
+    const groupOrRoot = before.length === 0 || (before.length === 1 && HELP_GROUPS.has(before[0]!));
+    return groupOrRoot && t.slice(h + 1).every(w => HELP_VERB_WORDS.has(w));
+  }
+  return t.some(w => HELP_FLAGS.has(w)) && t.every(w => HELP_FLAGS.has(w) || HELP_VERB_WORDS.has(w) || HELP_COMPANION_FLAGS.has(w));
+}
+
+const MAX_NESTING = 3;
+
+/** Does the program word `region.words[wi]` only ask for help? See {@link isHelpTokens}. */
+function isHelpRead(region: Region, wi: number, names: ReadonlySet<string>, depth: number, memo: Map<string, boolean>): boolean {
+  const t = region.wordTok[wi]!;
+  const tok = region.tokens[t]!;
+  const rest = region.tokens.slice(t + 1);
+  if (isProgramWord(tok, names)) return isHelpTokens(rest);
+  // The program word sits inside a longer token (a quoted `bash -c` argument). Read that text as a command
+  // line of its own, with the aliases known so far; nothing but redirections may follow it.
+  if (depth < MAX_NESTING && /[\s;&|()`]/.test(tok) && argumentTokens(rest).length === 0) {
+    let ok = memo.get(tok);
+    if (ok === undefined) {
+      ok = scanCommand(tok, names, depth + 1, memo) === null;
+      memo.set(tok, ok);
+    }
+    return ok;
+  }
+  return false;
 }
 
 /**
@@ -541,6 +664,70 @@ function writesManagedSettings(command: string): boolean {
   return cdsInto || regions.flat().some(isManagedSettingsWord);
 }
 
+/** Programs and words that WRITE or copy a file (or run text that can): next to a state-file word they mean a write. */
+const STATE_FILE_WRITERS = new Set([
+  "cp", "mv", "tee", "install", "ln", "dd", "rsync", "touch", "truncate", "sed", "perl", "python", "python3", "node",
+  "ruby", "ed", "open", "write", "writefile", "writefilesync", "copyfile", "copyfilesync", "rename", "renamesync",
+]);
+
+/**
+ * `curl -o FILE` / `-O` / `--output` / `--remote-name`, `wget -O FILE` / `-o FILE` / `--output-document`: they write a
+ * file named by a flag, so they are a writer only with that flag (a plain `curl URL` writes to stdout). A short-flag
+ * cluster counts (`-sSo`, `-fsSLo`), and so does an attached value (`-o/path`).
+ */
+function isDownloadWriter(words: readonly string[]): boolean {
+  const bases = words.map(tokenBase);
+  if (bases.includes("curl") && words.some(w => /^-[A-Za-z]*[oO]/.test(w) || w === "--output" || w === "--remote-name")) return true;
+  return bases.includes("wget") && words.some(w => /^-[A-Za-z]*[oO]/.test(w) || w === "--output-document" || w === "--output-file");
+}
+
+/**
+ * The person-only state files, by name, and the kind a shell write to each is refused as:
+ *   - `pause.json`, the emergency pause: `pause`;
+ *   - `egress-approvals.json`, the human egress approvals: `approve` (an agent that wrote one would be minting its own
+ *     approval, which is exactly what the `approve` refusal says, so it reuses that kind and its fix, `repo-aegis approve`);
+ *   - `decision-log.json`, the decision log's on/off switch, and `decisions.jsonl` with its rotations, the log itself
+ *     (P1-I; deleting it is switching it off by another route): `log-off`.
+ */
+/**
+ * Programs that DELETE a file. Next to the decision log's name they mean a write (deleting the log is switching it off);
+ * next to `pause.json` or the approvals they are not refused (removing either only tightens).
+ */
+const STATE_FILE_DELETERS = new Set(["rm", "unlink", "shred", "trash"]);
+
+const STATE_FILES: ReadonlyArray<{ name: string; kind: HumanOnlyKind; deletes?: true }> = [
+  { name: "pause\\.json", kind: "pause" },
+  { name: "egress-approvals\\.json", kind: "approve" },
+  { name: "decision-log\\.json", kind: "log-off" },
+  { name: "decisions\\.jsonl(?:\\.\\d)?", kind: "log-off", deletes: true },
+];
+
+/**
+ * A command line that writes one of the person-only state files in the repo-aegis home, `pause.json` (complexity-review
+ * P1-E) or `egress-approvals.json`: a redirect to a word naming it (`>`, `>>`, `>|`, `2>`, `&>`), or a
+ * `cp`/`mv`/`tee`/`install`/`ln`/`dd`/`sed`, a `curl -o` / `wget -O`, or an interpreter's `open(`/`writeFile`, on a word
+ * ending in the name (any letter case), anywhere on a line that also names a `repo-aegis` path (`~/.config/repo-aegis/…`,
+ * `$REPO_AEGIS_HOME/…`, a `cd` into it). It is those files' person-only gate for the one route the Edit deny rule and
+ * `check-write` cannot see, a shell. Quotes and backslashes are read away first (`'pause.json'`, `pause'.json'`,
+ * `> "$REPO_AEGIS_HOME"/pause.json`). Reading the file (`cat`, `ls`, `jq`, `grep`) is not refused. Accepted false
+ * positive: a write to some other `pause.json` inside a checkout whose path says `repo-aegis`. Not seen: a name built at
+ * run time. Returns the kind to refuse as, or null.
+ */
+function writesStateFile(command: string): HumanOnlyKind | null {
+  const plain = command.replace(/["'\\]/g, "");
+  if (!/repo[-_]aegis/i.test(plain)) return null;
+  for (const { name, kind, deletes } of STATE_FILES) {
+    if (!new RegExp(name, "i").test(plain)) continue;
+    if (new RegExp(`>>?\\|?\\s*[^\\s<>;&|]*${name}`, "i").test(plain)) return kind;
+    const ending = new RegExp(`${name}$`, "i");
+    for (const { words } of splitRegions(command)) {
+      if (!words.some(w => ending.test(normalizePath(w)))) continue;
+      if (words.some(w => STATE_FILE_WRITERS.has(tokenBase(w)) || (deletes === true && STATE_FILE_DELETERS.has(tokenBase(w)))) || isDownloadWriter(words)) return kind;
+    }
+  }
+  return null;
+}
+
 /**
  * The first human-only repo-aegis command this command line runs, or null.
  * Pure and cheap: a line with no repo-aegis word returns at once.
@@ -552,29 +739,44 @@ export function findHumanOnlyCommand(command: string): HumanOnlyHit | null {
   } catch {
     /* fall through to the program-word search */
   }
+  try {
+    const stateKind = writesStateFile(command);
+    if (stateKind !== null) return { kind: stateKind };
+  } catch {
+    /* fall through to the program-word search */
+  }
   const lower = command.toLowerCase();
   if (!lower.includes("aegis") && !/dist\/index\.js/.test(lower)) return null;
   try {
-    const names = definedNames(command);
-    let carry = false;
-    for (const { words, endedBy } of splitRegions(command)) {
-      // `$(which repo-aegis) approve '*'`: the substitution's result IS the program word, so the region
-      // after its closing `)` / backtick is read as following one.
-      if (carry) {
-        const kind = classify(followingWords(["", ...words], 0));
-        if (kind !== null) return { kind };
-      }
-      let hasProgram = false;
-      for (let i = 0; i < words.length; i++) {
-        if (!isProgramWord(words[i]!, names)) continue;
-        hasProgram = true;
-        const kind = classify(followingWords(words, i));
-        if (kind !== null) return { kind };
-      }
-      carry = hasProgram && (endedBy === ")" || endedBy === "`");
-    }
+    return scanCommand(command, new Set(), 0, new Map());
   } catch {
     return null;
+  }
+}
+
+/**
+ * The program-word search over one command line. `inherited` holds the alias names an enclosing line defined, so
+ * an alias defined outside a quoted `bash -c` argument is still known inside it.
+ */
+function scanCommand(command: string, inherited: ReadonlySet<string>, depth: number, memo: Map<string, boolean>): HumanOnlyHit | null {
+  const names = new Set([...definedNames(command), ...inherited]);
+  let carry = false;
+  for (const region of splitRegions(command)) {
+    const { words, endedBy } = region;
+    // A substitution whose result is the program word: the region after its closing `)` / backtick
+    // is read as following one.
+    if (carry) {
+      const kind = classify(followingWords(["", ...words], 0));
+      if (kind !== null && !isHelpTokens(region.tokens)) return { kind };
+    }
+    let hasProgram = false;
+    for (let i = 0; i < words.length; i++) {
+      if (!isProgramWord(words[i]!, names)) continue;
+      hasProgram = true;
+      const kind = classify(followingWords(words, i));
+      if (kind !== null && !isHelpRead(region, i, names, depth, memo)) return { kind };
+    }
+    carry = hasProgram && (endedBy === ")" || endedBy === "`");
   }
   return null;
 }
@@ -583,6 +785,20 @@ const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string; w
   approve: {
     what: "repo-aegis approve",
     fix: "repo-aegis approve <owner>/<repo>   (or <owner>/*)",
+  },
+  pause: {
+    what: "repo-aegis pause",
+    fix: "repo-aegis pause [--for 1h] [--repo <owner>/<repo>]   (and repo-aegis resume to end it early)",
+    why:
+      "A pause switches repo-aegis off for a while, so it counts only when a person decides to run it; an agent that ran it " +
+      "would be switching off its own guard, with or without a terminal attached",
+  },
+  "log-off": {
+    what: "repo-aegis log --off",
+    fix: "repo-aegis log --off   (and repo-aegis log --on to turn it back on)",
+    why:
+      "The decision log is what an agent reads to see why it was refused, so switching it off counts only when a person decides " +
+      "to; an agent that ran it would be removing the data its own next refusal needs, with or without a terminal attached",
   },
   "owner-add": {
     what: "repo-aegis engagements add --personal-org/--github-org",

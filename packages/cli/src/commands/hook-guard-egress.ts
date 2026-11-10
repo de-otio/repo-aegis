@@ -60,24 +60,34 @@ import {
   findDetachedStart,
   detachedStartRefusal,
   isPrintableDestination,
-  loadRegistry,
+  loadRegistryState,
+  withLogTrailer,
+  type DecisionAppendResult,
+  type DecisionFactsInput,
+  type DecisionRefKind,
+  type EgressIntent,
   parseEgressIntents,
+  pauseNotice,
   ruleHSkipNote,
   ruleHStatus,
   SHAPE_RULE_CODES,
-  RegistryEncryptedError,
-  RegistryNotFoundError,
   type Destination,
   type DetachedHit,
   type EgressDecision,
   type HumanOnlyKind,
+  type PauseState,
   type Registry,
   type RegistryState,
   type RuleHStatus,
+  refusalTrailer,
 } from "@de-otio/repo-aegis-core";
 import { currentHumanPresent } from "../human-presence.js";
+import { hostOfAdapter, recordDecision, registryStateFact, verbWords, type RecordArgs } from "../decision.js";
+import { firstIntentDestination, pauseCoveringDestinations, pauseCoveringIntents, recordPausedAllow } from "../pause-scope.js";
+import { ENCRYPTED_REGISTRY_NOTICE } from "./hook-policy.js";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
 import { adapterFor, type HookVerdict, type HostAdapter } from "./hook-hosts/index.js";
+import { writePromptApprovals } from "./hook-prompt-approval.js";
 
 export interface HookGuardEgressOptions {
   /** The host adapter: `claude` (default) | `codex` | `gemini` | `copilot` | `cursor` | `antigravity`, case-insensitive; see ./hook-hosts/. Unknown → no ask. */
@@ -106,13 +116,26 @@ function ghShimOnPath(env: NodeJS.ProcessEnv): boolean | undefined {
 }
 
 /**
+ * The pinned-enforcement-binary fallback (`pinnedHookCommand`) exports `REPO_AEGIS_PIN_FALLBACK=1` to the
+ * `repo-aegis` it falls back to. It only ever adds a notice, so an agent that sets it gains nothing.
+ */
+export const PIN_FALLBACK_NOTICE =
+  "repo-aegis: the pinned enforcement binary is missing or not usable, so this hook ran the repo-aegis found on PATH " +
+  "(it is at least as new as the pinned version); re-pin it by running: repo-aegis install claude-md";
+
+function withFallbackNotice(verdict: HookVerdict): HookVerdict {
+  if (verdict.action !== "allow" || process.env["REPO_AEGIS_PIN_FALLBACK"] !== "1") return verdict;
+  return { ...verdict, notice: [verdict.notice, PIN_FALLBACK_NOTICE].filter(n => n !== undefined).join(" ") };
+}
+
+/**
  * Print the adapter's rendering of `verdict` and exit with its code. The one
  * place this hook writes to stdout: every decision goes through the host
  * adapter, so no code path here can print a host shape (or a rewritten
  * command) behind the adapter's back.
  */
 function emit(adapter: HostAdapter, verdict: HookVerdict): never {
-  const out = adapter.render(verdict);
+  const out = adapter.render(withFallbackNotice(verdict));
   if (out.stdout !== "") process.stdout.write(out.stdout);
   process.exit(out.exitCode);
 }
@@ -166,7 +189,7 @@ export function oversizedInputVerdict(prefix: string, adapter: HostAdapter = ada
 const HOOK_INPUT_TOO_LARGE_REASON =
   "repo-aegis: refused. This command is larger than 1 MiB, so the egress guard cannot read it whole and does not " +
   "judge it. No approval covers this. Fix: put large content in a file and pass the file (`--body-file`, `-F`, " +
-  "`--input`, `-d @file`), keeping the command itself short. [HOOK_INPUT_TOO_LARGE; details: repo-aegis explain HOOK_INPUT_TOO_LARGE]";
+  `\`--input\`, \`-d @file\`), keeping the command itself short. ${refusalTrailer("HOOK_INPUT_TOO_LARGE")}`;
 
 const EMPTY_REGISTRY: Registry = {
   engagements: [],
@@ -180,32 +203,40 @@ const EMPTY_REGISTRY: Registry = {
  * and a guard that refused to run because a registry was missing would be
  * inert exactly where it is most needed (a fresh machine). So a failure falls
  * back to an empty registry and the condition travels with the decision as
- * `registryState`, which rule h reads (issue #151, decision D4):
+ * `registryState`, which rule h reads (issue #151, decision D4), from the one
+ * core loader:
  *
  *   - no registry file  → `missing`: rule h is skipped;
- *   - encrypted, or a file that does not parse or validate → `unreadable`:
- *     rule h REFUSES any egress that has a destination, because no owner can
- *     be confirmed. Skipping here would let an agent that can write the file
- *     switch rule h off with one bad YAML line.
- *
- * Only {@link RegistryNotFoundError} is "missing". Anything else, including an
- * error this code does not know, is `unreadable`: fail closed.
+ *   - only a ciphertext → `encrypted`: runs as if there were no registry (rule
+ *     h skipped), and the note says so;
+ *   - a file that does not parse or validate (`unparseable`), or was written by
+ *     a newer repo-aegis (`newer-schema`): rule h ASKS (the pre-push hook still
+ *     refuses the push), because no owner can be confirmed. Skipping here would
+ *     let an agent that can write the file switch rule h off with one bad YAML
+ *     line.
  */
 function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistryState; note?: string } {
-  try {
-    return { registry: loadRegistry(), registryState: "loaded" };
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
+  const load = loadRegistryState();
+  switch (load.state) {
+    case "loaded":
+      return { registry: load.registry, registryState: "loaded" };
+    case "missing":
       return { registry: EMPTY_REGISTRY, registryState: "missing" };
-    }
-    return {
-      registry: EMPTY_REGISTRY,
-      registryState: "unreadable",
-      note:
-        err instanceof RegistryEncryptedError
-          ? "registry is encrypted: context rules ran without it, and any publish with a destination is refused until it is decrypted"
-          : "registry could not be read: context rules ran without it, and any publish with a destination is refused until it is repaired",
-    };
+    case "encrypted":
+      return {
+        registry: EMPTY_REGISTRY,
+        registryState: "encrypted",
+        note: "registry is encrypted: context rules and rule h ran without it",
+      };
+    case "unparseable":
+    case "newer-schema":
+      return {
+        registry: EMPTY_REGISTRY,
+        registryState: load.state,
+        note:
+          `registry could not be read (${load.state === "newer-schema" ? "was written by a newer repo-aegis" : "does not parse"}): ` +
+          "any publish with a destination needs a person",
+      };
   }
 }
 
@@ -265,9 +296,39 @@ function recordApprovalUse(decision: Extract<EgressDecision, { action: "allow" }
  * model on a block) and the adapter's deny on stdout (for hosts that read
  * their JSON channel instead).
  */
-function deny(adapter: HostAdapter, code: string, reason: string, details: Record<string, unknown>, stdoutReason = reason): never {
-  process.stderr.write(JSON.stringify({ code, error: reason, details }, null, 2) + "\n");
-  emit(adapter, { action: "deny", reason: stdoutReason });
+function deny(adapter: HostAdapter, code: string, reason: string, details: Record<string, unknown>, stdoutReason?: string): never {
+  // P1-I: the record is written first, so the trailer says what happened. A refusal that never reached the egress parse
+  // (a raw network call, a human-only verb, a detached start, an identity rule, an oversized payload) has no verb or
+  // destination to record.
+  const written = logHook({ outcome: "refuse", code }).written;
+  process.stderr.write(JSON.stringify({ code, error: withLogTrailer(reason, written), details }, null, 2) + "\n");
+  emit(adapter, { action: "deny", reason: withLogTrailer(stdoutReason ?? reason, written) });
+}
+
+/**
+ * What this hook run knows for its decision record (P1-I). Module state on purpose: `deny` and the final verdict both
+ * write through it, and one process makes one decision. Mutated only inside `hookGuardEgress` as the facts become known.
+ */
+const hookLogState: { host: ReturnType<typeof hostOfAdapter>; facts: DecisionFactsInput; pinFallback: boolean } = {
+  host: "unknown",
+  facts: {},
+  pinFallback: false,
+};
+
+function logHook(args: Omit<RecordArgs, "layer" | "host" | "facts" | "pinFallback">): DecisionAppendResult {
+  return recordDecision({ layer: "egress-hook", host: hookLogState.host, pinFallback: hookLogState.pinFallback, facts: hookLogState.facts, ...args });
+}
+
+/** The ref a `git push` refspec updates, and what kind of change it is, from the parsed intent only. */
+function pushRefOf(intent: EgressIntent): { ref?: string; refKind?: DecisionRefKind } {
+  if (intent.verb !== "git-push") return {};
+  const spec = intent.refspec;
+  if (intent.deletesRef === true || (spec !== undefined && spec.startsWith(":"))) {
+    return { refKind: "delete", ...(spec !== undefined && spec.replace(/^:/, "") !== "" && { ref: spec.replace(/^:/, "") }) };
+  }
+  if (spec === undefined) return {};
+  const dst = spec.replace(/^\+/, "").split(":").pop()!;
+  return { ref: dst, refKind: dst.startsWith("refs/tags/") ? "tag" : "branch" };
 }
 
 /** Refuse a command line that runs a human-only repo-aegis command. Same channels as every other deny. */
@@ -297,6 +358,9 @@ function denyDetachedStart(adapter: HostAdapter, hit: DetachedHit): never {
  */
 export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<void> {
   const adapter = adapterFor(opts.agent);
+  hookLogState.host = hostOfAdapter(adapter.name);
+  hookLogState.pinFallback = process.env["REPO_AEGIS_PIN_FALLBACK"] === "1";
+  hookLogState.facts = {};
   let stdinText: string;
   try {
     const input = await readStdin();
@@ -320,6 +384,10 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   let registryNote: string | undefined;
   let ruleH: RuleHStatus = "applied";
   let humanPresent = false;
+  // The first parsed intent, for the decision record's verb and ref (an allow decision does not always carry its intent).
+  let firstIntent: EgressIntent | undefined;
+  // What the host said about itself, kept for the prompt-approval write after the verdict (never the command text).
+  let host: { permissionMode: string | undefined; sessionId: string | undefined; cwd: string } | undefined;
   try {
     const parsed = adapter.parse(stdinText);
     // Not a shell command: fail open, silently, without touching the registry.
@@ -330,10 +398,22 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     if (parsed.kind === "malformed") reportNotJudged(adapter, parsed.reason);
     if (parsed.kind !== "command") emit(adapter, { action: "allow" });
     const { command, cwd } = parsed;
+    host = { permissionMode: parsed.permissionMode, sessionId: parsed.sessionId, cwd: cwd ?? process.cwd() };
+    if (parsed.permissionMode !== undefined) hookLogState.facts = { ...hookLogState.facts, permissionMode: parsed.permissionMode };
 
     // R6 (plan §8.2): a raw HTTP client writing to the GitHub API, or `gh auth token` next to a network
     // call. Shape rules on the command text: no registry, no approval, and no `ask`.
-    const network = checkNetworkRules(command);
+    // P1-E: a machine-wide pause lifts the raw-HTTP-client rule (it has no destination, so a repository-scoped pause
+    // does not), and ONLY that rule: `gh auth token` next to a network call stays refused, because it hands the
+    // person's credential to whatever the call reaches (an absolute path to gh gets round the shim). The rule is
+    // judged again without the lifted one, so a command line that trips both is still refused. Read only when the
+    // rule fired, so the common path does no I/O.
+    let network = checkNetworkRules(command);
+    let pausedNetwork: PauseState | null = null;
+    if (network !== null && network.code === "GITHUB_API_VIA_HTTP_CLIENT") {
+      pausedNetwork = pauseCoveringDestinations([]);
+      if (pausedNetwork !== null) network = checkNetworkRules(command, { skipApiWrite: true });
+    }
     if (network !== null) deny(adapter, network.code, network.reason, { verb: "(raw network call)" });
     // Commands only a person may run (`approve`, owner adds, `upstreams add`,
     // `init --migrate-classify|--force`): refused in ANY agent Bash text, with
@@ -358,10 +438,25 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit
     // before touching the registry or the filesystem.
-    if (intents.length === 0) emit(adapter, { action: "allow" });
+    firstIntent = intents[0];
+    if (intents.length === 0) {
+      if (pausedNetwork === null) emit(adapter, { action: "allow" });
+      recordPausedAllow("egress-hook", { verb: "raw network call", pause: pausedNetwork });
+      emit(adapter, { action: "allow", notice: pauseNotice(pausedNetwork) });
+    }
+
+    // P1-E: a person's emergency pause. After every person-only refusal above (the human-only verbs, the detached
+    // starts, the identity rules), which a pause never lifts, and before the registry is read or the egress policy
+    // runs: an in-scope pause allows the command, with the fixed notice where the host shows one.
+    const paused = pauseCoveringIntents(intents, cwd ?? process.cwd());
+    if (paused !== null) {
+      recordPausedAllow("egress-hook", { verb: verbWords(intents[0]!.verb), destination: firstIntentDestination(intents, cwd ?? process.cwd()), pause: paused });
+      emit(adapter, { action: "allow", notice: pauseNotice(paused) });
+    }
 
     const loaded = loadRegistryOrEmpty();
     registryNote = loaded.note;
+    hookLogState.facts = { ...hookLogState.facts, registryState: registryStateFact(loaded.registryState) };
     ruleH = ruleHStatus(loaded.registryState, loaded.registry);
     humanPresent = currentHumanPresent();
 
@@ -385,6 +480,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
         // Only worth answering where `ask` is on the table at all: without
         // an ask, rule g already denies.
         const shim = ask ? ghShimOnPath(opts.env ?? process.env) : undefined;
+        if (shim !== undefined) hookLogState.facts = { ...hookLogState.facts, shimFirst: shim };
         return { ask, ...(shim !== undefined && { ghShimOnPath: shim }) };
       })(),
     });
@@ -403,8 +499,42 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   // `error` verdict through the adapter (the host's fail-open answer), never
   // an uncaught exception, which commander turns into exit 1 (and Copilot
   // fails CLOSED on exit 1). The outcome is computed first and emitted after.
-  const outcome = outcomeOrError(decision, { registryNote, ruleH, humanPresent });
+  let ctx: OutcomeContext = { registryNote, ruleH, humanPresent, encrypted: ruleH === "skipped:encrypted" };
+  let outcome = outcomeOrError(decision, ctx);
+  // P1-I: a command that parsed as an egress shape writes one record, whatever the outcome (a `git status` writes none:
+  // it never reaches here). For a refusal or an ask the record is written BEFORE the text is final, and the text is
+  // built again with the trailer for what the write did. The decision above is not touched by any of it.
+  if (outcome.verdict.action !== "error") {
+    const dest = decision.destination !== undefined && isPrintableDestination(decision.destination) && decision.destination.unresolved === undefined
+      ? { org: decision.destination.org, repo: decision.destination.repo }
+      : undefined;
+    const intent = decision.intent ?? firstIntent;
+    const written = logHook({
+      outcome: decision.action === "deny" ? "refuse" : decision.action,
+      ...(decision.action !== "allow" && { code: decision.code }),
+      ...(intent !== undefined && { verb: verbWords(intent.verb), ...pushRefOf(intent) }),
+      ...(dest !== undefined && { destination: dest }),
+      ...(decision.action === "allow" && decision.approval !== undefined && { approvalId: decision.approval.id }),
+    }).written;
+    if (decision.action !== "allow") {
+      ctx = { ...ctx, logged: written };
+      outcome = outcomeOrError(decision, ctx);
+    }
+  }
   if (outcome.stderr !== undefined) process.stderr.write(outcome.stderr);
+  // Only for an `ask` that is going out as one (not an `error`): record what a yes at the host's prompt may
+  // carry down to pre-push and the `gh` shim, and say so in the prompt (the sentence goes before the parenthesised
+  // registry notes). The hook never READS these records.
+  if (outcome.verdict.action === "ask" && decision.action === "ask" && host !== undefined) {
+    const carried = writePromptApprovals(decision, {
+      agent: adapter.name,
+      permissionMode: host.permissionMode,
+      sessionId: host.sessionId,
+      cwd: host.cwd,
+    });
+    if (carried.stderr !== undefined) process.stderr.write(carried.stderr);
+    if (carried.sentence !== undefined) outcome = outcomeOrError(decision, { ...ctx, askNote: carried.sentence });
+  }
   emit(adapter, outcome.verdict);
 }
 
@@ -432,9 +562,15 @@ export function outcomeOrError(decision: EgressDecision, ctx: OutcomeContext): O
 }
 
 interface OutcomeContext {
+  /** Where this run's decision record went (P1-I); set only once the record was attempted, and ends a refusal or an ask. */
+  logged?: DecisionAppendResult["written"];
   registryNote: string | undefined;
   ruleH: RuleHStatus;
   humanPresent: boolean;
+  /** For an `ask` only: one fixed sentence (what a yes at the host's prompt carries), added after the reason. */
+  askNote?: string;
+  /** The registry is encrypted (read as none): an allow carries a notice, because rule h and the org boundaries are off. */
+  encrypted?: boolean;
 }
 
 function planOutcome(
@@ -443,8 +579,13 @@ function planOutcome(
 ): Outcome {
   let { registryNote } = ctx;
   if (decision.action === "allow") {
-    if (decision.approval !== undefined) return { verdict: { action: "allow", reason: recordApprovalUse(decision, "hook guard-egress") } };
-    return { verdict: { action: "allow" } };
+    // An allow while the registry is encrypted says so: rule h and the engagement org boundaries are off, and the
+    // person would otherwise see nothing (the hosts drop exit-0 stderr).
+    const notice = ctx.encrypted === true ? { notice: ENCRYPTED_REGISTRY_NOTICE } : {};
+    if (decision.approval !== undefined) {
+      return { verdict: { action: "allow", reason: recordApprovalUse(decision, "hook guard-egress"), ...notice } };
+    }
+    return { verdict: { action: "allow", ...notice } };
   }
 
   // Rule h's own refusal already says the registry could not be read and how
@@ -455,11 +596,17 @@ function planOutcome(
   // (no destination) or a person at the keyboard gets no extra line. No
   // registry contents, ever.
   const skipNote =
-    !ctx.humanPresent && decision.code !== "UNREGISTERED_OWNER_EGRESS" && !SHAPE_RULE_CODES.has(decision.code)
+    !ctx.humanPresent &&
+    decision.code !== "UNREGISTERED_OWNER_EGRESS" &&
+    !SHAPE_RULE_CODES.has(decision.code) &&
+    // An encrypted registry already travels as `registryNote`, so its skip would only repeat it.
+    ctx.ruleH !== "skipped:encrypted"
       ? ruleHSkipNote(ctx.ruleH)
       : null;
   const notes = [registryNote, skipNote].filter((n): n is string => n !== undefined && n !== null);
-  const reason = notes.length === 0 ? decision.reason : `${decision.reason} (${notes.join("; ")})`;
+  const base = decision.action === "ask" && ctx.askNote !== undefined ? `${decision.reason} ${ctx.askNote}` : decision.reason;
+  const withNotes = notes.length === 0 ? base : `${base} (${notes.join("; ")})`;
+  const reason = ctx.logged === undefined ? withNotes : withLogTrailer(withNotes, ctx.logged);
 
   if (decision.action === "ask") return { verdict: { action: "ask", reason } };
 
@@ -476,6 +623,6 @@ function planOutcome(
   // the bare reason (the notes travel in `details`), stdout the noted one.
   return {
     verdict: { action: "deny", reason },
-    stderr: JSON.stringify({ code: decision.code, error: decision.reason, details }, null, 2) + "\n",
+    stderr: JSON.stringify({ code: decision.code, error: ctx.logged === undefined ? decision.reason : withLogTrailer(decision.reason, ctx.logged), details }, null, 2) + "\n",
   };
 }

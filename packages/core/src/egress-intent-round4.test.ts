@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 //
-// Issue #151, PR 2a, third review round. What the backstop treats as data (M1: only message-type flag
-// values; a flag whose value RUNS is scanned), heredocs (M2), the mention window (L3), search tools (L4) and
-// git aliases (L5).
+// Issue #151, PR 2a, third review round, as it stands once the word backstop is gone: the hook reads a
+// command's PARSED shape, never its text. Message-type flag values (M1) and heredocs (M2) are data; text that
+// runs only through something the parser does not model (a flag whose value runs, an interpreter's program,
+// `find -exec`) is no intent at the hook, and the `gh` shim / pre-push hook judge what it then executes.
+// Plus the shells that read a pipe (still unresolved) and git aliases (L5).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -33,48 +35,32 @@ function quiet(command: string, opts?: ParseEgressOptions): void {
 const RUN = "gh issue create -R stranger/r -b x";
 const URL = "https://github.com/stranger/r";
 
-describe("M1: a flag whose value runs a command is scanned; only message-type flags are data", () => {
-  it("git -c <key>=<program> …: the config value is never a message", () => {
+describe("M1: message-type flag values are data; a flag whose value runs is not read for text either", () => {
+  it("git -c <key>=<program> and the other flags that run something: no intent at the hook (the gh shim and pre-push judge what runs)", () => {
     for (const c of [
       `git -c core.pager='${RUN}' log`,
       `git -c core.editor='${RUN}' commit`,
       `git -c core.sshCommand='${RUN}' fetch origin`,
-      `git -c core.fsmonitor='${RUN}' status`,
       `git -c credential.helper='!${RUN}' fetch`,
-      `git -c diff.external='${RUN}' diff`,
-      `git -c core.hooksPath=x -c core.pager='${RUN}' log`,
-      `git --config-env=core.pager=X -c core.pager='${RUN}' log`,
       `git -c core.pager='git push ${URL} main' log`,
-    ]) {
-      flagged(c);
-    }
-  });
-
-  it("the other flags that run something: -O / --open-files-in-pager, --exec / -x, --extcmd, --upload-pack, --receive-pack", () => {
-    for (const c of [
       `git grep -O'${RUN}' foo`,
-      `git grep -O '${RUN}' foo`,
-      `git grep --open-files-in-pager='${RUN}' foo`,
       `git grep --open-files-in-pager '${RUN}' foo`,
       `git rebase --exec '${RUN}' main`,
-      `git rebase --exec='${RUN}' main`,
-      `git rebase -x '${RUN}' main`,
-      `git difftool -x '${RUN}'`,
       `git difftool --extcmd='${RUN}'`,
       `git fetch --upload-pack='${RUN}' origin`,
-      `git fetch -u '${RUN}' origin`,
-      `git ls-remote --upload-pack '${RUN}' origin`,
-      `git push --receive-pack='${RUN}' ${URL} main`,
       `git clone --upload-pack='${RUN}' ${URL}`,
+      `GIT_PAGER='${RUN}' git log`,
+      `EDITOR='${RUN}' git commit`,
     ]) {
-      flagged(c);
+      quiet(c);
     }
   });
 
-  it("an assignment in the command's prefix names a program too", () => {
-    flagged(`GIT_PAGER='${RUN}' git log`);
-    flagged(`GIT_SSH_COMMAND='${RUN}' git fetch origin`);
-    flagged(`EDITOR='${RUN}' git commit`);
+  it("…but a real `git push` carrying such a flag is still a push, and is judged", () => {
+    const i = all(`git push --receive-pack='${RUN}' ${URL} main`);
+    assert.equal(i.length, 1);
+    assert.equal(i[0]!.verb, "git-push");
+    assert.equal(i[0]!.remote, URL);
   });
 
   it("message-type flags stay data: -m, -am, --message, --body, --title, --notes, -f/-F fields", () => {
@@ -98,50 +84,42 @@ describe("M1: a flag whose value runs a command is scanned; only message-type fl
       `gh pr comment 5 -R acme/x --body="${RUN}"`,
       `gh release create v1 -R acme/x --notes "${RUN}"`,
       `gh api -X POST repos/acme/x/issues -f body="${RUN}" -F title="gh pr list"`,
+      `gh pr create -R acme/x --head '${RUN}' -b x`,
     ]) {
-      assert.ok(
-        all(c).every(i => i.unresolved === undefined),
-        c,
-      );
+      const intents = all(c);
+      assert.equal(intents.length, 1, c);
+      assert.ok(intents.every(i => i.unresolved === undefined), c);
     }
-  });
-
-  it("…but the same text in a flag that is not a message is read", () => {
-    flagged(`gh pr create -R acme/x --head '${RUN}' -b x`);
-    flagged(`gh api repos/acme/x/issues -X POST --jq '${RUN}'`);
   });
 });
 
-describe("M2: heredocs are data only when nothing runs them", () => {
+describe("M2: a heredoc is parsed only for a shell that is given it; a shell that reads a pipe is unresolved", () => {
   const body = `${RUN}\n`;
 
-  it("a heredoc piped onward, or fed to a runner of stdin, or to a shell that reads a pipe, is flagged", () => {
+  it("a heredoc piped to a shell that reads stdin is flagged (the shell reading a pipe is the shape)", () => {
     for (const c of [
       `cat <<EOF | sh\n${body}EOF`,
       `cat <<'EOF' | bash -s\n${body}EOF`,
       `cat <<'EOF' | sh -\n${body}EOF`,
-      `source /dev/stdin <<'EOF'\n${body}EOF`,
-      `. /dev/stdin <<'EOF'\n${body}EOF`,
       `tee >(sh) <<'EOF'\n${body}EOF`,
-      `make -f /dev/stdin <<'EOF'\nall:\n\t${RUN}\nEOF`,
-      `gmake -f - <<'EOF'\nall:\n\t${RUN}\nEOF`,
-      `at now <<'EOF'\n${body}EOF`,
-      `batch <<'EOF'\n${body}EOF`,
-      `cat <<'EOF' | tee out.sh\n${body}EOF`,
     ]) {
       flagged(c);
     }
   });
 
-  it("a substitution whose result is a command word, or eval / sh -c text, runs its heredoc", () => {
+  it("a heredoc fed to a runner of stdin, or run through a substitution, is data to the hook (the shim judges the gh it runs)", () => {
     for (const c of [
+      `source /dev/stdin <<'EOF'\n${body}EOF`,
+      `. /dev/stdin <<'EOF'\n${body}EOF`,
+      `make -f /dev/stdin <<'EOF'\nall:\n\t${RUN}\nEOF`,
+      `at now <<'EOF'\n${body}EOF`,
+      `batch <<'EOF'\n${body}EOF`,
+      `cat <<'EOF' | tee out.sh\n${body}EOF`,
       `eval "$(cat <<'EOF'\n${body}EOF\n)"`,
       `sh -c "$(cat <<'EOF'\n${body}EOF\n)"`,
-      `bash -c "$(cat <<'EOF'\n${body}EOF\n)"`,
       `$(cat <<'EOF'\n${body}EOF\n)`,
-      `eval \`cat <<'EOF'\n${body}EOF\n\``,
     ]) {
-      flagged(c);
+      quiet(c);
     }
   });
 
@@ -179,41 +157,8 @@ describe("M2: heredocs are data only when nothing runs them", () => {
   });
 });
 
-describe("L3: flag words and their values do not count against the mention window", () => {
-  const rep = (s: string, n: number): string => Array.from({ length: n }, () => s).join(" ");
-
-  it("many flags between gh and its group", () => {
-    flagged(`find . -maxdepth 0 -exec gh ${rep("-R a/b", 5)} issue create -b x \\;`);
-    flagged(`find . -maxdepth 0 -exec gh ${rep("--repo=a/b", 9)} issue create -b x \\;`);
-    flagged(`find . -maxdepth 0 -exec gh ${rep("-R a/b", 20)} issue create -b x \\;`);
-    flagged(`find . -maxdepth 0 -exec git ${rep("-C a", 5)} push ${URL} main \\;`);
-    flagged(`$GH ${rep("-R a/b", 7)} issue create -b x`);
-    flagged(`$G ${rep("-C a", 9)} push ${URL} main`);
-  });
-
-  it("ordinary words still count: a group far past the window is not a mention", () => {
-    quiet(`echo gh ${rep("word", 12)} issue`);
-    quiet(`echo git ${rep("word", 12)} push`);
-    quiet(`echo gh ${rep("-x", 100)} issue`); // past the cap on the whole look-ahead
-  });
-
-  it("a word directly after a flag is its value, free; the next is not", () => {
-    flagged("echo gh -R a/b issue create");
-    flagged("echo gh --paginate issue create");
-    quiet(`echo gh ${rep("a b", 6)} issue`); // 12 ordinary words
-  });
-});
-
-describe("L4: search tools exempt only their pattern and path arguments", () => {
-  it("--pre (rg) and --pager (ag, ack) run a command", () => {
-    flagged(`rg --pre '${RUN}' foo`);
-    flagged(`rg --pre='${RUN}' foo`);
-    flagged(`ag --pager '${RUN}' foo`);
-    flagged(`ack --pager='${RUN}' foo`);
-    flagged(`ag --pager="git push ${URL} main" foo`);
-  });
-
-  it("patterns and paths stay data", () => {
+describe("search tools and runners: their arguments are data to the hook", () => {
+  it("patterns and paths of a search stay data, and a search's --pre / --pager is not read for text", () => {
     for (const c of [
       `rg "gh issue create" .`,
       `rg -e 'git push' -g '*.md' doc/`,
@@ -222,9 +167,16 @@ describe("L4: search tools exempt only their pattern and path arguments", () => 
       `ag 'git push' docs`,
       `ack 'gh issue' lib`,
       `egrep -n 'gh issue create' notes.md`,
+      `rg --pre '${RUN}' foo`,
+      `ag --pager '${RUN}' foo`,
     ]) {
       quiet(c);
     }
+  });
+
+  it("find -exec runs a command the parser does not model: no intent at the hook", () => {
+    quiet(`find . -maxdepth 0 -exec gh -R a/b issue create -b x \;`);
+    quiet(`find . -maxdepth 0 -exec git -C a push ${URL} main \;`);
   });
 });
 

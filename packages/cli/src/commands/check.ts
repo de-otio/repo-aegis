@@ -58,13 +58,21 @@ import {
   getRemoteUrl,
   EGRESS_HUMAN_ENV,
   findApproval,
+  findPromptApproval,
+  normaliseRef,
   approvalScopeOf,
+  approvalSource,
   findUncoveringStarApproval,
   uncoveredStarSentence,
   type ApprovalScope,
-  loadRegistry,
+  loadRegistryState,
+  registryUnreadable,
   appendAuditRecord,
-  RegistryNotFoundError,
+  pauseNotice,
+  logTrailer,
+  type DecisionAppendResult,
+  type DecisionFactsInput,
+  type PauseState,
   type Registry,
   type RepoVisibility,
   CustomerCoupledNoEngagementError,
@@ -93,9 +101,11 @@ import {
   type Waiver,
   EXIT_HIT,
 } from "@de-otio/repo-aegis-core";
-import { emitJson, emitText, emitError, shouldRevealMatches } from "../format.js";
+import { emitJson, emitText, emitError, setErrorDecisionHook, shouldRevealMatches, type ErrorPayload } from "../format.js";
+import { recordDecision, registryStateFact, type RecordArgs } from "../decision.js";
 import { currentHumanPresent } from "../human-presence.js";
 import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
+import { pauseCoveringDestinations, pauseCoveringWorkingRepo, recordPausedAllow } from "../pause-scope.js";
 
 interface CheckOptions extends DenySetFloorOptions {
   /**
@@ -135,6 +145,13 @@ interface CheckOptions extends DenySetFloorOptions {
    * because refusing it elsewhere would only invite callers to drop it.
    */
   remoteUrl?: string;
+  /**
+   * The ref git will update ON THE REMOTE, pre-push's `$remote_ref`, passed by the installed script on both its
+   * paths. It is what a prompt approval (a person's yes at an agent's permission prompt) is bound to: the
+   * destination ref, which neither `--push-ref` (the LOCAL ref, new refs only) nor `--range` carries. Absent
+   * (a script from before this flag) → a prompt approval never matches, which is the safe direction.
+   */
+  remoteRef?: string;
   /**
    * Live lookup for a destination whose visibility is unknown (issue #114).
    * Not a CLI flag: injectable for tests. Defaults to `gh repo view` unless
@@ -381,26 +398,28 @@ function refLabel(opts: CheckOptions): string {
 const EMPTY_REGISTRY: Registry = { engagements: [], alwaysBlock: [] };
 
 /**
- * Load the registry, and say HOW (rule h, issue #151, decision D4). The same
- * three-way state the agent hook and the shim use: only
- * {@link RegistryNotFoundError} is `missing`; an encrypted, unparseable or
- * otherwise unreadable registry is `unreadable` (rule h refuses), and the
- * ambiguity falls on the side of refusing.
+ * Load the registry, and say HOW (rule h, issue #151, decision D4), with the one
+ * core loader every layer shares. `missing` and `encrypted` both run as if there
+ * were no registry (an empty one, so the cross-org check still has the
+ * remote-origin fallback inside `computeTrustBoundary`); `unparseable` and
+ * `newer-schema` are unreadable: rule h refuses.
  *
  * For the trust-boundary comparison, `registry: null` means "skip the
  * cross-org check": a guardrail must not block on its own inability to
  * determine context (the spurious `CROSS_ORG_WRITE` flake,
- * doc/bugs/repo-aegis-check-write-flake.md). A *missing* registry is the one
- * error that is not ambiguous — there is simply no registry on this machine —
- * so it degrades to an empty one, which still lets the remote-origin fallback
- * inside `computeTrustBoundary` supply the repo's own org.
+ * doc/bugs/repo-aegis-check-write-flake.md).
  */
-function loadRegistryState(): { registry: Registry | null; state: RegistryState } {
-  try {
-    return { registry: loadRegistry(), state: "loaded" };
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) return { registry: EMPTY_REGISTRY, state: "missing" };
-    return { registry: null, state: "unreadable" };
+function loadRegistryForPush(): { registry: Registry | null; state: RegistryState } {
+  const load = loadRegistryState();
+  switch (load.state) {
+    case "loaded":
+      return { registry: load.registry, state: "loaded" };
+    case "missing":
+    case "encrypted":
+      return { registry: EMPTY_REGISTRY, state: load.state };
+    case "unparseable":
+    case "newer-schema":
+      return { registry: null, state: load.state };
   }
 }
 
@@ -472,6 +491,18 @@ function publicPushApprovalSentence(
   }
 }
 
+/**
+ * What a "yes" at an agent's permission prompt does and does not do for this push, added to the refusal so that the
+ * refusal after a "no", or after the two minutes, or from an older hook script, is not a dead end. Fixed text.
+ */
+function promptApprovalSentence(remoteRef: string | undefined): string {
+  return remoteRef === undefined || remoteRef === ""
+    ? " This pre-push script is older than the installed repo-aegis (it does not tell it which remote ref is being " +
+        "updated), so a yes at an agent prompt cannot reach it: a person runs `repo-aegis install hooks` once."
+    : " A yes at an agent prompt covers only this exact push (the same repository and remote ref) for 2 minutes; " +
+        "re-run it and answer the prompt.";
+}
+
 /** How a push URL travels: ssh for scp-like, ssh:// and ssh-config alias forms; http for everything else GitHub. */
 function pushTransport(raw: string | undefined): "ssh" | "http" {
   const c = classifyRemoteUrl(raw);
@@ -500,7 +531,7 @@ function pushTransport(raw: string | undefined): "ssh" | "http" {
  * cannot resolve) is not "no destination": it is an unresolved one, and rule h
  * refuses it for a caller with no person present (D5).
  */
-function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestination | null {
+function evaluateDestination(repo: RepoConfig, opts: CheckOptions, pause: PauseState | null = null): CheckDestination | null {
   if (opts.remoteUrl === undefined || opts.remoteUrl.trim() === "") return null;
   // The pre-push hook sees the real environment and git config of the push: an
   // ssh override (GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT, core.sshCommand)
@@ -511,12 +542,19 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   if (target.kind === "non-github") return null;
 
   const ref = refLabel(opts);
-  const loaded = loadRegistryState();
+  const loaded = loadRegistryForPush();
+  if (runDecision !== null) {
+    // Mutation: this run's decision record learns how the registry loaded, and (when the URL names one) where the push goes.
+    runDecision.facts = { ...runDecision.facts, registryState: registryStateFact(loaded.state) };
+    if (target.kind === "github") runDecision.destination = { org: target.org, repo: target.repo };
+  }
   const humanPresent = currentHumanPresent();
   const ruleH = ruleHStatus(loaded.state, loaded.registry ?? EMPTY_REGISTRY);
 
   // --- UNREGISTERED_OWNER_EGRESS (rule h) ----------------------------------
-  if (!humanPresent) {
+  // (`pause`: a machine-wide emergency pause is running this to keep CROSS_ORG_PUSH on; rule h, rule g and the account
+  // checks are what it lifts.)
+  if (!humanPresent && pause === null) {
     const named = target.kind === "github" ? { org: target.org, repo: target.repo } : null;
     const candidate =
       named ??
@@ -527,8 +565,8 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
         ...(target.kind === "unresolved" && { unresolvedWhy: target.why }),
       } as const);
     let refused = false;
-    if (loaded.state === "unreadable") {
-      refused = true; // no owner can be confirmed, so none is admitted (D4, revised)
+    if (registryUnreadable(loaded.state)) {
+      refused = true; // no owner can be confirmed, so none is admitted (D4, revised); a hook cannot ask, so it refuses
     } else if (loaded.state === "loaded" && loaded.registry !== null) {
       const owners = registeredOwners(loaded.registry);
       refused = owners.size > 0 && !ownerAdmitted(candidate, { verb: "git-push" }, owners, loaded.registry);
@@ -547,9 +585,16 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
         opts,
       );
     }
-    // D4: say when rule h did NOT judge, so nobody believes an owner check happened.
-    const skipNote = ruleHSkipNote(ruleH);
+    // D4: say when rule h did NOT judge, so nobody believes an owner check happened. (Encrypted has its own line below.)
+    const skipNote = loaded.state === "encrypted" ? null : ruleHSkipNote(ruleH);
     if (skipNote !== null) process.stderr.write(`repo-aegis: ${skipNote}\n`);
+  }
+  // An encrypted registry is treated as none: say so once per run, with what that switched off and the way back.
+  if (loaded.state === "encrypted") {
+    process.stderr.write(
+      "repo-aegis: registry is encrypted, so rule h was skipped and the cross-org check used only this repository's " +
+        "remote; a person runs `repo-aegis registry decrypt --identity <key>`\n",
+    );
   }
 
   if (target.kind === "unresolved") {
@@ -676,21 +721,36 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   // destination, and a registry that could not be loaded has no personal orgs,
   // so `*` then covers nothing (fail closed).
   const scope = approvalScopeOf(registry ?? {});
-  const approval = dest.publicFacing && !humanPresent ? findApproval(parsed, opts.pushRef, scope) : null;
+  // A terminal approval first, unchanged. Failing that, a PROMPT approval: a person's yes at the agent's own
+  // permission prompt for exactly this verb, this destination and this REMOTE ref, for two minutes. The pre-push
+  // script's `--remote-ref` is what names that ref; without it nothing matches.
+  const needsApproval = dest.publicFacing && !humanPresent && pause === null;
+  const approval: { id: string } | null = !needsApproval
+    ? null
+    : (findApproval(parsed, opts.pushRef, scope) ??
+      (opts.remoteRef !== undefined && opts.remoteRef !== ""
+        ? findPromptApproval({ verb: "git-push", org: parsed.org, repo: parsed.repo, ref: normaliseRef(opts.remoteRef) })
+        : null));
   if (approval !== null) {
     try {
       appendAuditRecord({
         action: "egress-approval-use",
         cwd: repo.cwd,
         repo: repo.cwd,
-        details: { id: approval.id, layer: "git pre-push", destination: `${parsed.org}/${parsed.repo}`, ref },
+        details: {
+          id: approval.id,
+          source: approvalSource(approval),
+          layer: "git pre-push",
+          destination: `${parsed.org}/${parsed.repo}`,
+          ref,
+        },
       });
     } catch {
       /* audit must not block the push */
     }
     process.stderr.write(`repo-aegis: human approval ${approval.id} stands in for a person on this push\n`);
   }
-  if (dest.publicFacing && !humanPresent && approval === null) {
+  if (dest.publicFacing && !humanPresent && approval === null && pause === null) {
     auditRefusal("PUBLIC_PUSH_NEEDS_HUMAN", repo, `${dest.org}/${dest.repo}`, ref);
     emitError(
       {
@@ -702,7 +762,8 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
           `The destination ${parsed.org}/${parsed.repo} (${visLabel}, ${cls}) is public-facing, and no person is ` +
             `present` +
             (assumedPublic ? `.${UNKNOWN_VISIBILITY_HINT}` : ""),
-          publicPushApprovalSentence(parsed, opts.pushRef, scope, registry ?? EMPTY_REGISTRY),
+          publicPushApprovalSentence(parsed, opts.pushRef, scope, registry ?? EMPTY_REGISTRY) +
+            promptApprovalSentence(opts.remoteRef),
           [
             {
               by: "person",
@@ -732,7 +793,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   // repo-aegis credential helper supplies the App token. Over SSH the push would go as whatever key the person
   // has: refused, with the HTTPS form. Over HTTPS the helper must be first in git's list, or git asks the
   // person's helper instead.
-  if (registry !== null && registry.identityMap?.get(parsed.org)?.agent !== undefined) {
+  if (pause === null && registry !== null && registry.identityMap?.get(parsed.org)?.agent !== undefined) {
     const presence = identityPresence(checkTerminal());
     if (presence === "agent") {
       const transport = pushTransport(opts.remoteUrl);
@@ -797,7 +858,95 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   return dest;
 }
 
+/**
+ * The pause covering this run, when it is a pre-commit or pre-push run (see the call site), else null. Pre-commit is
+ * scoped by the working repo's origin, pre-push by the push's destination (resolved offline, as pre-push does).
+ */
+function isPrePushRun(opts: CheckOptions): boolean {
+  return (!!opts.pushRef || !!opts.range) && opts.remoteUrl !== undefined && opts.remoteUrl.trim() !== "";
+}
+
+/** The push's destination as `owner/repo`, when the URL names a GitHub repository offline; for the audit record. */
+function pausedDestination(opts: CheckOptions): { org: string; repo: string } | null {
+  try {
+    const target = resolveRemoteUrl(opts.remoteUrl, undefined, { sshOverride: detectSshOverride(opts.cwd ?? process.cwd()) });
+    return target.kind === "github" ? { org: target.org, repo: target.repo } : null;
+  } catch {
+    return null;
+  }
+}
+
+function pausedHookRun(opts: CheckOptions): PauseState | null {
+  const prePush = isPrePushRun(opts);
+  if (!opts.staged && !prePush) return null;
+  const cwd = opts.cwd ?? process.cwd();
+  if (!prePush) return pauseCoveringWorkingRepo(cwd);
+  try {
+    const target = resolveRemoteUrl(opts.remoteUrl, undefined, { sshOverride: detectSshOverride(cwd) });
+    return pauseCoveringDestinations([target.kind === "github" ? { org: target.org, repo: target.repo } : null]);
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The decision log (P1-I): pre-commit and pre-push each write one record per run
+// ---------------------------------------------------------------------------
+
+/**
+ * What this run knows for its decision record. Module state on purpose: `emitError` (the one place a refusal is
+ * printed) reaches it through `setErrorDecisionHook`, so no refusal site assembles a record or a trailer itself. One
+ * process makes one `check` call; `check` resets it first. Mutated only by `check` and `evaluateDestination`.
+ */
+interface RunDecision {
+  layer: "pre-commit" | "pre-push";
+  verb: string;
+  destination?: { org: string; repo: string };
+  ref?: string;
+  refKind?: "branch" | "tag" | "other";
+  facts: DecisionFactsInput;
+}
+let runDecision: RunDecision | null = null;
+
+function refKindOf(ref: string): "branch" | "tag" | "other" {
+  return ref.startsWith("refs/tags/") ? "tag" : ref.startsWith("refs/heads/") ? "branch" : "other";
+}
+
+function recordRun(outcome: "allow" | "refuse", code?: string, extra: Partial<RecordArgs> = {}): DecisionAppendResult {
+  const d = runDecision;
+  if (d === null) return { written: "none" };
+  return recordDecision({
+    layer: d.layer,
+    outcome,
+    host: "git",
+    verb: d.verb,
+    ...(code !== undefined && { code }),
+    ...(d.destination !== undefined && { destination: d.destination }),
+    ...(d.ref !== undefined && { ref: d.ref, refKind: d.refKind ?? "other" }),
+    facts: d.facts,
+    ...extra,
+  });
+}
+
+/** Every `emitError` of a pre-commit / pre-push run is a refusal of that run: its code (or a fixed one) and the destination it names. */
+function recordErrorPayload(payload: ErrorPayload): DecisionAppendResult {
+  const details = payload.details;
+  const dest = typeof details === "object" && details !== null ? (details as Record<string, unknown>)["destination"] : undefined;
+  const parts = typeof dest === "string" ? dest.split("/") : [];
+  return recordRun("refuse", payload.code ?? "CHECK_ERROR", parts.length === 2 ? { destination: { org: parts[0]!, repo: parts[1]! } } : {});
+}
+
 export function check(opts: CheckOptions): void {
+  try {
+    checkRun(opts);
+  } finally {
+    // One process makes one decision; an in-process caller (a test) must not leave this run's decision hook on `emitError`.
+    setErrorDecisionHook(null);
+    runDecision = null;
+  }
+}
+
+function checkRun(opts: CheckOptions): void {
   // Validate flags FIRST. Exactly one of --staged, --path, --range,
   // --push-ref, --history must be specified.
   const modes = [opts.staged, !!opts.path, !!opts.range, !!opts.pushRef, !!opts.history].filter(
@@ -813,6 +962,36 @@ export function check(opts: CheckOptions): void {
       },
       opts,
     );
+  }
+
+  // P1-I: only the two git-hook shapes are decisions that get logged; an explicit `--path`/`--range`/`--history` scan is
+  // something a person asked to read.
+  const hookLayer = opts.staged ? "pre-commit" : isPrePushRun(opts) ? "pre-push" : null;
+  runDecision =
+    hookLayer === null
+      ? null
+      : {
+          layer: hookLayer,
+          verb: hookLayer === "pre-commit" ? "git commit" : "git push",
+          ...(hookLayer === "pre-push" && opts.pushRef !== undefined && { ref: opts.pushRef, refKind: refKindOf(opts.pushRef) }),
+          facts: {},
+        };
+  setErrorDecisionHook(runDecision === null ? null : recordErrorPayload);
+
+  // P1-E: a person's emergency pause. Only for the two git-hook shapes (pre-commit `--staged`, pre-push with a
+  // remote URL): an explicit `--path`/`--range`/`--history` scan is something a person asked to read.
+  const paused = pausedHookRun(opts);
+  if (paused !== null) {
+    // A pause scoped to this repository (or any pre-commit run) lifts everything. A MACHINE-WIDE pause on a push keeps
+    // the cross-org check on (a push across a trust boundary is a different mistake from a false positive): the
+    // destination checks run with the pause, which skips rule g, rule h and the account checks and nothing else.
+    const dest = isPrePushRun(opts) ? pausedDestination(opts) : null;
+    if (paused.repo === undefined && isPrePushRun(opts)) evaluateDestination(readRepoConfig(opts.cwd), opts, paused);
+    recordPausedAllow(opts.staged ? "pre-commit" : "pre-push", { verb: opts.staged ? "git commit" : "git push", destination: dest, pause: paused });
+    const notice = pauseNotice(paused);
+    if (opts.json) emitJson({ status: "paused", notice, hits: [], skipped: [], egress: [] });
+    else process.stderr.write(`${notice}\n`);
+    return;
   }
 
   const repo = readRepoConfig(opts.cwd);
@@ -886,6 +1065,7 @@ export function check(opts: CheckOptions): void {
           : "staged";
 
   if (!hasDenySet && egress.length === 0) {
+    recordRun("allow");
     if (opts.json) {
       emitJson({
         hits: [],
@@ -1274,5 +1454,11 @@ export function check(opts: CheckOptions): void {
     }
   }
 
-  if ((totalHits > 0 || egress.length > 0) && !advisory) process.exit(EXIT_HIT);
+  if ((totalHits > 0 || egress.length > 0) && !advisory) {
+    // The hit text above already went out; the trailer follows it on stderr, after the write attempt.
+    const written = recordRun("refuse", totalHits > 0 ? "MARKER_HIT" : "REGISTRY_EGRESS_HIT").written;
+    if (runDecision !== null) process.stderr.write(`repo-aegis: ${logTrailer(written)}\n`);
+    process.exit(EXIT_HIT);
+  }
+  recordRun("allow");
 }

@@ -21,17 +21,18 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
   appendAuditRecord,
+  approvalSource,
   decideEgress,
+  findPromptApprovalDefault,
   recordWorkingTree,
   describeDestinationForReceipt,
   describeVerb,
   egressParseOptions,
   formatReceipt,
   isPrintableDestination,
-  loadRegistry,
+  loadRegistryState,
   parseEgressIntents,
   parseRemoteUrl,
-  RegistryNotFoundError,
   resolveDestinationOffline,
   ruleHStatus,
   SHAPE_RULE_CODES,
@@ -39,7 +40,9 @@ import {
   type EgressIntent,
   type Registry,
   type RegistryState,
+  withLogTrailer,
 } from "@de-otio/repo-aegis-core";
+import { recordDecision, verbWords } from "../decision.js";
 import { emitJson, type OutputOptions } from "../format.js";
 import { currentHumanPresent } from "../human-presence.js";
 
@@ -79,20 +82,19 @@ const EMPTY_REGISTRY: Registry = { engagements: [], alwaysBlock: [] };
  * are different for rule h (issue #151, decision D4):
  *
  *   - no registry file → `missing`: rule h is skipped (fails open);
- *   - encrypted, or a file that does not parse or validate → `unreadable`:
- *     rule h refuses any egress that has a destination, because no owner can
- *     be confirmed. Only {@link RegistryNotFoundError} is "missing"; any
- *     other error, including an unknown one, is `unreadable` (fail closed).
+ *   - only a ciphertext → `encrypted`: runs as if there were no registry
+ *     (rule h is skipped);
+ *   - a file that does not parse or validate (`unparseable`), or was written by
+ *     a newer repo-aegis (`newer-schema`): rule h refuses any egress that has a
+ *     destination, because no owner can be confirmed. The shim has no prompt,
+ *     so it denies rather than asks. Anything this code does not recognise is
+ *     `unparseable` (fail closed).
  */
 function loadRegistryOrEmpty(): { registry: Registry; registryState: RegistryState } {
-  try {
-    return { registry: loadRegistry(), registryState: "loaded" };
-  } catch (err) {
-    return {
-      registry: EMPTY_REGISTRY,
-      registryState: err instanceof RegistryNotFoundError ? "missing" : "unreadable",
-    };
-  }
+  const load = loadRegistryState();
+  return load.state === "loaded"
+    ? { registry: load.registry, registryState: "loaded" }
+    : { registry: EMPTY_REGISTRY, registryState: load.state };
 }
 
 /** Public shape of an allow verdict's destination. Never more than this. */
@@ -142,7 +144,7 @@ export type AllowVerdict = Record<string, unknown> & {
 /** The outcome of the egress decision, before anyone exits or prints a verdict. */
 export type EgressEvaluation =
   /** A policy refusal: `stderrLine` is the structured JSON line, exit status 2. */
-  | { kind: "deny"; stderrLine: string }
+  | { kind: "deny"; stderrLine: string; log: { code: string; verb: string; destination?: { org: string; repo: string } } }
   /** A fault in the guard itself: exit status 1 for `egress-check`, warn-and-proceed for the shim. */
   | { kind: "fault"; message: string }
   | { kind: "allow"; verdict: AllowVerdict; intents: EgressIntent[] };
@@ -180,6 +182,9 @@ export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
       humanPresent,
       // A shell has no prompt to offer, so `ask` degrades to `deny` in core.
       capabilities: { ask: false },
+      // The shim is a layer BELOW the agent's permission prompt: a person's yes there, written by the hook for
+      // exactly this command, may stand in for a person here (the hook itself never reads it: F1).
+      findPromptApproval: findPromptApprovalDefault,
     });
   } catch (err) {
     return { kind: "fault", message: `egress policy failed: ${(err as Error).message}` };
@@ -189,6 +194,11 @@ export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
     const shown = decision.destination && destinationJson(decision.destination);
     return {
       kind: "deny",
+      log: {
+        code: decision.code,
+        verb: verbWords(decision.intent.verb),
+        ...(decision.destination !== undefined && decision.destination.unresolved === undefined && { destination: { org: decision.destination.org, repo: decision.destination.repo } }),
+      },
       stderrLine:
         JSON.stringify({
           code: decision.code,
@@ -224,6 +234,7 @@ export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
         cwd,
         details: {
           id: decision.approval.id,
+          source: approvalSource(decision.approval),
           layer: "gh shim",
           ...(decision.intent && { verb: describeVerb(decision.intent.verb) }),
           ...(decision.destination && { destination: `${decision.destination.org}/${decision.destination.repo}` }),
@@ -269,12 +280,36 @@ export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
   };
 }
 
+/**
+ * The structured refusal line of a `deny` evaluation, after its decision record was written (P1-I): `error` ends with
+ * `(logged: repo-aegis log --last 1)` or `(not logged)`. The record is made first, so the trailer is true; the refusal
+ * is the same whatever the write did. `home` pins the log for the `gh` shim.
+ */
+export function recordedDenyLine(ev: Extract<EgressEvaluation, { kind: "deny" }>, home?: string): string {
+  const written = recordDecision({
+    layer: "shim",
+    outcome: "refuse",
+    host: "unknown",
+    code: ev.log.code,
+    verb: ev.log.verb,
+    ...(ev.log.destination !== undefined && { destination: ev.log.destination }),
+    ...(home !== undefined && { home }),
+  }).written;
+  try {
+    const parsed = JSON.parse(ev.stderrLine) as { error?: unknown };
+    if (typeof parsed.error !== "string") return ev.stderrLine;
+    return JSON.stringify({ ...parsed, error: withLogTrailer(parsed.error, written) }) + "\n";
+  } catch {
+    return ev.stderrLine;
+  }
+}
+
 export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   const cwd = opts.cwd ?? process.cwd();
   const result = evaluateEgress(args, cwd);
   if (result.kind === "fault") return internalError(result.message);
   if (result.kind === "deny") {
-    process.stderr.write(result.stderrLine);
+    process.stderr.write(recordedDenyLine(result));
     process.exit(2);
   }
   emitJson(result.verdict);

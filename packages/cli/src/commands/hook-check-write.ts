@@ -3,14 +3,22 @@
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import {
+  APPROVALS_FILE,
   isGhConfigFile,
-  loadRegistry,
-  RegistryEncryptedError,
-  RegistryNotFoundError,
+  loadRegistryState,
   OVERRIDE_FILENAME,
+  PAUSE_FILE,
+  pauseNotice,
+  REFUSAL_GUIDE,
+  refusalTrailer,
+  withLogTrailer,
+  withRefusalTrailer,
   type Registry,
 } from "@de-otio/repo-aegis-core";
-import { decideHookAction, type HookDecision } from "./hook-policy.js";
+import { recordDecision, registryStateFact } from "../decision.js";
+import { pauseCoveringWorkingRepo, pausedRepoLabel, recordPausedAllow } from "../pause-scope.js";
+import { protectedStateFile } from "../state-file-guard.js";
+import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import {
   parseHookWriteFields,
   readHookStdin,
@@ -38,7 +46,39 @@ import {
 //                    stderr is surfaced to the user as a warning.
 const EXIT_BLOCK = 2;
 
+/** X-10: a payload whose `code` is in the shared refusal table gets the table's version/next-step/person-only trailer. */
+function withGuideTrailer(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  const v = value as { code?: unknown; error?: unknown };
+  if (typeof v.code !== "string" || typeof v.error !== "string") return value;
+  if (!Object.prototype.hasOwnProperty.call(REFUSAL_GUIDE, v.code)) return value;
+  return { ...value, error: withRefusalTrailer(v.code, v.error) };
+}
+
+/**
+ * The registry state of this run, for the decision record's facts (P1-I). Module state: set once by the registry load
+ * below, read by `emitJsonAndExit` when a refusal is recorded. One process makes one decision.
+ */
+let registryFact: ReturnType<typeof registryStateFact> | undefined;
+
 function emitJsonAndExit(value: unknown, exitCode: number): never {
+  // X-10's guide trailer first, so P1-I's `(logged: …)` below stays last.
+  value = withGuideTrailer(value);
+  if (exitCode !== 0 && value !== null && typeof value === "object") {
+    // P1-I: every refusal of this hook is recorded (one record, written first), and its text ends with the trailer for
+    // what the write did. Never the path: the record names the code and the layer only.
+    const v = value as { code?: unknown; error?: unknown };
+    const code = typeof v.code === "string" ? v.code : "CHECK_WRITE_REFUSED";
+    const written = recordDecision({
+      layer: "check-write",
+      outcome: "refuse",
+      host: "claude-code",
+      code,
+      verb: "write",
+      ...(registryFact !== undefined && { facts: { registryState: registryFact } }),
+    }).written;
+    if (typeof v.error === "string") value = { ...value, error: withLogTrailer(v.error, written) };
+  }
   // Claude Code forwards STDERR (not stdout) to the model when a
   // PreToolUse hook exits non-zero. Emitting the diagnostic on stdout —
   // as this hook originally did — meant a blocked write reached the
@@ -138,36 +178,96 @@ export async function hookCheckWrite(): Promise<void> {
           `agent write to ${basename(filePath)} in gh's config directory refused: it controls which account, pager, ` +
           `editor and aliases gh uses, so changing it could redirect the credential repo-aegis injects. No approval ` +
           `covers this. Tell your human what you need changed; a person edits it, or runs \`gh config set\` or ` +
-          `\`gh auth\`, from their own terminal. [GH_CONFIG_WRITE_REFUSED; details: repo-aegis explain GH_CONFIG_WRITE_REFUSED]`,
+          `\`gh auth\`, from their own terminal.`,
         details: { filePath },
       },
       EXIT_BLOCK,
     );
   }
 
-  let registry: Registry;
-  try {
-    registry = loadRegistry();
-  } catch (err) {
-    if (err instanceof RegistryNotFoundError) {
-      registry = { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
-    } else if (err instanceof RegistryEncryptedError) {
-      emitJsonAndExit({ code: err.code, error: err.message }, EXIT_BLOCK);
-    } else {
-      // Block, never exit 1: Claude Code treats exit 1 as non-blocking, so an unreadable registry (a schemaVersion
-      // this build cannot read, a typo) would switch the cross-org write check off. The message is fixed text:
-      // the parse error names orgs and engagement ids, which must not reach an agent's transcript.
-      emitJsonAndExit(
-        {
-          code: "REGISTRY_ERROR",
-          error:
-            "the registry cannot be read, so the cross-org write check cannot run and the write is refused. " +
-            "Run `repo-aegis status` (or `repo-aegis doctor`) in a terminal to see why.",
-        },
-        EXIT_BLOCK,
-      );
-    }
+  // The person-only state files (P1-E): the emergency pause, and the egress approvals. An agent that could write the
+  // pause would switch repo-aegis off for itself; one that could write an approval would approve its own publish.
+  // Refused wherever the file is spelled (any letter case, through a symlinked directory or file), paused or not, and
+  // (like the two refusals above) before any pause is honoured. `install claude-md` also denies the literal
+  // `Edit(<home>/pause.json)` and `Edit(<home>/egress-approvals.json)`, which reaches the agent's own shell too.
+  const state = protectedStateFile(filePath, cwd ?? process.cwd());
+  if (state === "pause") {
+    emitJsonAndExit(
+      {
+        code: "PAUSE_FILE_WRITE_REFUSED",
+        error:
+          `agent write to ${PAUSE_FILE} refused: that file is the emergency pause, which only a person may set ` +
+          `(\`repo-aegis pause\`, from their own terminal). No approval covers this. Tell your human what is wrong ` +
+          `and let them decide.`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
   }
+  if (state === "approvals") {
+    emitJsonAndExit(
+      {
+        code: "APPROVALS_FILE_WRITE_REFUSED",
+        error:
+          `agent write to ${APPROVALS_FILE} refused: that file holds the human egress approvals, which only a person ` +
+          `mints (\`repo-aegis approve\`, from their own terminal), so an agent that wrote one would be approving its ` +
+          `own publish. No approval covers this. Tell your human what you need.`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
+  }
+
+  if (state === "decision-log") {
+    emitJsonAndExit(
+      {
+        code: "DECISION_LOG_STATE_WRITE_REFUSED",
+        error:
+          `agent write to the decision log refused (${basename(filePath)}): that is the log's on/off switch or the log itself, and the log is ` +
+          `what you read to see why you were refused (\`repo-aegis log --last 1\`). Only a person switches it off ` +
+          `(\`repo-aegis log --off\`, from their own terminal); you may switch it back on with \`repo-aegis log --on\`. ` +
+          `No approval covers this. ${refusalTrailer("DECISION_LOG_STATE_WRITE_REFUSED")}`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
+  }
+
+  // P1-E: a pause scoped to this session's repository allows the write, cross-org check included (for that repository
+  // only). A machine-wide pause does NOT touch this hook: the cross-org write check stays on, and the notice says so.
+  // Detection is not paused: `scan-after-write` still reports a marker hit, as advice.
+  const paused = pauseCoveringWorkingRepo(cwd ?? process.cwd());
+  if (paused !== null && paused.repo !== undefined) {
+    recordPausedAllow("check-write", { verb: "write", destination: pausedRepoLabel(paused.repo), pause: paused });
+    process.stdout.write(JSON.stringify({ systemMessage: pauseNotice(paused) }) + "\n");
+    process.exit(0);
+  }
+
+  // Missing and encrypted both run as if there were no registry (an encrypted one has no plaintext to read, and
+  // encryption at rest is deprecated). Block, never exit 1, for a registry that exists but cannot be read: Claude Code
+  // treats exit 1 as non-blocking, so a schemaVersion this build cannot read, or a typo, would switch the cross-org
+  // write check off. The messages are fixed text: the parse error names orgs and engagement ids, which must not reach
+  // an agent's transcript.
+  const load = loadRegistryState();
+  registryFact = registryStateFact(load.state);
+  if (load.state === "newer-schema") {
+    emitJsonAndExit({ code: "REGISTRY_ERROR", error: NEWER_SCHEMA_ERROR }, EXIT_BLOCK);
+  }
+  if (load.state === "unparseable") {
+    emitJsonAndExit(
+      {
+        code: "REGISTRY_ERROR",
+        error:
+          "the registry cannot be read, so the cross-org write check cannot run and the write is refused. " +
+          "Run `repo-aegis status` (or `repo-aegis doctor`) in a terminal to see why.",
+      },
+      EXIT_BLOCK,
+    );
+  }
+  const registry: Registry =
+    load.state === "loaded"
+      ? load.registry
+      : { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 };
 
   const decision: HookDecision = decideHookAction({
     filePath,
@@ -179,6 +279,8 @@ export async function hookCheckWrite(): Promise<void> {
   });
 
   if (decision.action !== "refuse") {
+    // Claude Code drops stderr on exit 0, so the person only sees the notice as the JSON `systemMessage`.
+    if (load.state === "encrypted") process.stdout.write(JSON.stringify({ systemMessage: ENCRYPTED_REGISTRY_NOTICE }) + "\n");
     process.exit(0);
   }
 
@@ -188,7 +290,12 @@ export async function hookCheckWrite(): Promise<void> {
       error:
         `cross-org write refused: file ${filePath} lives in a working tree ` +
         `whose trust boundary (${decision.destOrgs.join(", ") || "unknown"}) ` +
-        `does not overlap the launcher's (${decision.srcOrgs.join(", ") || "unknown"})`,
+        `does not overlap the launcher's (${decision.srcOrgs.join(", ") || "unknown"})` +
+        // Here only a machine-wide pause can be in force (a scoped one that covers this repository returned above).
+        (paused !== null
+          ? ". A machine-wide pause is active and does not lift cross-org checks; a person can lift them for one " +
+            "repository with `repo-aegis pause --repo <owner>/<repo>`, from their own terminal"
+          : ""),
       details: {
         srcOrgs: decision.srcOrgs,
         destOrgs: decision.destOrgs,

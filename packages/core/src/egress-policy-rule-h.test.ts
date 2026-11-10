@@ -252,56 +252,101 @@ describe("rule h — unregistered owner", () => {
       assert.equal(d.action === "deny" && d.code, "UNREGISTERED_OWNER_EGRESS");
     });
 
-    it("unreadable: refused even for an owner the unreadable file would have listed", () => {
-      // The callers fall back to an empty registry on an unreadable file …
-      const empty = decideH("gh issue create --body x", "acme", "repo", {
-        registryState: "unreadable",
-        registry: EMPTY,
-        resolveDestination: () => dest(),
-      });
-      assert.equal(empty.d.action === "deny" && empty.d.code, "UNREGISTERED_OWNER_EGRESS");
-      // … and a registry object that lists the owner cannot override the state.
-      const listed = decideH("gh issue create --body x", "acme", "repo", {
-        registryState: "unreadable",
-        resolveDestination: () => dest(),
-      });
-      assert.equal(listed.d.action === "deny" && listed.d.code, "UNREGISTERED_OWNER_EGRESS");
-      assert.equal(listed.spy.approvalCalls, 0);
-    });
+    const NO_ASK = { capabilities: { ask: false } } as const;
 
-    it("unreadable: says the registry could not be read and how to fix it (decrypt or repair); a person's step, no registry contents", () => {
+    for (const state of ["unparseable", "newer-schema"] as const) {
+      it(`${state}: without an ask, refused even for an owner the unreadable file would have listed`, () => {
+        // The callers fall back to an empty registry on an unreadable file ...
+        const empty = decideH("gh issue create --body x", "acme", "repo", {
+          registryState: state,
+          registry: EMPTY,
+          resolveDestination: () => dest(),
+          ...NO_ASK,
+        });
+        assert.equal(empty.d.action === "deny" && empty.d.code, "UNREGISTERED_OWNER_EGRESS");
+        // ... and a registry object that lists the owner cannot override the state.
+        const listed = decideH("gh issue create --body x", "acme", "repo", {
+          registryState: state,
+          resolveDestination: () => dest(),
+          ...NO_ASK,
+        });
+        assert.equal(listed.d.action === "deny" && listed.d.code, "UNREGISTERED_OWNER_EGRESS");
+        assert.equal(listed.spy.approvalCalls, 0);
+      });
+
+      it(`${state}: with an ask, asks (UNREGISTERED_OWNER_EGRESS) and the approval line says a yes runs one command only`, () => {
+        const { d, spy } = decideH("git push git@github.com:acme/repo.git main", "acme", "repo", {
+          registryState: state,
+          resolveDestination: () => dest(),
+        });
+        assert.ok(d.action === "ask", JSON.stringify(d));
+        assert.equal(d.code, "UNREGISTERED_OWNER_EGRESS");
+        assert.match(d.reason, /A person's yes at this prompt lets this one command run/);
+        assert.match(d.reason, /a push is still refused by the pre-push hook until the registry can be read/);
+        assert.equal(spy.approvalCalls, 0, "no approval is consulted");
+      });
+
+      it(`${state}: the reason never says "encrypted" and has the right why and fix`, () => {
+        for (const ask of [true, false]) {
+          const { d } = decideH("gh issue create --body x", "acme", "repo", {
+            registryState: state,
+            resolveDestination: () => dest(),
+            capabilities: { ask },
+          });
+          assert.ok(d.action === (ask ? "ask" : "deny"));
+          assert.ok(!/encrypt/i.test(d.reason), d.reason);
+          if (state === "unparseable") {
+            assert.match(d.reason, /does not parse or validate/);
+            assert.match(d.reason, /A person repairs /);
+            assert.match(d.reason, /repo-aegis status/);
+          } else {
+            assert.match(d.reason, /written by a newer repo-aegis than the one running this check/);
+            assert.match(d.reason, /A person upgrades repo-aegis, then runs `repo-aegis install hooks` and `repo-aegis install claude-md`/);
+          }
+          assert.ok(!d.reason.includes("customer-a-org"), "registry contents must not leak");
+          if (!ask) assert.match(d.reason, /No approval covers this/);
+        }
+      });
+    }
+
+    it("unparseable, ask host but the gh shim is not first on PATH: a gh verb is denied, not asked", () => {
       const { d } = decideH("gh issue create --body x", "acme", "repo", {
-        registryState: "unreadable",
+        registryState: "unparseable",
         resolveDestination: () => dest(),
+        capabilities: { ask: true, ghShimOnPath: false },
       });
-      assert.ok(d.action === "deny");
-      assert.match(d.reason, /could not be read/);
-      assert.match(d.reason, /encrypted/);
-      assert.match(d.reason, /repo-aegis registry decrypt --identity/);
-      assert.match(d.reason, /repair/);
-      assert.match(d.reason, /No approval covers this/);
-      assert.match(d.reason, /a person runs, from a terminal/);
-      assert.ok(!d.reason.includes("customer-a-org"), "registry contents must not leak");
+      assert.equal(d.action, "deny");
     });
 
-    it("unreadable: an unresolved destination is refused too; a person passes", () => {
+    it("encrypted: an unregistered destination is NOT refused by rule h (runs as if there were no registry)", () => {
+      const { d } = decideH("gh issue create --body x", "stranger", "repo", {
+        registryState: "encrypted",
+        registry: EMPTY,
+        ...NO_ASK,
+      });
+      assert.notEqual(d.action === "deny" && d.code, "UNREGISTERED_OWNER_EGRESS");
+      assert.ok(!(d.action !== "allow" && d.reason.includes("encrypted")), "no encrypted wording in a refusal");
+    });
+
+    it("unparseable: an unresolved destination is refused too (no ask host); a person passes", () => {
       const unresolved = dest({ org: "*", repo: "*", unresolved: "graphql-mutation", publicFacing: true, classKnown: false });
       const refused = decideH("gh api graphql -f query=x", "*", "*", {
-        registryState: "unreadable",
+        registryState: "unparseable",
         resolveDestination: () => unresolved,
+        ...NO_ASK,
       });
       assert.equal(refused.d.action === "deny" && refused.d.code, "UNREGISTERED_OWNER_EGRESS");
       const person = decideH("gh api graphql -f query=x", "*", "*", {
-        registryState: "unreadable",
+        registryState: "unparseable",
         resolveDestination: () => unresolved,
         humanPresent: true,
       });
       assert.equal(person.d.action, "allow");
     });
 
-    it("unreadable: a command with no destination (npm publish) is not rule h's business", () => {
+    it("unparseable: a command with no destination (npm publish) is not rule h's business", () => {
       const { d } = decideH("npm publish", "stranger", "repo", {
-        registryState: "unreadable",
+        registryState: "unparseable",
         resolveDestination: () => null,
         findApproval: () => null,
       });
@@ -309,16 +354,16 @@ describe("rule h — unregistered owner", () => {
       assert.equal(d.action, "ask"); // rule g, as today
     });
 
-    it("unreadable: a person passes", () => {
+    it("unparseable: a person passes", () => {
       const { d } = decideH("gh issue create --body x", "stranger", "repo", {
-        registryState: "unreadable",
+        registryState: "unparseable",
         humanPresent: true,
       });
       assert.equal(d.action, "allow");
     });
 
-    it("unreadable: the shape rules still win by order", () => {
-      const { d } = decideH("git push", "stranger", "repo", { registryState: "unreadable" });
+    it("unparseable: the shape rules still win by order", () => {
+      const { d } = decideH("git push", "stranger", "repo", { registryState: "unparseable" });
       assert.equal(d.action === "deny" && d.code, "PUSH_IMPLICIT_TARGET");
     });
   });
@@ -631,10 +676,11 @@ describe("rule h — refusal messages (§3.9, §5.4)", () => {
 
   it("unreadable registry: names the destination owner only, and says how to repair", () => {
     const reason = refuse("gh issue create --body x", dest({ org: "stranger", repo: "repo" }), {
-      registryState: "unreadable",
+      registryState: "unparseable",
+      capabilities: { ask: false },
     });
     assert.ok(reason.startsWith("gh issue create → stranger/repo: refused."), reason);
-    assert.match(reason, /could not be read/);
+    assert.match(reason, /does not parse or validate/);
     assert.match(reason, /\[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS\]$/);
     for (const bad of FORBIDDEN) assert.ok(!reason.includes(bad), bad);
   });

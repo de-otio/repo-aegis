@@ -20,6 +20,46 @@ const APP_MAPPED = parseRegistryText(
 const root = mkdtempSync(join(tmpdir(), "ra-taaad-checks-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 
+const NO_APP = parseRegistryText(
+  "schemaVersion: 3\n" +
+    "identities:\n  me: { kind: gh-login, login: alice }\n" +
+    "personalOrgs:\n  - { name: example-org, person: me }\n" +
+    "engagements: []\n",
+);
+
+describe("taaadChecks condition (X-9)", () => {
+  it("reports nothing when no owner maps an App as its agent identity, pinned taaad or not", () => {
+    const empty = join(root, "cond-no-pin");
+    mkdirSync(empty, { recursive: true });
+    assert.deepEqual(taaadChecks(NO_APP, empty), []);
+    assert.deepEqual(taaadChecks(parseRegistryText("schemaVersion: 3\npersonalOrgs:\n  - example-org\nengagements: []\n"), empty), []);
+  });
+
+  it("a pinned taaad that is not root-owned is not reported either when no owner maps an App (it used to warn)", () => {
+    const home = join(root, "cond-pinned-no-app");
+    const venv = join(root, "cond-venv");
+    mkdirSync(join(home, "bin"), { recursive: true });
+    mkdirSync(join(venv, "bin"), { recursive: true });
+    const launcher = join(venv, "bin", "taaad");
+    const interp = join(venv, "bin", "python3");
+    writeFileSync(launcher, "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(interp, "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(
+      join(home, "bin", "gh"),
+      `#!/bin/sh\n${SHIM_HEADER_LINE}\n__ra_taaad='${launcher}'\n__ra_taaad_interp='${interp}'\n__ra_taaad_pkg='${venv}'\n`,
+      { mode: 0o755 },
+    );
+    assert.deepEqual(taaadChecks(NO_APP, home), []);
+    assert.equal(taaadChecks(APP_MAPPED, home)[0]?.severity, "warn", "with an App agent the same pin is a warning");
+  });
+
+  it("reports as soon as one owner maps an App in the agent column", () => {
+    const empty = join(root, "cond-app");
+    mkdirSync(empty, { recursive: true });
+    assert.equal(taaadChecks(APP_MAPPED, empty).length, 1);
+  });
+});
+
 describe("taaadChecks fix text", () => {
   it("no taaad pinned with an App mapped: a failure whose fix is to install taaad, not root ownership", () => {
     const home = join(root, "no-pin");
