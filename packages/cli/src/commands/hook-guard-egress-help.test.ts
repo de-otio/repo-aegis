@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Command } from "commander";
-import { HUMAN_VERB_PATHS, type HumanOnlyKind } from "@de-otio/repo-aegis-core";
+import { findHumanOnlyCommand, HUMAN_VERB_PATHS, type HumanOnlyKind } from "@de-otio/repo-aegis-core";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { scrubGitEnv } from "../_test-utils.js";
 import { buildProgram } from "../program.js";
@@ -164,6 +164,47 @@ describe("hook guard-egress: --help on a person-only verb is allowed", { skip: !
     }
   });
 
+  it("`--help` that is not a whole argument is not help: Commander runs the action for each of these", () => {
+    for (const command of [
+      "repo-aegis approve >--help",
+      "repo-aegis approve >-h",
+      "repo-aegis approve <<<--help",
+      "repo-aegis approve <<--help\n-help",
+      "repo-aegis approve ' --help'",
+      "repo-aegis approve 'gh --help'",
+      "repo-aegis approve gh,--help",
+      "repo-aegis approve gh=--help",
+      "repo-aegis approve '!--help'",
+      "repo-aegis approve '[--help]'",
+      "repo-aegis approve '{--help}'",
+      "repo-aegis approve gh\f--help",
+      "repo-aegis identity remove gh >--help",
+      "repo-aegis identity remove >--help 7",
+      "repo-aegis gh >--help",
+      "$(which repo-aegis) approve >--help",
+      "bash -c 'repo-aegis approve >--help'",
+      "script -q /dev/null repo-aegis identity remove install >--help",
+      "script -q /dev/null repo-aegis approve >--help",
+      "alias ra=repo-aegis; bash -c 'ra approve acme/svc'",
+    ]) {
+      assertRefusedAsHumanCommand(command);
+    }
+  });
+
+  it("whole redirections around a help request are allowed, and `<group> help <sub>` and global boolean flags too", () => {
+    for (const command of [
+      "repo-aegis approve --help > /tmp/help.txt",
+      "repo-aegis approve --help 2>/dev/null",
+      "repo-aegis approve --help </dev/null",
+      "repo-aegis approve --help 2>&1",
+      "repo-aegis identity help add",
+      "repo-aegis --json approve --help",
+      "repo-aegis --no-color identity add --help",
+    ]) {
+      assertAllowed(command);
+    }
+  });
+
   it("--help on a managed-settings write is not a help read (it is not a repo-aegis verb)", () => {
     assert.equal(runGuard("sudo ls /etc/claude-code/managed-settings.d --help").code, 2);
   });
@@ -189,6 +230,30 @@ describe("hook guard-egress: --help on every command is allowed", { skip: !cliBu
       if (r.code !== 0) refused.push(`${command}\n  exit ${r.code}: ${r.stderr.split("\n")[0]}`);
     }
     assert.deepEqual(refused, []);
+  });
+
+  it("the same walk with `-h`, and with `repo-aegis help <command>`, refuses none (the guard's own matcher, in process)", async () => {
+    const refused: string[] = [];
+    for (const path of commandPaths(await buildProgram())) {
+      for (const command of [`repo-aegis ${path.join(" ")} -h`, `repo-aegis help ${path.join(" ")}`]) {
+        if (findHumanOnlyCommand(command) !== null) refused.push(command);
+      }
+    }
+    assert.deepEqual(refused, []);
+  });
+
+  it("the premise: Commander prints help and runs no action for `<verb> --help` and `<group> help <sub>` of every person-only verb", () => {
+    const env: NodeJS.ProcessEnv = { ...process.env, REPO_AEGIS_HOME: home };
+    for (const paths of Object.values(HUMAN_VERB_PATHS)) {
+      for (const path of paths) {
+        const forms = [[...path, "--help"], ...(path.length > 1 ? [[path[0]!, "help", ...path.slice(1)]] : [])];
+        for (const args of forms) {
+          const r = spawnSync(process.execPath, [cliPath, ...args], { cwd: tmp, env, encoding: "utf8" });
+          assert.equal(r.status, 0, `${args.join(" ")}\n${r.stderr}`);
+          assert.match(r.stdout, /^Usage: /, args.join(" "));
+        }
+      }
+    }
   });
 
   it("every verb in the human-commands table is a real command in the tree", async () => {

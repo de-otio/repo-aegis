@@ -56,9 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `identity add --help`, `engagements add --help`, `upstreams add --help`, `uninstall --help`,
   `install claude-md --help` and `repo-aegis help <verb>` no longer end in `AGENT_RAN_HUMAN_COMMAND`: the
   call changes nothing, and an agent that cannot read the help guesses flags. The exemption needs
-  `--help` / `-h` (or `help <verb>`) to be the **only** arguments; `approve x/y --help`, `approve --help x/y`
-  and `approve --help && approve x/y` are still refused. Read from the same quote-stripped words as the
-  refusal, not from the raw text.
+  `--help` / `-h` (or `help <verb>`, `<group> help <sub>`) to be the **only** arguments; `approve x/y --help`,
+  `approve --help x/y` and `approve --help && approve x/y` are still refused. The guard reads quote-stripped
+  shell tokens: each must be exactly a verb word, exactly `--help` / `-h`, `--json` / `--no-color`, or a whole
+  redirection (`2>&1`, `> file`, `< file`), and a redirection's target never counts as help. So `approve >--help`,
+  `approve ' --help'` and `approve gh,--help`, which Commander does not read as help, stay refused.
 
 - **Breaking-ish: Node.js 20 is no longer tested or documented as supported.** CI tests Node 22 and
   24, and the README and `doc/agent-install.md` now say Node.js 22 or later. No `package.json` has an

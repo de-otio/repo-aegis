@@ -1545,7 +1545,10 @@ Before the egress parse, and for **any** Bash command, the hook also refuses
 for help is not running it: with `--help` / `-h` as the only arguments (`approve --help`,
 `identity add --help`), or as `repo-aegis help <verb>`, the command is allowed, so an agent can
 read the flags to tell its person. Any other word next to `--help` (`approve x/y --help`) or in
-another segment of the same line (`approve --help && approve x/y`) keeps the refusal. The hook also refuses a
+another segment of the same line (`approve --help && approve x/y`) keeps the refusal. The help
+request is read as whole shell words: `--help` / `-h`, `--json`, `--no-color`, the verb's own words, and whole
+redirections (`2>&1`, `> file`, `< file`) are accepted, and `<group> help <sub>` (`identity help add`) too;
+`approve >--help` or `approve ' --help'` is not help to Commander and stays refused. The hook also refuses a
 command that starts a detached session: `tmux new -d`, `tmux new-window` /
 `send-keys`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`
 (`AGENT_DETACHED_SESSION`). These are text-level speed bumps: a program word

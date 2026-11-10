@@ -143,30 +143,39 @@ describe("repo-aegis docs", { skip: !cliBuilt() }, () => {
   });
 });
 
-describe("links inside the shipped agent guide resolve inside dist/docs", () => {
-  const guidePath = join(distDocs, "agent-guide.md");
-  const guide = existsSync(guidePath) ? readFileSync(guidePath, "utf8") : "";
-  // Links outside code fences; skip URLs and bare anchors.
-  const text = guide.replace(/^\s*(```|~~~)[\s\S]*?^\s*\1/gm, "");
-  const links = [...text.matchAll(/\]\(([^)\s]+)\)/g)].map(m => m[1]!).filter(l => !/^[a-z][a-z0-9+.-]*:/i.test(l));
+/** Relative (non-URL, non-bare-anchor) links of a markdown text, outside code fences and inline code. */
+function relativeLinks(md: string): string[] {
+  const text = md.replace(/^\s*(```|~~~)[\s\S]*?^\s*\1/gm, "").replace(/`[^`\n]*`/g, "");
+  return [...text.matchAll(/\]\(([^)\s]+)\)/g)].map(m => m[1]!).filter(l => !/^[a-z][a-z0-9+.-]*:/i.test(l));
+}
 
-  it("the guide has relative links to check (so this test cannot pass on nothing)", () => {
+describe("links inside every shipped doc resolve inside dist/docs (or point at GitHub)", () => {
+  it("the agent guide has relative links to check (so this test cannot pass on nothing)", () => {
+    const links = relativeLinks(readFileSync(join(distDocs, "agent-guide.md"), "utf8"));
     assert.ok(links.some(l => l.startsWith("#")), "no in-page anchors found");
     assert.ok(links.some(l => !l.startsWith("#")), "no file links found");
   });
 
-  for (const link of new Set(links)) {
-    it(`${link}`, () => {
-      const [file, anchor] = link.split("#") as [string, string | undefined];
-      const target = file === "" ? guidePath : resolve(dirname(guidePath), file);
-      assert.ok(!relative(distDocs, target).startsWith(".." + sep) && relative(distDocs, target) !== "..", `${link} leaves dist/docs`);
-      assert.ok(existsSync(target), `${link} does not exist in dist/docs`);
-      if (anchor !== undefined && anchor !== "" && target.endsWith(".md")) {
-        const body = readFileSync(target, "utf8");
-        const slugs = new Set(sections(body).map(s => s.slug));
-        const ids = new Set([...body.matchAll(/<a id="([^"]+)"/g)].map(m => m[1]!.toLowerCase()));
-        assert.ok(slugs.has(anchor) || ids.has(anchor), `${link}: no heading or anchor "${anchor}" in ${relative(distDocs, target)}`);
-      }
-    });
+  it("a link to a file the package does not carry became an absolute GitHub link", () => {
+    assert.match(readFileSync(join(distDocs, "cli-reference.md"), "utf8"), /\]\(https:\/\/github\.com\/de-otio\/repo-aegis\/blob\/main\/packages\/cli\/src\/program\.test\.ts\)/);
+  });
+
+  for (const t of TOPICS) {
+    const docPath = join(distDocs, ...t.file.split("/"));
+    const doc = existsSync(docPath) ? readFileSync(docPath, "utf8") : "";
+    for (const link of new Set(relativeLinks(doc))) {
+      it(`${t.file}: ${link}`, () => {
+        const [file, anchor] = link.split("#") as [string, string | undefined];
+        const target = file === "" ? docPath : resolve(dirname(docPath), file);
+        assert.ok(!relative(distDocs, target).startsWith(".." + sep) && relative(distDocs, target) !== "..", `${link} leaves dist/docs`);
+        assert.ok(existsSync(target), `${link} does not exist in dist/docs`);
+        if (anchor !== undefined && anchor !== "" && target.endsWith(".md")) {
+          const body = readFileSync(target, "utf8");
+          const slugs = new Set(sections(body).map(s => s.slug));
+          const ids = new Set([...body.matchAll(/<a id="([^"]+)"/g)].map(m => m[1]!.toLowerCase()));
+          assert.ok(slugs.has(anchor) || ids.has(anchor), `${link}: no heading or anchor "${anchor}" in ${relative(distDocs, target)}`);
+        }
+      });
+    }
   }
 });

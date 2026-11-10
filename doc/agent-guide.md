@@ -1022,10 +1022,12 @@ is "ours" is a compliance decision the user owns.
 
 When repo-aegis blocks your person, you are the first one they ask. Do not guess flags or paraphrase from memory:
 
-1. **Run `--help`.** `repo-aegis <command> --help` and `repo-aegis help <command>` are read-only and are allowed for
-   every command, including the ones only a person may run (`approve`, `identity`, `engagements add --personal-org`,
-   `upstreams add`, `uninstall`, `install claude-md --uninstall`). Only `--help` / `-h` may be the arguments: add a
-   target or any other flag and the command text is refused (`AGENT_RAN_HUMAN_COMMAND`).
+1. **Run `--help`.** `repo-aegis <command> --help` and `repo-aegis help <command>` only read, and the guard lets them
+   through for the commands only a person may run too (`approve --help`, `identity add --help`,
+   `engagements add --help`, `upstreams add --help`, `install claude-md --help`, `uninstall --help`,
+   `identity help add`). The arguments must be exactly `--help` / `-h` (a whole word, so not `>--help` or `' --help'`),
+   optionally with `--json` / `--no-color` and whole redirections such as `2>&1` or `> file`. Add a target or any
+   other flag and the command text is refused (`AGENT_RAN_HUMAN_COMMAND`).
 2. **Read the docs that ship with the package.** `repo-aegis docs` lists them (`readme`, `cli-reference`,
    `configuration`, `agent-guide`, `agent-sandbox`, `agent-install`, `egress-guard`, `changelog`);
    `repo-aegis docs cli-reference` prints one, and `repo-aegis docs cli-reference --path` prints its file path so you can

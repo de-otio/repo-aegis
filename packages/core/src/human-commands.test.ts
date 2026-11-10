@@ -472,6 +472,20 @@ describe("findHumanOnlyCommand: --help alone reads help, so an agent may run it 
     "bash -c 'repo-aegis approve --help'",
     "repo-aegis approve --help 2>&1",
     "repo-aegis approve --help | cat",
+    // whole redirections around the help request (usability)
+    "repo-aegis approve --help > /tmp/x",
+    "repo-aegis approve --help >/tmp/x",
+    "repo-aegis approve --help 2>/dev/null",
+    "repo-aegis approve --help </dev/null",
+    "repo-aegis approve --help >&2",
+    "repo-aegis approve --help 2>&1 | head -40",
+    // `<group> help <sub>` prints the subcommand's own page; global boolean flags may come first
+    "repo-aegis identity help add",
+    "repo-aegis engagements help set-identity",
+    "repo-aegis --json approve --help",
+    "repo-aegis --no-color identity add --help",
+    "bash -c 'repo-aegis approve --help > /tmp/x'",
+    "alias ra=repo-aegis; bash -c 'ra approve --help'",
   ];
   for (const command of HELP_ONLY) {
     it(`allows ${JSON.stringify(command)}`, () => assert.equal(findHumanOnlyCommand(command), null));
@@ -493,6 +507,42 @@ describe("findHumanOnlyCommand: --help alone reads help, so an agent may run it 
     ["repo-aegis init --force --help", "init-force"],
     ["repo-aegis gh --help -- pr view 1", "internal-entry"],
     ["$(which repo-aegis) approve --help example-org/svc", "approve"],
+    // `--help` is help only as a whole argument; Commander runs the action for all of these (the reviewer's inputs)
+    ["repo-aegis approve >--help", "approve"],
+    ["repo-aegis approve >-h", "approve"],
+    ["repo-aegis approve <<<--help", "approve"],
+    ["repo-aegis approve <<--help\n-help", "approve"],
+    ["repo-aegis approve >--help 1", "approve"],
+    ["repo-aegis approve ' --help'", "approve"],
+    ["repo-aegis approve 'gh --help'", "approve"],
+    ["repo-aegis approve gh,--help", "approve"],
+    ["repo-aegis approve gh=--help", "approve"],
+    ["repo-aegis approve '!--help'", "approve"],
+    ["repo-aegis approve '[--help]'", "approve"],
+    ["repo-aegis approve '{--help}'", "approve"],
+    ["repo-aegis approve gh\f--help", "approve"],
+    ["repo-aegis approve --help=approve", "approve"],
+    ["repo-aegis approve -hh", "approve"],
+    ["repo-aegis approve --help 2", "approve"],
+    ["repo-aegis identity remove gh >--help", "identity-change"],
+    ["repo-aegis identity remove >--help 7", "identity-change"],
+    ["repo-aegis identity require >--help", "identity-change"],
+    ["repo-aegis engagements set-identity gh >--help", "identity-change"],
+    ["repo-aegis gh >--help", "internal-entry"],
+    ["repo-aegis git-credential gh >--help", "internal-entry"],
+    ["$(which repo-aegis) approve >--help", "approve"],
+    ["bash -c 'repo-aegis approve >--help'", "approve"],
+    ["script -q /dev/null repo-aegis identity remove install >--help", "identity-change"],
+    ["script -q /dev/null repo-aegis approve >--help", "approve"],
+    // a redirection's target is never help, however it is spelled
+    ["repo-aegis approve > --help", "approve"],
+    ["repo-aegis approve 2>--help", "approve"],
+    // `help` is the help command only at the root or after a group; `approve help` hands `help` to the action
+    ["repo-aegis gh help", "internal-entry"],
+    ["repo-aegis identity help add example-org", "identity-change"],
+    // the quoted text is read as a command line with the aliases known outside it, and nothing may follow it
+    ["alias ra=repo-aegis; bash -c 'ra approve example-org/svc'", "approve"],
+    ["bash -c 'repo-aegis approve --help' example-org/svc", "approve"],
   ];
   for (const [command, kind] of REFUSED) {
     it(`still refuses ${JSON.stringify(command)}`, () => assert.deepEqual(findHumanOnlyCommand(command), { kind }));
