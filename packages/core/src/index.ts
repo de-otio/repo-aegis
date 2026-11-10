@@ -485,6 +485,22 @@ export type {
   StarApprovalGap,
 } from "./egress-approval.js";
 
+// The person-only emergency pause (`repo-aegis pause`): one validated reader for every entry point.
+export {
+  PAUSE_FILE,
+  DEFAULT_PAUSE_MS,
+  MAX_PAUSE_MS,
+  pausePath,
+  readPause,
+  readActivePause,
+  pauseCovers,
+  pauseNotice,
+  parsePauseRepo,
+  mintPause,
+  clearPause,
+} from "./pause.js";
+export type { PauseState, PauseRead, PauseReadOptions, PauseDestination, MintPauseOptions } from "./pause.js";
+
 // ---- render --------------------------------------------------------------
 export { renderMarkers, MARKER_FORMAT_VERSION } from "./render.js";
 export type { RenderOptions, RenderedFile, RenderResult } from "./render.js";

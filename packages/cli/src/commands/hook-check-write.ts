@@ -3,11 +3,16 @@
 import { homedir } from "node:os";
 import { basename } from "node:path";
 import {
+  APPROVALS_FILE,
   isGhConfigFile,
   loadRegistryState,
   OVERRIDE_FILENAME,
+  PAUSE_FILE,
+  pauseNotice,
   type Registry,
 } from "@de-otio/repo-aegis-core";
+import { pauseCoveringWorkingRepo, pausedRepoLabel, recordPausedAllow } from "../pause-scope.js";
+import { protectedStateFile } from "../state-file-guard.js";
 import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import {
   parseHookWriteFields,
@@ -143,6 +148,50 @@ export async function hookCheckWrite(): Promise<void> {
     );
   }
 
+  // The person-only state files (P1-E): the emergency pause, and the egress approvals. An agent that could write the
+  // pause would switch repo-aegis off for itself; one that could write an approval would approve its own publish.
+  // Refused wherever the file is spelled (any letter case, through a symlinked directory or file), paused or not, and
+  // (like the two refusals above) before any pause is honoured. `install claude-md` also denies the literal
+  // `Edit(<home>/pause.json)` and `Edit(<home>/egress-approvals.json)`, which reaches the agent's own shell too.
+  const state = protectedStateFile(filePath, cwd ?? process.cwd());
+  if (state === "pause") {
+    emitJsonAndExit(
+      {
+        code: "PAUSE_FILE_WRITE_REFUSED",
+        error:
+          `agent write to ${PAUSE_FILE} refused: that file is the emergency pause, which only a person may set ` +
+          `(\`repo-aegis pause\`, from their own terminal). No approval covers this. Tell your human what is wrong ` +
+          `and let them decide. [PAUSE_FILE_WRITE_REFUSED; details: repo-aegis explain PAUSE_FILE_WRITE_REFUSED]`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
+  }
+  if (state === "approvals") {
+    emitJsonAndExit(
+      {
+        code: "APPROVALS_FILE_WRITE_REFUSED",
+        error:
+          `agent write to ${APPROVALS_FILE} refused: that file holds the human egress approvals, which only a person ` +
+          `mints (\`repo-aegis approve\`, from their own terminal), so an agent that wrote one would be approving its ` +
+          `own publish. No approval covers this. Tell your human what you need. ` +
+          `[APPROVALS_FILE_WRITE_REFUSED; details: repo-aegis explain APPROVALS_FILE_WRITE_REFUSED]`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
+  }
+
+  // P1-E: a pause scoped to this session's repository allows the write, cross-org check included (for that repository
+  // only). A machine-wide pause does NOT touch this hook: the cross-org write check stays on, and the notice says so.
+  // Detection is not paused: `scan-after-write` still reports a marker hit, as advice.
+  const paused = pauseCoveringWorkingRepo(cwd ?? process.cwd());
+  if (paused !== null && paused.repo !== undefined) {
+    recordPausedAllow("hook check-write", { verb: "write", destination: pausedRepoLabel(paused.repo) });
+    process.stdout.write(JSON.stringify({ systemMessage: pauseNotice(paused) }) + "\n");
+    process.exit(0);
+  }
+
   // Missing and encrypted both run as if there were no registry (an encrypted one has no plaintext to read, and
   // encryption at rest is deprecated). Block, never exit 1, for a registry that exists but cannot be read: Claude Code
   // treats exit 1 as non-blocking, so a schemaVersion this build cannot read, or a typo, would switch the cross-org
@@ -189,7 +238,12 @@ export async function hookCheckWrite(): Promise<void> {
       error:
         `cross-org write refused: file ${filePath} lives in a working tree ` +
         `whose trust boundary (${decision.destOrgs.join(", ") || "unknown"}) ` +
-        `does not overlap the launcher's (${decision.srcOrgs.join(", ") || "unknown"})`,
+        `does not overlap the launcher's (${decision.srcOrgs.join(", ") || "unknown"})` +
+        // Here only a machine-wide pause can be in force (a scoped one that covers this repository returned above).
+        (paused !== null
+          ? ". A machine-wide pause is active and does not lift cross-org checks; a person can lift them for one " +
+            "repository with `repo-aegis pause --repo <owner>/<repo>`, from their own terminal"
+          : ""),
       details: {
         srcOrgs: decision.srcOrgs,
         destOrgs: decision.destOrgs,

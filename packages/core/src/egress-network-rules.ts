@@ -223,12 +223,14 @@ function readsGhToken(c: SimpleCommand): boolean {
  * R6: the refusal for a command line that sends a write to the GitHub API with a raw HTTP client, or reads
  * the gh token in a line that also makes a network call; null when it does neither. Pure; never throws.
  */
-export function checkNetworkRules(command: string): NetworkRuleHit | null {
+export function checkNetworkRules(command: string, opts: { skipApiWrite?: boolean } = {}): NetworkRuleHit | null {
   // Cheap exit: almost every command mentions neither.
   if (!/github\.com|auth|credential|(?:^|\s)-[A-Za-z]*K|--config/i.test(command)) return null;
   const commands = simpleCommands(command);
 
-  const writer = commands.find(writesGithubApi);
+  // `skipApiWrite` is for the emergency pause only: it lifts the raw-HTTP-client rule and nothing else, so the
+  // token rule below is still judged for the same command line.
+  const writer = opts.skipApiWrite === true ? undefined : commands.find(writesGithubApi);
   if (writer !== undefined) {
     return {
       code: "GITHUB_API_VIA_HTTP_CLIENT",

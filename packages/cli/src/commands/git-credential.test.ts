@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { mintApproval, type AncestorInfo, type IdentityPresence } from "@de-otio/repo-aegis-core";
+import { mintApproval, mintPause, pausePath, type AncestorInfo, type IdentityPresence } from "@de-otio/repo-aegis-core";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { hermeticGitEnv, scrubGitEnv } from "../_test-utils.js";
 import { parseShowScopeList } from "../git-credential-config.js";
@@ -935,6 +935,112 @@ describe("git-credential get: A5 configuration and environment (P1-A: only what 
 
   it("an unreadable git configuration is refused", () => {
     assertRefused(get(request(), deps({ readConfig: () => null })), "AGENT_PUSH_CREDENTIAL_CONFIG");
+  });
+});
+
+describe("git-credential get: the emergency pause (P1-E): step aside, never hand out a token", () => {
+  const T0 = new Date("2026-11-10T12:00:00.000Z");
+  const HOUR = 3_600_000;
+  const NOTHING = { stdout: "", stderr: "" };
+  const clock = (at: Date) => ({ now: () => at });
+  /** A home whose registry cannot be read: without a pause a push is refused (`quit=true`), the strongest case to step aside from. */
+  const brokenHome = (name: string): string => {
+    const h = join(tmp, `${name}${n}`);
+    mkdirSync(join(h, "state"), { recursive: true });
+    writeFileSync(join(h, "engagements.yaml"), "schemaVersion: 3\nidentities: [oops\n");
+    return h;
+  };
+  const pauseAt = (h: string, repo?: string, at: Date = T0): void => void mintPause({ path: pausePath(h), now: at, durationMs: HOUR, ...(repo !== undefined && { repo }) });
+  const run = (h: string, stdin: string, at: Date = T0): { stdout: string; stderr: string } => runGitCredential("get", stdin, h, deps(clock(at)));
+
+  it("control: with no pause the push is refused with quit=true", () => {
+    assertRefused(run(brokenHome("ctl"), request("p/r.git")), "GH_IDENTITY_UNAVAILABLE");
+  });
+
+  it("an active pause: a push it would have refused prints nothing at all, and no token is asked for", () => {
+    const h = brokenHome("active");
+    pauseAt(h);
+    let asked = 0;
+    const r = runGitCredential("get", request("p/r.git"), h, deps({ ...clock(T0), loginToken: () => (asked++, personToken()) }));
+    assert.deepEqual(r, NOTHING);
+    assert.equal(asked, 0);
+    assert.equal(calls(), 0, "taaad was never called");
+  });
+
+  it("an active pause: a push it answers is answered as without a pause: the App's token for an App-mapped owner", () => {
+    pauseAt(home);
+    const r = get(request("o/r.git"), deps(clock(T0)));
+    assert.match(r.stdout, new RegExp(`username=x-access-token\\npassword=${TOKEN}`));
+    assert.equal(calls(), 1, "the App token is minted exactly as without a pause");
+    assert.match(argv(), /--repo o\/r/);
+    // and it is byte-for-byte what no pause gives
+    rmSync(pausePath(home), { force: true });
+    const unpaused = get(request("o/r.git"), deps(clock(T0)));
+    assert.equal(r.stdout, unpaused.stdout);
+    assert.equal(r.stderr, unpaused.stderr);
+  });
+
+  it("an active pause: a person-mapped owner's push still gets the mapped login's token (identity choice unchanged)", () => {
+    pauseAt(home);
+    const r = get(request("p/r.git"), deps(clock(T0)));
+    assert.match(r.stdout, new RegExp(`password=${PERSON_TOKEN}`));
+    assert.equal(loginCalls.length, 1);
+  });
+
+  it("a pause covers reads too: the helper is as if repo-aegis were not installed", () => {
+    const h = brokenHome("read");
+    pauseAt(h);
+    const r = runGitCredential("get", request("p/r.git"), h, deps({ ...clock(T0), ancestry: () => remoteChain(["fetch", "origin"], "p/r.git") }));
+    assert.deepEqual(r, NOTHING);
+  });
+
+  it("after expiry (clock pinned past the end) the refusal is back", () => {
+    const h = brokenHome("expired");
+    pauseAt(h);
+    assert.deepEqual(run(h, request("p/r.git"), new Date(T0.getTime() + HOUR - 1)), NOTHING);
+    assertRefused(run(h, request("p/r.git"), new Date(T0.getTime() + HOUR)), "GH_IDENTITY_UNAVAILABLE", "at the expiry instant");
+    assertRefused(run(h, request("p/r.git"), new Date(T0.getTime() + 3 * HOUR)), "GH_IDENTITY_UNAVAILABLE", "long after");
+  });
+
+  it("a future-dated, world-writable or foreign-owned pause file is no pause", () => {
+    const future = brokenHome("future");
+    pauseAt(future, undefined, new Date(T0.getTime() + HOUR));
+    assertRefused(run(future, request("p/r.git")), "GH_IDENTITY_UNAVAILABLE", "future");
+    const open = brokenHome("open");
+    pauseAt(open);
+    chmodSync(pausePath(open), 0o666);
+    assertRefused(run(open, request("p/r.git")), "GH_IDENTITY_UNAVAILABLE", "world-writable");
+    const garbage = brokenHome("garbage");
+    writeFileSync(pausePath(garbage), JSON.stringify({ version: 1, expiresAt: "2099-01-01T00:00:00.000Z" }), { mode: 0o600 });
+    assertRefused(run(garbage, request("p/r.git")), "GH_IDENTITY_UNAVAILABLE", "a hand-made file with no createdAt");
+  });
+
+  it("--repo p/r: a push to p/r steps aside (case-insensitively); a push to another repository is still refused", () => {
+    const h = brokenHome("scoped");
+    pauseAt(h, "p/r");
+    assert.deepEqual(run(h, request("p/r.git")), NOTHING);
+    assert.deepEqual(run(h, request("P/R.git")), NOTHING);
+    assertRefused(run(h, request("p/other.git")), "GH_IDENTITY_UNAVAILABLE", "another repo");
+    assertRefused(run(h, request("q/r.git")), "GH_IDENTITY_UNAVAILABLE", "another owner");
+  });
+
+  it("--repo: a request that names no repository path, or several, is out of scope; a machine-wide pause covers it", () => {
+    const scoped = brokenHome("scoped-nopath");
+    pauseAt(scoped, "p/r");
+    const noPath = "protocol=https\nhost=github.com\n\n";
+    assert.notDeepEqual(run(scoped, noPath), NOTHING);
+    const two = "protocol=https\nhost=github.com\npath=p/r.git\npath=p/s.git\n\n";
+    assert.notDeepEqual(run(scoped, two), NOTHING);
+    const wide = brokenHome("wide-nopath");
+    pauseAt(wide);
+    assert.deepEqual(run(wide, noPath), NOTHING);
+  });
+
+  it("a relative home is never trusted to hold a pause", () => {
+    const h = brokenHome("rel");
+    pauseAt(h);
+    const r = runGitCredential("get", request("p/r.git"), "relative/home", deps(clock(T0)));
+    assert.equal(r.stdout, QUIT);
   });
 });
 

@@ -37,6 +37,8 @@ export const AGENT_RAN_HUMAN_COMMAND = "AGENT_RAN_HUMAN_COMMAND";
 
 export type HumanOnlyKind =
   | "approve"
+  // The emergency pause (P1-E): a global, time-boxed off switch only a person may set. `resume` only re-enables protection, so an agent may run it.
+  | "pause"
   | "owner-add"
   | "upstream-add"
   | "init-migrate"
@@ -487,6 +489,7 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
   // never mints). `--list` stays refused: its output names org scopes, which can be customer names.
   const revokeOnly = win.includes("--revoke") && !win.includes("--list");
   if (win.includes("approve") && !revokeOnly) return "approve";
+  if (win.includes("pause")) return "pause";
   const at = (word: string): number => win.indexOf(word);
   const eng = at("engagements");
   if (eng !== -1 && win.indexOf("add", eng) !== -1 && (win.includes("--personal-org") || win.includes("--github-org"))) {
@@ -525,6 +528,7 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
  */
 export const HUMAN_VERB_PATHS: Readonly<Record<HumanOnlyKind, ReadonlyArray<readonly string[]>>> = {
   approve: [["approve"]],
+  pause: [["pause"]],
   "owner-add": [["engagements", "add"]],
   "upstream-add": [["upstreams", "add"]],
   "init-migrate": [["init"]],
@@ -654,6 +658,60 @@ function writesManagedSettings(command: string): boolean {
   return cdsInto || regions.flat().some(isManagedSettingsWord);
 }
 
+/** Programs and words that WRITE or copy a file (or run text that can): next to a state-file word they mean a write. */
+const STATE_FILE_WRITERS = new Set([
+  "cp", "mv", "tee", "install", "ln", "dd", "rsync", "touch", "truncate", "sed", "perl", "python", "python3", "node",
+  "ruby", "ed", "open", "write", "writefile", "writefilesync", "copyfile", "copyfilesync", "rename", "renamesync",
+]);
+
+/**
+ * `curl -o FILE` / `-O` / `--output` / `--remote-name`, `wget -O FILE` / `-o FILE` / `--output-document`: they write a
+ * file named by a flag, so they are a writer only with that flag (a plain `curl URL` writes to stdout). A short-flag
+ * cluster counts (`-sSo`, `-fsSLo`), and so does an attached value (`-o/path`).
+ */
+function isDownloadWriter(words: readonly string[]): boolean {
+  const bases = words.map(tokenBase);
+  if (bases.includes("curl") && words.some(w => /^-[A-Za-z]*[oO]/.test(w) || w === "--output" || w === "--remote-name")) return true;
+  return bases.includes("wget") && words.some(w => /^-[A-Za-z]*[oO]/.test(w) || w === "--output-document" || w === "--output-file");
+}
+
+/**
+ * The person-only state files, by name, and the kind a shell write to each is refused as:
+ *   - `pause.json`, the emergency pause: `pause`;
+ *   - `egress-approvals.json`, the human egress approvals: `approve` (an agent that wrote one would be minting its own
+ *     approval, which is exactly what the `approve` refusal says, so it reuses that kind and its fix, `repo-aegis approve`).
+ */
+const STATE_FILES: ReadonlyArray<{ name: string; kind: HumanOnlyKind }> = [
+  { name: "pause\\.json", kind: "pause" },
+  { name: "egress-approvals\\.json", kind: "approve" },
+];
+
+/**
+ * A command line that writes one of the person-only state files in the repo-aegis home, `pause.json` (complexity-review
+ * P1-E) or `egress-approvals.json`: a redirect to a word naming it (`>`, `>>`, `>|`, `2>`, `&>`), or a
+ * `cp`/`mv`/`tee`/`install`/`ln`/`dd`/`sed`, a `curl -o` / `wget -O`, or an interpreter's `open(`/`writeFile`, on a word
+ * ending in the name (any letter case), anywhere on a line that also names a `repo-aegis` path (`~/.config/repo-aegis/…`,
+ * `$REPO_AEGIS_HOME/…`, a `cd` into it). It is those files' person-only gate for the one route the Edit deny rule and
+ * `check-write` cannot see, a shell. Quotes and backslashes are read away first (`'pause.json'`, `pause'.json'`,
+ * `> "$REPO_AEGIS_HOME"/pause.json`). Reading the file (`cat`, `ls`, `jq`, `grep`) is not refused. Accepted false
+ * positive: a write to some other `pause.json` inside a checkout whose path says `repo-aegis`. Not seen: a name built at
+ * run time. Returns the kind to refuse as, or null.
+ */
+function writesStateFile(command: string): HumanOnlyKind | null {
+  const plain = command.replace(/["'\\]/g, "");
+  if (!/repo[-_]aegis/i.test(plain)) return null;
+  for (const { name, kind } of STATE_FILES) {
+    if (!new RegExp(name, "i").test(plain)) continue;
+    if (new RegExp(`>>?\\|?\\s*[^\\s<>;&|]*${name}`, "i").test(plain)) return kind;
+    const ending = new RegExp(`${name}$`, "i");
+    for (const { words } of splitRegions(command)) {
+      if (!words.some(w => ending.test(normalizePath(w)))) continue;
+      if (words.some(w => STATE_FILE_WRITERS.has(tokenBase(w))) || isDownloadWriter(words)) return kind;
+    }
+  }
+  return null;
+}
+
 /**
  * The first human-only repo-aegis command this command line runs, or null.
  * Pure and cheap: a line with no repo-aegis word returns at once.
@@ -662,6 +720,12 @@ export function findHumanOnlyCommand(command: string): HumanOnlyHit | null {
   if (typeof command !== "string" || command === "") return null;
   try {
     if (writesManagedSettings(command)) return { kind: "managed-settings-write" };
+  } catch {
+    /* fall through to the program-word search */
+  }
+  try {
+    const stateKind = writesStateFile(command);
+    if (stateKind !== null) return { kind: stateKind };
   } catch {
     /* fall through to the program-word search */
   }
@@ -705,6 +769,13 @@ const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string; w
   approve: {
     what: "repo-aegis approve",
     fix: "repo-aegis approve <owner>/<repo>   (or <owner>/*)",
+  },
+  pause: {
+    what: "repo-aegis pause",
+    fix: "repo-aegis pause [--for 1h] [--repo <owner>/<repo>]   (and repo-aegis resume to end it early)",
+    why:
+      "A pause switches repo-aegis off for a while, so it counts only when a person decides to run it; an agent that ran it " +
+      "would be switching off its own guard, with or without a terminal attached",
   },
   "owner-add": {
     what: "repo-aegis engagements add --personal-org/--github-org",

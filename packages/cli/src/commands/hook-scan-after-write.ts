@@ -7,6 +7,8 @@ import {
   scanFile,
   CustomerCoupledNoEngagementError,
   EXIT_HIT,
+  pauseNotice,
+  type PauseState,
   type RepoJson,
   type ScanHit,
   type SkippedFile,
@@ -14,6 +16,14 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import { parseHookWriteFields, readHookStdin, WRITE_HOOK_INPUT_MAX_BYTES } from "./hook-input.js";
+import { pauseCoveringWorkingRepo, recordPausedAllow } from "../pause-scope.js";
+
+/** A scan hit without the text of its match. */
+function stripMatchText(hit: unknown): unknown {
+  if (hit === null || typeof hit !== "object") return hit;
+  const { matchPreview: _preview, ...rest } = hit as Record<string, unknown>;
+  return rest;
+}
 
 interface HookOptions {
   /** When true, do not exit non-zero on hits — return as if clean. Useful
@@ -95,7 +105,26 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   // Set once the registry is known to be encrypted: every answer then carries the person-facing `systemMessage`
   // (Claude Code drops stderr on exit 0), once per call.
   let notice: string | undefined;
-  const emit: (value: unknown, exitCode: number) => never = (value, exitCode) =>
+  // P1-E: set once a person's emergency pause covers this write. Detection is not paused: every answer still carries
+  // what the scan found, but a marker hit becomes advice (exit 0, `advisory: true`), with the fixed notice and a
+  // count. Every OTHER refusal (a cross-org write, an unreadable registry) is lifted only by a pause scoped to this
+  // repository: a machine-wide pause keeps the cross-org checks on.
+  let paused: PauseState | null = null;
+  const emit: (value: unknown, exitCode: number) => never = (value, exitCode) => {
+    if (paused !== null) {
+      const lifted = exitCode === EXIT_HIT || (exitCode !== 0 && paused.repo !== undefined);
+      const hits = (value as { hits?: unknown }).hits;
+      const finalCode = lifted ? 0 : exitCode;
+      // The audit record says "a pause let something through", so it is written only when the pause lifted a refusal
+      // (a marker hit turned advisory, a cross-org or registry refusal lifted by a scoped pause): not for a clean write.
+      if (lifted) recordPausedAllow("hook scan-after-write", { verb: "write" });
+      const found = finalCode === 0 && Array.isArray(hits) && hits.length > 0 ? `; ${hits.length} marker hit(s) found, advisory while paused` : "";
+      // At exit 0 this payload goes to stdout, which lands in the transcript, where a refusal's stderr would not:
+      // a hit's `matchPreview` is the first characters of what matched, so it is dropped here (path, line, column
+      // and the marker file's stem stay: that is where to look, not what was found).
+      const body = finalCode === 0 && Array.isArray(hits) ? { ...(value as object), hits: hits.map(stripMatchText) } : (value as object);
+      emitJsonAndExit({ ...body, ...(lifted && { advisory: true }), systemMessage: `${pauseNotice(paused)}${found}` }, finalCode);
+    }
     emitJsonAndExit(
       {
         ...(value as object),
@@ -104,12 +133,14 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
       },
       exitCode,
     );
+  };
 
   if (!filePath) {
     if (input.truncated) emit({ code: "HOOK_INPUT_TOO_LARGE", error: NOT_SCANNED_REASON }, 2);
     process.exit(0);
   }
   if (!existsSync(filePath)) process.exit(0);
+  paused = pauseCoveringWorkingRepo(cwd ?? process.cwd());
 
   // Missing: no registry => no engagements, no orgs. Treat the whole world as one boundary and scan with an empty
   // deny set. The agent would have run `repo-aegis init` already if engagement scoping were in use; the hook should

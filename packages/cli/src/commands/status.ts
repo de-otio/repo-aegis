@@ -10,7 +10,10 @@ import {
   resolveHookState,
   appendAuditRecord,
   recordWorkingTree,
+  readActivePause,
+  pauseNotice,
   RegistryNotFoundError,
+  type PauseState,
   type RepoJson,
   type EngagementJson,
   type HookState,
@@ -163,6 +166,19 @@ export function identityLines(sum: IdentitySummary | null): string[] {
   return lines;
 }
 
+/**
+ * What `status` says about an active emergency pause. The scope is "everything" or "one repository", never the
+ * repository's name (a status line is copied into tickets and agent transcripts; `pause --list`, which a person runs,
+ * names it).
+ */
+export function pauseLines(pause: PauseState | null): string[] {
+  if (pause === null) return [];
+  return [
+    `  pause:    ACTIVE for ${pause.repo === undefined ? "everything on this machine" : "one repository"} until ${pause.expiresAt}`,
+    `            ${pauseNotice(pause)}`,
+  ];
+}
+
 export function status(opts: OutputOptions & { cwd?: string }): void {
   // `--cwd` is documented as applying to every subcommand uniformly (design
   // README, "Universal CLI flags"). This previously ignored it and reported
@@ -276,6 +292,9 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
     engagements: repo.engagements,
   };
 
+  // P1-E: an active emergency pause (expired and invalid ones are no pause).
+  const pause = readActivePause();
+
   const result = {
     repo: repoJson,
     visibility,
@@ -292,6 +311,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
     warnings: denySet.warnings,
     hooks,
     ...(identitySummary !== null && { identity: identitySummary }),
+    ...(pause !== null && { pause: { expiresAt: pause.expiresAt, scope: pause.repo === undefined ? "all" : "repository" } }),
   };
 
   if (opts.json) {
@@ -301,6 +321,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   if (!repo.isGitRepo) {
     emitText("repo-aegis status: not inside a git repository");
     for (const line of identityLines(identitySummary)) emitText(line);
+    for (const line of pauseLines(pause)) emitText(line);
     return;
   }
   emitText(`repo-aegis status: ${repo.cwd}`);
@@ -329,6 +350,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   emitText(`  regex:    ${getRegexBackend()}`);
   for (const line of identityLines(identitySummary)) emitText(line);
   for (const line of hooksStatusLines(hooks)) emitText(line);
+  for (const line of pauseLines(pause)) emitText(line);
   for (let i = 0; i < visibilityWarnings.length; i++) {
     // First line is the finding, any follow-up is its continuation.
     emitText(i === 0 ? `  warning:  ${visibilityWarnings[i]}` : `            ${visibilityWarnings[i]}`);

@@ -69,6 +69,7 @@ function assertRefusedAsHumanCommand(command: string): void {
  */
 const REFUSED_SAMPLE: Readonly<Record<HumanOnlyKind, string>> = {
   approve: "repo-aegis approve acme/svc --ttl 1h",
+  pause: "repo-aegis pause --for 1h",
   "owner-add": "repo-aegis engagements add --personal-org stranger",
   "upstream-add": "repo-aegis upstreams add upstream-org/lib",
   "init-migrate": "repo-aegis init --migrate-classify",

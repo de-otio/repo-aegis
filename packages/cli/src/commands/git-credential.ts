@@ -35,6 +35,7 @@ import {
   identityPresence,
   loadRegistry,
   parseRemoteUrlResolved,
+  pausePath,
   readCachedVisibility,
   readProcessAncestry,
   readRepoConfig,
@@ -60,6 +61,7 @@ import {
   readCredentialConfig,
   type ConfigEntry,
 } from "../git-credential-config.js";
+import { pauseCoveringDestinations, recordPausedAllow } from "../pause-scope.js";
 import { resolveTrustedGh } from "./doctor-owner-checks.js";
 import { isOwnHooksPath } from "./gh-command.js";
 import { fetchLoginToken } from "./gh-identity-token.js";
@@ -102,6 +104,8 @@ export interface GitCredentialDeps {
    * when no gh may be handed the request, `unavailable` when gh has no usable token for that login.
    */
   loginToken: (login: string, env: NodeJS.ProcessEnv, home: string) => LoginTokenResult;
+  /** The clock for the emergency pause's expiry. Default: now. */
+  now?: () => Date;
 }
 
 export type LoginTokenResult =
@@ -428,10 +432,32 @@ function auditBestEffort(details: Record<string, unknown>, home: string): void {
   }
 }
 
-/** `get`. Pure given `deps`: returns what to print, never prints or exits. */
+/**
+ * `get`. Pure given `deps`: returns what to print, never prints or exits.
+ *
+ * P1-E: a person's emergency pause (read from the pinned home) changes ONE thing: a REFUSAL (`quit=true`) for a request
+ * in scope becomes nothing at all, so git asks its next helper as if repo-aegis were not installed. The identity choice
+ * is made as always, and an answer (an App's token for an App-mapped owner, the mapped login's token) is given as
+ * always: a pause never hands out a token the helper would not have handed out, and never withholds one it would. The
+ * request's scope is the one repository path it names; a request that names none or several is out of a scoped pause.
+ */
 export function gitCredentialGet(stdin: string, home: string, deps: GitCredentialDeps): GitCredentialResult {
   const request = readRequest(parseCredentialInput(stdin));
   if (!request.forGithub) return NOTHING;
+  const result = gitCredentialDecide(request, home, deps);
+  if (result.stdout !== QUIT) return result;
+  const named = request.paths.length === 1 && request.firstPath !== null ? ownerRepoOf(request.firstPath) : null;
+  const dest = named === null ? null : { org: named.owner, repo: named.repo };
+  // A relative home is stale or hand-edited (refused by the decision) and is never trusted to hold a pause.
+  const paused = !isAbsolute(home)
+    ? null
+    : pauseCoveringDestinations([dest], { path: pausePath(home), ...(deps.now !== undefined && { now: deps.now() }) });
+  if (paused === null) return result;
+  recordPausedAllow("git credential helper", { verb: "credential", destination: dest, home });
+  return NOTHING;
+}
+
+function gitCredentialDecide(request: Request, home: string, deps: GitCredentialDeps): GitCredentialResult {
 
   // A person present: the next helper answers, exactly as without repo-aegis. No registry read, no mint.
   const presence = deps.presence();

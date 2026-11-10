@@ -761,6 +761,30 @@ export async function buildProgram(): Promise<Command> {
       approve(target, withGlobals(opts, cmd));
     });
 
+  // The emergency pause: a person-only, time-boxed off switch for "repo-aegis is wrong right now and I have to ship".
+  // Needs a terminal like `approve`, always expires (default 1h, cap 8h), and `resume` ends it early.
+  program
+    .command("pause")
+    .description(
+      "pause repo-aegis for a while (a person's terminal only; always expires: default 1h, at most 8h). With --repo <owner>/<repo> only that repository is paused. The hooks, egress guard, gh shim and git credential helper then stand aside (a machine-wide pause keeps the cross-org checks on; one with --repo lifts them for that repository); approve, pause, identity changes and uninstall stay person-only. End it early with `resume`.",
+    )
+    .option("--for <duration>", "how long: 30m, 2h, 90s (default 1h, never more than 8h)")
+    .option("--repo <owner/repo>", "pause only for this repository (its pushes and its working copy); default: everything on this machine")
+    .option("--reason <text>", "why (only its length is recorded)")
+    .option("--list", "show the active pause instead of setting one")
+    .action(async (opts, cmd) => {
+      const { pause } = await import("./commands/pause.js");
+      pause(withGlobals(opts, cmd));
+    });
+
+  program
+    .command("resume")
+    .description("end an emergency pause now (repo-aegis protects again); allowed for an agent, because it only turns protection back on")
+    .action(async (opts, cmd) => {
+      const { resume } = await import("./commands/pause.js");
+      resume(withGlobals(opts, cmd));
+    });
+
   // A client-side gate that is installed but disconnected looks exactly like
   // one that is clean — both are silent. `doctor` is the fleet-wide sweep that
   // makes that state findable on purpose rather than by luck.
