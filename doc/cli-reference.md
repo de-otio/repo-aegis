@@ -1941,9 +1941,10 @@ without rebuilding those facts by hand. **On by default**, read-only to read, an
   (`AGENT_RAN_HUMAN_COMMAND`) or writes `state/decision-log.json`, `Edit(<home>/state/decision-log.json)` is among the
   deny rules `install claude-md` writes, and `hook check-write` refuses a write to the file
   (`DECISION_LOG_STATE_WRITE_REFUSED`). The log itself (`state/decisions.jsonl` and its `.1`..`.3` rotations) is
-  protected the same way, because deleting or truncating it is switching it off by another route; the hooks' own appends
-  are not agent tools and keep working (a sandboxed `git commit` runs them inside the sandbox, where the deny sends the
-  record to the `$TMPDIR` fallback and `doctor` says `DECISION_LOG_FALLBACK`). The honest mistake it stops: an agent switching the log off because it is
+  protected from an agent's tools, because deleting or truncating it is switching it off by another route: `hook check-write`
+  refuses a write to it and the shell-write rule refuses a command that writes or deletes it. It has **no** `Edit(...)`
+  deny rule on purpose: a deny rule reaches the agent's sandboxed shell, where the hooks and the shim run too, and they
+  would then log to the sandbox's own `$TMPDIR`, which a person's `repo-aegis log` does not read. The honest mistake it stops: an agent switching the log off because it is
   "noise", which removes the data its next refusal needs. **`log --on`** only turns recording back on, so an agent may
   run it. `repo-aegis log --off --help` is allowed (an agent can always read help).
 - **`doctor`** reports `DECISION_LOG_OFF` (info), `DECISION_LOG_FALLBACK` (info) and `DECISION_LOG_UNWRITABLE` (warn).

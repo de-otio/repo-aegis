@@ -14,7 +14,6 @@ import {
   leakContextFlagPath,
   appendAuditRecord,
   approvalsPath,
-  decisionLogPath,
   decisionLogStatePath,
   pausePath,
   PROMPT_APPROVALS_DIR,
@@ -428,10 +427,9 @@ export function registryDenyPlan(pin: EnforcementPin = currentEnforcementPin()):
     // The decision log's on/off switch (P1-I): an agent that could write `{"enabled": false}` would remove the data its
     // own next refusal needs. `log --off` is person-only; this keeps the file out of the agent's write tools.
     decisionLogStatePath(home),
-    // ...and the log itself (review F3): "it is noise, delete it" is the same honest mistake by another route. The hooks'
-    // own appends are not agent tools. (A sandboxed `git commit` runs them inside the sandbox, where this deny sends the
-    // record to the $TMPDIR fallback; `doctor` reports that as DECISION_LOG_FALLBACK.)
-    ...[0, 1, 2, 3].map(i => (i === 0 ? decisionLogPath(home) : `${decisionLogPath(home)}.${i}`)),
+    // The log FILE has no Edit rule on purpose: a deny rule reaches the agent's sandboxed shell, where the hooks and the shim
+    // run too, so they would log to the sandbox's own $TMPDIR, which the person's `repo-aegis log` does not read. Agent
+    // tools are stopped by `check-write` and the shell-write rule instead (state-file-guard.ts, human-commands.ts).
     // Rules e-g read a cached entry's class and visibility to decide whether a
     // destination is public-facing: a forged "private" entry for a public repo
     // would skip rule g's person check. Every writer treats a failed write as a
@@ -511,7 +509,7 @@ function legacyDenyPair(list: readonly unknown[]): string[] {
 
 /** Basenames/globs of the paths this install protects, for recognising its own rules. */
 const OUR_RULE_SHAPE =
-  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|pause\.json|destinations\.json|state\/decision-log\.json|state\/decisions\.jsonl(?:\.[123])?|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers|prompt-approvals)\/\*\*)\)$/;
+  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|pause\.json|destinations\.json|state\/decision-log\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers|prompt-approvals)\/\*\*)\)$/;
 
 /** Shape of the rules `registryDenyPlan` writes for a pin: `<...>/@de-otio/repo-aegis/**`, or a file named `node`. */
 const OUR_PIN_RULE_SHAPE = /^Edit\(\/\/(?:.+\/@de-otio\/repo-aegis\/\*\*|.+\/node)\)$/;

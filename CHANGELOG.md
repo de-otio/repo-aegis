@@ -26,8 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `repo-aegis log --off` is person-only (a terminal, like `pause`; the egress guard refuses an agent's command text, an
   agent's write of `state/decision-log.json` is refused as `DECISION_LOG_STATE_WRITE_REFUSED`, and
   `Edit(<home>/state/decision-log.json)` joins the `install claude-md` deny rules); `log --on` is allowed for an agent.
-- The log itself (`state/decisions.jsonl` and its rotations) is protected like its switch: `Edit(...)` deny rules, a
-  `check-write` refusal and a shell-write rule (deleting it counts). `log` shows a `code` only when the agent guide has a
+- The log itself (`state/decisions.jsonl` and its rotations) is protected from an agent's tools: a `check-write` refusal
+  and a shell-write rule (deleting it counts). It has no `Edit(...)` deny rule, so sandboxed hooks can still append to it. `log` shows a `code` only when the agent guide has a
   row for it (else `"invalid"`), reads the `$TMPDIR` fallback only from a directory this user owns that is not
   group- or world-writable, and nothing is written when `REPO_AEGIS_HOME` is relative.
 - `doctor`: `DECISION_LOG_OFF` (info), `DECISION_LOG_FALLBACK` (info), `DECISION_LOG_UNWRITABLE` (warn).

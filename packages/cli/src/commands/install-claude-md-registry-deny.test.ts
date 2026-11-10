@@ -91,11 +91,7 @@ describe("registryDenyPlan", () => {
       `Edit(/${h}/pause.json)`,
       // the decision log's on/off switch: an agent that could write it would remove the data its next refusal needs
       `Edit(/${h}/state/decision-log.json)`,
-      // ...and the log itself with its rotations: deleting it is switching it off by another route
-      `Edit(/${h}/state/decisions.jsonl)`,
-      `Edit(/${h}/state/decisions.jsonl.1)`,
-      `Edit(/${h}/state/decisions.jsonl.2)`,
-      `Edit(/${h}/state/decisions.jsonl.3)`,
+      // (the log file itself has no Edit rule: sandboxed hooks would then log to the sandbox's own $TMPDIR)
       `Edit(/${h}/destinations.json)`,
       `Edit(/${h}/state/deny-set.cache.json)`,
       `Edit(/${h}/state/claude-md-deny-rules.json)`,
@@ -117,10 +113,6 @@ describe("registryDenyPlan", () => {
       plan.rules.filter(r => r.includes("/state")),
       [
         `Edit(/${h}/state/decision-log.json)`,
-        `Edit(/${h}/state/decisions.jsonl)`,
-        `Edit(/${h}/state/decisions.jsonl.1)`,
-        `Edit(/${h}/state/decisions.jsonl.2)`,
-        `Edit(/${h}/state/decisions.jsonl.3)`,
         `Edit(/${h}/state/deny-set.cache.json)`, `Edit(/${h}/state/claude-md-deny-rules.json)`],
     );
     assert.ok(plan.rules.every(r => !r.includes("/state/**") && !r.includes("audit")));
