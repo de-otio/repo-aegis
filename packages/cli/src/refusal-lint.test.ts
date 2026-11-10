@@ -13,7 +13,14 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REFUSAL_GUIDE, refusalGuideLine, refusalTrailer, repoAegisVersion, withRefusalTrailer } from "@de-otio/repo-aegis-core";
+import {
+  REFUSAL_GUIDE,
+  refusalGuideLine,
+  refusalTrailer,
+  repoAegisVersion,
+  USAGE_AFTER_TERMINAL_GATE,
+  withRefusalTrailer,
+} from "@de-otio/repo-aegis-core";
 import { errorRows, knownCodes, type Docs } from "./commands/explain.js";
 
 const here = dirname(fileURLToPath(import.meta.url)); // packages/cli/dist
@@ -44,6 +51,126 @@ function sourceFiles(): { path: string; text: string }[] {
 }
 
 const CODE = "[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+";
+
+/** The text of the first argument of a call whose `(` is at `open - 1`: up to the top-level `,` or closing `)`. */
+function firstArgument(t: string, open: number): string {
+  let depth = 0;
+  let quote: string | null = null;
+  let i = open;
+  for (; i < t.length; i++) {
+    const c = t[i]!;
+    if (quote !== null) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "{" || c === "(" || c === "[") depth++;
+    else if (c === "}" || c === ")" || c === "]") {
+      if (depth === 0) break;
+      depth--;
+    } else if (c === "," && depth === 0) break;
+  }
+  return t.slice(open, i);
+}
+
+/** Split `s` at its top-level commas (not inside brackets or strings). */
+function splitTopLevel(s: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (quote !== null) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "{" || c === "(" || c === "[") depth++;
+    else if (c === "}" || c === ")" || c === "]") depth--;
+    else if (c === "," && depth === 0) {
+      parts.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
+type EmitErrorCall =
+  | { kind: "code"; code: string }
+  | { kind: "const"; name: string }
+  /** `err.code` and the like: the code is declared where the error class is (rules K and L) or in a `…Code` union (A). */
+  | { kind: "declared-elsewhere" }
+  /** no `code` at all (a bare message): nothing to document. */
+  | { kind: "none" }
+  /** a code the scan cannot read: a variable, a shorthand, a spread, a ternary, or a payload passed in whole. */
+  | { kind: "opaque"; expr: string };
+
+/** Every `emitError(` call in `t`, classified by what its first argument says about the code. */
+function emitErrorCalls(t: string): EmitErrorCall[] {
+  const out: EmitErrorCall[] = [];
+  for (const m of t.matchAll(/\bemitError\(/g)) {
+    if (/\bfunction\s+$/.test(t.slice(0, m.index!))) continue; // the definition, not a call
+    const arg = firstArgument(t, m.index! + m[0].length).trim();
+    if (/^["'`]/.test(arg)) {
+      out.push({ kind: "none" });
+      continue;
+    }
+    if (!arg.startsWith("{")) {
+      // `cond ? { code: "A", … } : { code: "B", … }`: readable when every `code:` in it is a literal
+      const props = [...arg.matchAll(/\bcode\s*:\s*([^,}\n]+)/g)].map(p => p[1]!.trim());
+      const lits = props.map(p => /^"([A-Z][A-Z0-9_]+)"$/.exec(p)?.[1]);
+      if (props.length > 0 && lits.every(l => l !== undefined)) {
+        for (const l of lits) out.push({ kind: "code", code: l! });
+      } else out.push({ kind: "opaque", expr: arg.slice(0, 40).replace(/\s+/g, " ") });
+      continue;
+    }
+    const segments = splitTopLevel(arg.slice(1, arg.lastIndexOf("}"))).map(s => s.trim());
+    let value: string | null = null;
+    for (const s of segments) {
+      const prop = /^code\s*:\s*([^]*)$/.exec(s);
+      if (prop !== null) value = prop[1]!.trim();
+      else if (s === "code") value = "code"; // shorthand
+    }
+    if (value === null) {
+      const spreads = segments.filter(s => s.startsWith("..."));
+      // `...(err.code !== undefined && { code: err.code })`: a declared code, added only when there is one
+      if (spreads.length === 0) out.push({ kind: "none" });
+      else if (spreads.some(s => /\b[A-Za-z_$][\w$]*\.code\b/.test(s))) out.push({ kind: "declared-elsewhere" });
+      else out.push({ kind: "opaque", expr: "...spread" });
+      continue;
+    }
+    const lit = /^"([A-Z][A-Z0-9_]+)"$/.exec(value);
+    if (lit !== null) out.push({ kind: "code", code: lit[1]! });
+    else if (/^[A-Z][A-Z0-9_]+$/.test(value)) out.push({ kind: "const", name: value });
+    else if (/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.code$/.test(value)) out.push({ kind: "declared-elsewhere" });
+    else out.push({ kind: "opaque", expr: value.slice(0, 40) });
+  }
+  return out;
+}
+
+/**
+ * Files that may pass a code to `emitError` through a parameter (`emitError({ code, … })`): the helper's callers
+ * name the code, and the scan reads those callers (`requireTerminal(`, `refuse(` — rule B). Any other `emitError`
+ * whose code is not a literal, a constant or a declared `….code` is reported, so a new wrapper (`fail(code, msg)`)
+ * cannot hide a code from this lint.
+ */
+const OPAQUE_EMIT_ERROR_ALLOWED = new Set(["require-terminal.ts", "install-claude-md-managed.ts"]);
+
+/** `path: emitError(<expr>)` for every `emitError` call whose code the scan cannot read, outside the short allowlist. */
+export function findOpaqueEmitErrors(files: { path: string; text: string }[]): string[] {
+  const out: string[] = [];
+  for (const f of files) {
+    if (OPAQUE_EMIT_ERROR_ALLOWED.has(f.path.slice(f.path.lastIndexOf("/") + 1))) continue;
+    for (const call of emitErrorCalls(f.text)) {
+      if (call.kind === "opaque") out.push(`${f.path}: emitError code is "${call.expr}"`);
+    }
+  }
+  return out;
+}
 /** Union types named `…Code` that are doctor findings or hook state, not refusals. */
 const NOT_REFUSAL_UNIONS = new Set(["DoctorCheckCode", "HookStateCode"]);
 
@@ -112,18 +239,14 @@ export function deriveRefusalCodes(files: { path: string; text: string }[]): Map
     for (const m of t.matchAll(new RegExp(`\\b(?:auditRefusal|pushRefusal)\\(\\s*"(${CODE})"`, "g"))) add(m[1], f.path);
     // I: a refuse decision object
     for (const m of t.matchAll(new RegExp(`action:\\s*"refuse"[^]{0,80}?code:\\s*"(${CODE})"`, "g"))) add(m[1], f.path);
-    // J: every code an `emitError(` call can print (the plain CLI errors: exit 2 with `{ code, error }`). The first
-    //    `code:` of the call's argument, as a literal (`USAGE` too: a single word) or a constant. A call whose code
-    //    is `err.code` is covered by K and L, where that code is declared.
-    const callStarts = [...t.matchAll(/\bemitError\(/g)].map(m => m.index!);
-    callStarts.forEach((start, i) => {
-      const end = Math.min(start + 900, callStarts[i + 1] ?? Infinity);
-      const arg = /\bcode:\s*([A-Za-z_"][A-Za-z0-9_"]*)/.exec(t.slice(start, end));
-      if (arg === null) return;
-      const tok = arg[1]!;
-      const lit = /^"([A-Z][A-Z0-9_]+)"$/.exec(tok);
-      add(lit !== null ? lit[1] : consts.get(tok), f.path);
-    });
+    // J: every code an `emitError(` call can print (the plain CLI errors: exit 2 with `{ code, error }`), read from the
+    //    call's own object argument: a literal (`USAGE` too: a single word) or a constant. A call whose code is
+    //    `err.code` is covered by K and L, where that code is declared; any other shape is reported by
+    //    {@link findOpaqueEmitErrors}, so a new helper cannot hide a code from this scan.
+    for (const call of emitErrorCalls(t)) {
+      if (call.kind === "code") add(call.code, f.path);
+      else if (call.kind === "const") add(consts.get(call.name), f.path);
+    }
     // K: an error class that declares its own code (`readonly code = "X"`), which `emitError({ code: err.code })` prints.
     for (const m of t.matchAll(/\breadonly code(?:: [^=;]+)? = "([A-Z][A-Z0-9_]+)"/g)) add(m[1], f.path);
     for (const m of t.matchAll(/this\.code = "([A-Z][A-Z0-9_]+)"/g)) add(m[1], f.path);
@@ -194,6 +317,56 @@ describe("refusal lint (X-10)", () => {
     assert.equal(withRefusalTrailer("PUSH_IMPLICIT_TARGET", once), once);
   });
 
+  it("withRefusalTrailer decides 'already done' by the guide line: an older hand-written token does not hide the new fields (M1)", () => {
+    const code = "PUSH_IMPLICIT_TARGET";
+    for (const old of [`[${code}; details: repo-aegis explain ${code}]`, `[${code}]`]) {
+      const got = withRefusalTrailer(code, `a bare push was refused. ${old}`);
+      assert.ok(got.includes(refusalGuideLine(code)), `the version and next step are added: ${got}`);
+      assert.equal(got.split(`[${code}`).length - 1, 1, `the token appears once: ${got}`);
+      assert.ok(got.endsWith(`[${code}; details: repo-aegis explain ${code}]`), got);
+    }
+    // a different code's token is left alone and the trailer for THIS code is added
+    assert.ok(withRefusalTrailer(code, "x [OTHER_CODE]").includes("[OTHER_CODE]"));
+    // an override changes the line, so a text that carries the table's line gets the overridden one too
+    const table = withRefusalTrailer("USAGE", "bad flag.");
+    const overridden = withRefusalTrailer("USAGE", table, USAGE_AFTER_TERMINAL_GATE);
+    assert.match(overridden, /Only a person can run it: yes\. \[USAGE; details: repo-aegis explain USAGE\]$/);
+    assert.equal(overridden.split("[USAGE;").length - 1, 1);
+  });
+
+  it("no source file outside core/src/refusal.ts hand-writes a `[CODE; details: repo-aegis explain …]` trailer (M1)", () => {
+    // `[CODE; …]` in prose or comments names the placeholder `CODE`, which has no underscore and is not matched.
+    const hand = new RegExp(`\\[${CODE}; details: repo-aegis explain`);
+    const bad = files.filter(f => !f.path.endsWith("/core/src/refusal.ts") && hand.test(f.text)).map(f => f.path.slice(PACKAGES.length + 1));
+    assert.deepEqual(bad, [], `build the trailer with refusalTrailer() / withRefusalTrailer(): ${bad.join(", ")}`);
+    // and the detector itself sees one
+    assert.ok(hand.test("x [SOME_CODE; details: repo-aegis explain SOME_CODE]"));
+    assert.ok(!hand.test("`[CODE; details: repo-aegis explain CODE]`"));
+  });
+
+  it("every emitError code is a literal, a constant or a declared `….code`, or its file is on the short allowlist (M2)", () => {
+    assert.deepEqual(findOpaqueEmitErrors(files), []);
+    // mutation check: a wrapper that hides its code is reported
+    const fake = [
+      {
+        path: "/x/src/fail.ts",
+        text:
+          'function fail(code: string, m: string): never { return emitError({ code, error: m }, {}); }\n' +
+          'emitError({ code: cond ? "A_ONE" : "A_TWO", error: "x" }, opts);\n' +
+          'emitError(payload, opts);\n' +
+          'emitError({ ...base, error: "x" }, opts);\n' +
+          'emitError({ code: err.code, error: "fine" }, opts);\n' +
+          'emitError({ code: "FINE_LITERAL", error: "fine" }, opts);\n' +
+          'emitError("a bare message", opts);',
+      },
+    ];
+    const reported = findOpaqueEmitErrors(fake);
+    assert.equal(reported.length, 4, reported.join("\n"));
+    assert.match(reported.join("\n"), /"code"/);
+    // an allowlisted helper file may pass a code through
+    assert.deepEqual(findOpaqueEmitErrors([{ path: "/x/src/require-terminal.ts", text: fake[0]!.text }]), []);
+  });
+
   it("the scan reads plain CLI errors: an emitError code, a single-word code, an error class's own code, a constructor argument", () => {
     const fake = [
       {
@@ -226,6 +399,16 @@ describe("refusal lint (X-10)", () => {
       assert.ok(shown.error.startsWith("too long repo-aegis "), shown.error);
       assert.ok(shown.error.endsWith("[PAUSE_TOO_LONG; details: repo-aegis explain PAUSE_TOO_LONG]"), shown.error);
       assert.match(shown.error, /Only a person can run it: yes\. \[/);
+      // H2: USAGE is agent-fixable by default, but a person's step after a terminal gate (the code stays USAGE)
+      out = "";
+      assert.throws(() => emitError({ code: "USAGE", error: "bad flag" }, { json: true }), /exit 2/);
+      assert.match((JSON.parse(out) as { error: string }).error, /Only a person can run it: no\. \[USAGE; details: repo-aegis explain USAGE\]$/);
+      out = "";
+      assert.throws(() => emitError({ code: "USAGE", error: "bad flag" }, { json: true }, USAGE_AFTER_TERMINAL_GATE), /exit 2/);
+      const gated = JSON.parse(out) as { code: string; error: string };
+      assert.equal(gated.code, "USAGE");
+      assert.match(gated.error, /Next step: A person corrects the command's flags/);
+      assert.match(gated.error, /Only a person can run it: yes\. \[USAGE; details: repo-aegis explain USAGE\]$/);
       out = "";
       assert.throws(() => emitError({ code: "NOT_A_CODE_IN_THE_TABLE", error: "plain" }, { json: true }), /exit 2/);
       assert.equal((JSON.parse(out) as { error: string }).error, "plain");

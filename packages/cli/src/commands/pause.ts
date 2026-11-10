@@ -30,6 +30,7 @@ import {
   readPause,
   type PauseState,
 } from "@de-otio/repo-aegis-core";
+import { USAGE_AFTER_TERMINAL_GATE } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { requireTerminal, type RequireTerminalOptions } from "../require-terminal.js";
 
@@ -105,7 +106,7 @@ export function pause(opts: PauseOptions): void {
   let durationMs = DEFAULT_PAUSE_MS;
   if (opts.for !== undefined) {
     const t = parseTtl(opts.for);
-    if (t === null) emitError({ code: "USAGE", error: `--for must be like 30m, 2h, 90s (got ${JSON.stringify(opts.for)})` }, opts);
+    if (t === null) emitError({ code: "USAGE", error: `--for must be like 30m, 2h, 90s (got ${JSON.stringify(opts.for)})` }, opts, USAGE_AFTER_TERMINAL_GATE);
     if (t > MAX_PAUSE_MS) {
       emitError(
         {
@@ -123,7 +124,7 @@ export function pause(opts: PauseOptions): void {
   if (opts.repo !== undefined) {
     const parsed = parsePauseRepo(opts.repo);
     if (parsed === null) {
-      emitError({ code: "USAGE", error: `--repo must be <owner>/<repo> (got ${JSON.stringify(opts.repo)}); there is no wildcard scope` }, opts);
+      emitError({ code: "USAGE", error: `--repo must be <owner>/<repo> (got ${JSON.stringify(opts.repo)}); there is no wildcard scope` }, opts, USAGE_AFTER_TERMINAL_GATE);
     }
     repo = parsed;
   }

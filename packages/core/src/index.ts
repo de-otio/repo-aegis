@@ -383,8 +383,15 @@ export {
 } from "./refusal.js";
 export type { RefusalInput, RefusalFix } from "./refusal.js";
 // X-10: the single table of next step + person-only per refusal code, and the running version.
-export { REFUSAL_GUIDE, refusalGuideEntry, refusalGuideLine, repoAegisVersion } from "./refusal-guide.js";
-export type { RefusalGuideEntry } from "./refusal-guide.js";
+export {
+  REFUSAL_GUIDE,
+  refusalGuideEntry,
+  refusalGuideLine,
+  repoAegisVersion,
+  USAGE_AFTER_TERMINAL_GATE,
+  HOOK_INPUT_TOO_LARGE_AFTER_WRITE,
+} from "./refusal-guide.js";
+export type { RefusalGuideEntry, RefusalGuideOverride } from "./refusal-guide.js";
 export {
   findApprovalDefault,
   findPromptApprovalDefault,

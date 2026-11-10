@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { isHomeOverridden, REFUSAL_GUIDE, withRefusalTrailer } from "@de-otio/repo-aegis-core";
+import { isHomeOverridden, REFUSAL_GUIDE, withRefusalTrailer, type RefusalGuideOverride } from "@de-otio/repo-aegis-core";
 
 export interface OutputOptions {
   json?: boolean;
@@ -20,13 +20,17 @@ export interface ErrorPayload {
   details?: unknown;
 }
 
-export function emitError(value: ErrorPayload | string, opts: OutputOptions = {}): never {
+/**
+ * `guide` (optional) replaces the table's next step or person-only answer for THIS error only, for a call site that
+ * knows more than the code does (`USAGE` after a terminal gate: the reader is a person). The code is unchanged.
+ */
+export function emitError(value: ErrorPayload | string, opts: OutputOptions = {}, guide?: RefusalGuideOverride): never {
   const given: ErrorPayload = typeof value === "string" ? { error: value } : value;
   // X-10: a refusal code in the shared table always ends with its version, next step, person-only answer and
   // `[CODE; details: …]` token, whichever call site raised it (a no-op when the text already carries it).
   const payload: ErrorPayload =
     given.code !== undefined && Object.prototype.hasOwnProperty.call(REFUSAL_GUIDE, given.code)
-      ? { ...given, error: withRefusalTrailer(given.code, given.error) }
+      ? { ...given, error: withRefusalTrailer(given.code, given.error, guide) }
       : given;
   if (opts.json) {
     process.stderr.write(JSON.stringify(payload) + "\n");
