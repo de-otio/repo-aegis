@@ -51,6 +51,45 @@ describe("findHumanOnlyCommand — the emergency pause (P1-E)", () => {
     it(`allows ${JSON.stringify(command)}`, () => assert.equal(findHumanOnlyCommand(command), null));
   }
 
+  // The shell route to the state file: the Edit deny rule and check-write do not see a shell, so the text is the lock.
+  const FILE_WRITES: readonly string[] = [
+    "echo '{}' > ~/.config/repo-aegis/pause.json",
+    "echo '{}' >> ~/.config/repo-aegis/pause.json",
+    "echo '{}'>~/.config/repo-aegis/pause.json",
+    "printf x > \"$REPO_AEGIS_HOME/pause.json\"",
+    "printf x > ${REPO_AEGIS_HOME}/Pause.json",
+    "cat x.json | tee ~/.config/repo-aegis/PAUSE.JSON",
+    "cp /tmp/x.json ~/.config/repo-aegis/pause.json",
+    "mv x.json /Users/me/.config/repo-aegis/pause.json",
+    "install -m 600 x.json ~/.config/repo-aegis/pause.json",
+    "ln -s /tmp/x.json ~/.config/repo-aegis/pause.json",
+    "cd ~/.config/repo-aegis && echo '{}' > pause.json",
+    "cd ~/.config/repo-aegis && cp /tmp/x.json pause.json",
+    "dd if=/tmp/x.json of=~/.config/repo-aegis/pause.json",
+    "sed -i s/a/b/ ~/.config/repo-aegis/pause.json",
+    "python3 -c \"open('/Users/me/.config/repo-aegis/pause.json','w').write('{}')\"",
+    "node -e \"require('fs').writeFileSync(process.env.HOME+'/.config/repo-aegis/pause.json','{}')\"",
+    "bash -c 'echo {} > ~/.config/repo-aegis/pause.json'",
+  ];
+  for (const command of FILE_WRITES) {
+    it(`refuses a shell write to the pause file: ${JSON.stringify(command)}`, () => assert.deepEqual(findHumanOnlyCommand(command), { kind: "pause" }));
+  }
+
+  const FILE_READS: readonly string[] = [
+    "cat ~/.config/repo-aegis/pause.json",
+    "ls -la ~/.config/repo-aegis/pause.json",
+    "jq . ~/.config/repo-aegis/pause.json",
+    "grep expiresAt ~/.config/repo-aegis/pause.json",
+    "echo '{}' > /tmp/pause.json",
+    "cp x.json /tmp/pause.json",
+    "git commit -m 'cp x ~/.config/repo-aegis/pause.json is refused'",
+    "repo-aegis resume",
+    "repo-aegis status",
+  ];
+  for (const command of FILE_READS) {
+    it(`allows ${JSON.stringify(command)}`, () => assert.equal(findHumanOnlyCommand(command), null));
+  }
+
   it("the refusal is fixed text that says why and names the person's way", () => {
     const text = humanCommandRefusal({ kind: "pause" });
     assert.match(text, /refused\./);

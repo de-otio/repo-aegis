@@ -212,9 +212,12 @@ repo-aegis resume                               # end it now
 ```
 
 While a pause lasts, the git hooks, the agent hooks, the `gh` wrapper and the git credential helper stand aside
-and print `repo-aegis: paused until 14:30 (resume: repo-aegis resume)`. It always expires; `status` and
-`doctor` show it. A marker found in a file an agent just wrote is still reported, as advice. `approve`,
-identity changes and `uninstall` stay person-only, and a pause cannot be set or extended by an agent. It is not
+and print `repo-aegis: paused until 14:30, cross-org checks stay on (resume: repo-aegis resume)`. A pause for the
+whole machine keeps the cross-org checks on (a push or write across a trust boundary is still refused); a pause
+with `--repo` lifts them for that repository. It always expires; `status` and `doctor` show it. A marker found in
+a file an agent just wrote is still reported, as advice. The credential helper still answers as before and only
+stops refusing. `approve`, identity changes and `uninstall` stay person-only, and a pause cannot be set or
+extended by an agent. It is not
 a substitute for fixing the false positive: see `repo-aegis explain <CODE>`. Details: [doc/cli-reference.md](doc/cli-reference.md).
 
 ## Uninstalling

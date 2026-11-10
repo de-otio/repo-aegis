@@ -63,7 +63,7 @@ import {
   type TerminalCheck,
 } from "@de-otio/repo-aegis-core";
 import type { OutputOptions } from "../format.js";
-import { pauseCoveringIntents } from "../pause-scope.js";
+import { firstIntentDestination, pauseCoveringIntents, recordPausedAllow } from "../pause-scope.js";
 import { buildGhCommand, evaluateEgress, readbackResult, type AllowVerdict, type EgressEvaluation } from "./egress-check.js";
 import { gitSpawnViolation, readCredentialConfig, type ConfigEntry } from "../git-credential-config.js";
 import { resolveTrustedGh } from "./doctor-owner-checks.js";
@@ -831,6 +831,11 @@ function runPinned(
   if (paused !== null) {
     io.err(`${pauseNotice(paused.pause)}\n`);
     intents = paused.intents;
+    recordPausedAllow("gh shim", {
+      verb: intents !== null && intents[0] !== undefined ? describeVerb(intents[0].verb) : "gh",
+      destination: intents === null ? null : firstIntentDestination(intents, cwd),
+      home,
+    });
   } else {
     try {
       const ev = (deps.evaluate ?? evaluateEgress)(args, cwd);
@@ -871,7 +876,11 @@ function runPinned(
       : { kind: "plain", note: "repo-aegis faulted while choosing a GitHub identity" };
   }
 
-  if (outcome.kind === "refuse" && paused !== null && !args.some(a => AUTH_GROUPS.includes(a))) outcome = { kind: "plain" };
+  // The refusals a pause never converts: verbs that read or change tokens and gh's config, and running an alias or an
+  // extension (a name that is not a gh command: it can expand to anything, with the mapped token in its environment).
+  const firstWord = args.find(a => !a.startsWith("-"));
+  const aliasLike = firstWord !== undefined && !isGhBuiltinGroup(firstWord);
+  if (outcome.kind === "refuse" && paused !== null && !aliasLike && !args.some(a => AUTH_GROUPS.includes(a))) outcome = { kind: "plain" };
   if (outcome.kind === "refuse") {
     io.err(refusalLine(outcome.code, outcome.reason, verbOf(args, intents ?? [])));
     return 2;

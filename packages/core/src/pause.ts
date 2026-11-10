@@ -9,21 +9,28 @@
 //
 // THE PERSON-ONLY GATE IS THE WHOLE DESIGN. This file is a global off switch, so who may write it matters more
 // than anything it does. The writers are `repo-aegis pause` (a terminal gate, `PAUSE_NEEDS_TTY`, like `approve`)
-// and nothing else. An agent is kept off it in three places:
+// and nothing else. An agent runs as the same OS user as the person, so file ownership and mode cannot keep it
+// off the file; the agent-side locks are these four:
 //   - the egress guard refuses an agent Bash command that runs `repo-aegis pause` (core/human-commands.ts),
-//     paused or not;
+//     paused or not, and a text rule there refuses a command that writes a word ending in `pause.json` under a
+//     `repo-aegis` path (a redirect, `cp`, `mv`, `tee`, `install`, `ln`, an interpreter's `open(`);
 //   - `Edit(<home>/pause.json)` is in the deny rules `install claude-md` writes, so the agent's own write tools
-//     and its sandboxed shell cannot touch the file, and `check-write` refuses a write to it that gets past those;
-//   - this reader fails closed: a file that is not a plain file, is not owned by this user, is group- or
-//     world-writable, is dated in the future, lasts longer than the cap or does not parse is NO pause.
+//     and its sandboxed shell cannot touch the file;
+//   - `check-write` refuses a write to it that gets past those, wherever the path is spelled: any letter case,
+//     through a symlinked directory or a symlinked file (cli/state-file-guard.ts);
+//   - this reader requires the file's stored name to be exactly `pause.json` (a case-insensitive file system
+//     would otherwise open `Pause.json` as `pause.json`).
+// The reader's other checks (a plain file, owned by this user, not group- or world-writable, not dated in the
+// future, not longer than the cap, parses) defend against OTHER users and against a stale or hand-edited file,
+// not against the agent: a planted file buys nothing it could not get from an approval, and fails closed.
 // `resume` is allowed for an agent: it only turns protection back on (see cli/commands/pause.ts).
 //
 // What a reader does with an active pause is each entry point's business; this file is the one place that decides
 // whether there is one, so that fifteen call sites cannot disagree. A reader never deletes (the lower layers may
 // be sandboxed read-only) and never throws.
-import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { repoAegisHome } from "./paths.js";
 import { safeDestination } from "./refusal.js";
 
@@ -127,6 +134,8 @@ export function readPause(opts: PauseReadOptions = {}): PauseRead {
     }
     // lstat, not stat: a symlink to somewhere else is not the file a person wrote.
     if (!st.isFile() || st.size > PAUSE_FILE_MAX_BYTES) return { kind: "invalid" };
+    // The name as stored, not as looked up: on a case-insensitive file system `Pause.json` answers to `pause.json`.
+    if (!readdirSync(dirname(path)).includes(basename(path))) return { kind: "invalid" };
     if (process.platform !== "win32") {
       const uid = opts.expectedUid ?? process.getuid?.();
       if (uid !== undefined && st.uid !== uid) return { kind: "invalid" };
@@ -168,10 +177,17 @@ export function pauseCovers(state: PauseState, destinations: readonly PauseDesti
 
 const pad = (n: number): string => String(n).padStart(2, "0");
 
-/** The one fixed notice line every entry point prints while a pause applies. Local time, HH:MM. */
+/**
+ * The one fixed notice line every entry point prints while a pause applies. Local time, HH:MM. A machine-wide pause
+ * keeps the cross-org checks on (a push or a write across a trust boundary is a different mistake from a false
+ * positive), and says so; a pause scoped to one repository lifts them for that repository.
+ */
 export function pauseNotice(state: PauseState): string {
   const at = new Date(state.expiresAt);
-  return `repo-aegis: paused until ${pad(at.getHours())}:${pad(at.getMinutes())} (resume: repo-aegis resume)`;
+  const until = `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+  return state.repo === undefined
+    ? `repo-aegis: paused until ${until}, cross-org checks stay on (resume: repo-aegis resume)`
+    : `repo-aegis: paused until ${until} (resume: repo-aegis resume)`;
 }
 
 function safeUser(): string {

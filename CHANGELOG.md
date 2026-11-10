@@ -54,7 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   joins the `permissions.deny` rules `install claude-md` writes (re-run it once), and `hook check-write` refuses a
   write to the file (`PAUSE_FILE_WRITE_REFUSED`). An agent may run `resume`, which only turns protection back on.
   `status` and `doctor` (`PAUSE_ACTIVE`, a warning) show an active pause; `pause` and `resume` are audit records
-  (the reason's length, never its text); `uninstall` removes the file.
+  (the reason's length, never its text); `uninstall` removes the file. A **machine-wide** pause keeps the
+  cross-org checks on (`CROSS_ORG_PUSH`, `CROSS_ORG_WRITE`) and its notice says so; a `--repo` pause lifts them
+  for that repository only. It lifts the raw-HTTP-client rule but never `GH_AUTH_TOKEN_NETWORK`, and the `gh`
+  shim still refuses running an alias or extension. The credential helper answers as without a pause (an
+  App-mapped owner still pushes as the App) and only a refusal becomes nothing. Every entry point that stands
+  aside writes a `paused-allow` audit record (layer, verb, `owner/repo`), and `scan-after-write` drops the
+  match preview from the advisory payload it prints at exit 0. The pause file's stored name must be exactly
+  `pause.json`, and `check-write` judges the state files by what they are (any letter case, symlinked directories
+  and files), which also closes a pre-existing gap for `egress-approvals.json` (`APPROVALS_FILE_WRITE_REFUSED`). A
+  shell command that writes `pause.json` under a `repo-aegis` path is refused as a person-only command.
 
 ### Changed
 

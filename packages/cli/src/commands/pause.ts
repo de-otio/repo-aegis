@@ -151,7 +151,7 @@ export function pause(opts: PauseOptions): void {
   emitText(`  ${pauseNotice(state)}`);
   emitText(
     "  while paused, the hooks, the egress guard, the gh shim and the git credential helper stand aside for " +
-      (state.repo === undefined ? "everything" : "that repository") +
+      (state.repo === undefined ? "everything except the cross-org checks, which stay on" : "that repository, cross-org checks included") +
       "; marker scans after a write still report, as advice. approve, pause, identity changes and uninstall stay person-only.",
   );
 }

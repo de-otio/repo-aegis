@@ -544,6 +544,30 @@ function writesManagedSettings(command: string): boolean {
   return cdsInto || regions.flat().some(isManagedSettingsWord);
 }
 
+/** Programs and words that WRITE or copy a file (or run text that can): next to a `pause.json` word they mean a write. */
+const PAUSE_FILE_WRITERS = new Set([
+  "cp", "mv", "tee", "install", "ln", "dd", "rsync", "touch", "truncate", "sed", "perl", "python", "python3", "node",
+  "ruby", "ed", "open", "write", "writefile", "writefilesync", "copyfile", "copyfilesync", "rename", "renamesync",
+]);
+
+/**
+ * A command line that writes the emergency pause's state file (complexity-review P1-E): a redirect to, or a
+ * `cp`/`mv`/`tee`/`install`/`ln`/`dd`/`sed`, or an interpreter's `open(`/`writeFile` on, a word ending in `pause.json`
+ * (any letter case), anywhere on a line that also names a `repo-aegis` path (`~/.config/repo-aegis/…`,
+ * `$REPO_AEGIS_HOME/…`, a `cd` into it). It is the pause's person-only gate for the one route the Edit deny rule and
+ * `check-write` cannot see, a shell. Reading the file (`cat`, `ls`) is not refused. Accepted false positive: a
+ * write to some other `pause.json` inside a checkout whose path says `repo-aegis`. Not seen: a name built at run time.
+ */
+function writesPauseFile(command: string): boolean {
+  if (!/repo[-_]aegis/i.test(command) || !/pause\.json/i.test(command)) return false;
+  if (/>>?\s*["']?[^\s"'<>;&|]*pause\.json/i.test(command)) return true;
+  for (const { words } of splitRegions(command)) {
+    if (!words.some(w => /pause\.json$/i.test(normalizePath(w)))) continue;
+    if (words.some(w => PAUSE_FILE_WRITERS.has(tokenBase(w)))) return true;
+  }
+  return false;
+}
+
 /**
  * The first human-only repo-aegis command this command line runs, or null.
  * Pure and cheap: a line with no repo-aegis word returns at once.
@@ -552,6 +576,11 @@ export function findHumanOnlyCommand(command: string): HumanOnlyHit | null {
   if (typeof command !== "string" || command === "") return null;
   try {
     if (writesManagedSettings(command)) return { kind: "managed-settings-write" };
+  } catch {
+    /* fall through to the program-word search */
+  }
+  try {
+    if (writesPauseFile(command)) return { kind: "pause" };
   } catch {
     /* fall through to the program-word search */
   }

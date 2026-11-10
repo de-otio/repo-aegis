@@ -967,15 +967,24 @@ describe("git-credential get: the emergency pause (P1-E): step aside, never hand
     assert.equal(calls(), 0, "taaad was never called");
   });
 
-  it("an active pause: a push it would have answered with the App's token is answered with nothing", () => {
+  it("an active pause: a push it answers is answered as without a pause: the App's token for an App-mapped owner", () => {
     pauseAt(home);
     const r = get(request("o/r.git"), deps(clock(T0)));
-    assert.deepEqual(r, NOTHING);
-    assert.equal(calls(), 0, "no token was minted under a pause");
-    assert.equal(loginCalls.length, 0);
-    // and with the same registry, no pause: the App token comes out (the control for the line above)
+    assert.match(r.stdout, new RegExp(`username=x-access-token\\npassword=${TOKEN}`));
+    assert.equal(calls(), 1, "the App token is minted exactly as without a pause");
+    assert.match(argv(), /--repo o\/r/);
+    // and it is byte-for-byte what no pause gives
     rmSync(pausePath(home), { force: true });
-    assert.match(get(request("o/r.git"), deps(clock(T0))).stdout, /password=/);
+    const unpaused = get(request("o/r.git"), deps(clock(T0)));
+    assert.equal(r.stdout, unpaused.stdout);
+    assert.equal(r.stderr, unpaused.stderr);
+  });
+
+  it("an active pause: a person-mapped owner's push still gets the mapped login's token (identity choice unchanged)", () => {
+    pauseAt(home);
+    const r = get(request("p/r.git"), deps(clock(T0)));
+    assert.match(r.stdout, new RegExp(`password=${PERSON_TOKEN}`));
+    assert.equal(loginCalls.length, 1);
   });
 
   it("a pause covers reads too: the helper is as if repo-aegis were not installed", () => {

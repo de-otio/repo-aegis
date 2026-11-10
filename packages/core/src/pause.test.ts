@@ -145,6 +145,21 @@ describe("pause: a file that fails a check is no pause (fail closed)", () => {
     assert.equal(readPause({ path: link, now: T0 }).kind, "invalid");
   });
 
+  it("a case-variant name (Pause.json, PAUSE.JSON) is no pause, even where the file system opens it as pause.json", () => {
+    for (const name of ["Pause.json", "PAUSE.JSON", "pause.JSON"]) {
+      const dir = join(root, `h${n++}`);
+      mkdirSync(dir, { recursive: true });
+      raw(join(dir, name), good());
+      // `lstat(.../pause.json)` succeeds on a case-insensitive file system and fails on a case-sensitive one:
+      // either way the answer must not be `active`.
+      assert.notEqual(readPause({ path: join(dir, "pause.json"), now: T0 }).kind, "active", name);
+    }
+    // control: the exact name is accepted
+    const ok = fresh();
+    raw(ok, good());
+    assert.equal(readPause({ path: ok, now: T0 }).kind, "active");
+  });
+
   it("a directory, an oversized file, and bad JSON are refused", () => {
     const dir = fresh();
     mkdirSync(dir);
@@ -241,10 +256,15 @@ describe("pause: scope", () => {
 });
 
 describe("pause: notice", () => {
-  it("is one fixed line with the expiry and the way out", () => {
-    const s: PauseState = { version: 1, createdAt: iso(0), expiresAt: iso(HOUR), by: "a", reasonLength: 0 };
-    const at = new Date(s.expiresAt);
-    const hhmm = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
-    assert.equal(pauseNotice(s), `repo-aegis: paused until ${hhmm} (resume: repo-aegis resume)`);
+  const base: PauseState = { version: 1, createdAt: iso(0), expiresAt: iso(HOUR), by: "a", reasonLength: 0 };
+  const at = new Date(base.expiresAt);
+  const hhmm = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+
+  it("a machine-wide pause says the expiry, that cross-org checks stay on, and the way out", () => {
+    assert.equal(pauseNotice(base), `repo-aegis: paused until ${hhmm}, cross-org checks stay on (resume: repo-aegis resume)`);
+  });
+
+  it("a pause scoped to one repository lifts cross-org for it, and does not say otherwise", () => {
+    assert.equal(pauseNotice({ ...base, repo: "acme/svc" }), `repo-aegis: paused until ${hhmm} (resume: repo-aegis resume)`);
   });
 });

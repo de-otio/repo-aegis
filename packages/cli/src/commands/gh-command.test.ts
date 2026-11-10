@@ -1329,7 +1329,7 @@ describe("U4: a read whose identity cannot be produced runs as the active gh acc
 
 describe("P1-E: the gh shim under an emergency pause", () => {
   const HOUR = 3_600_000;
-  const NOTICE = /^repo-aegis: paused until \d\d:\d\d \(resume: repo-aegis resume\)$/m;
+  const NOTICE = /^repo-aegis: paused until \d\d:\d\d(?:, cross-org checks stay on)? \(resume: repo-aegis resume\)$/m;
   type Kind = "active" | "expired" | "future" | "world-writable";
 
   /** The pause file in the world's pinned home, relative to the real clock with an hour of margin each way. */
@@ -1381,6 +1381,20 @@ describe("P1-E: the gh shim under an emergency pause", () => {
     assert.doesNotMatch(r.err, /PUBLISHED →/);
   });
 
+  it("a pause that lets a call through is one `paused-allow` audit record: layer, verb and destination, nothing from the call", () => {
+    const w = makeWorld();
+    writeFileSync(join(w.home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    setPause(w, "active");
+    const r = run(w, ["pr", "create", "--repo", "Example-Org/SVC", "--title", "SECRET-TITLE", "--body-file", "/var/folders/xx/pr.md"], { presence: "agent", plainPath: true });
+    assert.equal(r.status, 0, r.err);
+    const log = readFileSync(join(w.home, "state", "audit.log"), "utf8");
+    const rec = log.split("\n").filter(l => l !== "").map(l => JSON.parse(l) as { action: string; details?: Record<string, unknown> }).filter(x => x.action === "paused-allow");
+    assert.equal(rec.length, 1);
+    assert.equal(rec[0]!.details?.["layer"], "gh shim");
+    assert.equal(rec[0]!.details?.["destination"], "example-org/svc");
+    assert.doesNotMatch(log, /SECRET-TITLE|pr\.md/);
+  });
+
   it("the identity choice is unchanged where it works: a mapped write still runs as the App, narrowed", () => {
     const w = makeWorld();
     setPause(w, "active");
@@ -1407,12 +1421,13 @@ describe("P1-E: the gh shim under an emergency pause", () => {
     assert.deepEqual(r.taaadArgv, []);
   });
 
-  it("verbs that read tokens or change gh's config stay refused for an agent while paused", () => {
+  it("verbs that read tokens or change gh's config, and running an alias or extension, stay refused for an agent while paused", () => {
     const w = makeWorld();
-    const candidates = [["auth", "token"], ["auth", "token", "--user", "alice"], ["auth", "status"], ["config", "set", "pager", "x"], ["alias", "set", "x", "y"], ["extension", "install", "o/r"]];
+    const candidates = [["auth", "token"], ["auth", "token", "--user", "alice"], ["auth", "status"], ["config", "set", "pager", "x"], ["alias", "set", "x", "y"], ["extension", "install", "o/r"], ["myalias", "run"], ["co", "123"]];
     // Which of these an agent is refused WITHOUT a pause (not every `auth` verb reads a token).
     const refused = candidates.filter(args => run(w, args, { presence: "agent", plainPath: true }).status === 2);
     assert.ok(refused.some(a => a.join(" ") === "auth token"), "control: `gh auth token` is refused without a pause");
+    assert.ok(refused.some(a => a[0] === "myalias"), "control: running an alias or extension for a mapped owner is refused without a pause");
     setPause(w, "active");
     for (const args of refused) {
       rmSync(join(w.stubs, "gh.argv"), { force: true });

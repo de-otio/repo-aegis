@@ -101,7 +101,7 @@ import {
 import { emitJson, emitText, emitError, shouldRevealMatches } from "../format.js";
 import { currentHumanPresent } from "../human-presence.js";
 import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
-import { pauseCoveringDestinations, pauseCoveringWorkingRepo } from "../pause-scope.js";
+import { pauseCoveringDestinations, pauseCoveringWorkingRepo, recordPausedAllow } from "../pause-scope.js";
 
 interface CheckOptions extends DenySetFloorOptions {
   /**
@@ -527,7 +527,7 @@ function pushTransport(raw: string | undefined): "ssh" | "http" {
  * cannot resolve) is not "no destination": it is an unresolved one, and rule h
  * refuses it for a caller with no person present (D5).
  */
-function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestination | null {
+function evaluateDestination(repo: RepoConfig, opts: CheckOptions, pause: PauseState | null = null): CheckDestination | null {
   if (opts.remoteUrl === undefined || opts.remoteUrl.trim() === "") return null;
   // The pre-push hook sees the real environment and git config of the push: an
   // ssh override (GIT_SSH_COMMAND, GIT_SSH, GIT_SSH_VARIANT, core.sshCommand)
@@ -543,7 +543,9 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   const ruleH = ruleHStatus(loaded.state, loaded.registry ?? EMPTY_REGISTRY);
 
   // --- UNREGISTERED_OWNER_EGRESS (rule h) ----------------------------------
-  if (!humanPresent) {
+  // (`pause`: a machine-wide emergency pause is running this to keep CROSS_ORG_PUSH on; rule h, rule g and the account
+  // checks are what it lifts.)
+  if (!humanPresent && pause === null) {
     const named = target.kind === "github" ? { org: target.org, repo: target.repo } : null;
     const candidate =
       named ??
@@ -713,7 +715,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   // A terminal approval first, unchanged. Failing that, a PROMPT approval: a person's yes at the agent's own
   // permission prompt for exactly this verb, this destination and this REMOTE ref, for two minutes. The pre-push
   // script's `--remote-ref` is what names that ref; without it nothing matches.
-  const needsApproval = dest.publicFacing && !humanPresent;
+  const needsApproval = dest.publicFacing && !humanPresent && pause === null;
   const approval: { id: string } | null = !needsApproval
     ? null
     : (findApproval(parsed, opts.pushRef, scope) ??
@@ -739,7 +741,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
     }
     process.stderr.write(`repo-aegis: human approval ${approval.id} stands in for a person on this push\n`);
   }
-  if (dest.publicFacing && !humanPresent && approval === null) {
+  if (dest.publicFacing && !humanPresent && approval === null && pause === null) {
     auditRefusal("PUBLIC_PUSH_NEEDS_HUMAN", repo, `${dest.org}/${dest.repo}`, ref);
     emitError(
       {
@@ -782,7 +784,7 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   // repo-aegis credential helper supplies the App token. Over SSH the push would go as whatever key the person
   // has: refused, with the HTTPS form. Over HTTPS the helper must be first in git's list, or git asks the
   // person's helper instead.
-  if (registry !== null && registry.identityMap?.get(parsed.org)?.agent !== undefined) {
+  if (pause === null && registry !== null && registry.identityMap?.get(parsed.org)?.agent !== undefined) {
     const presence = identityPresence(checkTerminal());
     if (presence === "agent") {
       const transport = pushTransport(opts.remoteUrl);
@@ -851,8 +853,22 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
  * The pause covering this run, when it is a pre-commit or pre-push run (see the call site), else null. Pre-commit is
  * scoped by the working repo's origin, pre-push by the push's destination (resolved offline, as pre-push does).
  */
+function isPrePushRun(opts: CheckOptions): boolean {
+  return (!!opts.pushRef || !!opts.range) && opts.remoteUrl !== undefined && opts.remoteUrl.trim() !== "";
+}
+
+/** The push's destination as `owner/repo`, when the URL names a GitHub repository offline; for the audit record. */
+function pausedDestination(opts: CheckOptions): { org: string; repo: string } | null {
+  try {
+    const target = resolveRemoteUrl(opts.remoteUrl, undefined, { sshOverride: detectSshOverride(opts.cwd ?? process.cwd()) });
+    return target.kind === "github" ? { org: target.org, repo: target.repo } : null;
+  } catch {
+    return null;
+  }
+}
+
 function pausedHookRun(opts: CheckOptions): PauseState | null {
-  const prePush = (!!opts.pushRef || !!opts.range) && opts.remoteUrl !== undefined && opts.remoteUrl.trim() !== "";
+  const prePush = isPrePushRun(opts);
   if (!opts.staged && !prePush) return null;
   const cwd = opts.cwd ?? process.cwd();
   if (!prePush) return pauseCoveringWorkingRepo(cwd);
@@ -886,6 +902,12 @@ export function check(opts: CheckOptions): void {
   // remote URL): an explicit `--path`/`--range`/`--history` scan is something a person asked to read.
   const paused = pausedHookRun(opts);
   if (paused !== null) {
+    // A pause scoped to this repository (or any pre-commit run) lifts everything. A MACHINE-WIDE pause on a push keeps
+    // the cross-org check on (a push across a trust boundary is a different mistake from a false positive): the
+    // destination checks run with the pause, which skips rule g, rule h and the account checks and nothing else.
+    const dest = isPrePushRun(opts) ? pausedDestination(opts) : null;
+    if (paused.repo === undefined && isPrePushRun(opts)) evaluateDestination(readRepoConfig(opts.cwd), opts, paused);
+    recordPausedAllow(opts.staged ? "pre-commit" : "pre-push", { verb: opts.staged ? "git commit" : "git push", destination: dest });
     const notice = pauseNotice(paused);
     if (opts.json) emitJson({ status: "paused", notice, hits: [], skipped: [], egress: [] });
     else process.stderr.write(`${notice}\n`);

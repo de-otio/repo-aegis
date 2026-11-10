@@ -86,7 +86,7 @@ describe("pause / resume", () => {
     assert.equal(statSync(path).mode & 0o777, 0o600);
     const text = runPause();
     assert.match(text.stdout, /everything on this machine/);
-    assert.match(text.stdout, /repo-aegis: paused until \d\d:\d\d \(resume: repo-aegis resume\)/);
+    assert.match(text.stdout, /repo-aegis: paused until \d\d:\d\d(?:, cross-org checks stay on)? \(resume: repo-aegis resume\)/);
   });
 
   it("--for 9h is refused as PAUSE_TOO_LONG; 8h is the most; nothing is written for the refusal", () => {

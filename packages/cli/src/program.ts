@@ -754,7 +754,7 @@ export async function buildProgram(): Promise<Command> {
   program
     .command("pause")
     .description(
-      "pause repo-aegis for a while (a person's terminal only; always expires: default 1h, at most 8h). With --repo <owner>/<repo> only that repository is paused. The hooks, egress guard, gh shim and git credential helper then stand aside; approve, pause, identity changes and uninstall stay person-only. End it early with `resume`.",
+      "pause repo-aegis for a while (a person's terminal only; always expires: default 1h, at most 8h). With --repo <owner>/<repo> only that repository is paused. The hooks, egress guard, gh shim and git credential helper then stand aside (a machine-wide pause keeps the cross-org checks on; one with --repo lifts them for that repository); approve, pause, identity changes and uninstall stay person-only. End it early with `resume`.",
     )
     .option("--for <duration>", "how long: 30m, 2h, 90s (default 1h, never more than 8h)")
     .option("--repo <owner/repo>", "pause only for this repository (its pushes and its working copy); default: everything on this machine")

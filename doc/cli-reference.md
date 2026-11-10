@@ -1840,9 +1840,12 @@ The emergency pause: for "repo-aegis is wrong right now and I have to ship". It 
 - **Setting one needs a terminal**, exactly like `approve`: a TTY on stderr that is a person's (no agent host
   or pty wrapper above the process, a chain that reaches a login session) and no `REPO_AEGIS_EGRESS_HUMAN`
   (`PAUSE_NEEDS_TTY`, exit 2). The agent hook also refuses an agent Bash command whose text runs `pause`
-  (`AGENT_RAN_HUMAN_COMMAND`), paused or not, and `Edit(<home>/pause.json)` is among the deny rules `install
-  claude-md` writes (a write that gets past those is refused by `hook check-write` as
-  `PAUSE_FILE_WRITE_REFUSED`).
+  (`AGENT_RAN_HUMAN_COMMAND`), paused or not, and so does a command whose text redirects, `cp`s, `mv`s, `tee`s,
+  `install`s, `ln`s or `open(`s a word ending in `pause.json` (any letter case) on a line that names a `repo-aegis`
+  path. `Edit(<home>/pause.json)` is among the deny rules `install claude-md` writes, and `hook check-write` refuses
+  a write to the file as `PAUSE_FILE_WRITE_REFUSED` however the path is spelled: any letter case (`Pause.json`), a
+  symlinked directory or a symlinked file. The same check protects `egress-approvals.json`
+  (`APPROVALS_FILE_WRITE_REFUSED`). These are the agent-side locks: the agent is the same OS user as the person.
 - **`--for`** is `30m`, `2h`, `90s`; default `1h`, never more than `8h` (`PAUSE_TOO_LONG`). There is no "until
   further notice": pause again when it ends.
 - **`--repo <owner>/<repo>`** limits the pause to one repository, matched case-insensitively. A pause with no
@@ -1857,27 +1860,35 @@ The emergency pause: for "repo-aegis is wrong right now and I have to ship". It 
 - **`resume`** ends it now. It needs no terminal and an agent may run it, because it can only turn protection
   back on; it prints no scope.
 
-State: `<home>/pause.json`, written atomically (0600). A reader treats a file that is not a plain file, is not
+State: `<home>/pause.json`, written atomically (0600). A reader treats a file that is not a plain file, whose
+stored name is not exactly `pause.json` (a case-insensitive file system opens `Pause.json` as `pause.json`), is not
 owned by this user, is group- or world-writable, has a `createdAt` in the future, lasts more than 8 hours, or
-does not parse as **no pause** (fail closed). Nothing deletes an expired file when it is only read; `pause`,
+does not parse as **no pause** (fail closed). Owner and mode defend against other users and a stale file, not
+against the agent. Nothing deletes an expired file when it is only read; `pause`,
 `pause --list` and `resume` do, and write the `resume` audit record that an expiry owes. Audit (when the audit
 log is on): `pause` (scope, expiry, reason length, never the text) and `resume` (`cause: resume|expired`).
 
-**While paused and in scope**, each entry point allows and says so with one fixed line,
-`repo-aegis: paused until 14:30 (resume: repo-aegis resume)` (local time):
+**While paused and in scope**, each entry point allows and says so with one fixed line, in local time:
+`repo-aegis: paused until 14:30, cross-org checks stay on (resume: repo-aegis resume)` for a machine-wide pause,
+`repo-aegis: paused until 14:30 (resume: repo-aegis resume)` for one scoped with `--repo`. **A machine-wide pause
+keeps the cross-org checks on** (`CROSS_ORG_PUSH`, `CROSS_ORG_WRITE`: carrying content across a trust boundary is a
+different mistake from a false positive); a pause scoped to a repository lifts them for that repository only. Each
+entry point that stands aside also writes one best-effort audit record, `paused-allow` (the layer, the verb and the
+destination as `owner/repo`; never the command, a path, a marker or the reason).
 
 | Entry point | While paused |
 |---|---|
-| pre-commit, pre-push (`check --staged`, `check --push-ref` or `--range` with `--remote-url`) | skips the scan and every destination rule (g, h, cross-org); exit 0, notice on stderr (`status: "paused"` in `--json`). An explicit `check --path`, a `--range` with no `--remote-url`, or `--history` is not paused |
-| `hook guard-egress` (every host adapter) | allows, with the notice as the `systemMessage` where the host has one (Claude Code). A machine-wide pause also lifts the raw-network rule (R6) |
-| `hook check-write`, `hook scan-after-write` | the write is allowed; a marker hit is still **reported**, as advice (exit 0, `advisory: true`, a count in the notice) |
-| `gh` shim | runs `gh` without the egress refusal; an identity refusal becomes a plain run as the caller (no token attached); an identity that works is still used. `gh auth`, `config`, `alias` and `extension` stay refused for an agent |
-| git credential helper | steps aside: prints nothing and exits 0, so git asks its next helper as if repo-aegis were not installed; it never hands out a token and does not refuse |
+| pre-commit, pre-push (`check --staged`, `check --push-ref` or `--range` with `--remote-url`) | skips the scan, rule g and rule h; exit 0, notice on stderr (`status: "paused"` in `--json`). On a push, a machine-wide pause still runs `CROSS_ORG_PUSH`. An explicit `check --path`, a `--range` with no `--remote-url`, or `--history` is not paused |
+| `hook guard-egress` (every host adapter) | allows, with the notice as the `systemMessage` where the host has one (Claude Code). A machine-wide pause also lifts the raw-HTTP-client rule (`GITHUB_API_VIA_HTTP_CLIENT`); `GH_AUTH_TOKEN_NETWORK` (`gh auth token` next to a network call, an absolute path to `gh` included) stays refused, and is judged again for a command line that trips both |
+| `hook check-write` | a pause scoped to the session's repository allows the write; a machine-wide pause leaves the cross-org write check on |
+| `hook scan-after-write` | a marker hit is still **reported**, as advice (exit 0, `advisory: true`, a count in the notice), without the text of the match (`matchPreview` is dropped from the stdout payload). A cross-org finding is lifted only by a scoped pause |
+| `gh` shim | runs `gh` without the egress refusal; an identity refusal becomes a plain run as the caller (no token attached); an identity that works is still used. `gh auth`, `config`, `alias` and `extension`, and running an alias or extension, stay refused for an agent |
+| git credential helper | the identity choice is made as always and an answer is given as always (an App-mapped owner still pushes as the App); only a **refusal** (`quit=true`) becomes nothing at all, so git asks its next helper |
 
 **Not covered by a pause:** `approve`, `pause`, identity changes, `uninstall`, `registry decrypt` and the
 other person-only verbs stay refused for an agent (`AGENT_RAN_HUMAN_COMMAND`), and so do detached-session
-starts, a `REPO_AEGIS_*` variable on `git`/`gh`, and writes to the waiver file, to `gh`'s config and to
-`pause.json`. A pause never makes an agent able to switch repo-aegis off or extend one.
+starts, a `REPO_AEGIS_*` variable on `git`/`gh`, `gh auth token` next to a network call, and writes to the waiver
+file, to `gh`'s config, to `egress-approvals.json` and to `pause.json`. A pause never makes an agent able to switch repo-aegis off or extend one.
 
 `status` shows an active pause (`pause:    ACTIVE for everything on this machine until …`, and `pause` in
 `--json`; never the repository's name) and `doctor` reports it as `PAUSE_ACTIVE` (warn, with the expiry and

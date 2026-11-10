@@ -14,11 +14,13 @@
 // Both return null on ANY doubt (no pause, an invalid file, an unreadable origin, a throw): not knowing is never a
 // reason to switch a check off.
 import {
+  appendAuditRecord,
   getRemoteUrl,
   parseRemoteUrlResolved,
   pauseCovers,
   readActivePause,
   resolveDestinationOffline,
+  safeDestination,
   type EgressIntent,
   type PauseDestination,
   type PauseReadOptions,
@@ -68,4 +70,55 @@ export function pauseCoveringIntents(intents: readonly EgressIntent[], cwd: stri
   } catch {
     return null;
   }
+}
+
+/**
+ * One best-effort audit record, `paused-allow`, from an entry point that stood aside because a pause covers it: which
+ * layer, which verb, and the destination as `owner/repo` when it is a plain GitHub name (`safeDestination`). Never the
+ * command line, a path, a marker, or the pause's reason (which is not stored anywhere). No `cwd`: a working
+ * directory's name can carry a customer's. The audit log is opt-in, so this is a no-op until it is on. `home` pins the
+ * log for the entry points that read a pinned home (the `gh` shim, the credential helper).
+ */
+export function recordPausedAllow(
+  layer: string,
+  info: { verb?: string; destination?: { org: string; repo: string } | null; home?: string } = {},
+): void {
+  const saved = process.env["REPO_AEGIS_HOME"];
+  try {
+    if (info.home !== undefined) process.env["REPO_AEGIS_HOME"] = info.home;
+    const safe = info.destination === null || info.destination === undefined ? null : safeDestination(info.destination.org, info.destination.repo);
+    appendAuditRecord({
+      action: "paused-allow",
+      details: {
+        layer,
+        ...(info.verb !== undefined && { verb: info.verb }),
+        ...(safe !== null && { destination: `${safe.org}/${safe.repo}` }),
+      },
+    });
+  } catch {
+    /* the audit log must never break the allow */
+  } finally {
+    if (info.home !== undefined) {
+      if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
+      else process.env["REPO_AEGIS_HOME"] = saved;
+    }
+  }
+}
+
+/** The first intent's destination, resolved offline, for {@link recordPausedAllow}; null on any doubt. */
+export function firstIntentDestination(intents: readonly EgressIntent[], cwd: string): { org: string; repo: string } | null {
+  try {
+    const first = intents[0];
+    if (first === undefined) return null;
+    const d = resolveDestinationOffline(first, cwd);
+    return d === null || d.unresolved !== undefined || d.candidates !== undefined ? null : { org: d.org, repo: d.repo };
+  } catch {
+    return null;
+  }
+}
+
+/** A scoped pause's `owner/repo` as a destination, for {@link recordPausedAllow}. */
+export function pausedRepoLabel(repo: string): { org: string; repo: string } | null {
+  const [org, name] = repo.split("/");
+  return org === undefined || name === undefined ? null : { org, repo: name };
 }

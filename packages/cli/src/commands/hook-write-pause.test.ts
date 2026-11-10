@@ -10,14 +10,14 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { cliBuilt, runCli } from "../_subprocess-utils.js";
 import { mintPause, pausePath } from "@de-otio/repo-aegis-core";
 
 const HOUR = 3_600_000;
-const NOTICE = /repo-aegis: paused until \d\d:\d\d \(resume: repo-aegis resume\)/;
+const NOTICE = /repo-aegis: paused until \d\d:\d\d(?:, cross-org checks stay on)? \(resume: repo-aegis resume\)/;
 const REGISTRY = `schemaVersion: 2
 engagements:
   - id: alpha
@@ -85,8 +85,17 @@ describe("hook check-write under a pause", { skip: SKIP }, () => {
     assert.equal((r.json as { code: string }).code, "CROSS_ORG_WRITE");
   });
 
-  it("an active pause allows it, with the notice as the systemMessage", () => {
+  it("a MACHINE-WIDE pause keeps the cross-org write check on", () => {
     const home = aegisHome("active");
+    const src = repo("src", "git@github.com:alpha-org/src.git", "alpha");
+    const dest = repo("dest", "git@github.com:beta-org/dest.git", "beta");
+    const r = crossOrgWrite(home, src, dest);
+    assert.equal(r.code, 2);
+    assert.equal((r.json as { code: string }).code, "CROSS_ORG_WRITE");
+  });
+
+  it("a pause scoped to the session's repository lifts it for that repository, with the notice as the systemMessage", () => {
+    const home = aegisHome("active", "alpha-org/src");
     const src = repo("src", "git@github.com:alpha-org/src.git", "alpha");
     const dest = repo("dest", "git@github.com:beta-org/dest.git", "beta");
     const r = crossOrgWrite(home, src, dest);
@@ -132,6 +141,42 @@ describe("hook check-write under a pause", { skip: SKIP }, () => {
     }
   });
 
+  it("case variants of the pause file, and a symlinked directory or file that leads to it, are refused too", () => {
+    const home = aegisHome("active");
+    const cwd = repo("cwd", "git@github.com:alpha-org/src.git", "alpha");
+    const viaDir = join(tmp, `viadir${n++}`);
+    symlinkSync(home, viaDir);
+    const viaFile = join(tmp, `viafile${n++}.json`);
+    symlinkSync(pausePath(home), viaFile);
+    const paths = [
+      join(home, "Pause.json"),
+      join(home, "PAUSE.JSON"),
+      join(home, "pause.JSON"),
+      join(home, "Pause.json.7.tmp"),
+      join(viaDir, "pause.json"),
+      join(viaDir, "Pause.json"),
+      join(viaDir, "not-yet", "..", "pause.json"),
+      viaFile,
+    ];
+    for (const file_path of paths) {
+      const r = runCli(home, cwd, ["hook", "check-write"], { input: JSON.stringify({ tool_input: { file_path } }) });
+      assert.equal(r.code, 2, file_path);
+      assert.equal((r.json as { code: string }).code, "PAUSE_FILE_WRITE_REFUSED", file_path);
+    }
+  });
+
+  it("the egress approvals file is protected the same way: its exact name, case variants and a symlinked directory", () => {
+    const home = aegisHome("none");
+    const cwd = repo("cwd", "git@github.com:alpha-org/src.git", "alpha");
+    const viaDir = join(tmp, `viadir${n++}`);
+    symlinkSync(home, viaDir);
+    for (const file_path of [join(home, "egress-approvals.json"), join(home, "Egress-Approvals.JSON"), join(viaDir, "egress-approvals.json")]) {
+      const r = runCli(home, cwd, ["hook", "check-write"], { input: JSON.stringify({ tool_input: { file_path } }) });
+      assert.equal(r.code, 2, file_path);
+      assert.equal((r.json as { code: string }).code, "APPROVALS_FILE_WRITE_REFUSED", file_path);
+    }
+  });
+
   it("another file named pause.json is an ordinary write", () => {
     const home = aegisHome("none");
     const cwd = repo("cwd", "git@github.com:alpha-org/src.git", "alpha");
@@ -173,6 +218,30 @@ describe("hook scan-after-write under a pause: detection is not paused", { skip:
     assert.match(j.systemMessage ?? "", /1 marker hit\(s\) found, advisory while paused/);
     // the literal marker never travels
     assert.doesNotMatch(r.stdout + r.stderr, /leak-token/);
+  });
+
+  it("the paused stdout carries no text of the match: no matchPreview, not even its first characters", () => {
+    const control = scan(aegisHome("none"), repo("cwd", "git@github.com:alpha-org/src.git", "alpha"));
+    assert.ok((control.json as { hits: Array<{ matchPreview?: string }> }).hits[0]?.matchPreview, "control: an unpaused hit has a preview");
+    const r = scan(aegisHome("active"), repo("cwd", "git@github.com:alpha-org/src.git", "alpha"));
+    const hit = (r.json as { hits: Array<Record<string, unknown>> }).hits[0]!;
+    assert.equal(hit["matchPreview"], undefined);
+    assert.ok(typeof hit["line"] === "number" && typeof hit["column"] === "number", "where to look stays");
+    assert.doesNotMatch(r.stdout, /leak-token|matchPreview/);
+  });
+
+  it("a machine-wide pause keeps the post-write cross-org check (exit 2); a scoped one lifts it", () => {
+    const src = repo("src", "git@github.com:alpha-org/src.git", "alpha");
+    const dest = repo("dest", "git@github.com:beta-org/dest.git", "beta");
+    const file = join(dest, "f.ts");
+    writeFileSync(file, "clean\n");
+    const run = (home: string) => runCli(home, src, ["hook", "scan-after-write"], { input: JSON.stringify({ tool_input: { file_path: file }, cwd: src }) });
+    const wide = run(aegisHome("active"));
+    assert.equal(wide.code, 2);
+    assert.equal((wide.json as { code: string }).code, "CROSS_ORG_WRITE");
+    const scoped = run(aegisHome("active", "alpha-org/src"));
+    assert.equal(scoped.code, 0, scoped.stderr);
+    assert.match((scoped.json as { systemMessage: string }).systemMessage, NOTICE);
   });
 
   it("an active pause with a clean file still says it is paused", () => {

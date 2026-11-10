@@ -10,15 +10,15 @@
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv, lastJsonLine, scrubGitEnv, PERSON_ANCESTRY } from "../_test-utils.js";
 import { check } from "./check.js";
-import { mintPause, pausePath, setAncestryReaderForTests } from "@de-otio/repo-aegis-core";
+import { auditLogPath, mintPause, pausePath, setAncestryReaderForTests } from "@de-otio/repo-aegis-core";
 
 const HOUR = 3_600_000;
-const NOTICE = /repo-aegis: paused until \d\d:\d\d \(resume: repo-aegis resume\)/;
+const NOTICE = /repo-aegis: paused until \d\d:\d\d(?:, cross-org checks stay on)? \(resume: repo-aegis resume\)/;
 
 let tmp: string;
 let originalCwd: string;
@@ -190,6 +190,34 @@ describe("pre-commit under a pause (check --staged)", () => {
   });
 });
 
+describe("a pause is an audit record (`paused-allow`)", () => {
+  it("pre-commit writes one record with the layer and the verb, and nothing from the command, the files or the reason", () => {
+    const home = setupHome();
+    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    const repo = makeRepo({ class: "private-strict", visibility: "private", origin: "git@github.com:acme/x.git" });
+    stageMarker(repo);
+    mintPause({ path: pausePath(home), now: new Date(Date.now() - 60_000), durationMs: HOUR, reasonLength: 31 });
+    assert.equal(run(home, { cwd: repo, staged: true }).exitCode, undefined);
+    const log = readFileSync(auditLogPath(home), "utf8");
+    const records = log.split("\n").filter(l => l !== "").map(l => JSON.parse(l) as { action: string; details?: Record<string, unknown>; cwd?: string });
+    const allowed = records.filter(r => r.action === "paused-allow");
+    assert.equal(allowed.length, 1);
+    assert.deepEqual(allowed[0]!.details, { layer: "pre-commit", verb: "git commit" });
+    assert.equal(allowed[0]!.cwd, undefined, "no working directory: its name can carry a customer's");
+    assert.doesNotMatch(log, /leak-token|leak\.txt/);
+  });
+
+  it("pre-push names the destination as owner/repo", () => {
+    const home = setupHome();
+    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+    const repo = makeRepo({ class: "public-eligible", visibility: "public", origin: "git@github.com:acme/x.git" });
+    setPause(home, "active");
+    run(home, { cwd: repo, pushRef: "refs/heads/main", remoteUrl: "git@github.com:Acme/X.git" });
+    const rec = readFileSync(auditLogPath(home), "utf8").split("\n").filter(l => l !== "").map(l => JSON.parse(l) as { action: string; details?: Record<string, unknown> }).find(r => r.action === "paused-allow");
+    assert.deepEqual(rec?.details, { layer: "pre-push", verb: "git push", destination: "acme/x" });
+  });
+});
+
 describe("pre-push under a pause (check --push-ref / --range with --remote-url)", () => {
   const PUBLIC = { class: "public-eligible", visibility: "public", origin: "git@github.com:acme/x.git" } as const;
 
@@ -215,16 +243,37 @@ describe("pre-push under a pause (check --push-ref / --range with --remote-url)"
     assert.match(r2.stderr, NOTICE);
   });
 
-  it("a pause also lifts the cross-org check and a marker in the pushed range", () => {
+  it("a MACHINE-WIDE pause keeps CROSS_ORG_PUSH on (and says so); it lifts the scan, rule g and rule h", () => {
     const home = setupHome();
     const repo = makeRepo({ class: "private-strict", visibility: "private", origin: "git@github.com:acme/x.git" });
     writeFileSync(join(repo, "leak.txt"), "leak-token\n");
     execFileSync("git", ["add", "-A"], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-q", "-m", "leak"], { cwd: repo, stdio: "ignore" });
-    const args = { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: "git@github.com:other-org/svc.git" } as const;
-    assert.equal(run(home, args).exitCode, 2); // CROSS_ORG_PUSH, control
+    const across = { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: "git@github.com:other-org/svc.git", json: true } as const;
+    const control = run(home, across);
+    assert.equal(control.exitCode, 2);
+    assert.equal(lastJsonLine<{ code: string }>(control.stderr).code, "CROSS_ORG_PUSH");
     setPause(home, "active");
-    assert.equal(run(home, args).exitCode, undefined);
+    const paused = run(home, across);
+    assert.equal(paused.exitCode, 2, "the cross-org check is not paused by a machine-wide pause");
+    assert.equal(lastJsonLine<{ code: string }>(paused.stderr).code, "CROSS_ORG_PUSH");
+    // inside the boundary the same pause lifts the scan: the marker in the range does not stop the push
+    const inside = run(home, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: "git@github.com:acme/x.git" });
+    assert.equal(inside.exitCode, undefined, inside.stderr);
+    assert.match(inside.stderr, /cross-org checks stay on/);
+    assert.match(inside.stderr, NOTICE);
+  });
+
+  it("a pause scoped to the destination lifts CROSS_ORG_PUSH for that destination only", () => {
+    const home = setupHome();
+    const repo = makeRepo({ class: "private-strict", visibility: "private", origin: "git@github.com:acme/x.git" });
+    setPause(home, "active", "other-org/svc");
+    const r = run(home, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: "git@github.com:other-org/svc.git" });
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.match(r.stderr, NOTICE);
+    assert.doesNotMatch(r.stderr, /cross-org checks stay on/);
+    const elsewhere = run(home, { cwd: repo, range: "HEAD~1..HEAD", remoteUrl: "git@github.com:third-org/svc.git", json: true });
+    assert.equal(elsewhere.exitCode, 2);
   });
 
   it("after expiry the refusal is back", () => {

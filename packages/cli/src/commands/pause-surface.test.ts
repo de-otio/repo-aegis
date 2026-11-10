@@ -17,7 +17,7 @@ import { doctor } from "./doctor.js";
 import { uninstall } from "./uninstall.js";
 
 const HOUR = 3_600_000;
-const NOTICE = /repo-aegis: paused until \d\d:\d\d \(resume: repo-aegis resume\)/;
+const NOTICE = /repo-aegis: paused until \d\d:\d\d(?:, cross-org checks stay on)? \(resume: repo-aegis resume\)/;
 
 let tmp: string;
 let originalCwd: string;
