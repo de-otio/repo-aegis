@@ -6,7 +6,7 @@
 // test-only `REPO_AEGIS_TEST_NOW` seam and the home and `$TMPDIR` are fresh temp directories.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withEnv } from "./_test-utils.js";
@@ -94,6 +94,15 @@ describe("recordDecision", () => {
       withEnv("TMPDIR", join(off.home, "no-such-parent-file"), () => recordAndTrail({ layer: "pre-push", outcome: "refuse", code: "SOME_CODE" }, "refused.")),
     );
     assert.match(unlogged, /^refused\. \((?:logged: repo-aegis log --last 1|not logged)\)$/, "never throws, and the trailer is one of the two");
+  });
+
+  it("a relative home is never written to (a stale pinned helper line): the default home is used, and no file appears in the working directory", () => {
+    const w = world("rel");
+    const before = readdirSync(process.cwd());
+    const r = withEnv("REPO_AEGIS_HOME", w.home, () => recordDecision({ home: "relative/home", layer: "credential-helper", outcome: "refuse", code: "SOME_CODE" }));
+    assert.equal(r.written, "primary");
+    assert.deepEqual(readdirSync(process.cwd()), before, "nothing was created in the working directory");
+    assert.equal(readDecisionRecords(w.home, { tmp: w.tmp }).length, 1, "the record went to the default home");
   });
 
   it("never throws on a malformed input", () => {

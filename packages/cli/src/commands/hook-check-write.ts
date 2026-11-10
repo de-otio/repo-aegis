@@ -10,6 +10,7 @@ import {
   OVERRIDE_FILENAME,
   PAUSE_FILE,
   pauseNotice,
+  refusalTrailer,
   withLogTrailer,
   type Registry,
 } from "@de-otio/repo-aegis-core";
@@ -214,7 +215,7 @@ export async function hookCheckWrite(): Promise<void> {
           `agent write to ${DECISION_LOG_STATE_FILE} refused: that file switches the decision log on or off, and the log is ` +
           `what you read to see why you were refused (\`repo-aegis log --last 1\`). Only a person switches it off ` +
           `(\`repo-aegis log --off\`, from their own terminal); you may switch it back on with \`repo-aegis log --on\`. ` +
-          `No approval covers this. [DECISION_LOG_STATE_WRITE_REFUSED; details: repo-aegis explain DECISION_LOG_STATE_WRITE_REFUSED]`,
+          `No approval covers this. ${refusalTrailer("DECISION_LOG_STATE_WRITE_REFUSED")}`,
         details: { filePath },
       },
       EXIT_BLOCK,

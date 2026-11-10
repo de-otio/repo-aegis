@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureOutput, withEnv } from "../_test-utils.js";
+import { captureOutput, withEnv, isolateTmpdir } from "../_test-utils.js";
 import { mintPause, pausePath } from "@de-otio/repo-aegis-core";
 import { status } from "./status.js";
 import { doctor } from "./doctor.js";
@@ -22,11 +22,14 @@ const NOTICE = /repo-aegis: paused until \d\d:\d\d(?:, cross-org checks stay on)
 let tmp: string;
 let originalCwd: string;
 let n = 0;
+let restoreTmpdir: () => void = () => {};
 before(() => {
+  restoreTmpdir = isolateTmpdir();
   tmp = realpathSync(mkdtempSync(join(tmpdir(), "repo-aegis-pause-surface-")));
   originalCwd = process.cwd();
 });
 after(() => {
+  restoreTmpdir();
   process.chdir(originalCwd);
   rmSync(tmp, { recursive: true, force: true });
 });
@@ -114,7 +117,7 @@ describe("doctor reports PAUSE_ACTIVE as a warning", () => {
   });
 
   it("the text report labels it WARN", () => {
-    const r = withEnv("REPO_AEGIS_HOME", home("active"), () => captureOutput(() => doctor({ scanRoot: [emptyRoot()], egressChecks: false })));
+    const r = withEnv("REPO_AEGIS_HOME", home("active"), () => captureOutput(() => doctor({ scanRoot: [emptyRoot()], egressChecks: false, verbose: true })));
     assert.match(r.stdout, /WARN PAUSE_ACTIVE — repo-aegis is paused for everything on this machine until /);
     assert.match(r.stdout, /fix: repo-aegis resume/);
   });

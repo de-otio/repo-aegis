@@ -6,7 +6,7 @@
 // hands the rest to core's builder, which is the only thing that decides what a record may hold. It never throws and
 // never changes a decision: the caller reads `written` only to word the refusal's trailer.
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DECISION_PROXY_VARS,
@@ -119,7 +119,9 @@ export function recordDecision(args: RecordArgs): DecisionAppendResult {
       ...(ps !== undefined && { psReadable: ps }),
       ...(rest.facts ?? {}),
     };
-    return recordDecisionTo(home ?? repoAegisHome(), { ...rest, facts, version: cliVersion(), now: now ?? clock() });
+    // A relative pinned home (a stale or hand-edited helper line) is never a place to write: the default home is.
+    const where = home !== undefined && isAbsolute(home) ? home : repoAegisHome();
+    return recordDecisionTo(where, { ...rest, facts, version: cliVersion(), now: now ?? clock() });
   } catch {
     return { written: "none" };
   }

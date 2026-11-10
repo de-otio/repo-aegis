@@ -589,6 +589,11 @@ describe("hook guard-egress — output channels", { skip: !SUBPROCESS_TESTS_AVAI
   });
 });
 
+/** A refusal's text without the decision log's closing `(logged: …)` / `(not logged)` (P1-I). */
+function withoutLogTrailer(text: string): string {
+  return text.replace(/ \((?:logged: repo-aegis log --last 1|not logged)\)$/, "");
+}
+
 describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip: !SUBPROCESS_TESTS_AVAILABLE }, () => {
   const OWNERS_REGISTRY =
     "schemaVersion: 2\n" +
@@ -702,7 +707,8 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
       const r = runGuard(claudePayload(PUSH_STRANGER), { home });
       assert.equal(r.code, 0, r.stderr);
       const reason = (JSON.parse(r.stdout) as DecisionJson).hookSpecificOutput.permissionDecisionReason;
-      assert.ok(reason.endsWith(`(${NOTE_MISSING})`), reason);
+      assert.ok(withoutLogTrailer(reason).endsWith(`(${NOTE_MISSING})`), reason);
+      assert.match(reason, /\((?:logged: repo-aegis log --last 1|not logged)\)$/, "the log trailer is always last");
     });
 
     it("missing registry, a framework without an ask: the deny names the skip in the reason and in details.ruleH", () => {
@@ -720,7 +726,7 @@ describe("hook guard-egress — rule h: unregistered owner (issue #151)", { skip
       const r = runGuard(claudePayload(PUSH_STRANGER), { home });
       assert.equal(r.code, 0, r.stderr);
       const reason = (JSON.parse(r.stdout) as DecisionJson).hookSpecificOutput.permissionDecisionReason;
-      assert.ok(reason.endsWith(`(${NOTE_NO_OWNERS})`), reason);
+      assert.ok(withoutLogTrailer(reason).endsWith(`(${NOTE_NO_OWNERS})`), reason);
       assert.ok(!reason.includes("customer-b") && !reason.includes("Customer B"), reason);
     });
 

@@ -937,6 +937,16 @@ function recordErrorPayload(payload: ErrorPayload): DecisionAppendResult {
 }
 
 export function check(opts: CheckOptions): void {
+  try {
+    checkRun(opts);
+  } finally {
+    // One process makes one decision; an in-process caller (a test) must not leave this run's decision hook on `emitError`.
+    setErrorDecisionHook(null);
+    runDecision = null;
+  }
+}
+
+function checkRun(opts: CheckOptions): void {
   // Validate flags FIRST. Exactly one of --staged, --path, --range,
   // --push-ref, --history must be specified.
   const modes = [opts.staged, !!opts.path, !!opts.range, !!opts.pushRef, !!opts.history].filter(
