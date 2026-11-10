@@ -210,6 +210,17 @@ export async function buildProgram(): Promise<Command> {
       explain(code, withGlobals(opts, cmd));
     });
 
+  // The sandbox-shaped end-to-end flows against this install (P1-G). Read-only outside $TMPDIR; an agent may run it.
+  program
+    .command("selftest")
+    .description(
+      "run the real hooks, shim and credential helper through throwaway repositories under $TMPDIR, from the conditions you are in now (proxy variables, no process list, no TTY), and print one line per layer: pre-commit, pre-push, shim, credential helper, egress hook. Exit 0 when every layer is ok, 1 otherwise. Never touches your repositories, the registry, approvals or audit log, or the network. Run it first when anything is refused.",
+    )
+    .action(async (opts, cmd) => {
+      const { selftest } = await import("./commands/selftest.js");
+      selftest(withGlobals(opts, cmd));
+    });
+
   // Registry schemaVersion 3: named GitHub identities. The mutators need a terminal and are human-only; `list` is read-only.
   const identity = program
     .command("identity")

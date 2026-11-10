@@ -138,6 +138,23 @@ By hand:
    `doctor` lists anything still missing, each with the command that fixes it. New repositories
    under a registered org are classified automatically the first time an agent works in them.
 
+5. **After installing: run `repo-aegis selftest`.** It runs your real hooks, `gh` wrapper and
+   credential helper through throwaway repositories under your temp directory, from the conditions it
+   is called in (proxy variables, no process list, no terminal), and prints one line per layer:
+
+   ```
+   pre-commit ok
+   pre-push ok
+   shim ok
+   credential helper ok
+   egress hook ok
+   sandbox: proxy variables set: none; ps readable: yes; tty: yes
+   ```
+
+   Exit 0 means every layer works; anything else says which layer refuses and why. It never touches
+   your repositories, your registry or the network. Run it again, from inside your coding agent's
+   sandbox, after any upgrade and whenever something is refused that should not be.
+
 **What install changes on your machine:**
 - `~/.config/repo-aegis/` (the registry and state);
 - git hooks in the repositories you install them into;

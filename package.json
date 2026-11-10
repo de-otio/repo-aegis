@@ -19,6 +19,7 @@
     "test": "find packages -path '*/dist/*' -name '*.test.js' -print0 | GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 REPO_AEGIS_HOME=$(mktemp -d \"${TMPDIR:-/tmp}/repo-aegis-test.XXXXXX\" || echo /nonexistent/repo-aegis-test-home) REPO_AEGIS_VISIBILITY_LOOKUP=0 xargs -0 node --test --test-reporter=spec",
     "test:file": "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 REPO_AEGIS_HOME=$(mktemp -d \"${TMPDIR:-/tmp}/repo-aegis-test.XXXXXX\" || echo /nonexistent/repo-aegis-test-home) REPO_AEGIS_VISIBILITY_LOOKUP=0 node --test --test-reporter=spec",
     "test:shim": "bash tests/shim-smoke.sh",
+    "test:e2e": "npm run build && node --test --test-reporter=spec tests/e2e/sandbox-shaped.test.mjs",
     "test:cov": "c8 --reporter=text --reporter=html --check-coverage --lines 80 --branches 75 --include 'packages/*/dist/**/*.js' --exclude 'packages/*/dist/**/*.test.js' --exclude 'packages/*/dist/**/*.d.ts' --exclude 'packages/*/dist/**/types.js' --exclude 'packages/*/dist/**/index.js' npm test",
     "repo-aegis": "node packages/cli/dist/index.js",
     "repo-aegis-scan": "node packages/scan/dist/index.js"

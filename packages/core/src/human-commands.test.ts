@@ -428,6 +428,12 @@ describe("findHumanOnlyCommand — explain and identity list are read-only, so a
     "repo-aegis --json identity list",
     "/usr/local/bin/repo-aegis identity list",
     "repo-aegis identity list | cat",
+    // `selftest` writes only under $TMPDIR and is meant to be the first thing an agent runs when something is refused.
+    "repo-aegis selftest",
+    "repo-aegis selftest --json",
+    "repo-aegis --json selftest",
+    "node packages/cli/dist/index.js selftest",
+    "npx -y @de-otio/repo-aegis selftest",
   ];
   for (const command of ALLOWED) {
     it(`allows ${JSON.stringify(command)}`, () => assert.equal(findHumanOnlyCommand(command), null));

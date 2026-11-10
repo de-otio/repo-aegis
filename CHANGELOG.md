@@ -41,6 +41,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented: for scripted `claude -p` runs, pass an explicit `--permission-mode` other than
   `default`/`acceptEdits`. The hook input has no headless indicator, and `permission_mode` reads
   `default` there too.
+- **`repo-aegis selftest [--json]`: the real install, run through the sandbox's conditions.** It runs your pinned
+  hooks, your `gh` shim, the credential helper's pinned command and the registered Claude Code hook through
+  throwaway repositories under `$TMPDIR`, from the environment it is called in (proxy variables, no process list, no
+  TTY), and prints one line per layer: `pre-commit ok`, `pre-push ok`, `shim ok | not first on PATH | not
+  installed`, `credential helper ok | refuses: <code>`, `egress hook ok | not registered`, then the facts it
+  detected (proxy variable names, `ps` readable, tty). Exit 0 when every layer is ok, 1 otherwise. It never touches
+  your repositories, the registry, approvals, the audit log or the network (`ssh` and `taaad` are stubs; the
+  children get no TTY and never `REPO_AEGIS_EGRESS_HUMAN`), and an agent may run it: run it first when anything is
+  refused.
+- **A sandbox-shaped end-to-end release gate** (`npm run test:e2e`, `tests/e2e/`; a CI job and a required step
+  before `gh release create`, see CONTRIBUTING.md). It installs the packed tarballs into a temp prefix, runs the
+  real installers against a temp HOME, and drives real `git` and the `gh` shim against local bare repositories with
+  `HTTPS_PROXY` and `DOCKER_HTTPS_PROXY` set to a dead port, a failing `ps` first on PATH, no TTY and no network.
+  Flows are a table (one row each, with the outcome and refusal code it must end in). `E2E_TARBALL_DIR` replays a
+  published release: run against `@de-otio/repo-aegis@0.13.2` it fails the sandboxed push row
+  (`AGENT_PUSH_CREDENTIAL_CONFIG`). Rows for the pause (P1-E) and the decision log (P1-I) are `todo` until those exist.
 
 ### Changed
 
