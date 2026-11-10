@@ -24,6 +24,19 @@ export interface GitCredentialCheckOptions {
   cwd?: string;
 }
 
+/**
+ * True when a repo-aegis credential helper is configured for https://github.com but it is not this install's
+ * (a moved or upgraded CLI or Node): the `stale` finding of `GIT_CREDENTIAL_HELPER_ORDER`, asked without the
+ * registry condition, because someone who installed the helper wants it current whether or not an owner maps
+ * to an agent identity. False when git's configuration cannot be read, and when no repo-aegis helper is configured.
+ */
+export function gitCredentialHelperStale(opts: GitCredentialCheckOptions = {}): boolean {
+  const entries = opts.entries !== undefined ? opts.entries : readCredentialConfig(opts.cwd ?? process.cwd());
+  if (entries === null) return false;
+  const verdict = helperOrder(entries, opts.helper ?? helperCommand(currentEnforcementPin(), repoAegisHome()));
+  return verdict.kind === "missing" && verdict.stale;
+}
+
 export function gitCredentialOrderChecks(registry: Registry, opts: GitCredentialCheckOptions = {}): DoctorCheck[] {
   if (!hasMappedAgentIdentity(registry)) return [];
   const entries = opts.entries !== undefined ? opts.entries : readCredentialConfig(opts.cwd ?? process.cwd());

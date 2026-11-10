@@ -301,6 +301,25 @@ function uninstallHooks(ctx: UninstallHooksContext): void {
   }
 }
 
+/**
+ * Write `pre-commit` and `pre-push` (mode 0755) into `hooksDir`, rendered for `pin`. Throws on a file-system
+ * error. This is the part of `install hooks` that goes stale between releases; it touches no git config, which
+ * is why `upgrade` can run it without knowing (or changing) where `core.hooksPath` points.
+ */
+export function writeHookScripts(hooksDir: string, pin: EnforcementPin): void {
+  mkdirSync(hooksDir, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(hooksDir, 0o700);
+  } catch {
+    /* platform-restricted */
+  }
+  for (const name of ["pre-commit", "pre-push"] as const) {
+    const path = join(hooksDir, name);
+    writeFileSync(path, renderHookScript(name, pin), { mode: 0o755 });
+    chmodSync(path, 0o755);
+  }
+}
+
 export function installHooks(opts: InstallHooksOptions): void {
   const cwd = opts.cwd ?? process.cwd();
 
@@ -409,18 +428,7 @@ export function installHooks(opts: InstallHooksOptions): void {
   const configMtimeBefore = configMtimeIso(configPath);
 
   try {
-    mkdirSync(hooksDir, { recursive: true, mode: 0o700 });
-    try {
-      chmodSync(hooksDir, 0o700);
-    } catch {
-      /* platform-restricted */
-    }
-
-    writeFileSync(preCommitPath, renderHookScript("pre-commit", pin), { mode: 0o755 });
-    chmodSync(preCommitPath, 0o755);
-
-    writeFileSync(prePushPath, renderHookScript("pre-push", pin), { mode: 0o755 });
-    chmodSync(prePushPath, 0o755);
+    writeHookScripts(hooksDir, pin);
   } catch (err) {
     emitError(
       { code: "FS_ERROR", error: `failed to write hook scripts: ${(err as Error).message}` },

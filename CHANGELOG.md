@@ -36,8 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocks the prompt (its pinned command exits 0, not 2, if the pinned binary is gone). So a yes followed
   by the person typing before the push, and a "no" followed by the person's next message, both mean the
   push asks again. `repo-aegis approve --revoke prompt` does the same by hand and leaves terminal
-  approvals alone. Re-run `repo-aegis install claude-md` once to register it; with the managed drop-in,
-  `doctor` reports `MANAGED_DROPIN_STALE` until you do.
+  approvals alone. Re-run `repo-aegis install claude-md` once to register it, or run
+  `repo-aegis upgrade`; with the managed drop-in, `doctor` reports `MANAGED_DROPIN_STALE` until you do.
 - Prompt approvals bind more exactly: a mutating `gh api` binds the HTTP method as well as the endpoint
   (a yes to a PATCH is not a yes to a DELETE); `gh pr|issue edit|merge|comment|review <n>` and
   `gh release create|edit|upload <tag>` bind the number or tag when one is given (no target: the
@@ -109,6 +109,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `E2E_PS_READABLE_OK=1`) and on macOS under `sandbox-exec` with `ps` denied; the test that the process list is
   unreadable fails anywhere else, so run `npm run test:e2e` inside the Claude Code sandbox before a release.
 
+- **`repo-aegis upgrade [--dry-run] [--json]`: one command after an upgrade.** It finds every stale
+  install the way `doctor` does (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`, `MANAGED_DROPIN_STALE`, a
+  credential helper pinned to another install) and re-runs the matching installer in a fixed order
+  (hooks, shim, claude-md, git-credential), one line per step, ending `next: repo-aegis doctor`.
+  After upgrading the package, run it instead of the three `install` commands. It never installs what
+  was not installed, a second run prints `nothing to upgrade`, and `--dry-run` changes nothing. The
+  two steps that need a person (the managed drop-in's `sudo` write, the credential helper) run only
+  at a person's terminal; otherwise they are listed under `run yourself:` with the exact command and
+  are not counted as failures (a person who answers `n` at the `sudo` prompt has `declined`, exit 0).
+  Exit 1 when an installer failed or a step was refused (below); `--force` pins to a temporary copy anyway (and then every commit and push is refused once it is removed). An agent may run `upgrade`: it
+  only re-runs installers an agent may already run, so it is not in the person-only commands.
+- **`upgrade` never pins the hooks or the shim to a copy that will not last, and never rolls them
+  back.** They run a CLI pinned by absolute path; `upgrade` run from a worktree build, an `npx` copy or a
+  project devDependency would re-pin all of them there, and removing that copy later refuses every
+  commit and push until a person runs `install hooks`. Each step (hooks, shim, and the hint for the hooks
+  in Claude Code's `settings.json`) now reads its pin back from its scripts and refuses (step `REFUSED`,
+  nothing rewritten, exit 1) in two cases: the running CLI is temporary (a `.git` ancestor, `/_npx/`, or a
+  project devDependency in a git repository, an `npm link`; global installs of npm, pnpm, yarn and bun are
+  recognised without spawning a package manager, and the claude-md and git-credential steps get the same check), whether the old pin works or is already
+  gone, unless `--force`; or the running version is older than the pin that still works (`--force` does
+  not override that). Each refusal names the fix (run `upgrade` from the global install, or the step's own
+  installer) and ends with `UPGRADE_REFUSED`, which `repo-aegis explain` knows. Anything else is re-pinned, including a pin to another working install that is not newer, so
+  `nvm install` or `brew upgrade node` with the old install still on disk finishes in one run. A refused
+  run does not record the version. `upgrade` also keeps the pinned taaad while that launcher still exists
+  (a different `taaad` first on `PATH` no longer replaces it), leaves a `gh` at `<home>/bin` that is not a
+  repo-aegis shim alone (it failed on every run), and lists
+  `repo-aegis install claude-md --user-settings` under `run yourself:` when the hooks in Claude Code's
+  `settings.json` are pinned to a Node or install that has moved. Not covered by `upgrade`: a root
+  account's managed drop-in, and `MANAGED_DROPIN_LEDGER_STALE` / `MANAGED_DROPIN_ORPHANED` (follow
+  `doctor`'s fix).
+- **A once-per-version notice.** The version last seen is kept in `<home>/state/last-version`, and it
+  keeps the highest version seen (ordered like semver: a prerelease is below its release), so two installs
+  sharing a home do not announce themselves in turn.
+  The first command after a newer version is installed prints one stderr line, ``repo-aegis <version> is
+  new here: run `repo-aegis upgrade` ``, and records the version (so do `upgrade` and `init`, which
+  matters only when one of them is the first command). It is never printed, and nothing is recorded,
+  under `--json` (global or command level: the VS Code extension runs `status --json` and
+  `check --json` and discards stderr), by `hook ...` (Claude Code's hook JSON on stdout stays clean),
+  `git-credential` (stdout is the credential protocol), `gh`, `egress-check`, `egress-readback`,
+  `explain` (read-only), `uninstall`, a CI run, or on a machine whose `<home>` does not exist.
+
 
 ### Changed
 
@@ -161,7 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the destination checks still see it.
 
 - **The generated pre-push script passes `--remote-ref "$remote_ref"`, so re-run `repo-aegis install
-  hooks`.** Until you do, `status` and `doctor` report the pre-push hook as stale
+  hooks` (or run `repo-aegis upgrade`).** Until you do, `status` and `doctor` report the pre-push hook as stale
   (`HOOKS_SCRIPT_STALE`), and a yes at the prompt cannot reach it: the push is refused as before, and
   its message says to run `repo-aegis install hooks`. Nothing else about the old script's behaviour
   changes.
@@ -181,7 +222,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ENFORCEMENT_PIN_MISSING` stays a `doctor` failure. **The generated scripts and hook commands
   changed, so existing installs show as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`,
   `MANAGED_DROPIN_STALE`) until you re-run `repo-aegis install hooks`, `repo-aegis install shim` and
-  `repo-aegis install claude-md`.**
+  `repo-aegis install claude-md`, or run `repo-aegis upgrade`.**
 - **An encrypted registry is treated as no registry.** Encryption at rest is deprecated and goes
   away in 0.15.0. Until then an encrypted registry no longer refuses every publish or every
   Write: the hooks, pre-push, the `gh` shim and the write hooks run as if there were none (rule h

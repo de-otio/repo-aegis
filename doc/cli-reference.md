@@ -1047,6 +1047,44 @@ every run and get muted (`audit --no-hooks-check` is what the
 generated CI workflow sets instead). `doctor` is a developer-machine
 sweep, run on demand or on a schedule.
 
+### `repo-aegis upgrade [--dry-run] [--force] [--json] [--claude-home <dir>]`
+
+One command after upgrading the package. It finds every stale install the way `doctor` does (the same
+check functions) and re-runs the matching installer, in this order, one line per step:
+
+| Step | Stale when | Runs |
+|---|---|---|
+| `hooks` | `<home>/hooks/pre-commit` or `pre-push` is not what this release writes (`HOOKS_SCRIPT_STALE`), or one is missing or not executable | rewrites both scripts (the part of `install hooks` that goes stale; `core.hooksPath` is not touched) |
+| `shim` | the `gh` shim is an earlier release's script, or was rendered for another pin or home (`SHIM_STALE`; judged whether or not the shim is first on `PATH`) | `install shim` (keeps the taaad the shim already pins while that launcher still exists; otherwise the first `taaad` on `PATH`, then the old pin as a last resort) |
+| `claude-md` | the managed drop-in differs from what `install claude-md` would write (`MANAGED_DROPIN_STALE`) | `install claude-md`: a root write, behind a `sudo` password and a typed `y` |
+| `user-settings` | a repo-aegis hook command in Claude Code's own `settings.json` (what `init` writes by default) is pinned to another Node or install than this one | nothing: listed under `run yourself:` as `repo-aegis install claude-md --user-settings`, or `REFUSED` under the two cases above |
+| `git-credential` | a repo-aegis credential helper for `https://github.com` is configured, but it is another install's (`GIT_CREDENTIAL_HELPER_ORDER`'s stale case) | `install git-credential` (global git config) |
+
+- **It never pins to a copy that will not last, and never rolls back.** The hooks, the shim and the user-settings hooks run a CLI pinned by absolute path. `upgrade` reads each step's pin back from its scripts and judges every step on its own; a step is **refused** (`REFUSED`, ending in the code `UPGRADE_REFUSED`, which `repo-aegis explain` knows; nothing rewritten, exit 1, the version not recorded) in two cases, each with its own fix. (1) The running CLI is *ephemeral*: its realpath has a `.git` file or directory in an ancestor (a worktree build, an `npm link` or `npm i -g .` from a checkout, or a project devDependency, whose project is a git repository) or contains `/_npx/` (an `npx` cache). There is no bare `node_modules` rule: pnpm, yarn and bun global installs live under a `node_modules` too. The scripts would stop working when that copy is removed, so every commit and push would be refused. This applies to the three pinned steps and to the two person-gated ones (`claude-md`, `git-credential`), whether the old pin works or is already gone (unless the scripts already point at this very CLI). Fix: run `upgrade` from the global install (`npm i -g @de-otio/repo-aegis`, then `repo-aegis upgrade`; a developer on an `npm link` runs the step's own installer, for example `repo-aegis install hooks`, from a lasting install). `--force` pins to the temporary copy anyway, and once that copy is removed every commit and push is refused until `install hooks` runs from a lasting install. Global installs are recognised, before the `.git` walk, without spawning a package manager: from `process.execPath` (`<prefix>/bin/node`, so `<prefix>/lib/node_modules`), from `npm_config_prefix`, by any `lib/node_modules` path segment (where Homebrew keeps global packages although `process.execPath` resolves into its `Cellar`), and by the pnpm (`/pnpm/global/`), yarn (`/yarn/global/`) and bun (`/.bun/install/global/`) global roots. A global install elsewhere is judged by its `.git` ancestors; `--force` is the way out. Unix only: Windows hooks are not supported, and Windows global paths are not classified. (2) The running version is older than the pinned `__ra_version` of a pin that still works: it would roll enforcement back. Fix: run the newer install's `upgrade`, or the step's own installer (`repo-aegis install hooks`, `install shim`, `install claude-md --user-settings`) from this install to roll back on purpose. `--force` does not override this. Anything else is re-pinned, including a pin to another working install that is not newer (after `nvm install` or `brew upgrade node` the old global is still on disk) and a pin whose node or CLI file is gone. The two person-gated steps get only the ephemeral check (they have no pin to read back, so no rollback check): a person at the terminal who runs `upgrade` from a lasting install chooses it. Versions are compared with the same semver ordering as the notice (a prerelease is below its release).
+- **Never adds an install.** A missing shim, no drop-in, no helper: that step is `not-installed`/`current` in `--json` and silent in text. A `gh` at `<home>/bin` that is not a repo-aegis shim is the person's and is left alone.
+- **Steps that need a person** (`claude-md`, `git-credential`) run only when a person is at a terminal (the same test `install git-credential` and `approve` use); their own prompts and gates still apply. With none attached they are **not run and not failures**: they are listed under `run yourself:` with the exact command. A person who answers `n` at the `claude-md` prompt has `declined`: nothing is written, the exit code is 0 and the command is listed. `upgrade` is not person-only, because every installer it runs is one an agent may already run; it is not in `core/human-commands.ts`.
+- **Not handled.** For a root account (uid 0) `upgrade` reports the managed drop-in as `not-installed` while `doctor` judges it. `MANAGED_DROPIN_LEDGER_STALE` and `MANAGED_DROPIN_ORPHANED` are not `upgrade`'s: follow the `fix` in `doctor`'s finding. Only the `*_STALE` findings that re-running an installer cures are covered. It does not run `selftest` yet.
+- `--dry-run` prints what each step would do (a refusal included) and changes nothing, including the "last version seen" record below.
+- Output ends `next: repo-aegis doctor`. With nothing stale it prints `nothing to upgrade` first, and running it again is always a no-op.
+- Exit 0 when nothing is left stale or only `run yourself:` and `declined` items remain; **1** when an installer failed (the installer's own message is on stderr) or a step was refused. `--claude-home` is passed to the `claude-md` and `user-settings` steps and to their `run yourself:` lines.
+- `--json` prints one object: `{ "action": "upgrade", "dryRun", "version", "steps": [{ "step", "status", "detail", "command"? }], "runYourself": [{ "step", "command" }], "nothingToUpgrade", "failed", "refused", "next" }`. `status` is `current`, `not-installed`, `upgraded`, `would-upgrade`, `failed`, `refused`, `declined` or `run-yourself`.
+
+**The once-per-version notice.** The version last seen is recorded in `<home>/state/last-version`, and the record
+keeps the **highest** version seen (ordered like semver: a prerelease is below its release, `rc.2` below `rc.10`): a
+lower one (a second install on the same home, a downgrade) neither prints nor overwrites it, so two installs do not
+announce themselves in turn. The first command after a newer version is
+installed prints one line on stderr, ``repo-aegis <version> is new here: run `repo-aegis upgrade` ``, and records the
+version. `upgrade` (not `--dry-run`, and only when no installer failed and no step was refused) and `init` record it too; that only matters
+when one of them is the first command, since the notice has already recorded the version otherwise. It is printed
+from commands a person runs and from the git hooks' `check` calls. It is **not** printed, and the version is not
+recorded, under `--json` (global or command level: a machine reads that output, for instance the VS Code
+extension's `status --json` and `check --json`, and drops stderr), from `hook ...` (Claude Code's hook commands keep a
+clean stdout and an unchanged stderr), `git-credential` (stdout is the credential protocol), `gh`, `egress-check`,
+`egress-readback`, `explain` (read-only, creates nothing), `uninstall`, a CI run (`CI` set), or on a machine whose
+`<home>` does not exist (nothing was installed there, and the notice would create the directory). When the state
+directory cannot be written nothing is printed, since the notice could not stay "once". The record is per home,
+not per entry point.
+
 ---
 
 ## Repo classification

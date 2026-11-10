@@ -119,6 +119,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "status",
       "suggest-markers",
       "uninstall",
+      "upgrade",
       "upstreams",
       "waive",
     ],
@@ -131,6 +132,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "pause", flags: ["--for", "--list", "--reason", "--repo"], subcommands: [] },
   { path: "resume", flags: [], subcommands: [] },
   { path: "status", flags: [], subcommands: [] },
+  { path: "upgrade", flags: ["--claude-home", "--dry-run", "--force"], subcommands: [] },
   {
     path: "check",
     flags: [

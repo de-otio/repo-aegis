@@ -165,6 +165,42 @@ By hand:
 
 `repo-aegis uninstall` removes all of it (see below).
 
+## Upgrading
+
+```sh
+npm install -g @de-otio/repo-aegis@latest
+repo-aegis upgrade
+repo-aegis doctor
+```
+
+Most releases change something repo-aegis generated onto your machine: the git hook scripts, the `gh`
+wrapper, the root-owned Claude Code settings file, the credential helper's pin. Until those are
+rewritten, `doctor` reports them as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`,
+`MANAGED_DROPIN_STALE`) and the new behaviour does not apply. `repo-aegis upgrade` finds each stale
+one the way `doctor` does, re-runs its installer in a fixed order (hooks, shim, claude-md,
+git-credential) and prints one line per step. It only rewrites installs that are already there and never
+adds one, and a second run says `nothing to upgrade`. `--dry-run` shows what it would do and changes nothing.
+
+Your hooks and the `gh` wrapper are pinned to one install, and `upgrade` moves that pin to the one running
+it, with two exceptions that end in `REFUSED` and exit 1. It will not pin to a copy that will not last (a
+git checkout or worktree build, an `npm link`, an `npx` cache, a project devDependency): run `upgrade` from the global
+install (`npm i -g @de-otio/repo-aegis`). `--force` pins there anyway, and once that copy is removed every commit and
+push is refused until `install hooks` runs from a lasting install. (Such a copy re-pinning your hooks would
+refuse every commit once it was removed.) And it will not roll back: if they are pinned to a newer
+version, run the newer install's `upgrade`, or `repo-aegis install hooks` from this one to roll back on
+purpose. After `nvm install` or `brew upgrade node`, with the old install still on disk, it re-pins.
+
+Two steps need a person: the root-owned settings file (`sudo` asks for your password) and the git
+credential helper (it decides which GitHub account an agent pushes as). Where no person is at a
+terminal, for example when an agent runs `upgrade`, they are not run and not counted as failures.
+They are listed under `run yourself:` with the exact command to type, as is
+`repo-aegis install claude-md --user-settings` when the hooks in your `~/.claude/settings.json` (what
+`init` writes) are pinned to a Node or install that has moved (refused, with the same two exceptions,
+when this install is older or temporary). After you upgrade, the first
+command you run prints ``repo-aegis <version> is new here: run `repo-aegis upgrade` ``, once, on stderr
+(not under `--json`, not from a Claude Code hook, not from the git credential helper). The record keeps the
+highest version seen, so two installs sharing a home do not announce themselves in turn.
+
 ## Documentation
 
 | Doc                                          | For                                                                     |
