@@ -39,7 +39,7 @@ import { compareVersions } from "../semver.js";
 import { recordVersion } from "../version-notice.js";
 import { gitCredentialHelperStale, type GitCredentialCheckOptions } from "./doctor-git-credential-checks.js";
 import { canonical, unusable } from "./doctor-pin-checks.js";
-import { checkGuardHook, defaultClaudeHome, installClaudeMd, readSettingsFile } from "./install-claude-md.js";
+import { checkGuardHook, defaultClaudeHome, readSettingsFile } from "./install-claude-md.js";
 import { installGitCredential } from "./install-git-credential.js";
 import { writeHookScripts } from "./install-hooks.js";
 import { checkShim, installShim, shimBinDir, shimPathFor } from "./install-shim.js";
