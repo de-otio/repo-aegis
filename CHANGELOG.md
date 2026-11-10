@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every refusal now names the repo-aegis version, exactly one next step, and whether only a person can
+  run it** (complexity-review X-10), just before its `[CODE; details: repo-aegis explain CODE]` token
+  (which is unchanged and still last): `repo-aegis 0.13.2. Next step: <one sentence> Only a person can
+  run it: yes|no.` All three come from one typed table, `REFUSAL_GUIDE` in
+  `packages/core/src/refusal-guide.ts`, read by the shared `refusalTrailer()`; call sites do not repeat
+  them. The egress shape rules, the write-hook file refusals and the hook-input size refusals use the
+  same trailer. A lint test (`packages/cli/src/refusal-lint.test.ts`) derives every refusal code from the
+  source and fails when one has no table entry or no row in `doc/agent-guide.md` (what `repo-aegis
+  explain` prints). Four codes that had no guide row now have one: `PUBLISHED_ARCHIVE_ESCAPE`,
+  `INVALID_ORG_NAME`, `INVALID_UPSTREAM`, `GIT_CREDENTIAL_ORDER_REFUSED`.
 - `engagements set-identity --agent none` / `--person none` clear just that column and leave the other
   alone (an owner can move from an App to a person without `--clear` and a re-map). Works for
   engagements and `--personal-org`; both `none` equals `--clear`; clearing needs the same terminal as
