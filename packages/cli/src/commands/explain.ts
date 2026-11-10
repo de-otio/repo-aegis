@@ -14,6 +14,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { REFUSAL_GUIDE } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 
 /** One row of the guide's error table. */
@@ -40,6 +41,10 @@ export interface Explanation {
   readonly code: string;
   readonly codes: readonly string[];
   readonly anchor: string | null;
+  /** What a refusal with this code tells the reader to do next (core's REFUSAL_GUIDE), or null for a code with no table entry. */
+  readonly nextStep: string | null;
+  /** Whether only a person can take {@link nextStep}, or null for a code with no table entry. */
+  readonly personOnly: boolean | null;
   readonly meaning: string;
   readonly recovery: string;
   readonly section: { readonly heading: string; readonly markdown: string } | null;
@@ -218,10 +223,17 @@ export function explanationFor(docs: Docs, query: string): Explanation | null {
   if (row === null) return null;
   const sec = linkedSection(docs, row);
   const q = normalize(query);
+  const code = row.codes.includes(q) ? q : (row.codes[0] ?? q);
+  // X-10: the step and person-only answer a refusal itself prints come from one table (core's REFUSAL_GUIDE); show
+  // them first so a drift between that table and this row's recovery text is visible, not silent.
+  const table = [code, ...row.codes].find(c => Object.prototype.hasOwnProperty.call(REFUSAL_GUIDE, c));
+  const entry = table === undefined ? null : REFUSAL_GUIDE[table]!;
   return {
-    code: row.codes.includes(q) ? q : (row.codes[0] ?? q),
+    code,
     codes: row.codes,
     anchor: row.anchor,
+    nextStep: entry === null ? null : entry.next,
+    personOnly: entry === null ? null : entry.personOnly,
     meaning: row.meaning,
     recovery: row.recovery,
     section: sec === null ? null : { heading: sec.heading, markdown: sec.markdown },
@@ -273,6 +285,11 @@ export function explain(query: string | undefined, opts: ExplainOptions): void {
       return;
     }
     emitText(found.codes.length > 1 ? `${found.codes.join(" / ")}` : found.code);
+    if (found.nextStep !== null) {
+      emitText("");
+      emitText(`Next step: ${found.nextStep}`);
+      emitText(`Only a person can run it: ${found.personOnly === true ? "yes" : "no"}`);
+    }
     emitText("");
     emitText(`Meaning: ${found.meaning}`);
     emitText("");

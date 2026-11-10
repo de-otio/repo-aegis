@@ -74,6 +74,7 @@ import {
   type Registry,
   type RegistryState,
   type RuleHStatus,
+  refusalTrailer,
 } from "@de-otio/repo-aegis-core";
 import { currentHumanPresent } from "../human-presence.js";
 import { firstIntentDestination, pauseCoveringDestinations, pauseCoveringIntents, recordPausedAllow } from "../pause-scope.js";
@@ -182,7 +183,7 @@ export function oversizedInputVerdict(prefix: string, adapter: HostAdapter = ada
 const HOOK_INPUT_TOO_LARGE_REASON =
   "repo-aegis: refused. This command is larger than 1 MiB, so the egress guard cannot read it whole and does not " +
   "judge it. No approval covers this. Fix: put large content in a file and pass the file (`--body-file`, `-F`, " +
-  "`--input`, `-d @file`), keeping the command itself short. [HOOK_INPUT_TOO_LARGE; details: repo-aegis explain HOOK_INPUT_TOO_LARGE]";
+  `\`--input\`, \`-d @file\`), keeping the command itself short. ${refusalTrailer("HOOK_INPUT_TOO_LARGE")}`;
 
 const EMPTY_REGISTRY: Registry = {
   engagements: [],

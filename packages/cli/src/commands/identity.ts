@@ -29,6 +29,7 @@ import {
   ghLoginProblem,
   REGISTRY_IDENTITIES_MIN_VERSION,
 } from "@de-otio/repo-aegis-core";
+import { USAGE_AFTER_TERMINAL_GATE } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { requireTerminalForIdentityChange } from "../identity-gate.js";
 import type { RequireTerminalOptions } from "../require-terminal.js";
@@ -211,7 +212,7 @@ export function identityRemove(name: string | undefined, opts: BaseOptions): voi
  * tightens (the same state the first `set-identity` creates), so it needs neither and an agent may run it.
  */
 export function identityRequire(opts: BaseOptions & { off?: boolean; on?: boolean }): void {
-  if (opts.on === true && opts.off === true) failUsage("identity require takes --on or --off, not both", opts);
+  if (opts.on === true && opts.off === true) failUsage("identity require takes --on or --off, not both", opts, false);
   if (opts.on !== true) {
     requireTerminalForIdentityChange({ kind: "identity-require-off" }, opts);
     if (opts.off !== true) failUsage("identity require takes --off (clear) or --on (set)", opts);
@@ -248,8 +249,13 @@ export function identityRequire(opts: BaseOptions & { off?: boolean; on?: boolea
 // engagements set-identity
 // ---------------------------------------------------------------------------
 
-function failUsage(error: string, opts: OutputOptions): never {
-  return emitError({ code: "USAGE", error }, opts);
+/**
+ * `USAGE` for the identity commands. `afterGate` is true (the default) where the terminal gate has already passed, so
+ * the reader is a person and the next step is theirs; the one call before the gate (`identity require` with both
+ * `--on` and `--off`, which an agent may run with `--on`) keeps the table's agent-facing step.
+ */
+function failUsage(error: string, opts: OutputOptions, afterGate = true): never {
+  return emitError({ code: "USAGE", error }, opts, afterGate ? USAGE_AFTER_TERMINAL_GATE : undefined);
 }
 
 /**

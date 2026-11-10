@@ -13,6 +13,8 @@ import {
   type ScanHit,
   type SkippedFile,
   type Registry,
+  refusalTrailer,
+  HOOK_INPUT_TOO_LARGE_AFTER_WRITE,
 } from "@de-otio/repo-aegis-core";
 import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import { parseHookWriteFields, readHookStdin, WRITE_HOOK_INPUT_MAX_BYTES } from "./hook-input.js";
@@ -50,7 +52,7 @@ export const CURSOR_DETECTION_ONLY =
 const NOT_SCANNED_REASON =
   "repo-aegis: this write's hook payload is larger than 1 MiB and the file path could not be read from its " +
   "start, so the file that was written has NOT been scanned for markers. Tell your human which file you wrote; " +
-  "they can scan it with `repo-aegis check --path <file>`. [HOOK_INPUT_TOO_LARGE; details: repo-aegis explain HOOK_INPUT_TOO_LARGE]";
+  `they can scan it with \`repo-aegis check --path <file>\`. ${refusalTrailer("HOOK_INPUT_TOO_LARGE", HOOK_INPUT_TOO_LARGE_AFTER_WRITE)}`;
 
 function emitJsonAndExit(value: unknown, exitCode: number): never {
   // Claude Code's hook contract forwards stderr (not stdout) to the agent

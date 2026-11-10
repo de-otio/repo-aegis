@@ -77,6 +77,7 @@ import {
 } from "./registered-owners.js";
 import {
   refusal,
+  withRefusalTrailer,
   safeDestination,
   isSafeOwner,
   isPrintableDestination,
@@ -1395,7 +1396,8 @@ const DOT_GH_WRITE_NEEDS_BOT_REASON = [
   "Without --as, dot gh picks the account from the repository's owner, which for your user's own organisation is the user themself, so the agent would publish as them.",
   "Re-issue with --as bot as dot gh's first option:",
   "  dot gh --as bot <the same gh arguments>",
-  "If the bot lacks the permission (it has no issues, secrets, Actions or workflow-file access), stop and report it to your human; do not switch to --as owner or plain gh. [DOT_GH_WRITE_NEEDS_BOT]",
+  "If the bot lacks the permission (it has no issues, secrets, Actions or workflow-file access), stop and report it to your human; do not switch to --as owner or plain gh.",
+  // (the shared `[DOT_GH_WRITE_NEEDS_BOT; details: …]` trailer, with the version and next step, is added by `deny()`)
 ].join("\n");
 
 /** The owners a `gh` intent names literally: `--repo` / `-R` / `GH_REPO`, a URL or `o/r` positional, and a `repos/<o>/<r>/…` endpoint. */
@@ -1428,7 +1430,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   const deny = (code: EgressCode, reason: string, destination?: Destination): EgressDecision => ({
     action: "deny",
     code,
-    reason,
+    // X-10: the shape rules write their reason by hand; the shared trailer (version, next step, person-only,
+    // `[CODE; details: …]`) is appended here, once, for every code. A no-op for a reason built by `refusal()`.
+    reason: withRefusalTrailer(code, reason),
     ...(destination && { destination }),
     intent,
   });

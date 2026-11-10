@@ -6,6 +6,7 @@
 // which always fails, so a payload past the cap was neither checked nor scanned (and the hooks exited 0).
 // This module keeps the cap but says when it cut, and reads the fields the hooks need from a prefix: the
 // path is near the start of a Write/Edit payload, and the file itself is scanned from disk anyway.
+import { refusalTrailer } from "@de-otio/repo-aegis-core";
 
 /** Bytes a hook reads from stdin before it stops. */
 export const WRITE_HOOK_INPUT_MAX_BYTES = 1024 * 1024;
@@ -189,4 +190,4 @@ export function scanJsonPrefix(text: string): Map<string, string> {
 export const WRITE_HOOK_INPUT_TOO_LARGE_REASON =
   "repo-aegis: refused. This write's hook payload is larger than 1 MiB and the file path could not be read from " +
   "its start, so the write could not be checked. No approval covers this. Fix: write the file in smaller parts " +
-  "(a first Write, then Edits), or have your human check the payload. [HOOK_INPUT_TOO_LARGE; details: repo-aegis explain HOOK_INPUT_TOO_LARGE]";
+  `(a first Write, then Edits), or have your human check the payload. ${refusalTrailer("HOOK_INPUT_TOO_LARGE")}`;
