@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-10
+
+**Agent pushes from the default Claude Code sandbox now work.** 0.13.x refused them (`AGENT_PUSH_CREDENTIAL_CONFIG`,
+`AGENT_PUSH_CHAIN_UNREADABLE`); the credential helper is now an account chooser. This release is about not blocking
+honest work. A person-only, time-boxed `repo-aegis pause` covers a moment when repo-aegis is wrong. `repo-aegis log`
+shows why something was refused. `repo-aegis selftest` checks every layer from where you are, and `repo-aegis upgrade`
+re-pins the installs after an upgrade. Every refusal now names the version, one next step, and whether only a person
+can take it. After installing: run `repo-aegis upgrade`.
+
 ### Added (decision log, P1-I)
 
 - **A decision log, on by default, that an agent can debug from.** Every entry point (pre-commit, pre-push, the agent
