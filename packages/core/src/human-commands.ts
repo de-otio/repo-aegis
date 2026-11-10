@@ -27,6 +27,10 @@
 // The accepted false positive: a quoted MENTION of one of these commands next to
 // a repo-aegis word (`echo "repo-aegis approve"`). It is refused, and the agent
 // re-words it.
+//
+// Reading help is not running the command: a person-only verb whose ONLY arguments are `--help` / `-h`
+// (or `repo-aegis help <verb>`) is allowed, so an agent can tell its person the exact flags (P1-F).
+// Any other word next to it keeps the refusal. See {@link isHelpRead}.
 import { refusal } from "./refusal.js";
 
 export const AGENT_RAN_HUMAN_COMMAND = "AGENT_RAN_HUMAN_COMMAND";
@@ -491,6 +495,42 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
 }
 
 /**
+ * The words a person-only verb is spelled with, per kind: the paths `repo-aegis <words…> --help` can name.
+ * Typed `Record<HumanOnlyKind, …>` so a new kind cannot be added without saying how its help is asked for;
+ * the help exemption and its table test both read it. A kind that is not a repo-aegis verb has no path.
+ */
+export const HUMAN_VERB_PATHS: Readonly<Record<HumanOnlyKind, ReadonlyArray<readonly string[]>>> = {
+  approve: [["approve"]],
+  "owner-add": [["engagements", "add"]],
+  "upstream-add": [["upstreams", "add"]],
+  "init-migrate": [["init"]],
+  "init-force": [["init"]],
+  "identity-change": [["identity"], ["identity", "add"], ["identity", "remove"], ["identity", "require"], ["engagements", "set-identity"]],
+  "claude-md-uninstall": [["install", "claude-md"], ["uninstall"]],
+  "internal-entry": [["gh"], ["git-credential"]],
+  "managed-settings-write": [],
+};
+
+const HELP_FLAGS: ReadonlySet<string> = new Set(["--help", "-h"]);
+const HELP_VERB_WORDS: ReadonlySet<string> = new Set(Object.values(HUMAN_VERB_PATHS).flat(2));
+
+/**
+ * True when the words after a repo-aegis program word (the rest of its region, not just the window the
+ * classifier reads) only ask for help: verb words and `--help` / `-h`, or `help` followed by verb words.
+ * Commander prints help and exits before any action runs, so nothing is minted or changed. The check is on
+ * the same quote-stripped words the refusal reads, never on the raw text. Any other word (a target such as
+ * `x/y`, a flag such as `--ttl`, `--`, a second program word) fails it, so a target next to `--help` stays refused.
+ * A trailing single digit is a file-descriptor redirection (`--help 2>&1`) that the word reader split off.
+ */
+function isHelpRead(rest: readonly string[]): boolean {
+  const words = [...rest];
+  while (words.length > 0 && /^[0-9]$/.test(words[words.length - 1]!)) words.pop();
+  if (words.length === 0) return false;
+  if (words[0] === "help") return words.slice(1).every(w => HELP_VERB_WORDS.has(w));
+  return words.some(w => HELP_FLAGS.has(w)) && words.every(w => HELP_FLAGS.has(w) || HELP_VERB_WORDS.has(w));
+}
+
+/**
  * Spell a path the way the file system reads it: `/./` and a trailing `/.` are dropped, `//` is one `/`, and
  * `/x/../` cancels. Only for matching words against the managed-settings location, never to run anything.
  */
@@ -562,14 +602,14 @@ export function findHumanOnlyCommand(command: string): HumanOnlyHit | null {
       // after its closing `)` / backtick is read as following one.
       if (carry) {
         const kind = classify(followingWords(["", ...words], 0));
-        if (kind !== null) return { kind };
+        if (kind !== null && !isHelpRead(words)) return { kind };
       }
       let hasProgram = false;
       for (let i = 0; i < words.length; i++) {
         if (!isProgramWord(words[i]!, names)) continue;
         hasProgram = true;
         const kind = classify(followingWords(words, i));
-        if (kind !== null) return { kind };
+        if (kind !== null && !isHelpRead(words.slice(i + 1))) return { kind };
       }
       carry = hasProgram && (endedBy === ")" || endedBy === "`");
     }

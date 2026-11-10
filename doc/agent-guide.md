@@ -1018,6 +1018,24 @@ this machine. Surface the `fix` line to the user; do not run
 `engagements add` or `classify --apply` on your own initiative — which org
 is "ours" is a compliance decision the user owns.
 
+## Helping your person
+
+When repo-aegis blocks your person, you are the first one they ask. Do not guess flags or paraphrase from memory:
+
+1. **Run `--help`.** `repo-aegis <command> --help` and `repo-aegis help <command>` are read-only and are allowed for
+   every command, including the ones only a person may run (`approve`, `identity`, `engagements add --personal-org`,
+   `upstreams add`, `uninstall`, `install claude-md --uninstall`). Only `--help` / `-h` may be the arguments: add a
+   target or any other flag and the command text is refused (`AGENT_RAN_HUMAN_COMMAND`).
+2. **Read the docs that ship with the package.** `repo-aegis docs` lists them (`readme`, `cli-reference`,
+   `configuration`, `agent-guide`, `agent-sandbox`, `agent-install`, `egress-guard`, `changelog`);
+   `repo-aegis docs cli-reference` prints one, and `repo-aegis docs cli-reference --path` prints its file path so you can
+   Read or grep it. They work from any directory; the repository you are in has no copy. `repo-aegis explain <CODE>`
+   explains a refusal code.
+3. **Hand your person the exact command.** For a person-only command, write out the full line with the real owner, repo
+   or id filled in, and say what it will do and why it is needed. They run it in their own terminal.
+4. **Never run it yourself**, and never wrap it in `script`, `tmux`, `bash -c` or an alias to get past the hook. A hook
+   refusal is a decision for your person, not a routing problem.
+
 ## Error codes
 
 Every CLI failure with exit 2 emits a JSON error payload (under
@@ -1122,7 +1140,7 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | <a id="hook_input_too_large"></a>`HOOK_INPUT_TOO_LARGE` | egress guard: the hook input is larger than 1 MiB, so the command cannot be read whole and is not judged. Write hooks: a Write/Edit payload larger than 1 MiB whose file path is not near its start, so the write cannot be checked (before the write: refused) or the written file was not scanned (after it) | egress: put the large content in a file and pass the file (`--body-file`, `-F`, `--input`, `-d @file`); keep the command itself short. Writes: write the file in smaller parts (a first Write, then Edits); after a "not scanned" notice, tell your human which file you wrote so they can run `repo-aegis check --path <file>`. No approval covers it. |
 | <a id="github_api_via_http_client"></a>`GITHUB_API_VIA_HTTP_CLIENT` | egress guard: `curl` or `wget` writing to `api.github.com` or `uploads.github.com` (`-X POST\|PUT\|PATCH\|DELETE`, or a data flag) | use `gh api -X <METHOD> repos/<owner>/<repo>/…` or a `gh` verb with `--repo <owner>/<repo>`, which are checked like any publish. No approval covers it. |
 | <a id="gh_auth_token_network"></a>`GH_AUTH_TOKEN_NETWORK` | egress guard: `gh auth token` (or `gh auth status --show-token`) in a command line that also makes a network call (`curl`, `wget`, `nc`, `ssh`, an interpreter, or a `git` subcommand that can reach a remote; local ones such as `git tag` or `git log` do not count) | use `gh api …`, which uses its own credential and is checked. Never put the token in a command. No approval covers it. |
-| <a id="agent_ran_human_command"></a>`AGENT_RAN_HUMAN_COMMAND` | agent hook: the command text runs `repo-aegis approve`, `engagements add --personal-org\|--github-org`, `upstreams add`, `identity add\|remove`, `identity require --off`, `engagements set-identity` (`identity list`, `identity require --on` and `explain` only read or tighten and are not refused), the internal entry points `repo-aegis gh …` and `repo-aegis git-credential …` (the `gh` shim and git reach those themselves; any program-word form counts: `npx repo-aegis`, `node …/dist/index.js`) or `init --migrate-classify\|--force`, or removes the managed drop-in (`install claude-md --uninstall`, `uninstall --yes`) or runs `sudo` (any verb; reading it needs none) on the Claude Code managed-settings directory, in any shape (`bash -c`, a heredoc, `tmux`, an alias, `script`, `expect`), with or without a terminal | stop. These commands are how a person vouches for a publish or an owner. Tell the user what you need and give them the exact line to run in their own terminal. Do not re-word it to get past the hook. A quoted mention next to a repo-aegis word is refused too; re-word the sentence. |
+| <a id="agent_ran_human_command"></a>`AGENT_RAN_HUMAN_COMMAND` | agent hook: the command text runs `repo-aegis approve`, `engagements add --personal-org\|--github-org`, `upstreams add`, `identity add\|remove`, `identity require --off`, `engagements set-identity` (`identity list`, `identity require --on` and `explain` only read or tighten and are not refused; neither is any of these with `--help` / `-h` as its only argument, or as `repo-aegis help <verb>`, but `approve x/y --help` is refused), the internal entry points `repo-aegis gh …` and `repo-aegis git-credential …` (the `gh` shim and git reach those themselves; any program-word form counts: `npx repo-aegis`, `node …/dist/index.js`) or `init --migrate-classify\|--force`, or removes the managed drop-in (`install claude-md --uninstall`, `uninstall --yes`) or runs `sudo` (any verb; reading it needs none) on the Claude Code managed-settings directory, in any shape (`bash -c`, a heredoc, `tmux`, an alias, `script`, `expect`), with or without a terminal | stop. These commands are how a person vouches for a publish or an owner. Tell the user what you need and give them the exact line to run in their own terminal. Do not re-word it to get past the hook. A quoted mention next to a repo-aegis word is refused too; re-word the sentence. |
 | <a id="agent_detached_session"></a>`AGENT_DETACHED_SESSION` | agent hook: the command starts a detached session (`tmux new -d`, `tmux new-window` / `send-keys`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`) | run it in the foreground, or as a plain `nohup <command> &` for a dev server. If a long-lived terminal session is really needed, the user starts it. |
 | <a id="identity_change_needs_tty"></a>`IDENTITY_CHANGE_NEEDS_TTY` | `identity add`, `identity remove`, `identity require --off` or `engagements set-identity` (an engagement or `--personal-org`) was run without a person's terminal. These record which GitHub identity acts for an owner. No env var or approval lifts it. | **Ask your human to run the command themselves**, from their own terminal window; the refusal prints it. Do not retry, wrap it in `script` / `tmux`, or edit `engagements.yaml`. The agent hook refuses the command text too (`AGENT_RAN_HUMAN_COMMAND`). |
 | `MULTIPLE_INSTALLS` (`engagements set-identity`) | another `repo-aegis` on `PATH` is older than the running one (or its version cannot be read); it would refuse a schemaVersion 3 registry | tell the user to remove or upgrade the other install; do not try to work around it |
@@ -1341,6 +1359,7 @@ shape we don't model.
 | `install shim --uninstall` | remove the shim (never a file repo-aegis did not write) | `action`, `path`, `changed`, `reason?` |
 | `upstreams add <owner>/<repo>` | allow PRs, issues and comments to a fork's upstream (**person at a terminal only**) | `action`, `upstream`, `added` |
 | `upstreams remove <owner>/<repo>` / `upstreams list` | tighten / read; no terminal needed | `action`, `upstream`, `removed` / `action`, `upstreams` |
+| `docs [<topic>] [--path]` | the user docs that ship in the package: no topic lists them, a topic prints it, `--path` prints its file path (read-only, any directory; you may run it) | `topics`, or `topic`, `path`, `markdown` |
 | `explain <CODE\|topic>` / `explain --list` | what a refusal code means and what to do (the guide ships in the package; read-only, any directory; you may run it) | `code`, `codes`, `anchor`, `meaning`, `recovery`, `section` (or `topic`, `markdown`; `--list`: `codes`, `topics`) |
 | `identity list` | every identity and where it is mapped (read-only; you may run it) | `requireIdentity`, `identities[]` (`name`, `kind`, `login`\|`app`, `loginProblem?`, `person`, `agent`) |
 | `approve <org>/<repo>\|<org>/*\|*` | mint a time-limited approval for rule g (**person at a terminal only**); `--list` / `--revoke` need no terminal | `action`, `approval`, `warnings?` |
@@ -1360,5 +1379,5 @@ it, output is tuned for a human at a terminal.
 ## Reference
 
 - Tool home page: https://github.com/de-otio/repo-aegis
-- Design: [doc/design/README.md](design/README.md)
+- Design: [egress guard](design/egress-guard.md) (more design notes under `doc/design/` on GitHub)
 - CLI reference: [doc/cli-reference.md](cli-reference.md)

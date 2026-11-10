@@ -210,6 +210,18 @@ export async function buildProgram(): Promise<Command> {
       explain(code, withGlobals(opts, cmd));
     });
 
+  // The user docs that ship in dist/docs, for an agent helping its person from any repo. Read-only like `explain`.
+  program
+    .command("docs [topic]")
+    .description(
+      "print a doc that ships with repo-aegis (cli-reference, configuration, agent-guide, egress-guard, readme, changelog, …); with no topic, list them. `--path` prints the file path so you can Read or grep it. Read-only; works from any directory.",
+    )
+    .option("--path", "print the absolute path of the doc instead of its text")
+    .action(async (topic: string | undefined, opts, cmd) => {
+      const { docs } = await import("./commands/docs.js");
+      docs(topic, withGlobals(opts, cmd));
+    });
+
   // Registry schemaVersion 3: named GitHub identities. The mutators need a terminal and are human-only; `list` is read-only.
   const identity = program
     .command("identity")

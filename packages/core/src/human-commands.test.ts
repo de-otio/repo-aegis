@@ -13,6 +13,7 @@ import {
   findDetachedStart,
   findHumanOnlyCommand,
   humanCommandRefusal,
+  HUMAN_VERB_PATHS,
   type DetachedKind,
   type HumanOnlyKind,
 } from "./human-commands.js";
@@ -453,4 +454,55 @@ describe("findHumanOnlyCommand — explain and identity list are read-only, so a
   for (const [command, kind] of REFUSED) {
     it(`still refuses ${JSON.stringify(command)}`, () => assert.deepEqual(findHumanOnlyCommand(command), { kind }));
   }
+});
+
+describe("findHumanOnlyCommand: --help alone reads help, so an agent may run it (P1-F)", () => {
+  const HELP_ONLY = [
+    "repo-aegis approve --help",
+    "repo-aegis approve -h",
+    "repo-aegis help approve",
+    "repo-aegis identity --help",
+    "repo-aegis identity add --help",
+    "repo-aegis engagements set-identity -h",
+    "repo-aegis help identity add",
+    "repo-aegis gh --help",
+    "repo-aegis git-credential --help",
+    "repo-aegis install claude-md --help",
+    "npx -y @de-otio/repo-aegis approve --help",
+    "bash -c 'repo-aegis approve --help'",
+    "repo-aegis approve --help 2>&1",
+    "repo-aegis approve --help | cat",
+  ];
+  for (const command of HELP_ONLY) {
+    it(`allows ${JSON.stringify(command)}`, () => assert.equal(findHumanOnlyCommand(command), null));
+  }
+
+  // The same verbs with anything else next to --help, in the same segment or another, stay refused.
+  const REFUSED: ReadonlyArray<readonly [string, HumanOnlyKind]> = [
+    ["repo-aegis approve example-org/svc --help", "approve"],
+    ["repo-aegis approve --help example-org/svc", "approve"],
+    ["repo-aegis approve --help && repo-aegis approve example-org/svc", "approve"],
+    ["repo-aegis approve --help; repo-aegis approve example-org/svc", "approve"],
+    ["repo-aegis approve --help\nrepo-aegis approve example-org/svc", "approve"],
+    ["bash -c 'repo-aegis approve --help; repo-aegis approve example-org/svc'", "approve"],
+    ["repo-aegis approve --ttl 1h --help", "approve"],
+    ["repo-aegis approve -- --help", "approve"],
+    ["repo-aegis help approve example-org/svc", "approve"],
+    ["repo-aegis approve help", "approve"],
+    ["repo-aegis identity add work --gh-login alice --help", "identity-change"],
+    ["repo-aegis init --force --help", "init-force"],
+    ["repo-aegis gh --help -- pr view 1", "internal-entry"],
+    ["$(which repo-aegis) approve --help example-org/svc", "approve"],
+  ];
+  for (const [command, kind] of REFUSED) {
+    it(`still refuses ${JSON.stringify(command)}`, () => assert.deepEqual(findHumanOnlyCommand(command), { kind }));
+  }
+
+  it("HUMAN_VERB_PATHS has a path list for every kind", () => {
+    const kinds: HumanOnlyKind[] = [
+      "approve", "owner-add", "upstream-add", "init-migrate", "init-force", "identity-change",
+      "claude-md-uninstall", "internal-entry", "managed-settings-write",
+    ];
+    assert.deepEqual(Object.keys(HUMAN_VERB_PATHS).sort(), [...kinds].sort());
+  });
 });

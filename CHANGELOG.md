@@ -41,8 +41,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented: for scripted `claude -p` runs, pass an explicit `--permission-mode` other than
   `default`/`acceptEdits`. The hook input has no headless indicator, and `permission_mode` reads
   `default` there too.
+- **`repo-aegis docs [<topic>] [--path]`**: prints a user doc that ships in the package, from any directory.
+  No topic lists them; `--path` prints the file path so an agent can Read or grep it. Read-only, and an
+  agent may run it. `dist/docs` now carries the README, `cli-reference`, `configuration`, `agent-guide`,
+  `agent-sandbox`, `agent-install`, `design/egress-guard` and the CHANGELOG (links between them are
+  rewritten at build time so they resolve there). An agent helping a person whose command was blocked
+  could not read the reference unless this repository was checked out.
+- `doc/agent-guide.md` has a "Helping your person" section: run `--help`, read `repo-aegis docs`, hand the
+  person the exact person-only command, never run it.
 
 ### Changed
+
+- **`--help` on a person-only command is allowed in an agent's Bash text.** `approve --help`,
+  `identity add --help`, `engagements add --help`, `upstreams add --help`, `uninstall --help`,
+  `install claude-md --help` and `repo-aegis help <verb>` no longer end in `AGENT_RAN_HUMAN_COMMAND`: the
+  call changes nothing, and an agent that cannot read the help guesses flags. The exemption needs
+  `--help` / `-h` (or `help <verb>`) to be the **only** arguments; `approve x/y --help`, `approve --help x/y`
+  and `approve --help && approve x/y` are still refused. Read from the same quote-stripped words as the
+  refusal, not from the raw text.
 
 - **Breaking-ish: Node.js 20 is no longer tested or documented as supported.** CI tests Node 22 and
   24, and the README and `doc/agent-install.md` now say Node.js 22 or later. No `package.json` has an
