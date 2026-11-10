@@ -66,7 +66,7 @@ export function gitCredentialOrderChecks(registry: Registry, opts: GitCredential
       code: "GIT_CREDENTIAL_HELPER_ORDER",
       ok: false,
       detail,
-      fix: `a person runs, from a terminal: repo-aegis install git-credential   (it refuses, with instructions, when a system-scope helper or a global one with no reset in front would still answer first)`,
+      fix: `a person runs, from a terminal: repo-aegis install git-credential   (on stock macOS it adds an empty reset entry and puts osxkeychain back after its own helper; it refuses, with instructions, when another helper would still answer first)`,
     },
   ];
 }

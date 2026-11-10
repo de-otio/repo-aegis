@@ -15,10 +15,14 @@
 //   - the process list cannot be read (the default Claude Code sandbox blocks it).
 //
 // Assertions (a) to (c) FAILED on v0.12.2 (Phase U exit criterion) with:
-//   (a) AGENT_PUSH_CHAIN_UNREADABLE          (fixed by U5, and by U2's wording only if it were not a refusal)
+//   (a) AGENT_PUSH_CHAIN_UNREADABLE          (fixed by U5; P1-A then removed the chain check, so the helper no longer reads approvals)
 //   (b) GH_IDENTITY_ARG_UNSAFE                (fixed by U1 and/or U5)
 //   (c) GH_IDENTITY_UNAVAILABLE for a read    (fixed by U4)
-// The (d) negatives pass today and must keep passing: without the approval, the refusals stand.
+// The (d) negatives for `repo-aegis gh` pass today and must keep passing: without the approval, the refusals stand.
+// The (d) negatives for the credential helper flipped in P1-A: an unreadable process list is no longer a refusal.
+//
+// P1 acceptance (its own describe below): an agent push from the default Claude Code sandbox, with NO approval, a
+// proxy in the environment and no process list, goes through as the mapped person (the D1 default).
 //
 // Placeholders only: alice, example-org, example-bot.
 import { describe, it, before, after } from "node:test";
@@ -29,9 +33,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   approvalsPath,
+  identityPresence,
   loadRegistry,
   mintApproval,
-  revokeApprovals,
   type IdentityPresence,
   type TerminalCheck,
 } from "@de-otio/repo-aegis-core";
@@ -40,7 +44,7 @@ import { hermeticGitEnv, scrubGitEnv } from "./_test-utils.js";
 import { renderHookScript } from "@de-otio/repo-aegis-core";
 import { renderShimScript } from "./commands/shim-script.js";
 import { runGhCommand, type GhCommandDeps } from "./commands/gh-command.js";
-import { runGitCredential, type GitCredentialDeps } from "./commands/git-credential.js";
+import { realGitCredentialDeps, runGitCredential, type GitCredentialDeps } from "./commands/git-credential.js";
 import { mintAppToken } from "./commands/taaad-mint.js";
 import { readCredentialConfig } from "./git-credential-config.js";
 import type { TaaadPin } from "./commands/taaad-pin.js";
@@ -128,7 +132,7 @@ function write(path: string, text: string, mode = 0o644): void {
 }
 
 /** Build the world described at the top of the file. `localHooksPath` is what the repo-local config holds. */
-function makeWorld(opts: { localHooksPath?: "own" | "foreign" | "none"; approve?: boolean } = {}): World {
+function makeWorld(opts: { localHooksPath?: "own" | "foreign" | "none"; approve?: boolean; registry?: string } = {}): World {
   const root = join(base, `w${worlds++}`);
   const home = join(root, "aegis");
   const hooksDir = join(home, "hooks");
@@ -137,7 +141,7 @@ function makeWorld(opts: { localHooksPath?: "own" | "foreign" | "none"; approve?
   const globalConfig = join(root, "gitconfig");
   mkdirSync(join(home, "state"), { recursive: true });
   mkdirSync(hooksDir, { recursive: true });
-  write(join(home, "engagements.yaml"), REGISTRY);
+  write(join(home, "engagements.yaml"), opts.registry ?? REGISTRY);
   write(join(hooksDir, "pre-commit"), "#!/bin/sh\nexit 0\n", 0o755);
   write(join(hooksDir, "pre-push"), "#!/bin/sh\nexit 0\n", 0o755);
   write(join(stubs, "gh"), GH_STUB, 0o755);
@@ -188,8 +192,17 @@ const GIT_ASKS = "protocol=https\nhost=github.com\npath=example-org/svc.git\n\n"
 
 type Unreadable = "null" | "throws" | "readable";
 
-function helper(w: World, how: Unreadable, presence: IdentityPresence = "agent"): { stdout: string; stderr: string } {
-  const env = { PATH: process.env["PATH"] ?? "", HOME: join(w.root, "fake-home"), GIT_CONFIG_GLOBAL: w.globalConfig, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null" };
+function helperEnv(w: World): NodeJS.ProcessEnv {
+  return { PATH: process.env["PATH"] ?? "", HOME: join(w.root, "fake-home"), GIT_CONFIG_GLOBAL: w.globalConfig, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null" };
+}
+
+function helper(
+  w: World,
+  how: Unreadable,
+  presence: IdentityPresence = "agent",
+  over: Partial<GitCredentialDeps> = {},
+): { stdout: string; stderr: string } {
+  const env = helperEnv(w);
   const deps: GitCredentialDeps = {
     env,
     cwd: w.repo,
@@ -209,9 +222,12 @@ function helper(w: World, how: Unreadable, presence: IdentityPresence = "agent")
     },
     readConfig: readCredentialConfig,
     loadRegistry: h => loadRegistry(join(h, "engagements.yaml")),
+    // Real: the world's repo is recorded private, and its core.hooksPath is repo-aegis's own.
+    destinationPublic: realGitCredentialDeps().destinationPublic,
     resolveTaaad: () => w.taaadPath,
     mint: mintAppToken,
     loginToken: () => ({ kind: "unavailable" }),
+    ...over,
   };
   return runGitCredential("get", GIT_ASKS, w.home, deps);
 }
@@ -219,45 +235,106 @@ function helper(w: World, how: Unreadable, presence: IdentityPresence = "agent")
 describe("Phase U exit criterion: an agent publishes under one account-bound approval, in a sandbox", () => {
   for (const how of ["null", "throws"] as const) {
     describe(`(a) git push over HTTPS, process list unreadable (${how})`, () => {
-      it("the helper returns the App's credential, not AGENT_PUSH_CHAIN_UNREADABLE", () => {
+      it("the helper returns the App's credential, with no approval notice (the helper does not read approvals)", () => {
         const w = makeWorld();
         const r = helper(w, how);
-        assert.ok(!r.stderr.includes("AGENT_PUSH_CHAIN_UNREADABLE"), `refused: ${r.stderr}`);
         assert.match(r.stdout, /^username=x-access-token\npassword=ghs_STUBexamplebot0123456789abcdef\n/, `stdout: ${r.stdout}\nstderr: ${r.stderr}`);
-        // Exactly the U5 notice naming the approval, and never the token.
-        assert.match(r.stderr, /^repo-aegis: approval [0-9a-f]+ covers an unreadable process list for example-org\/svc\n$/, `stderr: ${r.stderr}`);
-        assert.ok(!r.stderr.includes("ghs_"), "the token never reaches stderr");
+        // No U5 notice (an approval exists in this world and is ignored), and never the token.
+        assert.equal(r.stderr, "");
         // Narrowed to exactly this repository, for a push.
         assert.deepEqual(lines(join(w.stubs, "taaad.argv")), ["mint --app example-bot --repo example-org/svc --permissions contents-write --json"]);
       });
 
-      it("(d) with no approval the helper refuses with AGENT_PUSH_CHAIN_UNREADABLE and mints nothing", () => {
+      it("(d) with no approval the helper answers all the same: an unreadable process list is no refusal", () => {
         const w = makeWorld({ approve: false });
         const r = helper(w, how);
-        assert.equal(r.stdout, "quit=true\n");
-        assert.ok(r.stderr.includes("AGENT_PUSH_CHAIN_UNREADABLE"), r.stderr);
-        assert.deepEqual(lines(join(w.stubs, "taaad.argv")), [], "a token was minted");
+        assert.match(r.stdout, /^username=x-access-token\npassword=ghs_STUBexamplebot0123456789abcdef\n/, `stdout: ${r.stdout}\nstderr: ${r.stderr}`);
+        assert.ok(!r.stderr.includes("AGENT_PUSH_CHAIN_UNREADABLE"), r.stderr);
+        assert.deepEqual(lines(join(w.stubs, "taaad.argv")), ["mint --app example-bot --repo example-org/svc --permissions contents-write --json"]);
       });
     });
   }
-
-  it("(d) an approval for another account's owner, or revoked, does not cover (a)", () => {
-    const w = makeWorld({ approve: false });
-    mintApproval({ target: { org: "other-org", repo: "*" }, login: "alice", path: approvalsPath(w.home) });
-    mintApproval({ target: { org: "example-org", repo: "*" }, path: approvalsPath(w.home) }); // no account bound
-    const r = helper(w, "null");
-    assert.ok(r.stderr.includes("AGENT_PUSH_CHAIN_UNREADABLE"), r.stderr);
-    assert.deepEqual(lines(join(w.stubs, "taaad.argv")), []);
-    // And a revoked approval covers nothing.
-    const w2 = makeWorld();
-    revokeApprovals("all", approvalsPath(w2.home));
-    assert.ok(helper(w2, "null").stderr.includes("AGENT_PUSH_CHAIN_UNREADABLE"));
-  });
 
   it("control: with a readable process chain the same fixture world yields the credential (the fixture itself is sound)", () => {
     const w = makeWorld({ approve: false });
     const r = helper(w, "readable");
     assert.match(r.stdout, /^username=x-access-token\npassword=ghs_STUBexamplebot0123456789abcdef\n/, `stdout: ${r.stdout}\nstderr: ${r.stderr}`);
+  });
+
+  // -------------------------------------------------------------------------
+  // P1 acceptance
+  // -------------------------------------------------------------------------
+
+  describe("P1 acceptance: an agent push from the default Claude Code sandbox", () => {
+    const PERSON_ONLY = `schemaVersion: 3
+identities:
+  alice: { kind: gh-login, login: alice }
+personalOrgs:
+  - { name: example-org, person: alice }
+engagements: []
+`;
+    const TOKEN_ALICE = "gho_STUBalice0123456789abcdef";
+
+    /** The sandbox: a proxy variable, no process list, no tty, no approval, and a stubbed login token. */
+    function sandboxPush(w: World, extraEnv: Record<string, string> = {}): { stdout: string; stderr: string; asked: string[] } {
+      const asked: string[] = [];
+      const env: NodeJS.ProcessEnv = {
+        ...helperEnv(w),
+        HTTP_PROXY: "http://127.0.0.1:3128",
+        HTTPS_PROXY: "http://127.0.0.1:3128",
+        http_proxy: "http://127.0.0.1:3128",
+        https_proxy: "http://127.0.0.1:3128",
+        NO_PROXY: "localhost",
+        SANDBOX_RUNTIME: "1",
+        ...extraEnv,
+      };
+      const r = helper(w, "throws", "agent", {
+        env,
+        ancestry: () => {
+          throw new Error("ps: operation not permitted");
+        },
+        presence: () => identityPresence({ kind: "no-tty" } as TerminalCheck),
+        loginToken: login => {
+          asked.push(login);
+          return { kind: "token", token: TOKEN_ALICE };
+        },
+      });
+      return { ...r, asked };
+    }
+
+    it("person-only registry (the D1 default): the mapped login's token, nothing refused, nothing minted", () => {
+      const w = makeWorld({ approve: false, registry: PERSON_ONLY });
+      const r = sandboxPush(w);
+      assert.equal(r.stdout, `username=x-access-token\npassword=${TOKEN_ALICE}\n`, `stderr: ${r.stderr}`);
+      assert.deepEqual(r.asked, ["alice"]);
+      assert.doesNotMatch(r.stderr, /\[[A-Z_]+[;\]]/, `no refusal code: ${r.stderr}`);
+      assert.ok(!r.stderr.includes("gho_"), "the token never reaches stderr");
+      assert.deepEqual(lines(join(w.stubs, "taaad.argv")), []);
+    });
+
+    it("App opt-in (the registry maps an agent App): the App token, narrowed to the repository, stderr empty", () => {
+      const w = makeWorld({ approve: false });
+      const r = sandboxPush(w);
+      assert.match(r.stdout, /^username=x-access-token\npassword=ghs_STUBexamplebot0123456789abcdef\n/, `stderr: ${r.stderr}`);
+      assert.deepEqual(lines(join(w.stubs, "taaad.argv")), ["mint --app example-bot --repo example-org/svc --permissions contents-write --json"]);
+      assert.equal(r.stderr, "");
+      assert.deepEqual(r.asked, [], "no login token was asked for");
+    });
+
+    it("an unmapped owner: nothing on stdout (git's next helper answers)", () => {
+      const w = makeWorld({ approve: false, registry: PERSON_ONLY.replace("name: example-org", "name: other-org") });
+      const r = sandboxPush(w);
+      assert.equal(r.stdout, "");
+      assert.deepEqual(r.asked, []);
+    });
+
+    it("control: the same world with GIT_TRACE_CURL=1 is refused (the fixture is not vacuous)", () => {
+      const w = makeWorld({ approve: false, registry: PERSON_ONLY });
+      const r = sandboxPush(w, { GIT_TRACE_CURL: "1" });
+      assert.equal(r.stdout, "quit=true\n");
+      assert.match(r.stderr, /AGENT_PUSH_CREDENTIAL_CONFIG/);
+      assert.deepEqual(r.asked, []);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -402,13 +479,14 @@ describe("Phase U exit criterion: an agent publishes under one account-bound app
 // ---------------------------------------------------------------------------
 
 describe("the real seams: the built helper with the real process-list reader and presence reader", { skip: !cliBuilt() }, () => {
-  it("answers the covered credential or refuses under a named code, never a crash or silent empty output", () => {
-    const w = makeWorld(); // approved: example-org/*, bound to alice, which the registry maps
+  it("answers the push with the App credential, never a crash or silent empty output", () => {
+    const w = makeWorld({ approve: false }); // no approval: the helper does not read them
     write(join(w.home, "bin", "gh"), renderShimScript({ node: process.execPath, cli: cliPath }, { home: w.home, taaad: w.taaad }), 0o755);
     // A `ps` that fails, first on PATH. The real reader runs ps by ABSOLUTE path (an agent must not be able to
     // fake it), so this does not make the process list unreadable here; where the sandbox does block it, the
-    // chain is unreadable and the approval covers it. Either way the outcome below must hold, and nothing is
-    // injected: the real `readProcessAncestry`, the real presence reader and the real git config reader all run.
+    // chain is unreadable. Either way the helper answers the push. Nothing is injected: the real
+    // `readProcessAncestry`, the real presence reader and the real git config reader all run. HTTPS_PROXY is set,
+    // as in the default Claude Code sandbox: a proxy variable does not stop the token.
     const fakeBin = join(w.root, "fakebin");
     write(join(fakeBin, "ps"), "#!/bin/sh\nexit 1\n", 0o755);
     const r = spawnSync(process.execPath, [cliPath, "git-credential", "--home", w.home, "get"], {
@@ -417,6 +495,7 @@ describe("the real seams: the built helper with the real process-list reader and
       encoding: "utf8",
       env: {
         PATH: `${fakeBin}:${process.env["PATH"] ?? ""}`,
+        HTTPS_PROXY: "http://127.0.0.1:3128",
         HOME: join(w.root, "fake-home"),
         GIT_CONFIG_GLOBAL: w.globalConfig,
         GIT_CONFIG_NOSYSTEM: "1",
@@ -428,13 +507,8 @@ describe("the real seams: the built helper with the real process-list reader and
     assert.notEqual(r.stdout, "", `silent empty output would hand the agent the person's own helper: ${label}`);
     assert.ok(!/TypeError|ReferenceError|\n\s+at .*\.js:\d+/.test(r.stderr), `no stack trace: ${label}`);
     assert.ok(!r.stderr.includes("ghs_"), `the token never reaches stderr: ${label}`);
-    if (r.stdout.startsWith("quit=true")) {
-      assert.equal(r.stdout, "quit=true\n", label);
-      assert.match(r.stderr, /\[(AGENT_CREDENTIAL_DIRECT_FILL|AGENT_PUSH_CHAIN_UNREADABLE)[;\]]/, `a named refusal: ${label}`);
-    } else {
-      assert.match(r.stdout, /^username=x-access-token\npassword=ghs_STUBexamplebot0123456789abcdef\n/, label);
-      assert.match(r.stderr, /^repo-aegis: approval [0-9a-f]+ covers an unreadable process list for example-org\/svc\n$/, label);
-    }
+    assert.match(r.stdout, /^username=x-access-token\npassword=ghs_STUBexamplebot0123456789abcdef\n/, label);
+    assert.equal(r.stderr, "", label);
   });
 });
 

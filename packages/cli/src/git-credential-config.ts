@@ -38,7 +38,7 @@ const isSystemScope = (scope: string): boolean => scope === "system" || scope ==
 export const scopeLabel = (scope: string): string => (scope === "unknown" ? "system (the git build's bundled config)" : scope);
 
 const CONFIG_KEYS =
-  "^(credential\\.|http\\.|remote\\..*\\.proxy$|core\\.(hookspath|fsmonitor|sshcommand)$|url\\..*\\.(insteadof|pushinsteadof)$)";
+  "^(credential\\.|http\\.|core\\.(hookspath|fsmonitor|sshcommand)$|url\\..*\\.(insteadof|pushinsteadof)$)";
 
 /** Parse `git config --show-scope --get-regexp` output (`scope<TAB>key value`). */
 export function parseShowScopeList(out: string): ConfigEntry[] {
@@ -64,7 +64,7 @@ export function gitBinary(env: NodeJS.ProcessEnv): string {
 }
 
 /**
- * The credential, http and remote-proxy entries git would read from `cwd`, in order. Null when git could not
+ * The credential, http and core entries git would read from `cwd`, in order. Null when git could not
  * be asked (a broken config file exits 128): the caller refuses, it does not guess.
  */
 export function readCredentialConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): ConfigEntry[] | null {
@@ -218,6 +218,49 @@ export function withHelperInstalled(entries: readonly ConfigEntry[], ours: strin
   return out;
 }
 
+/**
+ * The entry list as it will read once, at global scope, an empty reset entry, `ours` and then `readded` are written
+ * (in that order) to a global `credential.https://github.com.helper` list that was empty.
+ */
+export function withResetAndHelperInstalled(entries: readonly ConfigEntry[], ours: string, readded: readonly string[]): ConfigEntry[] {
+  const withReset = withHelperInstalled(entries, "");
+  const out = withHelperInstalled(withReset, ours);
+  const at = out.findIndex(e => e.scope === "global" && e.key === HELPER_KEY && e.value === ours);
+  out.splice(
+    at + 1,
+    0,
+    ...readded.map((value): ConfigEntry => ({ scope: "global", key: HELPER_KEY, value })),
+  );
+  return out;
+}
+
+/**
+ * The helpers a reset entry written at global scope would hide, as values to write back after ours: the system and
+ * global helpers that apply to https://github.com, in order, without repo-aegis's own and without duplicates.
+ * `foreign` is true when one of them is set under another URL pattern (`credential.https://github.com/<path>.helper`
+ * and the like): writing its value back under {@link HELPER_KEY} would change where it applies, so the caller must
+ * not re-add anything.
+ */
+export function helpersHiddenByReset(entries: readonly ConfigEntry[], ctx: CredentialContext = { path: null }): { values: string[]; foreign: boolean } {
+  const values: string[] = [];
+  let foreign = false;
+  for (const e of effectiveHelpers(entries, ctx)) {
+    if (!isSystemScope(e.scope) && e.scope !== "global") continue;
+    const v = e.value ?? "";
+    if (isRepoAegisHelperValue(v)) continue;
+    if (e.key !== "credential.helper" && e.key !== HELPER_KEY) {
+      foreign = true;
+      continue;
+    }
+    if (v.includes("\n")) {
+      foreign = true;
+      continue;
+    }
+    if (!values.includes(v)) values.push(v);
+  }
+  return { values, foreign };
+}
+
 // ---------------------------------------------------------------------------
 // A5: configuration that can redirect or capture the token
 // ---------------------------------------------------------------------------
@@ -225,10 +268,16 @@ export function withHelperInstalled(entries: readonly ConfigEntry[], ours: strin
 const FALSY = /^(false|no|off|0|)$/i;
 
 /**
- * A fixed phrase naming why the token must not be minted, or null. Checked only for a push the helper would
- * answer. Covers: a helper from local, worktree or command scope (it would be handed the token by `store`);
- * `http.proxy`, `sslVerify=false`, `sslCAInfo`, `sslCAPath`, `extraHeader` and `sslBackend` (and a remote's
- * `proxy`) at any scope but system; and the environment variables that trace, redirect or re-trust TLS.
+ * A fixed phrase naming why the token must not be handed over, or null. Checked only for a push the helper would
+ * answer. Covers the honest mistakes that would leak a token into a trace or a helper that stores it: a helper
+ * from local, worktree or command scope (it would be handed the token by `store`); the environment variables
+ * that trace the HTTP exchange (`GIT_TRACE_CURL`, `GIT_CURL_VERBOSE`, `GIT_TRACE_PACKET`) or turn the redaction
+ * of those traces off (`GIT_TRACE_REDACT`).
+ *
+ * Deliberately NOT judged (P1-A): `http.proxy` and the proxy variables (the default Claude Code sandbox sets one
+ * on every command, and a CONNECT proxy cannot read TLS), a CA bundle (`sslCAInfo`, `sslCAPath`, `sslBackend`:
+ * planting one is an attack, not an accident), `extraHeader`, and `sslVerify=false`, which only warns
+ * ({@link credentialConfigWarnings}).
  */
 export function credentialConfigViolation(
   entries: readonly ConfigEntry[],
@@ -238,31 +287,30 @@ export function credentialConfigViolation(
   for (const e of effectiveHelpers(entries, ctx)) {
     if (!isSystemScope(e.scope) && e.scope !== "global") return `a credential helper is configured in ${e.scope} scope`;
   }
-  for (const { entry, name } of applicableEntries(entries, "http", ctx)) {
-    if (isSystemScope(entry.scope)) continue;
-    const v = entry.value;
-    switch (name) {
-      case "proxy":
-        if (v !== null && v !== "") return `http.proxy is set in ${entry.scope} scope`;
-        break;
-      case "sslverify":
-        if (v !== null && FALSY.test(v)) return `http.sslVerify is off in ${entry.scope} scope`;
-        break;
-      case "sslcainfo":
-      case "sslcapath":
-        return `http.${name === "sslcainfo" ? "sslCAInfo" : "sslCAPath"} is set in ${entry.scope} scope`;
-      case "extraheader":
-        return `http.extraHeader is set in ${entry.scope} scope`;
-      case "sslbackend":
-        return `http.sslBackend is set in ${entry.scope} scope`;
-    }
-  }
-  for (const entry of entries) {
-    if (!isSystemScope(entry.scope) && /^remote\..*\.proxy$/.test(entry.key) && entry.value !== null && entry.value !== "") {
-      return `a remote's proxy is set in ${entry.scope} scope`;
-    }
-  }
   return environmentViolation(env);
+}
+
+/**
+ * Notes, not refusals: `http.sslVerify` off in a non-system scope, and `GIT_SSL_NO_VERIFY` in the environment.
+ * Turning verification off is a common honest mistake (a corporate proxy); it is the person's setting, so the
+ * helper says so on stderr and goes on. Fixed phrases.
+ */
+export function credentialConfigWarnings(entries: readonly ConfigEntry[], ctx: CredentialContext, env: NodeJS.ProcessEnv): string[] {
+  const phrases: string[] = [];
+  for (const { entry, name } of applicableEntries(entries, "http", ctx)) {
+    if (isSystemScope(entry.scope) || name !== "sslverify") continue;
+    // A valueless key reads as true, so only an explicit falsy value counts.
+    if (entry.value !== null && FALSY.test(entry.value)) {
+      const phrase = `http.sslVerify is off in ${entry.scope} scope`;
+      if (!phrases.includes(phrase)) phrases.push(phrase);
+    }
+  }
+  const noVerify = env["GIT_SSL_NO_VERIFY"];
+  if (noVerify !== undefined && noVerify !== "") phrases.push("GIT_SSL_NO_VERIFY is set in the environment");
+  return phrases.map(
+    phrase =>
+      `repo-aegis: warning: ${phrase}, so TLS certificates are not checked for this push; the token was given anyway. \`git config --list --show-origin\` names the file to remove it from.\n`,
+  );
 }
 
 /** The environment half of A5. Null when clean. */
@@ -276,12 +324,6 @@ export function environmentViolation(env: NodeJS.ProcessEnv): string | null {
   }
   const redact = env["GIT_TRACE_REDACT"];
   if (redact !== undefined && FALSY.test(redact) && redact !== "") return "GIT_TRACE_REDACT is off in the environment";
-  for (const [name, value] of Object.entries(env)) {
-    if (value === undefined || value === "") continue;
-    const upper = name.toUpperCase();
-    if (upper.endsWith("_PROXY") && upper !== "NO_PROXY") return `a proxy variable (${name}) is set in the environment`;
-    if (upper.startsWith("GIT_SSL_")) return `${upper} is set in the environment`;
-  }
   return null;
 }
 
@@ -333,8 +375,8 @@ export function laterStoringHelper(entries: readonly ConfigEntry[], ctx: Credent
  * effective configuration is judged as well: `core.hooksPath`, `core.fsmonitor` (anything but off) and
  * `core.sshCommand` from local, worktree or command scope; `url.<base>.insteadOf` / `pushInsteadOf` from those
  * scopes (it re-points the remote the token is sent to); and everything {@link credentialConfigViolation} judges
- * (`credential.helper` outside system and global scope, `http.proxy`, `sslVerify=false`, `sslCAInfo`,
- * `extraHeader`). `env` is the CHILD's environment, which `repo-aegis gh` allowlists, so it is `{}` there.
+ * (`credential.helper` outside system and global scope, the trace variables). `env` is the CHILD's environment,
+ * which the gh wrapper allowlists, so it is `{}` there.
  */
 export function gitSpawnViolation(entries: readonly ConfigEntry[], ctx: CredentialContext, env: NodeJS.ProcessEnv): string | null {
   for (const e of entries) {

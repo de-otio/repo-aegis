@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 //
-// The git credential helper (doc/plan-owner-identity.md §5.6, §13.4, A5, A7, A17). Placeholder names only:
+// The git credential helper (doc/plan-owner-identity.md §5.6, §13.4, A5, A7, A17; P1-A: the helper only chooses the
+// account, and refuses nothing about the process list or approvals). Placeholder names only:
 // owner `o` has an agent identity, `p` only a person identity, `q` is registered with none. The "taaad" is a
 // stub script on a temp path; no network, no real App. Presence and the process chain are injected for the
 // decision tests; the `git credential fill` tests run the real git and the built CLI.
@@ -11,11 +12,11 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { loadRegistry, mintApproval, type AncestorInfo, type IdentityPresence } from "@de-otio/repo-aegis-core";
+import { mintApproval, type AncestorInfo, type IdentityPresence } from "@de-otio/repo-aegis-core";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { hermeticGitEnv, scrubGitEnv } from "../_test-utils.js";
 import { parseShowScopeList } from "../git-credential-config.js";
-import { parentFromAncestry, runGitCredential, type GitCredentialDeps, type LoginTokenResult } from "./git-credential.js";
+import { encryptedNote, parentFromAncestry, realGitCredentialDeps, runGitCredential, type GitCredentialDeps, type LoginTokenResult } from "./git-credential.js";
 import { mintAppToken, resolvePinnedTaaad } from "./taaad-mint.js";
 import { renderShimScript } from "./shim-script.js";
 
@@ -103,7 +104,8 @@ function deps(over: Partial<GitCredentialDeps> = {}, presence: IdentityPresence 
     presence: () => presence,
     ancestry: pushChain,
     readConfig: () => [],
-    loadRegistry: h => loadRegistry(join(h, "engagements.yaml")),
+    loadRegistry: realGitCredentialDeps().loadRegistry,
+    destinationPublic: () => destinationPublic,
     resolveTaaad: () => taaad,
     mint: mintAppToken,
     loginToken: (login, env, h) => (loginCalls.push({ login, env, home: h }), personToken()),
@@ -115,7 +117,10 @@ function deps(over: Partial<GitCredentialDeps> = {}, presence: IdentityPresence 
 const PERSON_TOKEN = "gho_personTOKEN0123456789abcdef";
 let personToken = (): LoginTokenResult => ({ kind: "token", token: PERSON_TOKEN });
 let loginCalls: { login: string; env: NodeJS.ProcessEnv; home: string }[] = [];
+/** What the injected destination cache says: true (public or unknown) is the fail-closed default. */
+let destinationPublic = true;
 beforeEach(() => {
+  destinationPublic = true;
   loginCalls = [];
   personToken = () => ({ kind: "token", token: PERSON_TOKEN });
 });
@@ -150,16 +155,15 @@ describe("git-credential get: answering an agent push (I13, I13c, A7)", () => {
     }
   });
 
-  it("push through global options, send-pack: write; an alias or unreadable subcommand: read", () => {
+  it("push through global options, send-pack, an alias, an unreadable subcommand: all contents-write (anything but a known read is a push)", () => {
     const write = (sub: string[]): void => {
       get(request(), deps({ ancestry: () => remoteChain(sub) }));
       assert.match(argv(), /--permissions contents-write/, sub.join(" "));
     };
     write(["-C", "/x", "-c", "a=b", "push"]);
     write(["send-pack", "--stateless-rpc"]);
-    writeFileSync(join(stubDir, "out.json"), jsonFor({ permissions: { contents: "read" } }));
-    get(request(), deps({ ancestry: () => remoteChain(["pp", "origin"]) }));
-    assert.match(argv(), /--permissions read/, "an alias is a read: it can only fail to push, never write");
+    write(["pp", "origin"]);
+    write(["-C", "/a", "-c", "x=y", "-c"]);
   });
 
   it("the token is narrowed to the repository named in the path, .git suffix and case aside", () => {
@@ -203,7 +207,7 @@ describe("git-credential get: answering an agent push (I13, I13c, A7)", () => {
 describe("git-credential get: printing nothing (I14)", () => {
   it("a person present: nothing, no registry read, no mint", () => {
     let read = false;
-    const r = get(request(), deps({ loadRegistry: () => ((read = true), null) }, "person"));
+    const r = get(request(), deps({ loadRegistry: () => ((read = true), "unreadable") }, "person"));
     assert.deepEqual(r, { stdout: "", stderr: "" });
     assert.equal(read, false);
     assert.equal(calls(), 0);
@@ -302,11 +306,16 @@ describe("git-credential get: every refusal is exactly quit=true (A5, I15)", () 
 
   it("an unreadable registry: GH_IDENTITY_UNAVAILABLE (a faulted decision on a registered owner is not a fall-through)", () => {
     writeFileSync(join(home, "engagements.yaml"), "schemaVersion: 3\nidentities: [oops\n");
-    assertRefused(get(request()), "GH_IDENTITY_UNAVAILABLE");
+    const r = get(request());
+    assertRefused(r, "GH_IDENTITY_UNAVAILABLE");
+    assert.match(r.stderr, /exists but cannot be read/);
+    assert.match(r.stderr, /repo-aegis doctor/);
   });
 
-  it("an agent owner with a write and only a person identity: GH_IDENTITY_WRITE_NEEDS_HUMAN", () => {
-    assertRefused(get(request("p/r.git")), "GH_IDENTITY_WRITE_NEEDS_HUMAN");
+  it("an owner with only a person identity and a push is NOT refused any more: the mapped login's token (D1)", () => {
+    const r = get(request("p/r.git"));
+    assert.equal(r.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`);
+    assert.ok(!r.stderr.includes("GH_IDENTITY_WRITE_NEEDS_HUMAN"), r.stderr);
   });
 
   it("a relative --home is refused", () => {
@@ -328,29 +337,40 @@ describe("git-credential get: every refusal is exactly quit=true (A5, I15)", () 
   });
 });
 
-describe("git-credential get: the parent chain (A7, review finding)", () => {
-  it("no git-remote-https in the chain (git credential fill run directly): quit=true, taaad never called", () => {
-    const direct: AncestorInfo[] = [
-      { pid: 9, ppid: 8, comm: "git", argv: ["git", "credential", "fill"] },
-      { pid: 8, ppid: 1, comm: "zsh", argv: ["zsh"] },
-    ];
-    assertRefused(get(request(), deps({ ancestry: () => direct })), "AGENT_CREDENTIAL_DIRECT_FILL");
-    assert.equal(calls(), 0);
+describe("git-credential get: the parent chain (A7): only a known read is told apart; everything else is a push", () => {
+  const credentialFill: AncestorInfo[] = [
+    { pid: 9, ppid: 8, comm: "git", argv: ["git", "credential", "fill"] },
+    { pid: 8, ppid: 1, comm: "zsh", argv: ["zsh"] },
+  ];
+  const answeredAsPush = (r: { stdout: string; stderr: string }, label: string): void => {
+    assert.match(r.stdout, /^username=x-access-token\npassword=ghs_exampletoken0123456789abcdef\n/, `${label}: ${r.stderr}`);
+    assert.equal(r.stderr, "", label);
+    assert.match(argv(), /--permissions contents-write --json$/, `${label}: the wider scope`);
+  };
+
+  it("no git-remote-https in the chain (git credential fill run directly): answered as a push; no approval exists or is needed", () => {
+    answeredAsPush(get(request(), deps({ ancestry: () => credentialFill })), "direct");
+    assert.equal(calls(), 1);
   });
 
-  it("direct fill is refused for an unmapped owner too (it must not hand the agent the person's helper answer)", () => {
+  it("an unmapped owner on a direct chain: nothing (the person's own helper answers, as for any unmapped owner)", () => {
     const direct: AncestorInfo[] = [{ pid: 8, ppid: 1, comm: "zsh", argv: ["zsh"] }];
-    assertRefused(get(request("q/r.git"), deps({ ancestry: () => direct })), "AGENT_CREDENTIAL_DIRECT_FILL");
+    assert.deepEqual(get(request("q/r.git"), deps({ ancestry: () => direct })), { stdout: "", stderr: "" });
+    assert.equal(calls(), 0);
   });
 
-  it("an unreadable chain, or a remote helper with no git above it: quit=true", () => {
-    assertRefused(get(request(), deps({ ancestry: () => ({ ancestors: [], complete: false }) })), "AGENT_PUSH_CHAIN_UNREADABLE");
-    assertRefused(get(request(), deps({ ancestry: () => { throw new Error("no ps"); } })), "AGENT_PUSH_CHAIN_UNREADABLE");
-    assertRefused(
-      get(request(), deps({ ancestry: () => [{ pid: 10, ppid: 1, comm: "git-remote-https", argv: ["git-remote-https", "origin", "https://github.com/o/r.git"] }] })),
-      "AGENT_PUSH_CHAIN_UNREADABLE",
+  it("an unreadable chain (null, a throw, an empty list, a remote helper with no git above it): answered as a push", () => {
+    answeredAsPush(get(request(), deps({ ancestry: () => null })), "null");
+    answeredAsPush(get(request(), deps({ ancestry: () => ({ ancestors: [], complete: false }) })), "empty");
+    answeredAsPush(
+      get(request(), deps({ ancestry: () => { throw new Error("ps: operation not permitted"); } })),
+      "throws",
     );
-    assert.equal(calls(), 0);
+    answeredAsPush(
+      get(request(), deps({ ancestry: () => [{ pid: 10, ppid: 1, comm: "git-remote-https", argv: ["git-remote-https", "origin", "https://github.com/o/r.git"] }] })),
+      "no git above the remote helper",
+    );
+    assert.equal(calls(), 4);
   });
 
   it("a person present is not subject to it: nothing, as before", () => {
@@ -384,6 +404,9 @@ describe("git-credential get: the parent chain (A7, review finding)", () => {
 
   it("real git's chain: a fetch through the dispatcher is still a read", () => {
     assert.deepEqual(parentFromAncestry(realChain(["fetch", "origin"]), "o/r.git"), { kind: "remote", sub: "fetch" });
+    writeFileSync(join(stubDir, "out.json"), jsonFor({ permissions: { contents: "read", metadata: "read" } }));
+    assert.match(get(request(), deps({ ancestry: () => realChain(["fetch", "origin"]) })).stdout, /^username=/);
+    assert.match(argv(), /--permissions read --json$/, "a known read mints read");
   });
 
   it("only a dispatcher with the remote helper's own arguments is skipped", () => {
@@ -394,183 +417,53 @@ describe("git-credential get: the parent chain (A7, review finding)", () => {
   });
 });
 
-describe("git-credential get: an unreadable process list (U2, U5)", () => {
-  const unreadable = (): GitCredentialDeps => deps({ ancestry: () => ({ ancestors: [], complete: false }) });
-  const approvalsFile = (): string => join(home, "egress-approvals.json");
-  const approve = (target: { org: string; repo: string }, over: { login?: string; ref?: string; now?: Date } = {}): string =>
-    mintApproval({ target, path: approvalsFile(), ...over }).id;
-
-  it("no approval: the text names a sandbox as the likely cause and three remedies, all a person's", () => {
-    const r = get(request(), unreadable());
-    assertRefused(r, "AGENT_PUSH_CHAIN_UNREADABLE");
-    assert.match(r.stderr, /sandbox/i);
-    assert.match(r.stderr, /process list/);
-    assert.match(r.stderr, /A person runs the push from a terminal\./);
-    assert.match(r.stderr, /A person runs, from a terminal: repo-aegis approve o\/r \(agents may then push to it for the approval's lifetime\)\./);
-    assert.match(r.stderr, /A person lets the agent's command run outside the sandbox\./);
-    assert.match(r.stderr, /Agents: do not run that yourself/);
-    assert.match(r.stderr, /\[AGENT_PUSH_CHAIN_UNREADABLE; details: repo-aegis explain AGENT_PUSH_CHAIN_UNREADABLE\]/);
-    assert.ok(!/(agent|you) (may|can|should) (disable|leave|run outside)/i.test(r.stderr), "never tells an agent to leave the sandbox");
-    assert.equal(calls(), 0);
-  });
-
-  it("no approval and no usable path: still refused, and no approve command is offered", () => {
-    const r = get("protocol=https\nhost=github.com\n\n", unreadable());
-    assertRefused(r, "AGENT_PUSH_CHAIN_UNREADABLE");
-    assert.ok(!r.stderr.includes("repo-aegis approve"), r.stderr);
-    assert.equal(calls(), 0);
-  });
-
-  it("an approval for the repository covers it: a contents-write token, one stderr line, no other change", () => {
-    const id = approve({ org: "o", repo: "r" }, { login: "example-user" });
-    const r = get(request(), unreadable());
-    assert.match(r.stdout, /^username=x-access-token\npassword=ghs_exampletoken0123456789abcdef\n/);
-    assert.equal(r.stderr, `repo-aegis: approval ${id} covers an unreadable process list for o/r\n`);
-    assert.match(argv(), /^mint --app example-bot --repo o\/r --permissions contents-write --json$/);
-    assert.equal(calls(), 1);
-  });
-
-  it("an approval for the whole owner covers it; the owner and repository match case-insensitively", () => {
-    const id = approve({ org: "o", repo: "*" }, { login: "example-user" });
-    assert.match(get(request("O/R.git"), unreadable()).stderr, new RegExp(`approval ${id} covers`));
-    assert.equal(calls(), 1);
-  });
-
-  it("the audit record names the approval id and what it covered", () => {
-    const id = approve({ org: "o", repo: "r" }, { login: "example-user" });
-    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+describe("git-credential get: the audit record (L6) names no approval", () => {
+  const auditOn = (): void => writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+  const withHome = <T>(h: string, fn: () => T): T => {
     const saved = process.env["REPO_AEGIS_HOME"];
-    process.env["REPO_AEGIS_HOME"] = home;
+    process.env["REPO_AEGIS_HOME"] = h;
     try {
-      get(request(), unreadable());
+      return fn();
     } finally {
       if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
       else process.env["REPO_AEGIS_HOME"] = saved;
     }
+  };
+
+  it("an App push's record has the identity, scope and verb, and no approval, covers or login key", () => {
+    auditOn();
+    withHome(home, () => get(request(), deps({ ancestry: () => null })));
     const lines = readFileSync(join(home, "state", "audit.log"), "utf8").trim().split("\n");
     const rec = JSON.parse(lines[lines.length - 1]!) as { action: string; details: Record<string, unknown> };
     assert.equal(rec.action, "git-credential");
-    assert.deepEqual(
-      { ...rec.details },
-      { identity: "bot", kind: "github-app", owner: "o", repo: "r", scope: "contents-write", verb: "push", approval: id, covers: "AGENT_PUSH_CHAIN_UNREADABLE" },
-    );
+    assert.deepEqual({ ...rec.details }, { identity: "bot", kind: "github-app", owner: "o", repo: "r", scope: "contents-write", verb: "push" });
     assert.ok(!lines.join("\n").includes("example-user"), "the person's login is not copied into the log");
   });
 
-  it("the audit record lands in the PINNED home even when the caller's REPO_AEGIS_HOME points elsewhere (L6)", () => {
-    approve({ org: "o", repo: "r" }, { login: "example-user" });
-    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
+  it("the record lands in the PINNED home even when the caller's REPO_AEGIS_HOME points elsewhere", () => {
+    auditOn();
     const elsewhere = mkdtempSync(join(tmpdir(), "rae-other-home-"));
-    const saved = process.env["REPO_AEGIS_HOME"];
-    process.env["REPO_AEGIS_HOME"] = elsewhere;
     try {
-      get(request(), unreadable());
-      assert.equal(process.env["REPO_AEGIS_HOME"], elsewhere, "the caller's variable is restored");
+      withHome(elsewhere, () => {
+        get(request());
+        assert.equal(process.env["REPO_AEGIS_HOME"], elsewhere, "the caller's variable is restored");
+      });
+      assert.ok(existsSync(join(home, "state", "audit.log")), "written to the pinned home");
+      assert.ok(!existsSync(join(elsewhere, "state", "audit.log")), "not to the caller's home");
     } finally {
-      if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
-      else process.env["REPO_AEGIS_HOME"] = saved;
-    }
-    assert.ok(existsSync(join(home, "state", "audit.log")), "written to the pinned home");
-    assert.ok(!existsSync(join(elsewhere, "state", "audit.log")), "not to the caller's home");
-    rmSync(elsewhere, { recursive: true, force: true });
-  });
-
-  it("an approval that does not cover it leaves the refusal: another repo or owner, no login, `*`, a ref, expired", () => {
-    const longAgo = new Date("2020-01-01T00:00:00Z");
-    approve({ org: "o", repo: "other" }, { login: "example-user" });
-    approve({ org: "p", repo: "*" }, { login: "example-user" });
-    approve({ org: "o", repo: "r" }); // no login: the owner had no mapped person at mint time
-    approve({ org: "*", repo: "*" });
-    approve({ org: "o", repo: "r" }, { login: "example-user", ref: "main" });
-    approve({ org: "o", repo: "r" }, { login: "example-user", now: longAgo });
-    assertRefused(get(request(), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
-    assert.equal(calls(), 0);
-  });
-
-  it("a chain that WAS read and shows a non-git caller is refused even with a covering approval", () => {
-    approve({ org: "o", repo: "r" }, { login: "example-user" });
-    const direct: AncestorInfo[] = [
-      { pid: 9, ppid: 8, comm: "git", argv: ["git", "credential", "fill"] },
-      { pid: 8, ppid: 1, comm: "zsh", argv: ["zsh"] },
-    ];
-    assertRefused(get(request(), deps({ ancestry: () => direct })), "AGENT_CREDENTIAL_DIRECT_FILL");
-    const shell: AncestorInfo[] = [{ pid: 8, ppid: 1, comm: "zsh", argv: ["zsh"] }];
-    assertRefused(get(request(), deps({ ancestry: () => shell })), "AGENT_CREDENTIAL_DIRECT_FILL");
-    assert.equal(calls(), 0);
-  });
-
-  it("a request naming two paths or two hosts is not covered, and git's configuration is still checked", () => {
-    approve({ org: "o", repo: "*" }, { login: "example-user" });
-    assertRefused(get(request("o/r.git", "path=o/s.git\n"), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
-    assertRefused(get("protocol=https\nhost=github.com\nhost=example.com\npath=o/r.git\n\n", unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
-    assertRefused(get(request(), deps({ ancestry: () => ({ ancestors: [], complete: false }), readConfig: () => null })), "AGENT_PUSH_CREDENTIAL_CONFIG");
-    assert.equal(calls(), 0);
-  });
-
-  it("a covered request for an owner with no identity is not handed to the person's own helper", () => {
-    approve({ org: "q", repo: "*" }, { login: "example-user" });
-    assertRefused(get(request("q/r.git"), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
-    assert.equal(calls(), 0);
-    assert.equal(loginCalls.length, 0);
-  });
-
-  it("an approval minted for an account the owner is no longer mapped to covers nothing (U5, current login)", () => {
-    // Minted while the owner's person identity was another login; the registry now maps `example-user`.
-    approve({ org: "o", repo: "r" }, { login: "mallory" });
-    assertRefused(get(request(), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
-    // The same approval, minted for the login the registry maps now, covers (control).
-    approve({ org: "o", repo: "r" }, { login: "EXAMPLE-USER" });
-    assert.match(get(request(), unreadable()).stdout, /^username=x-access-token\npassword=ghs_/);
-    assert.equal(calls(), 1, "only the second request minted");
-  });
-
-  it("an owner with no person identity has nothing to bind an approval to: nothing is covered", () => {
-    // `b` has an agent identity only; an approval carrying some login (it cannot have been minted for `b`
-    // by the CLI, but a store can hold anything) still covers nothing.
-    writeFileSync(join(home, "engagements.yaml"), REGISTRY.replace("personalOrgs:\n", "personalOrgs:\n  - { name: b, agent: bot }\n"));
-    approve({ org: "b", repo: "*" }, { login: "example-user" });
-    assertRefused(get(request("b/r.git"), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
-    assert.equal(calls(), 0);
-  });
-
-  it("an approval with a login, an unreadable chain and no registry: AGENT_PUSH_CHAIN_UNREADABLE, never the person's helper", () => {
-    approve({ org: "o", repo: "r" }, { login: "example-user" });
-    const r = get(request(), deps({ ancestry: () => ({ ancestors: [], complete: false }), loadRegistry: () => "missing" }));
-    assertRefused(r, "AGENT_PUSH_CHAIN_UNREADABLE");
-    assert.equal(calls(), 0);
-    // An unreadable registry is refused the same way (there is no account to bind the approval to).
-    assertRefused(get(request(), deps({ ancestry: () => ({ ancestors: [], complete: false }), loadRegistry: () => null })), "AGENT_PUSH_CHAIN_UNREADABLE");
-    // Control: with the chain readable and no registry, the next helper answers.
-    assert.deepEqual(get(request(), deps({ loadRegistry: () => "missing" })), { stdout: "", stderr: "" });
-  });
-
-  it("a person present is not subject to any of it: nothing, as before", () => {
-    assert.deepEqual(get(request(), deps({ ancestry: () => ({ ancestors: [], complete: false }) }, "person")), { stdout: "", stderr: "" });
-  });
-
-  it("the approval store is the pinned home's, not REPO_AEGIS_HOME's", () => {
-    const elsewhere = join(tmp, `elsewhere${n}`);
-    mkdirSync(elsewhere, { recursive: true });
-    const saved = process.env["REPO_AEGIS_HOME"];
-    process.env["REPO_AEGIS_HOME"] = elsewhere;
-    try {
-      // An approval only in the caller's home does not count...
-      mintApproval({ target: { org: "o", repo: "r" }, login: "example-user", path: join(elsewhere, "egress-approvals.json") });
-      assertRefused(get(request(), unreadable()), "AGENT_PUSH_CHAIN_UNREADABLE");
-      // ...and one in the pinned home counts whatever the caller's environment says.
-      approve({ org: "o", repo: "r" }, { login: "example-user" });
-      assert.match(get(request(), unreadable()).stdout, /^username=/);
-    } finally {
-      if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
-      else process.env["REPO_AEGIS_HOME"] = saved;
+      rmSync(elsewhere, { recursive: true, force: true });
     }
   });
 });
 
 describe("git-credential get: the chain's shape (M3)", () => {
   const sh: AncestorInfo = { pid: 11, ppid: 10, comm: "sh", argv: ["sh", "-c", "x get"] };
+  // A shape that is not git's remote helper is `direct`: classified as such, and answered as a push (the wider
+  // scope), never as a read.
   const direct = (chain: AncestorInfo[], label: string): void => {
-    assertRefused(get(request(), deps({ ancestry: () => chain })), "AGENT_CREDENTIAL_DIRECT_FILL", label);
+    assert.deepEqual(parentFromAncestry(chain, "o/r.git"), { kind: "direct" }, label);
+    assert.match(get(request(), deps({ ancestry: () => chain })).stdout, /^username=x-access-token/, label);
+    assert.match(argv(), /--permissions contents-write/, `${label}: answered as a push`);
   };
   const [remote, gitProc, shell] = remoteChain(["push", "origin", "main"]) as [AncestorInfo, AncestorInfo, AncestorInfo];
 
@@ -578,14 +471,13 @@ describe("git-credential get: the chain's shape (M3)", () => {
     assert.match(get(request(), deps({ ancestry: () => [sh, remote, gitProc, shell] })).stdout, /^username=/);
   });
 
-  it("a forged git-remote-https (a copy of sh as a hook) running `git credential fill`: refused, taaad never called", () => {
+  it("a forged git-remote-https (a copy of sh as a hook) running `git credential fill`: classified direct, never read as a fetch", () => {
     const forged: AncestorInfo = { pid: 10, ppid: 8, comm: "git-remote-https", argv: ["/tmp/git-remote-https", "/tmp/hook"] };
     const fill: AncestorInfo = { pid: 12, ppid: 10, comm: "git", argv: ["git", "credential", "fill"] };
     direct([fill, forged, shell], "credential fill under a forged remote helper");
     // even with a perfect-looking argv, a `git credential` between is refused
     direct([fill, { ...remote }, gitProc, shell], "git credential between");
     direct([{ pid: 12, ppid: 10, comm: "git", argv: ["git", "credential-osxkeychain", "get"] }, remote, gitProc], "credential-<x> between");
-    assert.equal(calls(), 0);
   });
 
   it("the remote helper must be the parent or grandparent, with only a shell between", () => {
@@ -603,7 +495,7 @@ describe("git-credential get: the chain's shape (M3)", () => {
     assert.match(get(request(), deps({ ancestry: () => [{ ...remote, argv: ["git-remote-https", "origin", "https://github.com/O/R"] }, gitProc] })).stdout, /^username=/, "case and .git do not matter");
   });
 
-  it("a `git credential…` above the remote helper is refused too", () => {
+  it("a `git credential…` above the remote helper is classified direct too", () => {
     direct([remote, { pid: 9, ppid: 8, comm: "git", argv: ["git", "credential", "fill"] }, shell], "credential above");
   });
 });
@@ -620,30 +512,23 @@ describe("git-credential get: person column answers known reads as the mapped lo
     assert.equal(calls(), 0, "no App token is minted for a person column");
   });
 
-  it("a read still passes the store guard: a later helper that would save the token refuses it", () => {
-    const cfg =
-      "global\tcredential.https://github.com.helper \nglobal\tcredential.https://github.com.helper !'/n' '/c' git-credential --home '/h'\nglobal\tcredential.https://github.com.helper osxkeychain";
-    const r = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"]), readConfig: () => parseShowScopeList(cfg) }));
-    assertRefused(r, "AGENT_PUSH_CREDENTIAL_STORE");
-    assert.equal(loginCalls.length, 0, "refused before the token was asked for");
+  it("a known read skips the push-time checks: a proxy, a trace variable or a repo-local helper do not stop a fetch", () => {
+    const proxyEnv = { DOCKER_HTTPS_PROXY: "http://localhost:3128", HTTPS_PROXY: "http://localhost:3128", GIT_TRACE_CURL: "1" };
+    const cfg = parseShowScopeList("global\thttp.proxy http://localhost:3128\nlocal\tcredential.helper !evil");
+    for (const sub of ["fetch", "pull", "clone"]) {
+      loginCalls = [];
+      const r = get(request("p/r.git"), deps({ ancestry: () => remoteChain([sub]), env: proxyEnv, readConfig: () => cfg }));
+      assert.deepEqual(r, { stdout: `username=x-access-token\npassword=${PERSON_TOKEN}\n`, stderr: "" }, sub);
+    }
   });
 
   it("no token for the mapped login: refused with GH_IDENTITY_UNAVAILABLE rather than answered as another account", () => {
     personToken = () => ({ kind: "unavailable" });
     assertRefused(get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"]) })), "GH_IDENTITY_UNAVAILABLE");
   });
-
-  it("an alias, push, send-pack or an unreadable subcommand: quit=true GH_IDENTITY_WRITE_NEEDS_HUMAN", () => {
-    for (const argv of [["pp", "origin"], ["push"], ["send-pack"], ["-C", "/a", "-c", "x=y", "-c"]]) {
-      assertRefused(get(request("p/r.git"), deps({ ancestry: () => remoteChain(argv) })), "GH_IDENTITY_WRITE_NEEDS_HUMAN", argv.join(" "));
-    }
-  });
 });
 
-describe("git-credential get: a person's account under a login-bound approval (the helper consults the same approvals as `repo-aegis gh`)", () => {
-  const approvalsFile = (): string => join(home, "egress-approvals.json");
-  const approve = (target: { org: string; repo: string }, over: { login?: string; ref?: string; now?: Date } = {}): string =>
-    mintApproval({ target, path: approvalsFile(), ...over }).id;
+describe("git-credential get: a push as the owner's person account (D1: the default, with no approval)", () => {
   const entries = (text: string): ReturnType<typeof parseShowScopeList> => parseShowScopeList(text);
   const auditOn = (): void => writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
   const withAudit = <T>(fn: () => T): T => {
@@ -660,105 +545,61 @@ describe("git-credential get: a person's account under a login-bound approval (t
     const lines = readFileSync(join(home, "state", "audit.log"), "utf8").trim().split("\n");
     return JSON.parse(lines[lines.length - 1]!) as { action: string; details: Record<string, unknown> };
   };
+  const NOTE = "repo-aegis: this push runs as the GitHub account mapped to p (its person identity)\n";
 
-  it("a push for an owner whose only identity is a person, under an approval for its login: THAT login's token, not the active account's", () => {
-    const id = approve({ org: "p", repo: "r" }, { login: "example-user" });
+  it("a person-only owner, no approval: THAT login's token, not the active account's, with one stderr line", () => {
     const r = get(request("p/r.git"));
     assert.equal(r.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`);
-    assert.equal(r.stderr, `repo-aegis: approval ${id} lets this push run as the GitHub account mapped to p\n`);
+    assert.equal(r.stderr, NOTE);
     assert.equal(loginCalls.length, 1);
     assert.equal(loginCalls[0]!.login, "example-user", "asked for the mapped login's token, by name");
     assert.equal(loginCalls[0]!.home, home, "through the pinned home");
     assert.equal(calls(), 0, "no App token is minted for a person column");
   });
 
-  it("an approval for the whole owner covers it, and the owner and repository match case-insensitively", () => {
-    const id = approve({ org: "p", repo: "*" }, { login: "EXAMPLE-USER" });
+  it("the owner and repository match case-insensitively", () => {
     const r = get(request("P/R.git"));
     assert.match(r.stdout, new RegExp(`password=${PERSON_TOKEN}`));
-    assert.match(r.stderr, new RegExp(`approval ${id} lets this push`));
+    assert.equal(r.stderr, "repo-aegis: this push runs as the GitHub account mapped to p (its person identity)\n");
   });
 
-  it("the audit record names the approval and never the login or the token", () => {
-    const id = approve({ org: "p", repo: "r" }, { login: "example-user" });
+  it("the audit record has no approval key, and never the login or the token", () => {
     auditOn();
     withAudit(() => get(request("p/r.git")));
     const rec = lastAudit();
     assert.equal(rec.action, "git-credential");
     assert.deepEqual(
       { ...rec.details },
-      { identity: "me", kind: "gh-login", column: "person", owner: "p", repo: "r", scope: "write", verb: "push", approval: id, covers: "GH_IDENTITY_WRITE_NEEDS_HUMAN" },
+      { identity: "me", kind: "gh-login", column: "person", owner: "p", repo: "r", scope: "write", verb: "push" },
     );
+    assert.ok(!("approval" in rec.details) && !("covers" in rec.details));
     const text = readFileSync(join(home, "state", "audit.log"), "utf8");
     assert.ok(!text.includes("example-user") && !text.includes(PERSON_TOKEN), "no login, no token in the log");
   });
 
-  it("without an approval the refusal stays, and its text says a login-bound approve from a terminal covers it", () => {
-    const r = get(request("p/r.git"));
-    assertRefused(r, "GH_IDENTITY_WRITE_NEEDS_HUMAN");
-    assert.match(r.stderr, /login-bound `repo-aegis approve p\/r`/);
-    assert.match(r.stderr, /from a terminal/);
-    assert.ok(!/does not consult approvals/.test(r.stderr), r.stderr);
-    assert.ok(!r.stderr.includes("an approval does not help"), r.stderr);
-    assert.equal(loginCalls.length, 0);
+  it("approvals are not consulted: whatever the store holds, the answer and its text are the same", () => {
+    const before = get(request("p/r.git"));
+    mintApproval({ target: { org: "p", repo: "r" }, login: "example-user", path: join(home, "egress-approvals.json") });
+    mintApproval({ target: { org: "p", repo: "*" }, login: "mallory", path: join(home, "egress-approvals.json") });
+    assert.deepEqual(get(request("p/r.git")), before);
   });
 
-  it("an approval that does not cover it leaves the refusal: another account, no login, `*`, a ref, another repository or owner, expired", () => {
-    const longAgo = new Date("2020-01-01T00:00:00Z");
-    approve({ org: "p", repo: "r" }, { login: "mallory" });
-    approve({ org: "p", repo: "r" }); // no login
-    approve({ org: "*", repo: "*" });
-    approve({ org: "p", repo: "r" }, { login: "example-user", ref: "main" });
-    approve({ org: "p", repo: "other" }, { login: "example-user" });
-    approve({ org: "o", repo: "*" }, { login: "example-user" });
-    approve({ org: "p", repo: "r" }, { login: "example-user", now: longAgo });
-    assertRefused(get(request("p/r.git")), "GH_IDENTITY_WRITE_NEEDS_HUMAN");
-    assert.equal(loginCalls.length, 0, "no token was asked for");
+  it("an alias, push, send-pack, an unreadable subcommand or an unreadable chain: the same (everything but a known read is a push)", () => {
+    for (const argvs of [["pp", "origin"], ["push"], ["send-pack"], ["-C", "/a", "-c", "x=y", "-c"]]) {
+      loginCalls = [];
+      const r = get(request("p/r.git"), deps({ ancestry: () => remoteChain(argvs, "p/r.git") }));
+      assert.deepEqual(r, { stdout: `username=x-access-token\npassword=${PERSON_TOKEN}\n`, stderr: NOTE }, argvs.join(" "));
+      assert.equal(loginCalls.length, 1);
+    }
+    const unreadable = get(request("p/r.git"), deps({ ancestry: () => null }));
+    assert.equal(unreadable.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`);
   });
 
-  it("an approval does not turn a read into a push: fetch is answered as a read, with no approval line", () => {
-    approve({ org: "p", repo: "*" }, { login: "example-user" });
-    assert.deepEqual(get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch", "origin"], "p/r.git") })), {
-      stdout: `username=x-access-token\npassword=${PERSON_TOKEN}\n`,
-      stderr: "",
-    });
-  });
-
-  it("a read's audit record says read/fetch and names no approval, login or token", () => {
-    auditOn();
-    withAudit(() => get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch", "origin"], "p/r.git") })));
-    assert.deepEqual({ ...lastAudit().details }, { identity: "me", kind: "gh-login", column: "person", owner: "p", repo: "r", scope: "read", verb: "fetch" });
-    const text = readFileSync(join(home, "state", "audit.log"), "utf8");
-    assert.ok(!text.includes("example-user") && !text.includes(PERSON_TOKEN));
-  });
-
-  it("an alias or unreadable subcommand is judged as a write: covered by the approval, refused without one", () => {
-    const aliasChain = (): AncestorInfo[] => remoteChain(["pp", "origin"], "p/r.git");
-    assertRefused(get(request("p/r.git"), deps({ ancestry: aliasChain })), "GH_IDENTITY_WRITE_NEEDS_HUMAN");
-    assert.equal(loginCalls.length, 0);
-    approve({ org: "p", repo: "r" }, { login: "example-user" });
-    assert.match(get(request("p/r.git"), deps({ ancestry: aliasChain })).stdout, new RegExp(`password=${PERSON_TOKEN}`));
-  });
-
-  it("an unreadable process list, covered by the same approval: the person's token, and both approvals' lines", () => {
-    const id = approve({ org: "p", repo: "r" }, { login: "example-user" });
-    const r = get(request("p/r.git"), deps({ ancestry: () => ({ ancestors: [], complete: false }) }));
-    assert.match(r.stdout, new RegExp(`password=${PERSON_TOKEN}`));
-    assert.match(r.stderr, new RegExp(`approval ${id} lets this push`));
-    assert.match(r.stderr, new RegExp(`approval ${id} covers an unreadable process list for p/r`));
-  });
-
-  it("every pre-mint check applies to a person's token exactly as to an App token: A5 configuration, environment and the store guard", () => {
-    approve({ org: "p", repo: "r" }, { login: "example-user" });
+  it("the configuration checks apply to a person's token as to an App token (trace variables, a helper in local scope, an unreadable configuration)", () => {
     const hits: [string, NodeJS.ProcessEnv, string][] = [
       ["global\tcredential.https://github.com.helper !ours\nlocal\tcredential.helper !evil", {}, "AGENT_PUSH_CREDENTIAL_CONFIG"],
-      ["global\thttp.proxy http://proxy.example:3128", {}, "AGENT_PUSH_CREDENTIAL_CONFIG"],
       ["", { GIT_TRACE_CURL: "1" }, "AGENT_PUSH_CREDENTIAL_CONFIG"],
-      [
-        "global\tcredential.https://github.com.helper \nglobal\tcredential.https://github.com.helper !'/n' '/c' git-credential --home '/h'\nglobal\tcredential.https://github.com.helper osxkeychain",
-        {},
-        "AGENT_PUSH_CREDENTIAL_STORE",
-      ],
+      ["", { GIT_TRACE_REDACT: "0" }, "AGENT_PUSH_CREDENTIAL_CONFIG"],
     ];
     for (const [cfg, env, code] of hits) {
       const r = get(request("p/r.git"), deps({ readConfig: () => entries(cfg), env }));
@@ -769,8 +610,107 @@ describe("git-credential get: a person's account under a login-bound approval (t
     assert.equal(loginCalls.length, 0, "refused before the token was asked for");
   });
 
+  const OURS = "!'/n' '/c' git-credential --home '/h'";
+  const withLater = (later: string): string =>
+    `global\tcredential.https://github.com.helper \nglobal\tcredential.https://github.com.helper ${OURS}\nglobal\tcredential.https://github.com.helper ${later}`;
+
+  it("A5: a later OS store (osxkeychain, libsecret, wincred, a credential manager, cache) does NOT refuse a person's token, push or read", () => {
+    for (const later of ["osxkeychain", "libsecret", "wincred", "manager", "manager-core", "git-credential-manager", "cache", "cache --timeout 60"]) {
+      const push = get(request("p/r.git"), deps({ readConfig: () => entries(withLater(later)) }));
+      assert.equal(push.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, `${later} push: ${push.stderr}`);
+      const read = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"], "p/r.git"), readConfig: () => entries(withLater(later)) }));
+      assert.equal(read.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, `${later} read: ${read.stderr}`);
+    }
+  });
+
+  it("A5: a later `store` (plaintext in ~/.git-credentials) or an unrecognised helper refuses a person's token, push and read alike, before any token is fetched", () => {
+    for (const later of ["store", "store --file /tmp/x", "!/opt/x/bin/mystery"]) {
+      loginCalls = [];
+      const push = get(request("p/r.git"), deps({ readConfig: () => entries(withLater(later)) }));
+      assertRefused(push, "AGENT_PUSH_CREDENTIAL_STORE", `${later} push`);
+      assert.match(push.stderr, /the person's token (would be written in plaintext|might be written in plaintext)/, later);
+      const read = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"], "p/r.git"), readConfig: () => entries(withLater(later)) }));
+      assertRefused(read, "AGENT_PUSH_CREDENTIAL_STORE", `${later} read`);
+      assert.equal(loginCalls.length, 0, `${later}: refused before the token was asked for`);
+    }
+  });
+
+  describe("the pre-push backstop: a repository's own core.hooksPath (husky)", () => {
+    const HUSKY = "local\tcore.hookspath .husky/_";
+    const GLOBAL_OWN = "global\tcore.hookspath /h/hooks";
+    const push = (cfg: string, over: Partial<GitCredentialDeps> = {}): { stdout: string; stderr: string } =>
+      get(request("p/r.git"), deps({ readConfig: () => entries(cfg), ...over }));
+
+    it("a local hooksPath that is not repo-aegis's, and a destination that is unknown or public: refused, no token fetched", () => {
+      destinationPublic = true;
+      const r = push(HUSKY);
+      assertRefused(r, "AGENT_PUSH_GUARD_NOT_RUNNING");
+      assert.match(r.stderr, /core\.hooksPath is set in local scope/);
+      assert.match(r.stderr, /pushes from a terminal, or chains repo-aegis's pre-push hook/);
+      assert.equal(loginCalls.length, 0);
+      for (const scope of ["worktree", "command"]) assertRefused(push(`${scope}\tcore.hookspath /tmp/h`), "AGENT_PUSH_GUARD_NOT_RUNNING", scope);
+    });
+
+    it("the same with the destination recorded private: the token", () => {
+      destinationPublic = false;
+      const r = push(HUSKY);
+      assert.equal(r.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, r.stderr);
+    });
+
+    it("a global hooksPath (the person's own or repo-aegis's), or none: the token, even for an unknown destination", () => {
+      destinationPublic = true;
+      for (const cfg of [GLOBAL_OWN, "global\tcore.hookspath /somewhere/else", "system\tcore.hookspath /x", ""]) {
+        assert.equal(push(cfg).stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, cfg);
+      }
+    });
+
+    it("a local hooksPath that IS repo-aegis's own hooks directory (install hooks --local) is not an override", () => {
+      destinationPublic = true;
+      const ownDir = join(home, "hooks");
+      mkdirSync(ownDir, { recursive: true });
+      assert.equal(push(`local\tcore.hookspath ${ownDir}`).stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`);
+      // The last value wins: a local override after a correct global one is still an override.
+      assertRefused(push(`global\tcore.hookspath ${ownDir}\nlocal\tcore.hookspath .husky/_`), "AGENT_PUSH_GUARD_NOT_RUNNING");
+      // ... and a correct local value after a foreign global one is fine.
+      assert.equal(push(`global\tcore.hookspath /elsewhere\nlocal\tcore.hookspath ${ownDir}`).stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`);
+    });
+
+    it("known reads, and the App column, are not affected", () => {
+      destinationPublic = true;
+      const read = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"], "p/r.git"), readConfig: () => entries(HUSKY) }));
+      assert.equal(read.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, read.stderr);
+      const app = get(request(), deps({ readConfig: () => entries(HUSKY) }));
+      assert.match(app.stdout, /^username=x-access-token\npassword=ghs_/, app.stderr);
+    });
+
+    it("the real offline visibility rule: a repository recorded private passes, an uncached or public one is refused", () => {
+      const repo = join(tmp, `husky-repo${n}`);
+      mkdirSync(repo, { recursive: true });
+      const git = (...a: string[]): void => void spawnSync("git", a, { cwd: repo, env: hermeticGitEnv(), stdio: "ignore" });
+      git("init", "-q", "-b", "main");
+      git("remote", "add", "origin", "https://github.com/p/r.git");
+      const real = realGitCredentialDeps().destinationPublic;
+      const check = (): boolean => real(repo, "p", "r", {}, home);
+      assert.equal(check(), true, "no cache: unknown is treated as public");
+      git("config", "repo-aegis.visibility", "public");
+      assert.equal(check(), true);
+      git("config", "repo-aegis.visibility", "private");
+      assert.equal(check(), false, "recorded private");
+      assert.equal(real(repo, "p", "other", {}, home), true, "another destination does not inherit this repository's cache");
+      assert.equal(real(repo, "p", "r", { REPO_AEGIS_ASSUME_PUBLIC: "1" }, home), true, "the one-directional public override still applies");
+      git("config", "repo-aegis.class", "public-eligible");
+      assert.equal(check(), true, "a public-eligible declaration is public whatever the cache says");
+      assert.equal(real(join(tmp, "not-a-repo-at-all"), "p", "r", {}, home), true, "fails closed");
+      // Wired end to end: the injected-nothing deps decide.
+      git("config", "repo-aegis.class", "private-strict");
+      const r = get(request("p/r.git"), deps({ cwd: repo, readConfig: () => entries(HUSKY), destinationPublic: real }));
+      assert.equal(r.stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, r.stderr);
+      git("config", "repo-aegis.visibility", "public");
+      assertRefused(get(request("p/r.git"), deps({ cwd: repo, readConfig: () => entries(HUSKY), destinationPublic: real })), "AGENT_PUSH_GUARD_NOT_RUNNING");
+    });
+  });
+
   it("no trusted gh, or no token for the mapped login: refused with a named code, audited as refused, nothing printed", () => {
-    approve({ org: "p", repo: "r" }, { login: "example-user" });
     auditOn();
     personToken = () => ({ kind: "untrusted", reason: "the gh first on PATH is not in a trusted location" });
     const a = withAudit(() => get(request("p/r.git")));
@@ -785,12 +725,92 @@ describe("git-credential get: a person's account under a login-bound approval (t
   });
 });
 
-describe("git-credential get: A5 configuration and environment", () => {
+describe("git-credential get: the registry has four states (F3, P1-A)", () => {
+  const WARNING_FREE_NOTHING = { stdout: "", stderr: "" };
+  const fresh = (name: string): string => {
+    const h = join(tmp, `${name}${n}`);
+    mkdirSync(join(h, "state"), { recursive: true });
+    return h;
+  };
+  const run = (h: string, stdin: string, over: Partial<GitCredentialDeps> = {}): { stdout: string; stderr: string } =>
+    runGitCredential("get", stdin, h, deps({ ...over }));
+
+  it("the real loader maps missing, encrypted, unreadable (a newer schema, a parse error) and readable", () => {
+    const load = realGitCredentialDeps().loadRegistry;
+    assert.equal(load(fresh("missing")), "missing");
+    const enc = fresh("encrypted");
+    writeFileSync(join(enc, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    assert.equal(load(enc), "encrypted");
+    const newer = fresh("newer");
+    writeFileSync(join(newer, "engagements.yaml"), "schemaVersion: 99\nidentities: {}\npersonalOrgs: []\nengagements: []\n");
+    assert.equal(load(newer), "unreadable", "a newer-schema registry is unreadable, never missing");
+    const broken = fresh("broken");
+    writeFileSync(join(broken, "engagements.yaml"), "schemaVersion: 3\nidentities: [oops\n");
+    assert.equal(load(broken), "unreadable");
+    assert.notEqual(load(home), "missing");
+    assert.notEqual(load(home), "unreadable");
+  });
+
+  it("a push with a newer-schema registry: quit=true and GH_IDENTITY_UNAVAILABLE, and no token is ever asked for", () => {
+    const h = fresh("newer-push");
+    writeFileSync(join(h, "engagements.yaml"), "schemaVersion: 99\nidentities: {}\npersonalOrgs: []\nengagements: []\n");
+    let asked = 0;
+    const r = run(h, request("p/r.git"), { loginToken: () => (asked++, personToken()) });
+    assert.equal(r.stdout, QUIT);
+    assert.match(r.stderr, /\[GH_IDENTITY_UNAVAILABLE[;\]]/);
+    assert.match(r.stderr, /exists but cannot be read \(it does not parse, or a newer repo-aegis wrote it\)/);
+    assert.match(r.stderr, /repo-aegis doctor/);
+    assert.equal(asked, 0, "loginToken was never called");
+    assert.equal(calls(), 0, "taaad was never called");
+    // An unparseable file is refused the same way.
+    const h2 = fresh("broken-push");
+    writeFileSync(join(h2, "engagements.yaml"), "schemaVersion: 3\nidentities: [oops\n");
+    assertRefused(run(h2, request("p/r.git"), { loginToken: () => (asked++, personToken()) }), "GH_IDENTITY_UNAVAILABLE");
+    assert.equal(asked, 0);
+  });
+
+  it("a known read with that home: nothing (the person's own helper answers it)", () => {
+    const h = fresh("newer-read");
+    writeFileSync(join(h, "engagements.yaml"), "schemaVersion: 99\nidentities: {}\npersonalOrgs: []\nengagements: []\n");
+    let asked = 0;
+    for (const sub of [["fetch", "origin"], ["pull"], ["clone", "https://github.com/p/r"], ["ls-remote", "origin"]]) {
+      const r = run(h, request("p/r.git"), { ancestry: () => remoteChain(sub, "p/r.git"), loginToken: () => (asked++, personToken()) });
+      assert.deepEqual(r, WARNING_FREE_NOTHING, sub.join(" "));
+    }
+    assert.equal(asked, 0);
+  });
+
+  it("an encrypted registry: stdout is empty and stderr is exactly the note (git's next helper answers); the note names only the validated path", () => {
+    const h = fresh("encrypted-push");
+    writeFileSync(join(h, "engagements.yaml.age"), "age-encryption.org/v1\n");
+    const r = run(h, request("P/Repo.git"));
+    assert.equal(r.stdout, "");
+    assert.equal(
+      r.stderr,
+      "repo-aegis: the registry is encrypted, so no GitHub account was chosen for p/repo; git's next credential helper answers. A person runs `repo-aegis registry decrypt --identity <key>`.\n",
+    );
+    assert.equal(r.stderr, encryptedNote({ owner: "P", repo: "Repo" }));
+    assert.equal(calls(), 0);
+  });
+
+  it("a person present never reads the registry at all, whatever its state", () => {
+    const h = fresh("person");
+    writeFileSync(join(h, "engagements.yaml"), "schemaVersion: 99\n");
+    assert.deepEqual(runGitCredential("get", request(), h, deps({}, "person")), WARNING_FREE_NOTHING);
+  });
+});
+
+describe("git-credential get: A5 configuration and environment (P1-A: only what would trace or store the token)", () => {
   const entries =(text: string): ReturnType<typeof parseShowScopeList> => parseShowScopeList(text);
   const refusedWith = (cfg: string, env: NodeJS.ProcessEnv = {}): void => {
     const before = calls();
     assertRefused(get(request(), deps({ readConfig: () => entries(cfg), env })), "AGENT_PUSH_CREDENTIAL_CONFIG", cfg + JSON.stringify(env));
     assert.equal(calls(), before, "refused before any mint");
+  };
+  const tokenWith = (cfg: string, env: NodeJS.ProcessEnv = {}, owner = "o/r.git"): { stdout: string; stderr: string } => {
+    const r = get(request(owner), deps({ readConfig: () => entries(cfg), env }));
+    assert.match(r.stdout, /^username=x-access-token\npassword=/, `${cfg} ${JSON.stringify(env)}: ${r.stderr}`);
+    return r;
   };
 
   it("a helper from local, worktree or command scope", () => {
@@ -799,15 +819,47 @@ describe("git-credential get: A5 configuration and environment", () => {
     refusedWith("global\tcredential.https://github.com.helper !ours\ncommand\tcredential.helper !evil");
   });
 
-  it("http.proxy, sslVerify=false, sslCAInfo, sslCAPath, extraHeader, sslBackend outside system scope", () => {
-    refusedWith("global\thttp.proxy http://proxy.example:3128");
-    refusedWith("local\thttp.https://github.com.proxy http://proxy.example:3128");
-    refusedWith("local\thttp.sslverify false");
-    refusedWith("global\thttp.sslcainfo /tmp/ca.pem");
-    refusedWith("global\thttp.sslcapath /tmp/ca");
-    refusedWith("local\thttp.extraheader Authorization: x");
-    refusedWith("global\thttp.sslbackend openssl");
-    refusedWith("local\tremote.origin.proxy http://proxy.example:3128");
+  it("a proxy is no refusal: HTTPS_PROXY in the environment, and http.proxy in global config, each give the token (the default sandbox sets one)", () => {
+    const viaEnv = tokenWith("", { HTTPS_PROXY: "http://127.0.0.1:3128", HTTP_PROXY: "http://127.0.0.1:3128", http_proxy: "http://127.0.0.1:3128", ALL_PROXY: "socks5://proxy.example:1080" });
+    assert.equal(viaEnv.stderr, "");
+    const viaConfig = tokenWith("global\thttp.proxy http://proxy.example:3128");
+    assert.equal(viaConfig.stderr, "");
+    tokenWith("local\thttp.https://github.com.proxy http://proxy.example:3128");
+    tokenWith("local\tremote.origin.proxy http://proxy.example:3128");
+  });
+
+  it("a CA bundle, an extra header and a TLS backend are no refusal either (planting one is an attack, not an accident)", () => {
+    tokenWith("global\thttp.sslcainfo /tmp/ca.pem");
+    tokenWith("global\thttp.sslcapath /tmp/ca");
+    tokenWith("local\thttp.extraheader Authorization: x");
+    tokenWith("global\thttp.sslbackend openssl");
+    tokenWith("", { GIT_SSL_CAINFO: "/tmp/ca.pem", GIT_SSL_CAPATH: "/tmp/ca" });
+  });
+
+  it("http.sslVerify off, or GIT_SSL_NO_VERIFY: the token, plus a warning line on stderr", () => {
+    const cfg = tokenWith("local\thttp.sslverify false");
+    assert.match(cfg.stderr, /^repo-aegis: warning: http\.sslVerify is off in local scope, so TLS certificates are not checked for this push; the token was given anyway\./m);
+    assert.match(cfg.stderr, /`git config --list --show-origin` names the file to remove it from\.\n$/);
+    const env = tokenWith("", { GIT_SSL_NO_VERIFY: "1" });
+    assert.match(env.stderr, /^repo-aegis: warning: GIT_SSL_NO_VERIFY is set in the environment, so TLS certificates are not checked/m);
+    // A person-mapped push carries the warning after its own line; a known read prints nothing.
+    const person = tokenWith("global\thttp.sslverify false", {}, "p/r.git");
+    assert.match(person.stderr, /^repo-aegis: this push runs as the GitHub account mapped to p \(its person identity\)\n/);
+    assert.match(person.stderr, /^repo-aegis: warning: http\.sslVerify is off in global scope/m);
+    const read = get(request("p/r.git"), deps({ ancestry: () => remoteChain(["fetch"], "p/r.git"), readConfig: () => entries("global\thttp.sslverify false") }));
+    assert.equal(read.stderr, "");
+    for (const ok of ["system\thttp.sslverify false", "global\thttp.sslverify true", "global\thttp.https://example.com.sslverify false"]) {
+      assert.equal(tokenWith(ok).stderr, "", ok);
+    }
+  });
+
+  it("the trace variables still refuse; harmless variables do not", () => {
+    for (const env of [{ GIT_TRACE_CURL: "1" }, { GIT_CURL_VERBOSE: "1" }, { GIT_TRACE_PACKET: "1" }, { GIT_TRACE_REDACT: "0" }]) {
+      refusedWith("", env);
+    }
+    const r = get(request(), deps({ readConfig: () => [], env: { GIT_TRACE_CURL: "1" } }));
+    assert.match(r.stderr, /\[AGENT_PUSH_CREDENTIAL_CONFIG[;\]]/);
+    assert.match(get(request(), deps({ env: { NO_PROXY: "example.com", GIT_TRACE_REDACT: "1", PATH: "/usr/bin" } })).stdout, /^username=/);
   });
 
   it("the same settings at system scope, for another host, or harmless, are fine", () => {
@@ -823,30 +875,15 @@ describe("git-credential get: A5 configuration and environment", () => {
     }
   });
 
-  it("the environment: trace, proxy and TLS variables", () => {
-    for (const env of [
-      { GIT_TRACE_CURL: "1" },
-      { GIT_CURL_VERBOSE: "1" },
-      { GIT_TRACE_PACKET: "1" },
-      { GIT_TRACE_REDACT: "0" },
-      { HTTPS_PROXY: "http://proxy.example:3128" },
-      { http_proxy: "http://proxy.example:3128" },
-      { ALL_PROXY: "socks5://proxy.example:1080" },
-      { GIT_SSL_NO_VERIFY: "1" },
-      { GIT_SSL_CAINFO: "/tmp/ca.pem" },
-    ]) {
-      refusedWith("", env);
-    }
-    assert.match(get(request(), deps({ env: { NO_PROXY: "example.com", GIT_TRACE_REDACT: "1", PATH: "/usr/bin" } })).stdout, /^username=/);
-  });
-
-  it("a later helper that would persist the token is refused before any mint; gh's helper may follow", () => {
+  it("a later helper that would persist an APP token is refused before any mint; gh's helper may follow", () => {
     const ours = "!'/n' '/c' git-credential --home '/h'";
     const cfg = (later: string): string =>
       `global\tcredential.https://github.com.helper \nglobal\tcredential.https://github.com.helper ${ours}\nglobal\tcredential.https://github.com.helper ${later}`;
-    for (const later of ["osxkeychain", "store --file /tmp/x", "cache", "manager", "manager-core", "git-credential-manager", "libsecret", "wincred", "!/opt/x/bin/mystery"]) {
+    for (const later of ["osxkeychain", "store --file /tmp/x", "cache", "manager", "manager-core", "git-credential-manager", "libsecret", "wincred", "!/opt/x/bin/mystery", "store"]) {
       const before = calls();
-      assertRefused(get(request(), deps({ readConfig: () => entries(cfg(later)) })), "AGENT_PUSH_CREDENTIAL_STORE", later);
+      const r = get(request(), deps({ readConfig: () => entries(cfg(later)) }));
+      assertRefused(r, "AGENT_PUSH_CREDENTIAL_STORE", later);
+      assert.match(r.stderr, /the App token would be saved/);
       assert.equal(calls(), before, `${later}: taaad never called`);
     }
     for (const later of ["!/opt/homebrew/bin/gh auth git-credential", "!gh auth git-credential", ours]) {
@@ -864,16 +901,18 @@ describe("git-credential get: A5 configuration and environment", () => {
     const base = `${reset}global\tcredential.https://github.com.helper ${ours}\n`;
     const cases: [string, string, string][] = [
       ["local helper", `local\tcredential.${pat}.helper !evil`, "AGENT_PUSH_CREDENTIAL_CONFIG"],
-      ["extraheader", `local\thttp.${pat}.extraheader X: y`, "AGENT_PUSH_CREDENTIAL_CONFIG"],
-      ["proxy", `global\thttp.${pat}.proxy http://proxy.example:3128`, "AGENT_PUSH_CREDENTIAL_CONFIG"],
       ["later storing helper", `global\tcredential.${pat}.helper osxkeychain`, "AGENT_PUSH_CREDENTIAL_STORE"],
     ];
+    writeFileSync(join(stubDir, "out.json"), jsonFor({ repositories: ["Svc"] }));
     for (const requestPath of ["O/Svc.git", "o/svc", "O/Svc", "o/svc.git"]) {
       for (const [label, line, code] of cases) {
         const before = calls();
         assertRefused(get(request(requestPath), deps({ readConfig: () => entries(base + line) })), code, `${label} for ${requestPath}`);
         assert.equal(calls(), before, `${label}: taaad never called`);
       }
+      // The sslVerify warning is matched by the same rule.
+      const warned = get(request(requestPath), deps({ readConfig: () => entries(`${base}global\thttp.${pat}.sslverify false`) }));
+      assert.match(warned.stderr, /http\.sslVerify is off in global scope/, requestPath);
     }
     // a pattern for another repository does not apply
     writeFileSync(join(stubDir, "out.json"), jsonFor({ repositories: ["svc"] }));
@@ -964,19 +1003,26 @@ describe("through `git credential fill` (real git, built CLI)", { skip: !cliBuil
     writeFileSync(join(home, "state", "taaad-pin.json"), JSON.stringify({ launcher: taaad }));
   });
 
-  it("direct fill by an agent with a mapped owner: nothing is printed that could be a credential, taaad and the second helper never run", () => {
+  it("direct fill by an agent with an App owner and a storing helper after ours: quit=true, nothing printed that could be a credential, the second helper never runs", () => {
     const r = fill("protocol=https\nhost=github.com\npath=o/r.git\n\n");
     assert.notEqual(r.status, 0, "git could not obtain a credential");
-    // Where `ps` is unreadable (a sandbox) the chain cannot be read: that is refused too, under its own code.
-    assert.match(r.stderr, /AGENT_CREDENTIAL_DIRECT_FILL|AGENT_PUSH_CHAIN_UNREADABLE/);
+    // The chain is not git's remote helper (or cannot be read in a sandbox): it is answered as a push, and the
+    // fixture's second helper would persist an App token, so the helper refuses before any mint.
+    assert.match(r.stderr, /\[AGENT_PUSH_CREDENTIAL_STORE[;\]]/);
     assert.ok(!r.stdout.includes("password"), r.stdout);
     assert.ok(!r.stdout.includes(TOKEN) && !r.stderr.includes(TOKEN));
     assert.equal(calls(), 0, "taaad never called");
     assert.equal(existsSync(`${second}.log`), false, "quit=true: the next helper was never asked");
   });
 
-  it("a failing helper decision stops the chain: the later helper is not consulted for an unmapped owner either", () => {
-    const r = fill("protocol=https\nhost=github.com\npath=q/r.git\n\n");
+  it("an unmapped owner prints nothing, so git asks the later helper (a refusal is the only thing that stops the chain)", () => {
+    fill("protocol=https\nhost=github.com\npath=q/r.git\n\n");
+    assert.equal(existsSync(`${second}.log`), true, "no answer from repo-aegis lets git ask the next helper");
+    assert.equal(calls(), 0, "no mint for an unmapped owner");
+  });
+
+  it("a refusal stops the chain: an App owner behind a storing later helper is not passed on", () => {
+    const r = fill("protocol=https\nhost=github.com\npath=o/r.git\n\n");
     assert.notEqual(r.status, 0);
     assert.equal(existsSync(`${second}.log`), false);
   });

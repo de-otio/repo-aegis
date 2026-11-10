@@ -79,13 +79,16 @@ export function classifyMintFailure(
 ): MintError {
   const e = (reason: MintFailureReason, message: string, kind: MintError["kind"] = "unavailable"): MintError =>
     new MintError(kind, message, reason);
-  // Seen 2026-11-09: inside the default Claude Code sandbox taaad-signer fails BEFORE its presence prompt (no
-  // Touch ID dialog appears), plausibly because the sandbox blocks the keychain or the helper's GitHub call. The
-  // hint names the likely cause without claiming it; it is added only where a sandbox could explain the failure.
+  // Seen 2026-11-09 and explained by P0: inside the default Claude Code sandbox taaad-signer fails BEFORE its
+  // presence prompt (no Touch ID dialog appears), and the cause is its own network call to GitHub
+  // (`NSURLErrorDomain -1003`, host not found): the signer's connection does not go through the sandbox's proxy,
+  // so allowlisting api.github.com does not help. The keychain is not the cause. The hint is added only where a
+  // sandbox could explain the failure.
   const sandboxHint = inSandbox
-    ? ". This command ran inside the agent's sandbox, which most likely stopped taaad-signer before its presence " +
-      "prompt (keychain or network); an App token cannot be minted from inside it. Your human runs the command " +
-      "from a terminal, or lets this one command run outside the sandbox"
+    ? ". This command ran inside the agent's sandbox, which blocks taaad-signer's own network connection to GitHub " +
+      "(it does not go through the sandbox's proxy, so adding api.github.com to the sandbox allowlist does not help); " +
+      "an App token cannot be minted from inside it. Your human runs the command from a terminal, or lets this one " +
+      "command run outside the sandbox"
     : "";
   const statusPart = status === null ? "" : ` (taaad exit status ${status})`;
   switch (status) {

@@ -127,6 +127,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `repo-aegis install claude-md`"). Both now use fixed text for an unparseable registry: the
   parse error, which can name orgs, is no longer echoed by `scan-after-write`.
 
+- **The git credential helper only chooses the account; it no longer decides whether a push may
+  go.** An agent push from the default Claude Code sandbox, which sets a proxy variable and blocks
+  the process list, used to be refused (`AGENT_PUSH_CHAIN_UNREADABLE`,
+  `AGENT_PUSH_CREDENTIAL_CONFIG`, then `GH_IDENTITY_WRITE_NEEDS_HUMAN`). Now an owner mapped to a
+  person login is pushed as that login with no approval (App identities are opt-in), and a public
+  destination is still stopped by pre-push rule g. Removed from the helper:
+  `AGENT_PUSH_CHAIN_UNREADABLE`, `AGENT_CREDENTIAL_DIRECT_FILL`, the approval lookups, and
+  `GH_IDENTITY_WRITE_NEEDS_HUMAN` (it is now `repo-aegis gh` only). Anything that is not a known
+  read (`fetch`, `pull`, `clone`, `ls-remote`, `archive`, `remote`, `submodule`) counts as a push,
+  including a process list that cannot be read. The configuration checks keep only what would put
+  the token in a trace or a helper that stores it (a helper in local, worktree or command scope;
+  `GIT_TRACE_CURL`, `GIT_CURL_VERBOSE`, `GIT_TRACE_PACKET`, `GIT_TRACE_REDACT` off). A proxy
+  (`HTTPS_PROXY`, `http.proxy`), a CA bundle, `http.extraHeader` and `http.sslBackend` no longer
+  refuse, and `http.sslVerify=false` or `GIT_SSL_NO_VERIFY` give the token with a
+  `repo-aegis: warning:` line. The same cuts apply to the git processes `repo-aegis gh` starts. A
+  registry that exists but cannot be read (it does not parse, or a newer repo-aegis wrote it) is
+  `GH_IDENTITY_UNAVAILABLE` for a push; an encrypted one prints a note on stderr and lets the next
+  helper answer.
+- **`repo-aegis install git-credential` works on stock macOS.** Apple's git carries
+  `credential.helper = osxkeychain` in a config nobody edits, so the install used to refuse with
+  `GIT_CREDENTIAL_ORDER_REFUSED` and a command a person had to run. When the global
+  `credential.https://github.com.helper` list is empty, it now writes an empty reset entry, its
+  helper, and the helpers the reset hides (osxkeychain) back after its own, and prints one line
+  saying so. The ledger is version 2 (`resetAdded`, `readded`; version 1 is still read), and
+  `--uninstall` removes exactly what was added: the helper, each re-added helper, then the reset
+  (only when no other value is left under the key). A non-empty list with a system helper in front
+  is still refused. The "needs an administrator" hint is gone.
+- **`AGENT_PUSH_CREDENTIAL_STORE` is narrower for a person's token.** A later helper that would save
+  an App token still always refuses (the person's later pushes would run as the App). A person's own
+  login token, push or read, now refuses only for `store` (plaintext in `~/.git-credentials`) and an
+  unrecognised helper; the OS stores (`osxkeychain`, `libsecret`, `wincred`, a credential manager)
+  and `cache` pass.
+- **A backstop for repositories that run their own hooks (`AGENT_PUSH_GUARD_NOT_RUNNING`).** With a
+  repository-level `core.hooksPath` (husky), git does not run repo-aegis's pre-push, so a script-run
+  push as the person's account to a repository not recorded as private is refused by the helper; a
+  private repository, a global `core.hooksPath`, an App identity and reads are unaffected. Known
+  residual: `git push --no-verify` skips the pre-push hook.
+- **Known reads skip the trace-variable checks.** A `fetch`, `pull` or `clone` as the person's account
+  no longer refuses on `GIT_TRACE_CURL` and the other trace variables (nothing is published); the
+  plaintext-store guard still applies to reads.
+- **The sandbox hint for a failed App mint names the network.** Inside the Claude Code sandbox,
+  taaad-signer's own connection to GitHub does not go through the sandbox's proxy (it fails with
+  `NSURLErrorDomain -1003`), so the old "keychain or network" guess is replaced, and the text says
+  that adding api.github.com to the sandbox allowlist does not help.
+
 ### Removed
 
 - **The Action's `registry` input.** It only exported `REPO_AEGIS_REGISTRY`, but `audit` and
@@ -146,6 +191,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `doc/configuration.md` lists `REPO_AEGIS_MARKERS_DIR`, `REPO_AEGIS_VISIBILITY_LOOKUP` and
   `REPO_AEGIS_EGRESS_HUMAN`. A comment in `taaad-pin.ts` said an untrusted taaad refuses App tokens;
   it is a warning.
+
+- **A fetch or pull from the Claude Code sandbox works again for owners mapped to a person's
+  account.** 0.13.1 answered these reads with the mapped login's token but ran the push-time
+  configuration checks first, and the sandbox always sets a proxy variable
+  (`DOCKER_HTTPS_PROXY`), so every read was refused with `AGENT_PUSH_CREDENTIAL_CONFIG`. A known
+  read now skips those checks; a later helper that would save the token still refuses it. Pushes
+  are unchanged.
 
 ### Internal
 

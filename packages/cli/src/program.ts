@@ -443,7 +443,7 @@ export async function buildProgram(): Promise<Command> {
 
   install
     .command("git-credential")
-    .description("make the repo-aegis credential helper the first git helper for https://github.com (global config; needs a terminal), so an agent's HTTPS push gets a token narrowed to one repository; sets credential.useHttpPath")
+    .description("make the repo-aegis credential helper the first git helper for https://github.com (global config; needs a terminal), so an agent's HTTPS push goes out as the account chosen for its owner (the mapped person login, or an App token narrowed to one repository); sets credential.useHttpPath, and on stock macOS an empty reset entry plus osxkeychain after ours")
     .option("--uninstall", "remove exactly what this command added (recorded in <home>/state/git-credential-install.json)")
     .action(async (opts, cmd) => {
       const { installGitCredential } = await import("./commands/install-git-credential.js");
@@ -454,7 +454,7 @@ export async function buildProgram(): Promise<Command> {
   // protocol lines on stdout; always exits 0 (git ignores a non-zero helper and asks the next one).
   program
     .command("git-credential <action>")
-    .description("git credential helper: `get` answers an agent's push to an owner with an agent identity; every refusal prints quit=true; store and erase are ignored (git calls this; configure it with `install git-credential`)")
+    .description("git credential helper: `get` answers an agent's push for a mapped owner with the mapped person's token or an App token; every refusal prints quit=true; store and erase are ignored (git calls this; configure it with `install git-credential`)")
     .action(async (action: string, opts, cmd) => {
       const { runGitCredential } = await import("./commands/git-credential.js");
       const { readFileSync } = await import("node:fs");
