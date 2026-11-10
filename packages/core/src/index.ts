@@ -375,12 +375,16 @@ export type { OwnerCandidate, RuleHStatus } from "./registered-owners.js";
 export {
   refusal,
   refusalTrailer,
+  withRefusalTrailer,
   safeDestination,
   isSafeOwner,
   isPrintableDestination,
   INVALID_DESTINATION_LABEL,
 } from "./refusal.js";
 export type { RefusalInput, RefusalFix } from "./refusal.js";
+// X-10: the single table of next step + person-only per refusal code, and the running version.
+export { REFUSAL_GUIDE, refusalGuideEntry, refusalGuideLine, repoAegisVersion } from "./refusal-guide.js";
+export type { RefusalGuideEntry } from "./refusal-guide.js";
 export {
   findApprovalDefault,
   findPromptApprovalDefault,

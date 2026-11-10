@@ -21,6 +21,7 @@
 // Callers pass only what the command already says (the verb, the destination
 // owner/repo). Never registry contents, other owners, engagement ids, payload
 // bytes or matched strings: the reason can land in an agent transcript.
+import { refusalGuideLine } from "./refusal-guide.js";
 
 /** One remedy, and who carries it out. */
 export interface RefusalFix {
@@ -142,7 +143,16 @@ function renderFix(fix: RefusalFix): string {
  * a tool that greps `[CODE` still matches.
  */
 export function refusalTrailer(code: string): string {
-  return `[${code}; details: repo-aegis explain ${code}]`;
+  return `${refusalGuideLine(code)} [${code}; details: repo-aegis explain ${code}]`;
+}
+
+/**
+ * `text` with the refusal trailer appended, unless it already carries one for `code`. For refusals built outside
+ * {@link refusal} (the shape rules, the terminal gates) so the version, next step and person-only fields still
+ * come from the one table.
+ */
+export function withRefusalTrailer(code: string, text: string): string {
+  return text.includes(`[${code}; `) ? text : `${text} ${refusalTrailer(code)}`;
 }
 
 /**

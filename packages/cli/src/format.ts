@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { isHomeOverridden } from "@de-otio/repo-aegis-core";
+import { isHomeOverridden, REFUSAL_GUIDE, withRefusalTrailer } from "@de-otio/repo-aegis-core";
 
 export interface OutputOptions {
   json?: boolean;
@@ -21,7 +21,13 @@ export interface ErrorPayload {
 }
 
 export function emitError(value: ErrorPayload | string, opts: OutputOptions = {}): never {
-  const payload: ErrorPayload = typeof value === "string" ? { error: value } : value;
+  const given: ErrorPayload = typeof value === "string" ? { error: value } : value;
+  // X-10: a refusal code in the shared table always ends with its version, next step, person-only answer and
+  // `[CODE; details: …]` token, whichever call site raised it (a no-op when the text already carries it).
+  const payload: ErrorPayload =
+    given.code !== undefined && Object.prototype.hasOwnProperty.call(REFUSAL_GUIDE, given.code)
+      ? { ...given, error: withRefusalTrailer(given.code, given.error) }
+      : given;
   if (opts.json) {
     process.stderr.write(JSON.stringify(payload) + "\n");
   } else {

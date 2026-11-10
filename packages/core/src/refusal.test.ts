@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { refusalTrailer, refusal, safeDestination } from "./refusal.js";
+import { refusalGuideLine, repoAegisVersion } from "./refusal-guide.js";
 
 describe("safeDestination", () => {
   it("accepts GitHub names, lower-cased", () => {
@@ -43,6 +44,7 @@ describe("refusal", () => {
       "gh issue create → owner/repo: refused. The owner is not registered. No approval covers this. " +
         "If it is yours, a person runs, from a terminal: do-a-thing --x (or --y). " +
         "Agents: do not run that yourself, retry or reroute; report this to your human. " +
+        `${refusalGuideLine("SOME_CODE")} ` +
         "[SOME_CODE; details: repo-aegis explain SOME_CODE]",
     );
   });
@@ -94,6 +96,11 @@ describe("refusal", () => {
   });
 
   it("refusalTrailer names the code first and the command that explains it", () => {
-    assert.equal(refusalTrailer("UNREGISTERED_OWNER_EGRESS"), "[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS]");
+    const t = refusalTrailer("UNREGISTERED_OWNER_EGRESS");
+    assert.ok(t.endsWith("[UNREGISTERED_OWNER_EGRESS; details: repo-aegis explain UNREGISTERED_OWNER_EGRESS]"), t);
+    assert.ok(t.startsWith(`repo-aegis ${repoAegisVersion()}. Next step: `), t);
+    assert.match(t, /Only a person can run it: yes\. \[/);
+    // an agent-fixable code says no
+    assert.match(refusalTrailer("PUSH_IMPLICIT_TARGET"), /Only a person can run it: no\. \[PUSH_IMPLICIT_TARGET;/);
   });
 });

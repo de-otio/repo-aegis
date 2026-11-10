@@ -9,6 +9,8 @@ import {
   OVERRIDE_FILENAME,
   PAUSE_FILE,
   pauseNotice,
+  REFUSAL_GUIDE,
+  withRefusalTrailer,
   type Registry,
 } from "@de-otio/repo-aegis-core";
 import { pauseCoveringWorkingRepo, pausedRepoLabel, recordPausedAllow } from "../pause-scope.js";
@@ -41,6 +43,15 @@ import {
 //                    stderr is surfaced to the user as a warning.
 const EXIT_BLOCK = 2;
 
+/** X-10: a payload whose `code` is in the shared refusal table gets the table's version/next-step/person-only trailer. */
+function withGuideTrailer(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  const v = value as { code?: unknown; error?: unknown };
+  if (typeof v.code !== "string" || typeof v.error !== "string") return value;
+  if (!Object.prototype.hasOwnProperty.call(REFUSAL_GUIDE, v.code)) return value;
+  return { ...value, error: withRefusalTrailer(v.code, v.error) };
+}
+
 function emitJsonAndExit(value: unknown, exitCode: number): never {
   // Claude Code forwards STDERR (not stdout) to the model when a
   // PreToolUse hook exits non-zero. Emitting the diagnostic on stdout —
@@ -50,7 +61,7 @@ function emitJsonAndExit(value: unknown, exitCode: number): never {
   // stderr so the block is self-explaining; keep exit-0 output on stdout.
   // Mirrors hook-scan-after-write.ts.
   const stream = exitCode === 0 ? process.stdout : process.stderr;
-  stream.write(JSON.stringify(value, null, 2) + "\n");
+  stream.write(JSON.stringify(withGuideTrailer(value), null, 2) + "\n");
   process.exit(exitCode);
 }
 
@@ -141,7 +152,7 @@ export async function hookCheckWrite(): Promise<void> {
           `agent write to ${basename(filePath)} in gh's config directory refused: it controls which account, pager, ` +
           `editor and aliases gh uses, so changing it could redirect the credential repo-aegis injects. No approval ` +
           `covers this. Tell your human what you need changed; a person edits it, or runs \`gh config set\` or ` +
-          `\`gh auth\`, from their own terminal. [GH_CONFIG_WRITE_REFUSED; details: repo-aegis explain GH_CONFIG_WRITE_REFUSED]`,
+          `\`gh auth\`, from their own terminal.`,
         details: { filePath },
       },
       EXIT_BLOCK,
@@ -161,7 +172,7 @@ export async function hookCheckWrite(): Promise<void> {
         error:
           `agent write to ${PAUSE_FILE} refused: that file is the emergency pause, which only a person may set ` +
           `(\`repo-aegis pause\`, from their own terminal). No approval covers this. Tell your human what is wrong ` +
-          `and let them decide. [PAUSE_FILE_WRITE_REFUSED; details: repo-aegis explain PAUSE_FILE_WRITE_REFUSED]`,
+          `and let them decide.`,
         details: { filePath },
       },
       EXIT_BLOCK,
@@ -174,8 +185,7 @@ export async function hookCheckWrite(): Promise<void> {
         error:
           `agent write to ${APPROVALS_FILE} refused: that file holds the human egress approvals, which only a person ` +
           `mints (\`repo-aegis approve\`, from their own terminal), so an agent that wrote one would be approving its ` +
-          `own publish. No approval covers this. Tell your human what you need. ` +
-          `[APPROVALS_FILE_WRITE_REFUSED; details: repo-aegis explain APPROVALS_FILE_WRITE_REFUSED]`,
+          `own publish. No approval covers this. Tell your human what you need.`,
         details: { filePath },
       },
       EXIT_BLOCK,

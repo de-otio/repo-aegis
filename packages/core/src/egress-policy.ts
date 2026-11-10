@@ -77,6 +77,7 @@ import {
 } from "./registered-owners.js";
 import {
   refusal,
+  withRefusalTrailer,
   safeDestination,
   isSafeOwner,
   isPrintableDestination,
@@ -1428,7 +1429,9 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   const deny = (code: EgressCode, reason: string, destination?: Destination): EgressDecision => ({
     action: "deny",
     code,
-    reason,
+    // X-10: the shape rules write their reason by hand; the shared trailer (version, next step, person-only,
+    // `[CODE; details: …]`) is appended here, once, for every code. A no-op for a reason built by `refusal()`.
+    reason: withRefusalTrailer(code, reason),
     ...(destination && { destination }),
     intent,
   });
