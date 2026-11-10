@@ -383,6 +383,8 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
   let registryNote: string | undefined;
   let ruleH: RuleHStatus = "applied";
   let humanPresent = false;
+  // The first parsed intent, for the decision record's verb and ref (an allow decision does not always carry its intent).
+  let firstIntent: EgressIntent | undefined;
   // What the host said about itself, kept for the prompt-approval write after the verdict (never the command text).
   let host: { permissionMode: string | undefined; sessionId: string | undefined; cwd: string } | undefined;
   try {
@@ -435,6 +437,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit
     // before touching the registry or the filesystem.
+    firstIntent = intents[0];
     if (intents.length === 0) {
       if (pausedNetwork === null) emit(adapter, { action: "allow" });
       recordPausedAllow("egress-hook", { verb: "raw network call", pause: pausedNetwork });
@@ -504,7 +507,7 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     const dest = decision.destination !== undefined && isPrintableDestination(decision.destination) && decision.destination.unresolved === undefined
       ? { org: decision.destination.org, repo: decision.destination.repo }
       : undefined;
-    const intent = decision.intent;
+    const intent = decision.intent ?? firstIntent;
     const written = logHook({
       outcome: decision.action === "deny" ? "refuse" : decision.action,
       ...(decision.action !== "allow" && { code: decision.code }),

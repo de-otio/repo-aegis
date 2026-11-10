@@ -543,6 +543,11 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions, pause: PauseS
 
   const ref = refLabel(opts);
   const loaded = loadRegistryForPush();
+  if (runDecision !== null) {
+    // Mutation: this run's decision record learns how the registry loaded, and (when the URL names one) where the push goes.
+    runDecision.facts = { ...runDecision.facts, registryState: registryStateFact(loaded.state) };
+    if (target.kind === "github") runDecision.destination = { org: target.org, repo: target.repo };
+  }
   const humanPresent = currentHumanPresent();
   const ruleH = ruleHStatus(loaded.state, loaded.registry ?? EMPTY_REGISTRY);
 
@@ -602,11 +607,6 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions, pause: PauseS
     return null;
   }
   const parsed = { host: "github.com", org: target.org, repo: target.repo };
-  if (runDecision !== null) {
-    // Mutation: this run's decision record learns where the push goes, and how the registry loaded.
-    runDecision.destination = { org: parsed.org, repo: parsed.repo };
-    runDecision.facts = { ...runDecision.facts, registryState: registryStateFact(loaded.state) };
-  }
   // The pushing repository's declaration describes the destination only when
   // the destination IS its origin. A push to any other URL (`git push
   // git@github.com:o/other.git main`) must be judged by `o/other`'s own
