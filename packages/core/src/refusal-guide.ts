@@ -76,7 +76,7 @@ export const REFUSAL_GUIDE: Readonly<Record<string, RefusalGuideEntry>> = {
   TAAAD_AGENT_WRITABLE: person("Leave taaad alone; your human may reinstall it into a root-owned prefix."),
 
   // ---- the owner and trust-boundary rules: a person decides, nothing an agent re-words can pass ----
-  UNREGISTERED_OWNER_EGRESS: person("Stop and tell your human; a person decides from a terminal whether this owner is theirs to register (the refusal's own text says how)."),
+  UNREGISTERED_OWNER_EGRESS: person("Stop and tell your human, who decides from their own terminal whether this owner is theirs to register."),
   PUBLIC_EGRESS_NEEDS_HUMAN: person("Tell your human what would be published where; they answer the prompt or run the command themselves."),
   PUBLIC_PUSH_NEEDS_HUMAN: person("Tell your human what would be pushed where; they answer the prompt or push from their own terminal."),
   SHIM_UNREACHABLE_NEEDS_HUMAN: person("Ask your human to approve the command from their own terminal, then re-issue the identical command."),
