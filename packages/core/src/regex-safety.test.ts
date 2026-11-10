@@ -91,10 +91,11 @@ describe("catastrophic patterns (static check, F10)", () => {
   }
 
   it("validatePatterns splits a catastrophic pattern from its neighbours", () => {
-    const r = validatePatterns(["before", "^(a+)+b$", "after"]);
+    const bad = j("^(a+", ")+b$");
+    const r = validatePatterns(["before", bad, "after"]);
     assert.deepEqual(r.valid, ["before", "after"]);
     assert.equal(r.invalid.length, 1);
-    assert.equal(r.invalid[0]!.pattern, "^(a+)+b$");
+    assert.equal(r.invalid[0]!.pattern, bad);
     assert.match(r.invalid[0]!.reason, /catastrophic/);
   });
 
