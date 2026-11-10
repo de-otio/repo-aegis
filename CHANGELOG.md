@@ -151,7 +151,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git-credential` (stdout is the credential protocol), `gh`, `egress-check`, `egress-readback`,
   `explain` (read-only), `uninstall`, a CI run, or on a machine whose `<home>` does not exist.
 
-
 ### Changed
 
 - `engagements set-identity` prints `identities unchanged (to clear one column use --agent none or
@@ -323,6 +322,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Action's `hits-json` output.** It was deprecated in 0.8.0 with removal promised for 0.9.0.
   Use `results-file`, the path to the JSON under `RUNNER_TEMP`. Only the exit code and that path
   are step outputs now.
+
+- **The `@de-otio/repo-aegis-mcp` MCP server package is gone.** Its tools duplicated the CLI's
+  `status`, `check`, `markers` and `engagements` commands, and the first-touch classification
+  is still available through `repo-aegis hook first-touch`. The CLI never wrote an MCP
+  config, so `repo-aegis` has no uninstall step for it. If you registered the server in your
+  own `.mcp.json` (or another agent's MCP config), delete that entry yourself. Agents can run
+  the same checks through the `repo-aegis` CLI.
 
 ### Fixed
 

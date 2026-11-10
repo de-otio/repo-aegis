@@ -14,8 +14,8 @@
 // doesn't exist, and a registry that silently lost an engagement.
 //
 // It lives in the CLI rather than in the composite Action because the Action
-// is only one of the callers: a local pre-push, a scheduled sweep, and the MCP
-// server can all be handed a registry that isn't there. Enforcing it where the
+// is only one of the callers: a local pre-push and a scheduled sweep can both be
+// handed a registry that isn't there. Enforcing it where the
 // number is computed means every caller inherits it, and no caller has to
 // parse JSON in bash to find out.
 import { emitError, type OutputOptions } from "./format.js";

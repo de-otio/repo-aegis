@@ -332,7 +332,7 @@ Prerequisite for B and D; independently a usability win (hits stop printing
    where the post-image path comes from `+++ b/…` as usual.
 4. `ScanHit` gains optional `path` (already declared, unset in diff mode today)
    and optional `blob`. Additive — `cli/format.ts`,
-   `vscode/src/diagnostics.ts`, and the MCP tools keep working unchanged.
+   `vscode/src/diagnostics.ts` keep working unchanged.
 5. Keep the virtual line numbering as-is (documented behaviour); path is the
    new precision, not a line remapping.
 

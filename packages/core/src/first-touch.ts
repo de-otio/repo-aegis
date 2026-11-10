@@ -3,7 +3,6 @@
 //
 // Phase 1 onboarding: just-in-time classification of a repo from its
 // git remote against the engagement registry. Used by:
-//   - the MCP `aegis_classify_first_touch` tool (agent-facing entry).
 //   - the CLI `repo-aegis hook first-touch` subcommand (Claude Code
 //     SessionStart hook entry).
 //

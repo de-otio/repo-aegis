@@ -155,7 +155,7 @@ export const BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS: readonly string[] = [
  *
  * Resolution lives here, not in the CLI, so that every caller that already
  * holds a {@link DenySet} gets the exemptions without threading a second
- * config object through: `check`, the hooks, the MCP tools and the VS Code
+ * config object through: `check`, the hooks and the VS Code
  * extension all call {@link computeDenySet} and nothing else.
  *
  * **Registry read failures fall back to the built-in default rather than
