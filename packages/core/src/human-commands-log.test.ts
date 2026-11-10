@@ -30,6 +30,12 @@ describe("findHumanOnlyCommand: the decision log's off switch (P1-I)", () => {
     "mv /tmp/x ~/.config/repo-aegis/state/Decision-Log.JSON",
     "sed -i 's/true/false/' ~/.config/repo-aegis/state/decision-log.json",
     "python3 -c \"open('/Users/me/.config/repo-aegis/state/decision-log.json','w').write('{}')\"",
+    // the log itself and its rotations (review F3)
+    "rm ~/.config/repo-aegis/state/decisions.jsonl",
+    "truncate -s 0 ~/.config/repo-aegis/state/decisions.jsonl",
+    `: > "$REPO_AEGIS_HOME/state/decisions.jsonl"`,
+    "mv ~/.config/repo-aegis/state/decisions.jsonl.1 /tmp/x",
+    "cp /dev/null ~/.config/repo-aegis/state/decisions.jsonl",
   ];
   for (const command of REFUSED) {
     it(`refuses ${JSON.stringify(command)}`, () => assert.deepEqual(findHumanOnlyCommand(command), { kind: "log-off" }));
@@ -46,6 +52,11 @@ describe("findHumanOnlyCommand: the decision log's off switch (P1-I)", () => {
     // reading the file, or the help
     "cat ~/.config/repo-aegis/state/decision-log.json",
     "jq . ~/.config/repo-aegis/state/decision-log.json",
+    "tail -n 20 ~/.config/repo-aegis/state/decisions.jsonl",
+    // deleting is a refused write only for the log: removing a pause or an approval only tightens, so that is unchanged
+    "rm ~/.config/repo-aegis/pause.json",
+    "cat ~/.config/repo-aegis/state/decisions.jsonl.1",
+    "grep -c refuse ~/.config/repo-aegis/state/decisions.jsonl",
     "repo-aegis log --help",
     "repo-aegis log --off --help",
     "repo-aegis help log",

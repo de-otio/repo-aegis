@@ -6,7 +6,7 @@
 // `now` is a fixed Date and `tmp` a fresh temp directory, so no test reads or writes the real `$TMPDIR/repo-aegis-<uid>`.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
@@ -15,6 +15,7 @@ import {
   buildDecisionRecord,
   decisionLogPath,
   decisionLogStatePath,
+  decisionLogWritable,
   fallbackDecisionLogPath,
   fallbackHoldsNewer,
   isDecisionLogEnabled,
@@ -485,6 +486,67 @@ describe("appendDecisionRecord: the $TMPDIR fallback", () => {
     appendDecisionRecord(w.home, rec({ now: t(10), code: "THIRD_ONE" }), { tmp: w.tmp, ops: broken });
     appendDecisionRecord(w.home, rec({ now: t(5), code: "SECOND_ONE" }), { tmp: w.tmp });
     assert.deepEqual(readDecisionRecords(w.home, { tmp: w.tmp }).map(d => d.record.code), ["FIRST_ONE", "SECOND_ONE", "THIRD_ONE"]);
+  });
+});
+
+describe("the fallback directory is trusted only when the writer would use it (review F1)", () => {
+  /** A fallback directory someone else could write, with lines planted in it that would pass every validator. */
+  function planted(w: { home: string; tmp: string }, mode: number): string {
+    const dir = join(w.tmp, `repo-aegis-${process.getuid?.() ?? "user"}`);
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(join(dir, "decisions.jsonl"), JSON.stringify(rec({ now: new Date("2026-12-01T00:00:00.000Z"), code: "PLANTED_CODE" })) + "\n");
+    chmodSync(dir, mode);
+    return dir;
+  }
+
+  it("a world-writable fallback directory: its lines are not read, doctor's newer-fallback test is false, and the writer agrees", { skip: process.getuid?.() === 0 }, () => {
+    const w = world();
+    const dir = planted(w, 0o777);
+    try {
+      assert.deepEqual(readDecisionRecords(w.home, { tmp: w.tmp }), []);
+      assert.equal(fallbackHoldsNewer(w.home, { tmp: w.tmp }), false);
+      assert.deepEqual(appendDecisionRecord(w.home, rec(), { tmp: w.tmp, ops: { ...realDecisionLogOps, mkdir: d => { if (d.startsWith(w.home)) throw new Error("ro"); } } }), { written: "none" });
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+
+  it("a group-writable one is refused too; the same directory at 0700 is read", { skip: process.getuid?.() === 0 }, () => {
+    const w = world();
+    const dir = planted(w, 0o770);
+    try {
+      assert.deepEqual(readDecisionRecords(w.home, { tmp: w.tmp }), []);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    assert.equal(readDecisionRecords(w.home, { tmp: w.tmp }).length, 1);
+    assert.equal(fallbackHoldsNewer(w.home, { tmp: w.tmp }), true);
+  });
+
+  it("a symlink in place of the directory is not read (lstat, not stat)", () => {
+    const w = world();
+    const real = join(w.tmp, "elsewhere");
+    mkdirSync(real, { mode: 0o700 });
+    writeFileSync(join(real, "decisions.jsonl"), JSON.stringify(rec({ code: "PLANTED_CODE" })) + "\n");
+    symlinkSync(real, join(w.tmp, `repo-aegis-${process.getuid?.() ?? "user"}`));
+    assert.deepEqual(readDecisionRecords(w.home, { tmp: w.tmp }), []);
+    assert.equal(fallbackHoldsNewer(w.home, { tmp: w.tmp }), false);
+  });
+
+  it("decisionLogWritable agrees with the writer: an untrusted fallback is 'none' (no `|| probe`), a trusted one is 'fallback'", { skip: process.getuid?.() === 0 }, () => {
+    const w = world();
+    const state = join(w.home, "state");
+    mkdirSync(state, { mode: 0o700 });
+    chmodSync(state, 0o500);
+    const dir = planted(w, 0o777);
+    try {
+      assert.equal(decisionLogWritable(w.home, { tmp: w.tmp }), "none");
+      chmodSync(dir, 0o700);
+      assert.equal(decisionLogWritable(w.home, { tmp: w.tmp }), "fallback");
+    } finally {
+      chmodSync(state, 0o700);
+      chmodSync(dir, 0o700);
+    }
   });
 });
 

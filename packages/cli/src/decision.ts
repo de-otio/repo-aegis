@@ -121,6 +121,8 @@ export function recordDecision(args: RecordArgs): DecisionAppendResult {
     };
     // A relative pinned home (a stale or hand-edited helper line) is never a place to write: the default home is.
     const where = home !== undefined && isAbsolute(home) ? home : repoAegisHome();
+    // ...and a relative DEFAULT home (`REPO_AEGIS_HOME=aegis-home git commit`) would put the log in the working tree (review F4).
+    if (!isAbsolute(where)) return { written: "none" };
     return recordDecisionTo(where, { ...rest, facts, version: cliVersion(), now: now ?? clock() });
   } catch {
     return { written: "none" };

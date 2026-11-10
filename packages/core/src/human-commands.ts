@@ -686,12 +686,20 @@ function isDownloadWriter(words: readonly string[]): boolean {
  *   - `pause.json`, the emergency pause: `pause`;
  *   - `egress-approvals.json`, the human egress approvals: `approve` (an agent that wrote one would be minting its own
  *     approval, which is exactly what the `approve` refusal says, so it reuses that kind and its fix, `repo-aegis approve`);
- *   - `decision-log.json`, the decision log's on/off switch (P1-I): `log-off`.
+ *   - `decision-log.json`, the decision log's on/off switch, and `decisions.jsonl` with its rotations, the log itself
+ *     (P1-I; deleting it is switching it off by another route): `log-off`.
  */
-const STATE_FILES: ReadonlyArray<{ name: string; kind: HumanOnlyKind }> = [
+/**
+ * Programs that DELETE a file. Next to the decision log's name they mean a write (deleting the log is switching it off);
+ * next to `pause.json` or the approvals they are not refused (removing either only tightens).
+ */
+const STATE_FILE_DELETERS = new Set(["rm", "unlink", "shred", "trash"]);
+
+const STATE_FILES: ReadonlyArray<{ name: string; kind: HumanOnlyKind; deletes?: true }> = [
   { name: "pause\\.json", kind: "pause" },
   { name: "egress-approvals\\.json", kind: "approve" },
   { name: "decision-log\\.json", kind: "log-off" },
+  { name: "decisions\\.jsonl(?:\\.\\d)?", kind: "log-off", deletes: true },
 ];
 
 /**
@@ -708,13 +716,13 @@ const STATE_FILES: ReadonlyArray<{ name: string; kind: HumanOnlyKind }> = [
 function writesStateFile(command: string): HumanOnlyKind | null {
   const plain = command.replace(/["'\\]/g, "");
   if (!/repo[-_]aegis/i.test(plain)) return null;
-  for (const { name, kind } of STATE_FILES) {
+  for (const { name, kind, deletes } of STATE_FILES) {
     if (!new RegExp(name, "i").test(plain)) continue;
     if (new RegExp(`>>?\\|?\\s*[^\\s<>;&|]*${name}`, "i").test(plain)) return kind;
     const ending = new RegExp(`${name}$`, "i");
     for (const { words } of splitRegions(command)) {
       if (!words.some(w => ending.test(normalizePath(w)))) continue;
-      if (words.some(w => STATE_FILE_WRITERS.has(tokenBase(w))) || isDownloadWriter(words)) return kind;
+      if (words.some(w => STATE_FILE_WRITERS.has(tokenBase(w)) || (deletes === true && STATE_FILE_DELETERS.has(tokenBase(w)))) || isDownloadWriter(words)) return kind;
     }
   }
   return null;

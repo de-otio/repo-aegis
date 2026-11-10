@@ -18,7 +18,7 @@
 // costs a re-worded path, a missed one costs the guard.
 import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { APPROVALS_FILE, DECISION_LOG_STATE_FILE, PAUSE_FILE, repoAegisHome } from "@de-otio/repo-aegis-core";
+import { APPROVALS_FILE, DECISION_LOG_FILE, DECISION_LOG_STATE_FILE, PAUSE_FILE, repoAegisHome } from "@de-otio/repo-aegis-core";
 
 export type ProtectedStateFile = "pause" | "approvals" | "decision-log";
 
@@ -27,6 +27,8 @@ const NAMES: ReadonlyArray<readonly [prefix: string, kind: ProtectedStateFile, d
   [PAUSE_FILE, "pause", ""],
   [APPROVALS_FILE, "approvals", ""],
   [DECISION_LOG_STATE_FILE, "decision-log", "state"],
+  // the log and its rotations/lock files (prefix match): deleting or truncating it removes the data the next refusal needs
+  [DECISION_LOG_FILE, "decision-log", "state"],
 ];
 
 /** `realpath` of `p`, or, when it does not exist, of its nearest existing ancestor with the rest appended. */

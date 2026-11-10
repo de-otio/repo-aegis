@@ -187,7 +187,7 @@ describe("decision log: the write hooks", { skip: SKIP }, () => {
     assert.doesNotMatch(JSON.stringify(rec), /repo-aegis\.yml|work/, "no path");
   });
 
-  it("check-write: a write to the decision log's switch is refused (an agent must not switch the log off), and to the log itself is not", () => {
+  it("check-write: a write to the decision log's switch is refused (an agent must not switch the log off),", () => {
     const w = world();
     const sw = runCliIn(w, ["hook", "check-write"], JSON.stringify({ tool_input: { file_path: join(w.home, "state", "decision-log.json") }, cwd: w.cwd }));
     assert.equal(sw.code, 2);
@@ -195,6 +195,24 @@ describe("decision log: the write hooks", { skip: SKIP }, () => {
     const rec = oneRecord(w, "switch write");
     assert.equal(rec.code, "DECISION_LOG_STATE_WRITE_REFUSED");
     assert.doesNotMatch(JSON.stringify(rec), /decision-log\.json|state/, "no path");
+  });
+
+  it("check-write: a write to the log or a rotation is refused (review F3), while the hooks' own appends keep working", () => {
+    const w = world();
+    // the hook's own append: a refusal writes its record into the very file the agent may not touch
+    const first = guard(w, BARE_PUSH, {}, "codex");
+    assert.equal(first.code, 2);
+    assert.equal(oneRecord(w, "own append").layer, "egress-hook");
+    for (const name of ["decisions.jsonl", "decisions.jsonl.1", "decisions.jsonl.lockfile"]) {
+      const r = runCliIn(w, ["hook", "check-write"], JSON.stringify({ tool_input: { file_path: join(w.home, "state", name) }, cwd: w.cwd }));
+      assert.equal(r.code, 2, name);
+      assert.equal((JSON.parse(r.stderr) as { code: string }).code, "DECISION_LOG_STATE_WRITE_REFUSED", name);
+    }
+    // the refusals above are themselves recorded (the hook appends to the protected file), and a second guard run still appends
+    assert.equal(guard(w, BARE_PUSH, {}, "codex").code, 2);
+    const layers = records(w).map(r => r.layer);
+    assert.equal(layers.filter(l => l === "egress-hook").length, 2, "the egress hook appended twice");
+    assert.equal(layers.filter(l => l === "check-write").length, 3, "each refused write was recorded");
   });
 
   it("check-write: an allowed write writes nothing", () => {

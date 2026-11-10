@@ -105,6 +105,17 @@ describe("recordDecision", () => {
     assert.equal(readDecisionRecords(w.home, { tmp: w.tmp }).length, 1, "the record went to the default home");
   });
 
+  it("a relative DEFAULT home (REPO_AEGIS_HOME=aegis-home) writes nothing: {written: none}, and no file appears in the working directory (review F4)", () => {
+    const w = world("rel-default");
+    const before = readdirSync(process.cwd());
+    for (const rel of ["aegis-home", "./aegis-home", "relative/home"]) {
+      const r = withEnv("REPO_AEGIS_HOME", rel, () => withEnv("TMPDIR", w.tmp, () => recordDecision({ layer: "pre-commit", outcome: "refuse", code: "SOME_CODE" })));
+      assert.deepEqual(r, { written: "none" }, rel);
+    }
+    assert.deepEqual(readdirSync(process.cwd()), before, "nothing was created in the working directory");
+    assert.deepEqual(readdirSync(w.tmp), [], "and nothing in the fallback either");
+  });
+
   it("never throws on a malformed input", () => {
     const w = world("d");
     assert.doesNotThrow(() => recordDecision({ home: w.home, layer: "nope" as never, outcome: "refuse", code: 5 as never, verb: {} as never }));

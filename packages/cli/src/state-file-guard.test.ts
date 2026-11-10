@@ -51,7 +51,12 @@ describe("protectedStateFile: the decision log's switch (P1-I)", () => {
     assert.equal(guard(join(home, "state", "decision-log.json"), home), "decision-log");
     assert.equal(guard(join(home, "state", "Decision-Log.JSON"), home), "decision-log");
     assert.equal(guard(join(home, "state", "decision-log.json.1.tmp"), home), "decision-log", "a temp sibling, as the writer makes one");
-    assert.equal(guard(join(home, "state", "decisions.jsonl"), home), null, "the log is appended by the hooks themselves");
+    assert.equal(guard(join(home, "state", "decisions.jsonl"), home), "decision-log", "the log itself (review F3): an agent deleting it is switching it off");
+    for (const f of ["decisions.jsonl.1", "decisions.jsonl.3", "Decisions.JSONL", "decisions.jsonl.lockfile", "decisions.jsonl.lockfile.lock"]) {
+      assert.equal(guard(join(home, "state", f), home), "decision-log", f);
+    }
+    assert.equal(guard(join(home, "state", "audit.log"), home), null, "other state files stay writable");
+    assert.equal(guard(join(home, "decisions.jsonl"), home), null, "only state/ holds the log");
     assert.equal(guard(join(home, "decision-log.json"), home), null, "only the state/ directory holds the switch");
     assert.equal(guard(join(workDir(), "state", "decision-log.json"), home), null);
   });

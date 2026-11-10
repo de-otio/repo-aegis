@@ -24,7 +24,7 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { emitError, emitJson, emitText, type OutputOptions } from "../format.js";
 import { requireTerminal, type RequireTerminalOptions } from "../require-terminal.js";
-import { findRow, loadDocs, type Docs } from "./explain.js";
+import { knownCodes, loadDocs, findRow, type Docs } from "./explain.js";
 
 export interface LogOptions extends OutputOptions, RequireTerminalOptions {
   since?: string;
@@ -73,6 +73,7 @@ export function formatRecord(r: DecisionRecord): string {
 
 /** The first sentence of an `explain` row's recovery, as the one fix line (X-10's table replaces this when it lands). */
 export function fixLineFor(docs: Docs | null, code: string): string {
+  if (code === "invalid") return "this record's code is not one repo-aegis documents; `repo-aegis explain --list` prints the known ones";
   const fallback = `repo-aegis explain ${code}`;
   if (docs === null) return fallback;
   try {
@@ -85,6 +86,18 @@ export function fixLineFor(docs: Docs | null, code: string): string {
   } catch {
     return fallback;
   }
+}
+
+/**
+ * Review F2: the reader's `code` is a pattern, so a planted line could put up to 64 upper-case words into the agent's
+ * context (`IGNORE_PREVIOUS_RULES_...`). Here, before anything is printed or emitted as JSON, a code that has no row in
+ * the agent guide (the codes `explain` knows) is shown as `"invalid"`. The writer keeps its pattern; this closes the READ
+ * side with the same parser `explain` uses. With no guide available (an unbuilt checkout) nothing can be vouched for, so
+ * every code is `"invalid"`.
+ */
+export function closeCodes(all: readonly LoggedDecision[], docs: Docs | null): LoggedDecision[] {
+  const known: ReadonlySet<string> = new Set(docs === null ? [] : knownCodes(docs));
+  return all.map(d => (d.record.code === undefined || known.has(d.record.code) || d.record.code === "invalid" ? d : { ...d, record: { ...d.record, code: "invalid" } }));
 }
 
 function parseLast(v: string | number | undefined, opts: OutputOptions): number | undefined {
@@ -139,7 +152,8 @@ export function log(opts: LogOptions): void {
   const last = parseLast(opts.last, opts);
   const code = opts.code === undefined ? undefined : opts.code.trim().toUpperCase().replace(/-/g, "_");
 
-  const all: LoggedDecision[] = readDecisionRecords(opts.home, opts.tmp !== undefined ? { tmp: opts.tmp } : {});
+  const docs = loadDocs(opts.docsDir);
+  const all: LoggedDecision[] = closeCodes(readDecisionRecords(opts.home, opts.tmp !== undefined ? { tmp: opts.tmp } : {}), docs);
   const filtered = all.filter(d => {
     const r = d.record;
     if (sinceIso !== undefined && r.ts < sinceIso) return false;
@@ -164,7 +178,6 @@ export function log(opts: LogOptions): void {
 
   // The default view: the most recent refusals, grouped by code, each with its one fix line.
   const refusals = filtered.filter(d => REFUSAL_OUTCOMES.has(d.record.outcome)).slice(-DEFAULT_REFUSALS).map(d => d.record);
-  const docs = loadDocs(opts.docsDir);
   const groups = new Map<string, DecisionRecord[]>();
   for (const r of refusals) {
     const key = r.code ?? "invalid";
@@ -188,7 +201,7 @@ export function log(opts: LogOptions): void {
     emitText("");
     emitText(`${c}  (${rs.length})`);
     emitText(`  fix: ${fixLineFor(docs, c)}`);
-    emitText(`  details: repo-aegis explain ${c}`);
+    if (c !== "invalid") emitText(`  details: repo-aegis explain ${c}`);
     for (const r of rs.slice(-3)) emitText(`  ${formatRecord(r)}`);
   }
 }

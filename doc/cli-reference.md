@@ -1940,7 +1940,10 @@ without rebuilding those facts by hand. **On by default**, read-only to read, an
   `REPO_AEGIS_EGRESS_HUMAN` is not honoured), the egress guard refuses an agent Bash command whose text runs it
   (`AGENT_RAN_HUMAN_COMMAND`) or writes `state/decision-log.json`, `Edit(<home>/state/decision-log.json)` is among the
   deny rules `install claude-md` writes, and `hook check-write` refuses a write to the file
-  (`DECISION_LOG_STATE_WRITE_REFUSED`). The honest mistake it stops: an agent switching the log off because it is
+  (`DECISION_LOG_STATE_WRITE_REFUSED`). The log itself (`state/decisions.jsonl` and its `.1`..`.3` rotations) is
+  protected the same way, because deleting or truncating it is switching it off by another route; the hooks' own appends
+  are not agent tools and keep working (a sandboxed `git commit` runs them inside the sandbox, where the deny sends the
+  record to the `$TMPDIR` fallback and `doctor` says `DECISION_LOG_FALLBACK`). The honest mistake it stops: an agent switching the log off because it is
   "noise", which removes the data its next refusal needs. **`log --on`** only turns recording back on, so an agent may
   run it. `repo-aegis log --off --help` is allowed (an agent can always read help).
 - **`doctor`** reports `DECISION_LOG_OFF` (info), `DECISION_LOG_FALLBACK` (info) and `DECISION_LOG_UNWRITABLE` (warn).
@@ -1953,7 +1956,9 @@ and `facts`: the proxy variable **names** that were set, `psReadable`, `tty`, `s
 `hooksPathScope`, `shimFirst`, `permissionMode`, `logFallback`. A value that fails its rule is written as `"invalid"`.
 **Never** logged: tokens or anything token-shaped, marker patterns or matched text, file contents, command text or
 arguments, environment values, URLs, file-system paths, approval or pause reasons, the `gh` account login, hostnames.
-The reader rebuilds every line through the same rules, so a hand-edited file cannot show more.
+The reader rebuilds every line through the same rules, so a hand-edited file cannot show more: `log` also shows a
+`code` only when it has a row in the agent guide (the codes `explain` knows), else `"invalid"`, and it reads the
+`$TMPDIR` fallback only from a directory this user owns that no one else can write.
 
 ### `repo-aegis egress-check -- <gh args…>`
 

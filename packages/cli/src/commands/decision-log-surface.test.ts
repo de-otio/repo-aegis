@@ -94,6 +94,24 @@ describe("doctor: the decision log's three codes", () => {
     assert.match(checks[0]!.detail, /\$TMPDIR/);
   });
 
+  it("an untrusted fallback directory (world-writable, planted lines) is neither reported nor counted as writable (review F1)", { skip: process.getuid?.() === 0 }, () => {
+    const w = world();
+    const state = join(w.home, "state");
+    appendDecisionRecord(w.home, rec(1), { tmp: w.tmp });
+    const dir = join(w.tmp, `repo-aegis-${process.getuid?.() ?? "user"}`);
+    mkdirSync(dir, { mode: 0o700 });
+    writeFileSync(join(dir, "decisions.jsonl"), JSON.stringify(rec(500)) + "\n");
+    chmodSync(dir, 0o777);
+    try {
+      assert.deepEqual(inWorld(w, () => decisionLogChecks(w.home)), [], "no DECISION_LOG_FALLBACK from a directory the writer refuses");
+      chmodSync(state, 0o500);
+      assert.deepEqual(inWorld(w, () => decisionLogChecks(w.home)).map(c => c.code), ["DECISION_LOG_UNWRITABLE"], "and no 'fallback' where the writer says none");
+    } finally {
+      chmodSync(state, 0o700);
+      chmodSync(dir, 0o700);
+    }
+  });
+
   it("DECISION_LOG_UNWRITABLE (warn) when neither the home nor $TMPDIR can be written", { skip: process.getuid?.() === 0 }, () => {
     const w = world();
     chmodSync(join(w.home, "state"), 0o500);

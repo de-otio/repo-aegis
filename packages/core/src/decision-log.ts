@@ -481,6 +481,8 @@ export const realDecisionLogOps: DecisionLogOps = {
     try {
       const st = lstatSync(dir);
       if (!st.isDirectory()) return false;
+      // Not group- or world-writable: someone else could plant or replace files in it.
+      if (process.platform !== "win32" && (st.mode & 0o022) !== 0) return false;
       const uid = process.getuid?.();
       return uid === undefined || st.uid === uid;
     } catch {
@@ -689,9 +691,13 @@ export function readDecisionRecords(home: string = repoAegisHome(), opts: ReadOp
     const primary = decisionLogPath(home);
     for (let i = DECISION_LOG_KEEP; i >= 1; i--) all.push(...readJsonl(`${primary}.${i}`, "primary"));
     all.push(...readJsonl(primary, "primary"));
-    const fb = fallbackDecisionLogPath(opts.tmp);
-    for (let i = DECISION_LOG_KEEP; i >= 1; i--) all.push(...readJsonl(`${fb}.${i}`, "fallback"));
-    all.push(...readJsonl(fb, "fallback"));
+    // The fallback is read only from a directory the writer would use: a plain directory this user owns that no one else can
+    // write. In a shared /tmp another user can pre-create it and plant lines (review F1).
+    if (realDecisionLogOps.trustedDir(fallbackDecisionDir(opts.tmp))) {
+      const fb = fallbackDecisionLogPath(opts.tmp);
+      for (let i = DECISION_LOG_KEEP; i >= 1; i--) all.push(...readJsonl(`${fb}.${i}`, "fallback"));
+      all.push(...readJsonl(fb, "fallback"));
+    }
     for (const line of readLines(legacyGhDecisionsPath(home))) {
       if (line === "") continue;
       try {
@@ -712,6 +718,7 @@ export function readDecisionRecords(home: string = repoAegisHome(), opts: ReadOp
 
 /** Whether the fallback holds a record newer than the primary's last one (doctor's `DECISION_LOG_FALLBACK`). */
 export function fallbackHoldsNewer(home: string = repoAegisHome(), opts: ReadOptions = {}): boolean {
+  if (!realDecisionLogOps.trustedDir(fallbackDecisionDir(opts.tmp))) return false;
   const fb = readJsonl(fallbackDecisionLogPath(opts.tmp), "fallback");
   if (fb.length === 0) return false;
   const primary = readJsonl(decisionLogPath(home), "primary");
@@ -736,7 +743,9 @@ export function decisionLogWritable(home: string = repoAegisHome(), opts: ReadOp
     }
   };
   if (probe(statePath(home))) return "primary";
-  return realDecisionLogOps.trustedDir(fallbackDecisionDir(opts.tmp)) || probe(fallbackDecisionDir(opts.tmp)) ? "fallback" : "none";
+  // As the writer does: create the directory, then require that it is one it may use.
+  const fbDir = fallbackDecisionDir(opts.tmp);
+  return probe(fbDir) && realDecisionLogOps.trustedDir(fbDir) ? "fallback" : "none";
 }
 
 // ---------------------------------------------------------------------------

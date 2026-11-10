@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { basename } from "node:path";
 import {
   APPROVALS_FILE,
-  DECISION_LOG_STATE_FILE,
   isGhConfigFile,
   loadRegistryState,
   OVERRIDE_FILENAME,
@@ -212,7 +211,7 @@ export async function hookCheckWrite(): Promise<void> {
       {
         code: "DECISION_LOG_STATE_WRITE_REFUSED",
         error:
-          `agent write to ${DECISION_LOG_STATE_FILE} refused: that file switches the decision log on or off, and the log is ` +
+          `agent write to the decision log refused (${basename(filePath)}): that is the log's on/off switch or the log itself, and the log is ` +
           `what you read to see why you were refused (\`repo-aegis log --last 1\`). Only a person switches it off ` +
           `(\`repo-aegis log --off\`, from their own terminal); you may switch it back on with \`repo-aegis log --on\`. ` +
           `No approval covers this. ${refusalTrailer("DECISION_LOG_STATE_WRITE_REFUSED")}`,
