@@ -522,7 +522,7 @@ describe("git-credential get: person column answers known reads as the mapped lo
     }
   });
 
-  it("a read is answered under a proxy variable or proxy config (the Claude Code sandbox sets one); a push is still refused", () => {
+  it("a read and a push are both answered under a proxy variable or proxy config (the Claude Code sandbox sets one)", () => {
     const proxyEnv = { DOCKER_HTTPS_PROXY: "http://localhost:3128", HTTPS_PROXY: "http://localhost:3128" };
     const proxyCfg = parseShowScopeList("global\thttp.proxy http://localhost:3128");
     for (const sub of ["fetch", "pull", "clone"]) {
@@ -530,7 +530,10 @@ describe("git-credential get: person column answers known reads as the mapped lo
       const r = get(request("p/r.git"), deps({ ancestry: () => remoteChain([sub]), env: proxyEnv, readConfig: () => proxyCfg }));
       assert.deepEqual(r, { stdout: `username=x-access-token\npassword=${PERSON_TOKEN}\n`, stderr: "" }, sub);
     }
-    assertRefused(get(request(), deps({ env: proxyEnv })), "AGENT_PUSH_CREDENTIAL_CONFIG", "an App push under the proxy variable is unchanged");
+    // 0.14.0 (P1-A): a proxy no longer refuses a push either; the App push gets its token.
+    const push = get(request(), deps({ env: proxyEnv }));
+    assert.match(push.stdout, /^username=x-access-token\npassword=ghs_/, "an App push under the proxy variable is answered");
+    assert.doesNotMatch(push.stdout, /quit=true/);
   });
 
   it("no token for the mapped login: refused with GH_IDENTITY_UNAVAILABLE rather than answered as another account", () => {
