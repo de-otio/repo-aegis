@@ -50,24 +50,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two steps that need a person (the managed drop-in's `sudo` write, the credential helper) run only
   at a person's terminal; otherwise they are listed under `run yourself:` with the exact command and
   are not counted as failures (a person who answers `n` at the `sudo` prompt has `declined`, exit 0).
-  Exit 1 when an installer failed or a step was refused (below). An agent may run `upgrade`: it
+  Exit 1 when an installer failed or a step was refused (below); `--force` pins to a temporary copy anyway. An agent may run `upgrade`: it
   only re-runs installers an agent may already run, so it is not in the person-only commands.
-- **`upgrade` never moves the pin to the install that happens to run it.** The hooks and the `gh` shim
-  run a CLI pinned by absolute path, and `upgrade` run from a worktree build, an `npx` copy with an older
-  devDependency or a second global install would re-pin all of them there; removing that copy later
-  refuses every commit and push until a person runs `install hooks`. It now reads the pin back from the
-  scripts and re-pins only when the pinned CLI is the running one (an in-place `npm install -g`) or is
-  gone. It refuses (step `REFUSED`, nothing rewritten, exit 1) when the pin names another install that
-  still works (``pinned to another install (<path>): run that install's upgrade, or `install hooks` from
-  this one to switch``) or when the running version is older than the pinned one. It also keeps the pinned
-  taaad while that launcher still exists (a different `taaad` first on `PATH` no longer replaces it),
-  leaves a `gh` at `<home>/bin` that is not a repo-aegis shim alone (it failed on every run), and lists
+- **`upgrade` never pins the hooks or the shim to a copy that will not last, and never rolls them
+  back.** They run a CLI pinned by absolute path; `upgrade` run from a worktree build, an `npx` copy or a
+  project `node_modules` would re-pin all of them there, and removing that copy later refuses every
+  commit and push until a person runs `install hooks`. Each step (hooks, shim, and the hint for the hooks
+  in Claude Code's `settings.json`) now reads its pin back from its scripts and refuses (step `REFUSED`,
+  nothing rewritten, exit 1) in two cases: the running CLI is temporary (a `.git` ancestor, `/_npx/`, or a
+  project `node_modules` outside npm's global prefix; derived from `process.execPath`,
+  `npm_config_prefix` and `lib/node_modules`, no `npm` spawn), whether the old pin works or is already
+  gone, unless `--force`; or the running version is older than the pin that still works (`--force` does
+  not override that). Each refusal names the fix (run `upgrade` from the global install, or the step's own
+  installer) and ends with `UPGRADE_REFUSED`, which `repo-aegis explain` knows. Anything else is re-pinned, including a pin to another working install that is not newer, so
+  `nvm install` or `brew upgrade node` with the old install still on disk finishes in one run. A refused
+  run does not record the version. `upgrade` also keeps the pinned taaad while that launcher still exists
+  (a different `taaad` first on `PATH` no longer replaces it), leaves a `gh` at `<home>/bin` that is not a
+  repo-aegis shim alone (it failed on every run), and lists
   `repo-aegis install claude-md --user-settings` under `run yourself:` when the hooks in Claude Code's
   `settings.json` are pinned to a Node or install that has moved. Not covered by `upgrade`: a root
   account's managed drop-in, and `MANAGED_DROPIN_LEDGER_STALE` / `MANAGED_DROPIN_ORPHANED` (follow
   `doctor`'s fix).
 - **A once-per-version notice.** The version last seen is kept in `<home>/state/last-version`, and it
-  keeps the highest version seen, so two installs sharing a home do not announce themselves in turn.
+  keeps the highest version seen (ordered like semver: a prerelease is below its release), so two installs
+  sharing a home do not announce themselves in turn.
   The first command after a newer version is installed prints one stderr line, ``repo-aegis <version> is
   new here: run `repo-aegis upgrade` ``, and records the version (so do `upgrade` and `init`, which
   matters only when one of them is the first command). It is never printed, and nothing is recorded,

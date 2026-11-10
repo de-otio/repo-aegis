@@ -10,7 +10,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliBuilt, cliPath } from "./_subprocess-utils.js";
-import { isNewer, lastVersionPath, noticeApplies, noticeLine, readLastVersion, recordVersion, versionNotice } from "./version-notice.js";
+import { buildProgram } from "./program.js";
+import { isNewer,lastVersionPath, noticeApplies, noticeLine, readLastVersion, recordVersion, versionNotice } from "./version-notice.js";
 
 let tmp: string;
 let n = 0;
@@ -102,8 +103,29 @@ describe("versionNotice", () => {
     assert.deepEqual(notices(home, "0.14.0"), []);
   });
 
-  it("a version that is not plain MAJOR.MINOR.PATCH counts as news whenever it differs", () => {
-    assert.equal(isNewer("0.14.0-rc.1", "0.14.0"), true);
+  it("a prerelease is below its release and prereleases compare numerically (semver precedence)", () => {
+    assert.equal(isNewer("0.14.0-rc.1", "0.14.0"), false, "a prerelease is not news after its release");
+    assert.equal(isNewer("0.14.0", "0.14.0-rc.1"), true);
+    assert.equal(isNewer("0.14.0-rc.10", "0.14.0-rc.2"), true, "numeric, not lexical");
+    assert.equal(isNewer("0.14.0-rc.2", "0.14.0-rc.10"), false);
+    assert.equal(isNewer("0.14.0-rc.1", "0.14.0-rc.1"), false);
+    assert.equal(isNewer("0.14.0-rc.1", "0.13.9"), true);
+    assert.equal(isNewer("0.14.0-beta", "0.14.0-alpha"), true);
+    assert.equal(isNewer("0.14.0-rc.1.1", "0.14.0-rc.1"), true, "a longer list above the list it prefixes");
+    assert.equal(isNewer("0.14.0+build.5", "0.14.0"), false, "build metadata is ignored");
+  });
+
+  it("a release and its prerelease sharing one home: one line in total, not one per switch", () => {
+    const home = freshHome();
+    const lines: string[] = [];
+    for (const v of ["0.14.0", "0.14.0-rc.1", "0.14.0", "0.14.0-rc.1"]) lines.push(...notices(home, v));
+    assert.deepEqual(lines, [`${noticeLine("0.14.0")}\n`]);
+    assert.equal(readLastVersion(home), "0.14.0");
+  });
+
+  it("a version that is not semver at all counts as news whenever it differs", () => {
+    assert.equal(isNewer("dev-build", "0.14.0"), true);
+    assert.equal(isNewer("0.14.0", "dev-build"), true);
     assert.equal(isNewer("0.14.0", "0.14.0"), false);
     assert.equal(isNewer("0.14.1", "0.14.0"), true);
     assert.equal(isNewer("0.9.0", "0.10.0"), false, "numeric, not lexical");
@@ -136,6 +158,18 @@ describe("noticeApplies: where it is never printed", () => {
     ]) {
       assert.equal(noticeApplies(path, none), false, path.join(" "));
     }
+  });
+  it("every top-level command is classified on purpose: a new command must be added here as notice or quiet", async () => {
+    // Commands a person runs at a terminal: they print the notice. Everything else must be in QUIET_COMMANDS (checked
+    // through noticeApplies), so a command that is a protocol or machine reader cannot pick the notice up by default.
+    const WITH_NOTICE = new Set([
+      "allow", "approve", "audit", "audit-log", "check", "classify", "context", "deny", "doctor", "engagements", "identity", "install", "markers", "registry", "render", "scan-env", "status", "suggest-markers", "upstreams", "waive",
+    ]);
+    const top = (await buildProgram()).commands.map(c => c.name());
+    const unclassified = top.filter(name => !WITH_NOTICE.has(name) && noticeApplies([name], none));
+    assert.deepEqual(unclassified, [], `classify these as notice or quiet in version-notice.ts and here: ${unclassified.join(", ")}`);
+    const wrong = [...WITH_NOTICE].filter(name => top.includes(name) && !noticeApplies([name], none));
+    assert.deepEqual(wrong, [], "listed as notice here but quiet in version-notice.ts");
   });
   it("--json (global or command level) does not: a machine reads that output and drops stderr", () => {
     assert.equal(noticeApplies(["status"], none, true), false);

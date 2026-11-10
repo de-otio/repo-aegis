@@ -126,7 +126,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "approve", flags: ["--list", "--note", "--ref", "--revoke", "--ttl"], subcommands: [] },
   { path: "deny", flags: [], subcommands: [] },
   { path: "status", flags: [], subcommands: [] },
-  { path: "upgrade", flags: ["--claude-home", "--dry-run"], subcommands: [] },
+  { path: "upgrade", flags: ["--claude-home", "--dry-run", "--force"], subcommands: [] },
   {
     path: "check",
     flags: [

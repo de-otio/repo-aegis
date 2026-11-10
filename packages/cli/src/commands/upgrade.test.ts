@@ -17,6 +17,7 @@ import { makeFakeSystem, type FakeSystem } from "../_managed-test-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { lastVersionPath, readLastVersion } from "../version-notice.js";
 import { doctor } from "./doctor.js";
+import { explanationFor, loadDocs } from "./explain.js";
 import { gitCredentialHelperStale } from "./doctor-git-credential-checks.js";
 import { managedDropinStaleCheck } from "./doctor-managed-checks.js";
 import { installClaudeMd } from "./install-claude-md.js";
@@ -25,7 +26,7 @@ import { checkShim } from "./install-shim.js";
 import { managedPaths } from "./managed-dropin.js";
 import { resolveManagedEnv } from "./managed-privileged.js";
 import { parseTaaadPinFromScript, renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
-import { upgrade, type UpgradeDeps, type UpgradeReport } from "./upgrade.js";
+import { isEphemeralCli, upgrade, type UpgradeDeps, type UpgradeReport } from "./upgrade.js";
 
 let tmp: string;
 let n = 0;
@@ -138,8 +139,10 @@ const staleCodes = (d: DoctorJson): string[] => [
   ...d.results.flatMap(r => r.checks).filter(c => !c.ok && c.code.endsWith("_STALE")).map(c => c.code),
 ];
 
-function runUpgrade(fx: Fixture, over: { dryRun?: boolean; json?: boolean; claudeHome?: string } = {}, deps: UpgradeDeps = {}): CaptureResult {
-  return fx.run(() => captureOutput(() => void upgrade(over, { version: VERSION, terminal: NO_PERSON, ...deps })));
+// `ephemeral: false` unless a test says otherwise: the build under test sits in a git worktree, which is exactly what
+// the real check calls temporary.
+function runUpgrade(fx: Fixture, over: { dryRun?: boolean; json?: boolean; force?: boolean; claudeHome?: string } = {}, deps: UpgradeDeps = {}): CaptureResult {
+  return fx.run(() => captureOutput(() => void upgrade(over, { version: VERSION, terminal: NO_PERSON, ephemeral: false, ...deps })));
 }
 
 const snapshot = (fx: Fixture): Record<string, string> => {
@@ -453,42 +456,179 @@ describe("upgrade: it never moves the pin to an install that merely ran it", () 
     writeFileSync(join(fx.home, "bin", "gh"), renderShimScript(pin, { home: fx.home }), { mode: 0o755 });
     chmodSync(join(fx.home, "bin", "gh"), 0o755);
   }
-  const refusedOther = (cli: string): RegExp =>
-    new RegExp(`REFUSED\\s+pinned to another install \\(${escapeRe(cli)}\\): run that install's upgrade, or \`install hooks\` from this one to switch`);
+  const readVersion = (fx: Fixture): string | null => readLastVersion(fx.home);
 
-  it("a pin to another install that still exists is left alone: both refused, nothing rewritten, exit 1", () => {
+  it("the nvm / Homebrew case: a new global, the old install still on disk with an older version, is re-pinned and exits 0", () => {
     const fx = makeFixture();
-    const other = { ...makePin(join(fx.base, "other-install")), version: "0.0.1" };
-    pinnedTo(fx, other);
-    const before = snapshot(fx);
+    const old = { ...makePin(join(fx.base, "old-global")), version: "0.0.1" };
+    pinnedTo(fx, old);
+    const now = fx.run(() => currentEnforcementPin());
 
     const out = runUpgrade(fx);
-    assert.equal(out.exitCode, 1, out.stdout);
-    assert.match(out.stdout, /upgrade: hooks\s+REFUSED/);
-    assert.match(out.stdout, /upgrade: shim\s+REFUSED/);
-    assert.match(out.stdout, refusedOther(other.cli));
-    assert.doesNotMatch(out.stdout, /nothing to upgrade/);
-    assert.deepEqual(snapshot(fx), before, "no script was rewritten");
-    assert.equal(readPin(fx, "hooks/pre-commit")?.cli, other.cli);
-    assert.equal(readPin(fx, "bin/gh")?.cli, other.cli);
-
-    const json = JSON.parse(runUpgrade(fx, { json: true }).stdout) as UpgradeReport;
-    assert.equal(json.refused, true);
-    assert.deepEqual(json.steps.filter(s => s.status === "refused").map(s => s.step), ["hooks", "shim"]);
-    assert.deepEqual(snapshot(fx), before);
+    assert.equal(out.exitCode, undefined, out.stdout + out.stderr);
+    assert.match(out.stdout, /upgrade: hooks\s+done/);
+    assert.match(out.stdout, /upgrade: shim\s+done/);
+    assert.doesNotMatch(out.stdout, /REFUSED/);
+    assert.equal(readPin(fx, "hooks/pre-commit")?.cli, now.cli);
+    assert.equal(readPin(fx, "bin/gh")?.cli, now.cli);
+    assert.deepEqual(staleCodes(doctorJson(fx)), []);
+    assert.match(runUpgrade(fx).stdout, /^nothing to upgrade/, "and the second run is a no-op");
   });
 
-  it("--dry-run reports the refusal too and changes nothing", () => {
+  it("mixed pins (hooks already on the running CLI, the shim on another install): one upgrade resolves both", () => {
     const fx = makeFixture();
+    const now = fx.run(() => currentEnforcementPin());
+    writeHookScripts(join(fx.home, "hooks"), { ...now, version: "0.0.1" }); // this CLI, an earlier release's script: stale
+    mkdirSync(join(fx.home, "bin"), { recursive: true });
     const other = { ...makePin(join(fx.base, "other-install")), version: "0.0.1" };
-    pinnedTo(fx, other);
-    const before = snapshot(fx);
-    const out = runUpgrade(fx, { dryRun: true });
-    assert.match(out.stdout, /upgrade: hooks\s+REFUSED/);
-    assert.deepEqual(snapshot(fx), before);
+    writeFileSync(join(fx.home, "bin", "gh"), renderShimScript(other, { home: fx.home }), { mode: 0o755 });
+    chmodSync(join(fx.home, "bin", "gh"), 0o755);
+
+    const out = runUpgrade(fx);
+    assert.equal(out.exitCode, undefined, out.stdout + out.stderr);
+    assert.match(out.stdout, /upgrade: hooks\s+done/);
+    assert.match(out.stdout, /upgrade: shim\s+done/);
+    assert.deepEqual(readPin(fx, "hooks/pre-commit"), now);
+    assert.equal(readPin(fx, "bin/gh")?.cli, now.cli);
+    assert.deepEqual(staleCodes(doctorJson(fx)), []);
   });
 
-  it("an older running version is refused: it would roll enforcement back to an older copy", () => {
+  describe("a running CLI that will not last (a git checkout, an npx cache, a project node_modules)", () => {
+    const ephemeralRefusal = /looks temporary.*run upgrade from the global install \(`npm i -g @de-otio\/repo-aegis`, then `repo-aegis upgrade`\), or pass --force \(UPGRADE_REFUSED\)/;
+
+    it("is refused while the old pin still works: nothing rewritten, exit 1, the version not recorded", () => {
+      const fx = makeFixture();
+      pinnedTo(fx, { ...makePin(join(fx.base, "old-global")), version: "0.0.1" });
+      const before = snapshot(fx);
+
+      const out = runUpgrade(fx, {}, { ephemeral: true });
+      assert.equal(out.exitCode, 1, out.stdout);
+      assert.match(out.stdout, /upgrade: hooks\s+REFUSED/);
+      assert.match(out.stdout, /upgrade: shim\s+REFUSED/);
+      assert.match(out.stdout, ephemeralRefusal);
+      assert.doesNotMatch(out.stdout, /nothing to upgrade/);
+      assert.deepEqual(snapshot(fx), before, "no script was rewritten");
+      assert.equal(readVersion(fx), null, "a refused run does not record the version");
+
+      const json = JSON.parse(runUpgrade(fx, { json: true }, { ephemeral: true }).stdout) as UpgradeReport;
+      assert.equal(json.refused, true);
+      assert.deepEqual(json.steps.filter(s => s.status === "refused").map(s => s.step), ["hooks", "shim"]);
+      assert.deepEqual(snapshot(fx), before);
+    });
+
+    it("is refused when the old pin is already gone too (the lockout is reachable from a pin that is missing)", () => {
+      const fx = makeFixture();
+      pinnedTo(fx, { node: "/opt/example/gone/bin/node", cli: "/opt/example/gone/dist/index.js", version: "0.0.1" });
+      const before = snapshot(fx);
+      const out = runUpgrade(fx, {}, { ephemeral: true });
+      assert.equal(out.exitCode, 1, out.stdout);
+      assert.match(out.stdout, ephemeralRefusal);
+      assert.deepEqual(snapshot(fx), before);
+      assert.equal(readVersion(fx), null);
+    });
+
+    it("is refused for by-name scripts too (the first pin must not be a temporary copy)", () => {
+      const fx = makeFixture();
+      writeStaleHooks(fx);
+      const before = snapshot(fx);
+      const out = runUpgrade(fx, {}, { ephemeral: true });
+      assert.equal(out.exitCode, 1, out.stdout);
+      assert.match(out.stdout, /upgrade: hooks\s+REFUSED/);
+      assert.deepEqual(snapshot(fx), before);
+    });
+
+    it("--force pins to it anyway", () => {
+      const fx = makeFixture();
+      pinnedTo(fx, { node: "/opt/example/gone/bin/node", cli: "/opt/example/gone/dist/index.js", version: "0.0.1" });
+      const now = fx.run(() => currentEnforcementPin());
+      const out = runUpgrade(fx, { force: true }, { ephemeral: true });
+      assert.equal(out.exitCode, undefined, out.stdout + out.stderr);
+      assert.match(out.stdout, /upgrade: hooks\s+done/);
+      assert.match(out.stdout, /upgrade: shim\s+done/);
+      assert.equal(readPin(fx, "hooks/pre-commit")?.cli, now.cli);
+    });
+
+    it("--force does not override a version rollback", () => {
+      const fx = makeFixture();
+      pinnedTo(fx, { ...makePin(join(fx.base, "newer-install")), version: "999.0.0" });
+      const before = snapshot(fx);
+      const out = runUpgrade(fx, { force: true }, { ephemeral: true });
+      assert.equal(out.exitCode, 1, out.stdout);
+      assert.match(out.stdout, /newer than this install/);
+      assert.deepEqual(snapshot(fx), before);
+    });
+
+    it("is fine when the scripts already point at this very CLI (nothing moves)", () => {
+      const fx = makeFixture();
+      const now = fx.run(() => currentEnforcementPin());
+      pinnedTo(fx, { ...now, version: "0.0.1" });
+      const out = runUpgrade(fx, {}, { ephemeral: true });
+      assert.equal(out.exitCode, undefined, out.stdout + out.stderr);
+      assert.match(out.stdout, /upgrade: hooks\s+done/);
+    });
+
+    it("--dry-run reports the refusal too and changes nothing", () => {
+      const fx = makeFixture();
+      pinnedTo(fx, { ...makePin(join(fx.base, "old-global")), version: "0.0.1" });
+      const before = snapshot(fx);
+      const out = runUpgrade(fx, { dryRun: true }, { ephemeral: true });
+      assert.match(out.stdout, /upgrade: hooks\s+REFUSED/);
+      assert.deepEqual(snapshot(fx), before);
+    });
+  });
+
+  describe("isEphemeralCli", () => {
+    const cliIn = (root: string, ...parts: string[]): string => {
+      const dir = join(root, ...parts);
+      mkdirSync(dir, { recursive: true });
+      const cli = join(dir, "index.js");
+      writeFileSync(cli, "// stub\n");
+      return cli;
+    };
+    const prefixed = (root: string): { execPath: string; env: NodeJS.ProcessEnv } => ({ execPath: join(root, "prefix", "bin", "node"), env: {} });
+
+    it("a directory under a .git (file or directory) ancestor is ephemeral: a worktree build", () => {
+      const root = join(tmp, `eph-${n++}`);
+      const checkout = join(root, "checkout");
+      mkdirSync(checkout, { recursive: true });
+      writeFileSync(join(checkout, ".git"), "gitdir: /elsewhere\n"); // a worktree's .git is a file
+      assert.equal(isEphemeralCli(cliIn(checkout, "packages", "cli", "dist"), prefixed(root)), true);
+      mkdirSync(join(root, "repo", ".git"), { recursive: true });
+      assert.equal(isEphemeralCli(cliIn(root, "repo", "dist"), prefixed(root)), true);
+    });
+
+    it("an npx cache is ephemeral", () => {
+      const root = join(tmp, `eph-${n++}`);
+      assert.equal(isEphemeralCli(cliIn(root, ".npm", "_npx", "abc123", "node_modules", "@de-otio", "repo-aegis", "dist"), prefixed(root)), true);
+    });
+
+    it("a project node_modules outside the global prefix is ephemeral; the global one is not", () => {
+      const root = join(tmp, `eph-${n++}`);
+      assert.equal(isEphemeralCli(cliIn(root, "project", "node_modules", "@de-otio", "repo-aegis", "dist"), prefixed(root)), true);
+      const global = cliIn(root, "prefix", "lib", "node_modules", "@de-otio", "repo-aegis", "dist");
+      assert.equal(isEphemeralCli(global, prefixed(root)), false);
+    });
+
+    it("a global install is recognised by the Node prefix, npm_config_prefix, or a lib/node_modules segment, even under a .git", () => {
+      const root = join(tmp, `eph-${n++}`);
+      mkdirSync(join(root, ".git"), { recursive: true }); // the whole tree sits in a repository (a dotfiles repo in $HOME)
+      const viaNode = cliIn(root, "prefix", "lib", "node_modules", "@de-otio", "repo-aegis", "dist");
+      assert.equal(isEphemeralCli(viaNode, prefixed(root)), false);
+      const winStyle = cliIn(root, "prefix", "node_modules", "@de-otio", "repo-aegis", "dist");
+      assert.equal(isEphemeralCli(winStyle, prefixed(root)), false);
+      const custom = cliIn(root, "custom-prefix", "lib", "node_modules", "@de-otio", "repo-aegis", "dist");
+      assert.equal(isEphemeralCli(custom, { execPath: "/somewhere/else/bin/node", env: { npm_config_prefix: join(root, "custom-prefix") } }), false);
+      const homebrew = cliIn(root, "homebrew", "lib", "node_modules", "@de-otio", "repo-aegis", "dist"); // execPath resolves into a Cellar
+      assert.equal(isEphemeralCli(homebrew, { execPath: join(root, "homebrew", "Cellar", "node", "22", "bin", "node"), env: {} }), false);
+    });
+
+    it("a plain directory with no .git ancestor and no node_modules is not ephemeral", () => {
+      const root = join(tmp, `eph-${n++}`);
+      assert.equal(isEphemeralCli(cliIn(root, "opt", "repo-aegis", "dist"), prefixed(root)), false);
+    });
+  });
+
+  it("an older running version is refused, naming only the step's own installer (never `run that install's upgrade` for an older one)", () => {
     const fx = makeFixture();
     const newer = { ...makePin(join(fx.base, "newer-install")), version: "999.0.0" };
     pinnedTo(fx, newer);
@@ -496,9 +636,21 @@ describe("upgrade: it never moves the pin to an install that merely ran it", () 
 
     const out = runUpgrade(fx);
     assert.equal(out.exitCode, 1, out.stdout);
-    assert.match(out.stdout, /upgrade: hooks\s+REFUSED\s+pinned to .*newer-install.* \(version 999\.0\.0\), which is newer than this install \(/);
-    assert.match(out.stdout, /run that install's upgrade, or `install hooks` from this one to switch/);
+    assert.match(out.stdout, new RegExp(`upgrade: hooks\\s+REFUSED\\s+the pin in the git hooks is ${escapeRe(newer.cli)} \\(version 999\\.0\\.0\\), which is newer than this install \\(.*\\): run the newer install's upgrade, or \`repo-aegis install hooks\` from this one to roll back on purpose \\(UPGRADE_REFUSED\\)`));
+    assert.match(out.stdout, new RegExp(`upgrade: shim\\s+REFUSED\\s+the pin in the gh shim is ${escapeRe(newer.cli)} .*or \`repo-aegis install shim\` from this one`));
+    const hooksLine = out.stdout.split("\n").find(l => l.startsWith("upgrade: hooks")) ?? "";
+    assert.doesNotMatch(hooksLine, /install shim/, "each refusal names only its own installer");
     assert.deepEqual(snapshot(fx), before);
+    assert.equal(readVersion(fx), null, "a refused run does not record the version");
+  });
+
+  it("a refusal ends with a code `repo-aegis explain` knows, and the guide row says what to do for both causes", () => {
+    const docs = loadDocs();
+    if (docs === null) return; // the guide is not next to a source-only run; the build copies it
+    const row = explanationFor(docs, "UPGRADE_REFUSED");
+    assert.ok(row !== null, "UPGRADE_REFUSED has no row in doc/agent-guide.md");
+    assert.match(row.recovery, /global install/);
+    assert.match(row.recovery, /newer install's `upgrade`/);
   });
 
   it("the same CLI path with a newer pinned version is refused too (an in-place downgrade is a person's choice)", () => {
@@ -598,6 +750,26 @@ describe("upgrade: Claude Code's user settings (what `init` writes by default)",
     assert.match(out.stdout, /upgrade: user-settings\s+needs you/);
     assert.match(out.stdout, new RegExp(`run yourself:\\n {2}repo-aegis install claude-md --user-settings --claude-home ${escapeRe(fx.claudeHome)}\\n`));
     assert.equal(readFileSync(join(fx.claudeHome, "settings.json"), "utf8"), before);
+  });
+
+  it("hooks pinned to a newer working install are refused (naming `install claude-md --user-settings`), not listed as current", () => {
+    const fx = makeFixture();
+    const newer = { ...makePin(join(fx.base, "newer-install")), version: "999.0.0" };
+    settingsWith(fx, newer);
+    const before = readFileSync(join(fx.claudeHome, "settings.json"), "utf8");
+    const out = runUpgrade(fx, { claudeHome: fx.claudeHome });
+    assert.equal(out.exitCode, 1, out.stdout);
+    assert.match(out.stdout, /upgrade: user-settings\s+REFUSED.*newer than this install.*`repo-aegis install claude-md --user-settings --claude-home /);
+    assert.doesNotMatch(out.stdout, /needs you/);
+    assert.equal(readFileSync(join(fx.claudeHome, "settings.json"), "utf8"), before);
+  });
+
+  it("with a running CLI that will not last it is refused too", () => {
+    const fx = makeFixture();
+    settingsWith(fx, { node: "/opt/example/old-node/bin/node", cli: "/opt/example/old/dist/index.js", version: "0.1.0" });
+    const out = runUpgrade(fx, { claudeHome: fx.claudeHome }, { ephemeral: true });
+    assert.equal(out.exitCode, 1, out.stdout);
+    assert.match(out.stdout, /upgrade: user-settings\s+REFUSED.*looks temporary/);
   });
 
   it("hooks pinned to this install are current: nothing to upgrade", () => {

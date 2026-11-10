@@ -21,15 +21,15 @@
 // It never installs something that was not installed (a missing shim stays missing), and `--dry-run` changes
 // nothing, not even the "last version seen" record the once-per-version notice reads.
 //
-// It never moves the pin to an install that only happens to be the one running it. The hooks and the shim run a
-// pinned CLI by absolute path; `upgrade` run from a worktree, an `npx` copy with an older devDependency or a second
-// global install would re-pin every hook there, and removing that copy later refuses every commit and push until
-// a person runs `install hooks`. So the pin is read back from the scripts first (`pinVerdict`): re-pin only when
-// the pinned CLI is the running one (an in-place `npm i -g`) or is gone, refuse when the running version is older
-// than the pinned one, and otherwise leave the pin alone and say which install to run instead.
+// It never pins the hooks or the shim to a copy that will not last, and never rolls them back. They run a pinned CLI
+// by absolute path; `upgrade` run from a worktree build, an `npx` copy or a project node_modules would re-pin every
+// hook there, and removing that copy later refuses every commit and push until a person runs `install hooks`. So each
+// step reads its pin back from the scripts (`pinVerdict`) and refuses when the running CLI is ephemeral (unless
+// `--force`) or older than the pinned version. Anything else is re-pinned, including a pin to another working install
+// that is not newer: after `nvm install` or `brew upgrade node` the old global is still on disk.
 import { existsSync, readFileSync } from "node:fs";
-import { delimiter, join } from "node:path";
-import { appendAuditRecord, inspectHookScripts, isPinnedHookCommand, parsePinFromScript, pinProblem, repoAegisHome, shellQuote, type EnforcementPin } from "@de-otio/repo-aegis-core";
+import { delimiter, dirname, join, sep } from "node:path";
+import { appendAuditRecord, inspectHookScripts, isPinnedHookCommand, parsePinFromScript, PIN_VERSION_PATTERN, pinProblem, repoAegisHome, shellUnquote, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { isHumanTerminal, readLine, type ConfirmOptions } from "../require-terminal.js";
@@ -49,6 +49,8 @@ import { resolveTaaadPin } from "./taaad-pin.js";
 export interface UpgradeOptions extends OutputOptions {
   /** Report what would be done; change nothing. */
   dryRun?: boolean;
+  /** Pin the hooks and the shim to this install even when it looks temporary (a git checkout, an npx cache, a project node_modules). */
+  force?: boolean;
   /** Where Claude Code's `CLAUDE.md` lives (default `~/.claude`), passed on to `install claude-md`. */
   claudeHome?: string;
 }
@@ -61,6 +63,8 @@ export interface UpgradeDeps {
   home?: string;
   /** Test seam: the enforcement pin the hooks and the drop-in are compared with. Default: this install's. */
   pin?: EnforcementPin;
+  /** Test seam: whether the running CLI counts as temporary. Default: {@link isEphemeralCli} on this install's CLI. */
+  ephemeral?: boolean;
   /** Test seam: the PATH the `gh` shim's taaad is looked up on. Default: `process.env.PATH`. */
   path?: string;
   /** Test seam: the file system view and privileged runner of the managed drop-in. Honoured only under the Node test runner. */
@@ -192,77 +196,141 @@ function findDropIn(env: ManagedEnv, pin: EnforcementPin): Found {
 }
 
 // ---------------------------------------------------------------------------
-// Whose pin is it? (never move it to an install that merely ran this command)
+// Whose pin is it? (never pin to a copy that will not last; never roll back)
 // ---------------------------------------------------------------------------
 
-/** The pins rendered into the scripts under `home` (the two hooks and the shim), as they are on disk. Unpinned or absent scripts add none. */
-function installedPins(home: string): EnforcementPin[] {
-  const out: EnforcementPin[] = [];
-  for (const rel of [join("hooks", "pre-commit"), join("hooks", "pre-push"), join("bin", "gh")]) {
-    try {
-      const pin = parsePinFromScript(readFileSync(join(home, rel), "utf8"));
-      if (pin !== null) out.push(pin);
-    } catch {
-      /* absent or unreadable: no pin to protect */
-    }
+function pinOf(path: string): EnforcementPin | null {
+  try {
+    return parsePinFromScript(readFileSync(path, "utf8"));
+  } catch {
+    return null; // absent or unreadable: no pin to protect
   }
-  return out;
 }
 
-export type PinVerdict = { ok: true } | { ok: false; detail: string };
-
-/**
- * May the hooks and the shim be re-pinned to `running`, given the pins they carry now? Yes when each existing
- * pin is the running CLI (an in-place `npm i -g` over the same path) or is unusable (its node or CLI is gone:
- * the scripts are broken until something re-pins them). No when an existing pin names ANOTHER install that still
- * works, or one newer than the running version.
- *
- * The honest mistake this stops: running `upgrade` from a copy that is not the one enforcing (a worktree build, an
- * `npx` cache, an older devDependency, a second global install). Re-pinning there looks like a successful upgrade
- * and later, when that copy is removed, refuses every commit and push until a person runs `install hooks`. The one
- * fix, in each message, is to run the upgrade of the install the scripts are pinned to.
- */
-export function pinVerdict(existing: readonly EnforcementPin[], running: EnforcementPin, runningVersion: string | undefined): PinVerdict {
-  const runningCli = canonical(running.cli);
-  let other: EnforcementPin | null = null;
-  for (const p of existing) {
-    if (unusable(p.node, "exec") || unusable(p.cli, "read")) continue; // gone: the scripts need re-pinning
-    if (p.version !== undefined && runningVersion !== undefined && versionIsOlder(runningVersion, p.version)) {
-      return {
-        ok: false,
-        detail:
-          `pinned to ${p.cli} (version ${p.version}), which is newer than this install (${runningVersion}): run that install's upgrade, ` +
-          `or \`install hooks\` from this one to switch. Re-pinning from here would roll enforcement back to an older copy (an old devDependency run by npx, a stale global)`,
-      };
-    }
-    if (canonical(p.cli) !== runningCli && other === null) other = p;
-  }
-  return other === null
-    ? { ok: true }
-    : {
-        ok: false,
-        detail:
-          `pinned to another install (${other.cli}): run that install's upgrade, or \`install hooks\` from this one to switch. ` +
-          `Re-pinning from here would point every hook and the shim at ${running.cli}, which stops enforcing when that copy is removed (a worktree, an npx cache)`,
-      };
+/** The pins rendered into the two hook scripts under `home`, as they are on disk. Unpinned or absent scripts add none. */
+function hookPins(home: string): EnforcementPin[] {
+  return [pinOf(join(home, "hooks", "pre-commit")), pinOf(join(home, "hooks", "pre-push"))].filter((p): p is EnforcementPin => p !== null);
 }
 
-/** True when a repo-aegis hook command in Claude Code's user `settings.json` is pinned to anything but `pin` (node, CLI and version). */
-function userSettingsHooksStale(claudeHome: string, pin: EnforcementPin): boolean {
+/** The pin rendered into the `gh` shim under `home`, if any. */
+function shimPins(home: string): EnforcementPin[] {
+  const pin = pinOf(join(home, "bin", "gh"));
+  return pin === null ? [] : [pin];
+}
+
+/** The pins of repo-aegis's own pinned hook commands in Claude Code's user `settings.json`. */
+function userSettingsPins(claudeHome: string): EnforcementPin[] {
   const settings = readSettingsFile(join(claudeHome, "settings.json"));
-  if (settings === null) return false;
-  const current = [shellQuote(pin.node), shellQuote(pin.cli), `__ra_version=${shellQuote(pin.version ?? "")}`];
+  if (settings === null) return [];
+  const out: EnforcementPin[] = [];
   for (const entries of Object.values(settings.hooks ?? {})) {
     for (const entry of entries ?? []) {
       for (const h of entry.hooks ?? []) {
         const command = typeof h.command === "string" ? h.command.trim() : "";
         const m = / hook ([a-z-]+)/.exec(command);
         if (m === null || !isPinnedHookCommand(command, m[1]!)) continue;
-        if (!current.every(part => command.includes(part))) return true;
+        // `if [ -f '<node>' ] && [ -x '<node>' ] && [ -f '<cli>' ] && ...` then `__ra_version='<v>'` (see `pinnedHookCommand`).
+        const paths = /^if \[ -f ('(?:[^']|'\\'')*') \] && \[ -x '(?:[^']|'\\'')*' \] && \[ -f ('(?:[^']|'\\'')*') \]/.exec(command);
+        if (paths === null) continue;
+        const node = shellUnquote(paths[1]!);
+        const cli = shellUnquote(paths[2]!);
+        if (node === null || cli === null) continue;
+        const v = /__ra_version=('(?:[^']|'\\'')*')/.exec(command);
+        const version = v === null ? null : shellUnquote(v[1]!);
+        out.push(version !== null && PIN_VERSION_PATTERN.test(version) ? { node, cli, version } : { node, cli });
       }
     }
   }
-  return false;
+  return out;
+}
+
+/** True when `existing` holds a pin that is not `pin` (another node, another CLI, or another version). */
+function anyPinDiffers(existing: readonly EnforcementPin[], pin: EnforcementPin): boolean {
+  return existing.some(p => p.node !== pin.node || canonical(p.cli) !== canonical(pin.cli) || (p.version ?? "") !== (pin.version ?? ""));
+}
+
+/**
+ * Is `cli` (a realpath) a copy that will not last: a git checkout (a `.git` file or directory in an ancestor, as in a
+ * worktree build), an `npx` cache (`/_npx/`), or a project `node_modules` that is not npm's global one? Pinning the
+ * hooks there works until the copy is removed, and then every commit and push is refused.
+ *
+ * The npm global prefix is derived without spawning `npm prefix -g`: the Node executable's own prefix (`<prefix>/bin/node`,
+ * so `<prefix>/lib/node_modules` on Unix and `<prefix>/node_modules` on Windows), the same under `npm_config_prefix`,
+ * and any path with a `lib/node_modules` segment, which is where Unix installs global packages even when
+ * `process.execPath` resolves into a Homebrew `Cellar` directory. A global install under a prefix that none of these
+ * names is judged by its `.git` ancestors and `node_modules` like any other, and `--force` overrides the verdict.
+ */
+export function isEphemeralCli(cli: string, opts: { execPath?: string; env?: NodeJS.ProcessEnv } = {}): boolean {
+  const path = cli.split(sep).join("/");
+  if (path.includes("/_npx/")) return true;
+  const execPath = opts.execPath ?? process.execPath;
+  const env = opts.env ?? process.env;
+  const prefixes = [dirname(dirname(execPath)), env["npm_config_prefix"], env["NPM_CONFIG_PREFIX"]].filter((p): p is string => typeof p === "string" && p !== "");
+  const globalRoots = prefixes.flatMap(p => [join(p, "lib", "node_modules"), join(p, "node_modules")]);
+  const isGlobal = path.includes("/lib/node_modules/") || globalRoots.some(root => cli === root || cli.startsWith(root + sep));
+  if (isGlobal) return false;
+  if (path.includes("/node_modules/")) return true;
+  for (let dir = dirname(cli); ; dir = dirname(dir)) {
+    if (existsSync(join(dir, ".git"))) return true;
+    if (dirname(dir) === dir) return false;
+  }
+}
+
+export type PinVerdict = { ok: true } | { ok: false; detail: string };
+
+export interface PinVerdictInput {
+  /** The pins the step's scripts carry now (empty for a by-name script). */
+  existing: readonly EnforcementPin[];
+  running: EnforcementPin;
+  /** Is the running CLI a copy that will not last ({@link isEphemeralCli})? */
+  ephemeral: boolean;
+  /** `--force`: pin to an ephemeral CLI anyway. It does not override a version rollback. */
+  force: boolean;
+  /** What is being pinned, for the message ("the git hooks"). */
+  what: string;
+  /** The one command that switches this step on purpose from the running install. */
+  installer: string;
+}
+
+/**
+ * May `what` be pinned to the running install? Two honest mistakes are refused, each with its own fix:
+ *
+ *  1. Rolling back: an existing pin that still works names a version NEWER than the running one (an old devDependency
+ *     run by npx, a stale global). The fix is to run the newer install's `upgrade`, or `installer` from this one to
+ *     roll back on purpose.
+ *  2. Pinning to a copy that will not last (`ephemeral`: a worktree build, an npx cache, a project `node_modules`):
+ *     it works until that copy is removed, then every commit and push is refused. Refused whether the old pin works
+ *     or is gone, unless the scripts already point at this very CLI. The fix is to run `upgrade` from the global
+ *     install, or pass `--force`.
+ *
+ * Anything else is re-pinned, including a pin to another install that still works but is not newer: after `nvm
+ * install` or `brew upgrade node` the previous global is still on disk, and refusing there would leave the person
+ * with no way to finish the upgrade from the install they just made.
+ */
+export function pinVerdict(i: PinVerdictInput): PinVerdict {
+  const runningCli = canonical(i.running.cli);
+  const runningVersion = i.running.version;
+  for (const p of i.existing) {
+    if (unusable(p.node, "exec") || unusable(p.cli, "read")) continue; // gone: nothing to roll back from
+    if (p.version !== undefined && runningVersion !== undefined && versionIsOlder(runningVersion, p.version)) {
+      return {
+        ok: false,
+        detail:
+          `the pin in ${i.what} is ${p.cli} (version ${p.version}), which is newer than this install (${runningVersion}): ` +
+          `run the newer install's upgrade, or \`${i.installer}\` from this one to roll back on purpose (UPGRADE_REFUSED)`,
+      };
+    }
+  }
+  const alreadyHere = i.existing.length > 0 && i.existing.every(p => canonical(p.cli) === runningCli);
+  if (i.ephemeral && !i.force && !alreadyHere) {
+    return {
+      ok: false,
+      detail:
+        `this install (${i.running.cli}) looks temporary (a git checkout, an npx cache or a project node_modules), so pinning ${i.what} to it ` +
+        "would refuse every commit and push once it is removed: run upgrade from the global install (`npm i -g @de-otio/repo-aegis`, then `repo-aegis upgrade`), or pass --force (UPGRADE_REFUSED)",
+    };
+  }
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -286,21 +354,22 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
     steps.push({ step, status, detail, ...(command !== undefined && { command }) });
     if ((status === "run-yourself" || status === "declined") && command !== undefined) runYourself.push({ step, command });
   };
-  // Whose pin the hooks and the shim carry, judged once and only when one of them (or the user settings hint) asks.
-  let verdict: PinVerdict | null = null;
-  const repinVerdict = (): PinVerdict => (verdict ??= pinVerdict(installedPins(home), pin, pin.version ?? deps.version));
-  const refusal = (): string => {
-    const v = repinVerdict();
-    return v.ok ? "" : v.detail;
-  };
+  // Each step is judged on its own pins and names its own installer. The running CLI's version is the pin's, or the
+  // one the command line was started with.
+  const running: EnforcementPin = pin.version !== undefined || deps.version === undefined ? pin : { ...pin, version: deps.version };
+  let ephemeral: boolean | null = null; // asked at most once, and only when a step is stale
+  const isEphemeral = (): boolean => deps.ephemeral ?? (ephemeral ??= isEphemeralCli(pin.cli));
+  const judge = (existing: readonly EnforcementPin[], what: string, installer: string): PinVerdict =>
+    pinVerdict({ existing, running, ephemeral: isEphemeral(), force: opts.force === true, what, installer });
   /** Not stale: report it in the JSON, say nothing in the text. */
   const quiet = (step: StepName, found: Found): void => add(step, found.state === "not-installed" ? "not-installed" : "current", found.detail);
 
   // 1. hooks
   {
+    let hooksVerdict: PinVerdict;
     const found = findHooks(home, pin);
     if (found.state !== "stale") quiet("hooks", found);
-    else if (!repinVerdict().ok) add("hooks", "refused", refusal());
+    else if (!(hooksVerdict = judge(hookPins(home), "the git hooks", "repo-aegis install hooks")).ok) add("hooks", "refused", hooksVerdict.detail);
     else if (dryRun) add("hooks", "would-upgrade", "would rewrite pre-commit and pre-push");
     else {
       const problem = pinProblem(pin);
@@ -315,9 +384,10 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
 
   // 2. shim
   {
+    let shimVerdict: PinVerdict;
     const found = findShim(home, deps.path);
     if (found.state !== "stale") quiet("shim", found);
-    else if (!repinVerdict().ok) add("shim", "refused", refusal());
+    else if (!(shimVerdict = judge(shimPins(home), "the gh shim", "repo-aegis install shim")).ok) add("shim", "refused", shimVerdict.detail);
     else if (dryRun) add("shim", "would-upgrade", `would rewrite ${shimPathFor()}`);
     else {
       // Keep the taaad the earlier install pinned while its launcher still exists: a different `taaad` that merely
@@ -366,15 +436,19 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
 
   // 3b. user-settings: the hooks `init` and `install claude-md --user-settings` put into Claude Code's own
   // settings.json carry the pin too, and go stale when Node or the install moves. Listed, never run: whether the
-  // hooks live there rather than in the managed drop-in is the person's call. Not listed while the pin is another
-  // install's, because the command would move it here.
+  // hooks live there rather than in the managed drop-in is the person's call. Judged like the other pinned steps:
+  // when this install is older than the pin, or will not last, the line says so instead of offering the command.
   {
     const claudeHome = opts.claudeHome ?? defaultClaudeHome();
-    const command = `repo-aegis install claude-md --user-settings${opts.claudeHome !== undefined ? ` --claude-home ${opts.claudeHome}` : ""}`;
-    if (!repinVerdict().ok || !userSettingsHooksStale(claudeHome, pin)) {
-      add("user-settings", "current", "no repo-aegis hook in Claude Code's settings.json is pinned to another install");
+    const settingsFile = join(claudeHome, "settings.json");
+    const installer = `repo-aegis install claude-md --user-settings${opts.claudeHome !== undefined ? ` --claude-home ${opts.claudeHome}` : ""}`;
+    const existing = userSettingsPins(claudeHome);
+    if (!anyPinDiffers(existing, pin)) {
+      add("user-settings", "current", "no repo-aegis hook in Claude Code's settings.json is pinned to another Node or install");
     } else {
-      add("user-settings", "run-yourself", `the repo-aegis hooks in ${join(claudeHome, "settings.json")} are pinned to another install or Node (doctor: ENFORCEMENT_PIN_MISSING once that is gone)`, command);
+      const verdict = judge(existing, `the repo-aegis hooks in ${settingsFile}`, installer);
+      if (!verdict.ok) add("user-settings", "refused", verdict.detail);
+      else add("user-settings", "run-yourself", `the repo-aegis hooks in ${settingsFile} are pinned to another install or Node (doctor: ENFORCEMENT_PIN_MISSING once that is gone)`, installer);
     }
   }
 
@@ -438,8 +512,9 @@ export function upgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): UpgradeRe
         /* audit log must not break user-facing ops */
       }
     }
-    // Once upgrade has run, the once-per-version notice has nothing left to say, unless an installer failed.
-    if (!report.failed && deps.version !== undefined) recordVersion(home, deps.version);
+    // Once upgrade has run, the once-per-version notice has nothing left to say, unless an installer failed or a step was
+    // refused (the run did not finish, so the version stays "not done").
+    if (!report.failed && !report.refused && deps.version !== undefined) recordVersion(home, deps.version);
   }
 
   if (opts.json === true) {
