@@ -564,8 +564,9 @@ session, `sshd`, a terminal emulator or an attached tmux/screen. If the chain
 cannot be read (no `ps`, as in an agent's sandbox) the answer is "not a
 person". `REPO_AEGIS_EGRESS_HUMAN` and `REPO_AEGIS_WAIVE_NONINTERACTIVE` are
 **not** honoured, and no approval lifts it. The agent hook also refuses any
-agent Bash command whose text contains the command (`AGENT_RAN_HUMAN_COMMAND`).
-A terminal opened from inside an agent (a tmux server started from it) can
+agent Bash command whose text contains the command (`AGENT_RAN_HUMAN_COMMAND`),
+except a call whose only arguments are `--help` / `-h` (or `repo-aegis help <verb>`),
+which reads help and changes nothing. A terminal opened from inside an agent (a tmux server started from it) can
 still carry `CLAUDECODE=1`; open a fresh terminal window, or unset that
 variable and `CLAUDE_CODE_ENTRYPOINT`. The ancestry check is a speed bump, not
 proof of a person: outside the agent sandbox a same-user agent can forge it.
@@ -1550,7 +1551,14 @@ Before the egress parse, and for **any** Bash command, the hook also refuses
 (`GITHUB_API_VIA_HTTP_CLIENT`) and `gh auth token` next to a network call
 (`GH_AUTH_TOKEN_NETWORK`); a command whose text runs `repo-aegis approve`,
 `engagements add --personal-org|--github-org`, `upstreams add`, `identity add|remove`, `identity require --off`, `engagements set-identity` or
-`init --migrate-classify|--force`, in any shape (`AGENT_RAN_HUMAN_COMMAND`); and a
+`init --migrate-classify|--force`, in any shape (`AGENT_RAN_HUMAN_COMMAND`). Asking one of them
+for help is not running it: with `--help` / `-h` as the only arguments (`approve --help`,
+`identity add --help`), or as `repo-aegis help <verb>`, the command is allowed, so an agent can
+read the flags to tell its person. Any other word next to `--help` (`approve x/y --help`) or in
+another segment of the same line (`approve --help && approve x/y`) keeps the refusal. The help
+request is read as whole shell words: `--help` / `-h`, `--json`, `--no-color`, the verb's own words, and whole
+redirections (`2>&1`, `> file`, `< file`) are accepted, and `<group> help <sub>` (`identity help add`) too;
+`approve >--help` or `approve ' --help'` is not help to Commander and stays refused. The hook also refuses a
 command that starts a detached session: `tmux new -d`, `tmux new-window` /
 `send-keys`, `screen -dm`, `setsid`, `daemonize`, `nohup … & disown`
 (`AGENT_DETACHED_SESSION`). These are text-level speed bumps: a program word
@@ -2023,6 +2031,35 @@ topic); `--list --json` prints `{ codes, topics }`.
 An unknown code exits 2 with `UNKNOWN_CODE` and the nearest known codes (in
 `details.nearest` under `--json`). `EXPLAIN_DOCS_MISSING` (exit 2) means the
 guide is not next to the command, which only happens in an unbuilt checkout.
+
+### `repo-aegis docs [<topic>] [--path] [--json]`
+
+Prints one of the user docs that ship in the npm package (`dist/docs/`, copied at
+build time), from any directory. It exists so that an agent helping a person whose
+command was blocked can read the exact flags and rules instead of guessing: a repository
+that is not this one has no `doc/` folder.
+
+| Topic | Doc |
+|---|---|
+| `readme` | `README.md` |
+| `cli-reference` | this file |
+| `configuration` | `doc/configuration.md` |
+| `agent-guide` | `doc/agent-guide.md` |
+| `agent-sandbox` | `doc/agent-sandbox.md` |
+| `agent-install` | `doc/agent-install.md` |
+| `egress-guard` | `doc/design/egress-guard.md` |
+| `changelog` | `CHANGELOG.md` |
+
+With no topic it lists the topics, one per line with a short summary. With a topic it
+prints that doc (case-insensitive). `--path` prints the doc's absolute file path instead,
+so an agent can Read or grep it. `--json` prints `{ topics }`, `{ topic, path, markdown }`
+or, with `--path`, `{ topic, path }`. An unknown topic exits 2 with
+`UNKNOWN_DOC_TOPIC` and the topic list. `DOCS_MISSING` (exit 2) means `dist/docs/` is not
+next to the command, which only happens in an unbuilt checkout. Relative links between the
+shipped docs are rewritten at build time so they resolve inside `dist/docs/`.
+
+**Read-only, and an agent may run it**, like `explain`: it reads files that ship next to
+the command and nothing else. It is not on the person-only list.
 
 ### `repo-aegis suggest-markers`
 

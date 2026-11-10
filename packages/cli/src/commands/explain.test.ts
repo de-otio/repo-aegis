@@ -32,7 +32,10 @@ describe("the docs ship in the built package", () => {
   for (const name of ["agent-guide.md", "agent-sandbox.md"]) {
     it(`dist/docs/${name} exists and is the current doc/${name}`, () => {
       assert.ok(existsSync(join(distDocs, name)), `${name} is missing from dist/docs: did the build run scripts/copy-cli-docs.mjs?`);
-      assert.equal(readFileSync(join(distDocs, name), "utf8"), readFileSync(join(repoRoot, "doc", name), "utf8"), `${name} in dist is stale`);
+      // The copy re-points relative links at the shipped layout (`../README.md` -> `README.md`), so compare the text
+      // with every link target blanked; docs.test.ts checks that the links resolve.
+      const blank = (s: string): string => s.replace(/\]\([^)\s]*\)/g, "](…)");
+      assert.equal(blank(readFileSync(join(distDocs, name), "utf8")), blank(readFileSync(join(repoRoot, "doc", name), "utf8")), `${name} in dist is stale`);
     });
   }
 

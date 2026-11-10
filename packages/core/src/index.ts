@@ -429,6 +429,7 @@ export {
   AGENT_RAN_HUMAN_COMMAND,
   AGENT_DETACHED_SESSION,
   findHumanOnlyCommand,
+  HUMAN_VERB_PATHS,
   humanCommandRefusal,
   findDetachedStart,
   detachedStartRefusal,
