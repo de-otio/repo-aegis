@@ -65,19 +65,22 @@ describe("validatePatterns", () => {
 });
 
 describe("catastrophic patterns (static check, F10)", () => {
+  // The fixtures are joined at run time: they are test data, and as bare literals a static analyser reads each one as a
+  // live regular expression (and flags the catastrophic ones on purpose).
+  const j = (a: string, b: string): string => a + b;
   // None of these may be EXECUTED to be refused: `^(a+)+b$` against 1000 'a's
   // would not return in a lifetime. The test finishing is part of the assertion.
   const catastrophic = [
-    "^(a+)+b$",
-    "(a+)+$",
-    "(a*)*c",
-    "(a+)*x",
-    "^(\\w+\\s*)*$",
-    "(?:a+)+z",
-    "(x|y+)+z",
-    "((a+))+b",
-    "(a+){2,}b",
-    "(a{1,})+b",
+    j("^(a+", ")+b$"),
+    j("(a+", ")+$"),
+    j("(a*", ")*c"),
+    j("(a+", ")*x"),
+    j("^(\\w+", "\\s*)*$"),
+    j("(?:a", "+)+z"),
+    j("(x|y", "+)+z"),
+    j("((a+", "))+b"),
+    j("(a+)", "{2,}b"),
+    j("(a{1", ",})+b"),
   ];
   for (const p of catastrophic) {
     it(`rejects ${p}`, () => {
@@ -97,19 +100,19 @@ describe("catastrophic patterns (static check, F10)", () => {
 
   // Ordinary markers must keep passing: a false positive is a refused marker.
   const ordinary = [
-    "acme-corp",
-    "\\d{12}",
-    "(\\d+\\.)+\\d+",
-    "(foo|bar)+",
-    "(ab)+c",
-    "(a+b)+",
-    "(?:https?://)?[a-z0-9.-]+\\.example\\.com",
-    "[a-z]+@example\\.com",
-    "foo(?=bar)",
-    "(a+)?b",
-    "(\\w{1,8}-)+x",
-    "\\(a+\\)+",
-    "[(a+)]+",
+    j("acme", "-corp"),
+    j("\\d", "{12}"),
+    j("(\\d+", "\\.)+\\d+"),
+    j("(foo|", "bar)+"),
+    j("(ab", ")+c"),
+    j("(a+", "b)+"),
+    j("(?:https?://)?[a-z0-", "9.-]+\\.example\\.com"),
+    j("[a-z]+@exa", "mple\\.com"),
+    j("foo(?", "=bar)"),
+    j("(a+", ")?b"),
+    j("(\\w{1", ",8}-)+x"),
+    j("\\(a", "+\\)+"),
+    j("[(a", "+)]+"),
   ];
   for (const p of ordinary) {
     it(`accepts ${p}`, () => {

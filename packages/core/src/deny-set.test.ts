@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, utimesSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -151,14 +151,16 @@ describe("computeDenySet", () => {
   it("computes fresh every call: an edit that keeps size and mtime is still seen (no cache)", () => {
     const repo = makeRepo("private-strict");
     const acmePath = join(markersDir, "customer-a.txt");
-    const before = statSync(acmePath);
+    // A fixed time, set by path before and after the edit: no stat-then-write on the same path.
+    const fixed = new Date(Date.UTC(2026, 0, 1));
+    utimesSync(acmePath, fixed, fixed);
     const ds1 = computeDenySet(repo, { markersDir });
     assert.ok(ds1.patterns.includes("acme-corp"));
 
     // Same byte length ("acme-corp" -> "acme-c0rp"), mtime restored: the old
     // fingerprint (mtime + size) could not tell these apart.
     writeFileSync(acmePath, "acme-c0rp\nacme\\.com\n");
-    utimesSync(acmePath, before.atime, before.mtime);
+    utimesSync(acmePath, fixed, fixed);
     const ds2 = computeDenySet(repo, { markersDir });
     assert.ok(ds2.patterns.includes("acme-c0rp"), "the edit must be visible immediately");
     assert.ok(!ds2.patterns.includes("acme-corp"));

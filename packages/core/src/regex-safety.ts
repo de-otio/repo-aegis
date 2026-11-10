@@ -114,7 +114,7 @@ function hasNestedUnboundedQuantifier(pattern: string): boolean {
   /** Parse an optional quantifier at `i`; returns its end index and whether it is unbounded. */
   const quantifier = (i: number): { end: number; unbounded: boolean } => {
     const c = pattern[i];
-    let end = i;
+    let end: number;
     let unbounded = false;
     if (c === "*" || c === "+") {
       end = i + 1;
