@@ -44,6 +44,7 @@ import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { findWorkingTrees, defaultScanRoots } from "../repo-walk.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { checkLabel, isFailure, isReportable, PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
+import { collapseFindings, fixFirstLines, renderLines, type Finding } from "./doctor-report.js";
 import { checkShim } from "./install-shim.js";
 import { checkGuardHook, checkRegistryAgentWritable } from "./install-claude-md.js";
 import { gitCredentialOrderChecks } from "./doctor-git-credential-checks.js";
@@ -76,6 +77,12 @@ interface DoctorOptions extends OutputOptions {
   sshDir?: string;
   /** Test seam for the gh-backed checks (binary policy, confirmation). Not reachable from the CLI. */
   ghOptions?: GhCheckOptions;
+  /**
+   * Print every finding and its fix. Without it, per-repository findings of one code collapse into one line
+   * with a count, and the fixes appear once, in the closing "Fix these first" list (FAILs only).
+   * `--json` is always complete either way.
+   */
+  verbose?: boolean;
   /** Test seam: what the global `core.hooksPath` holds, for `PREPUSH_HOOK_MISSING`. */
   readGlobalHooksPath?: () => string | null;
   /** Test seam for the managed drop-in checks: platform, uid, file system view, the privileged runner. Honoured only under the Node test runner. */
@@ -90,6 +97,8 @@ export interface DoctorRepoResult {
   shadowedRepoHooks: string[];
   /** Subset of the above that repo-aegis does not chain, i.e. genuinely never runs. */
   bypassedRepoHooks: string[];
+  /** One-line remediation for `code`; empty when the hook state is fine. */
+  fix: string;
   /** True only when this run actually unset a local override (requires
    * `--fix --yes`, never set during a dry run). */
   fixed: boolean;
@@ -203,6 +212,8 @@ function checkPushDefault(): DoctorCheck {
   return {
     code: "PUSH_DEFAULT_IMPLICIT",
     ok: false,
+    // WARN: a recommended personal git setting. Nothing is refused and no guard is inert without it.
+    severity: "warn",
     detail:
       "global push.default is unset or not `nothing`, so a bare `git push` picks a " +
       "destination for you — in the wrong checkout that publishes a branch you did not name",
@@ -273,6 +284,8 @@ function repoEgressChecks(wt: string, registry: Registry | null): DoctorCheck[] 
   out.push({
     code: "CLASS_VISIBILITY_UNRESOLVED",
     ok: resolved,
+    // WARN (P3-C): a clone you have not classified yet (a third party's repo, say) is not a broken guard.
+    ...(resolved ? {} : { severity: "warn" as const }),
     detail: resolved
       ? "class is explicit and GitHub visibility is cached"
       : "no explicit class and/or no cached GitHub visibility, so every destination-aware check is inert in this repo",
@@ -296,6 +309,8 @@ function repoEgressChecks(wt: string, registry: Registry | null): DoctorCheck[] 
     out.push({
       code: "PERSONAL_ORG_UNREGISTERED",
       ok: known,
+      // WARN (P3-C): a repo under an org you have not registered is the person's choice to leave alone.
+      ...(known ? {} : { severity: "warn" as const }),
       // The org name is deliberately NOT in `detail`: an unregistered org can
       // be a customer's, and `detail` is the line most likely to be copied out
       // of a terminal into a ticket or a chat. `fix` carries it because the
@@ -313,6 +328,46 @@ function repoEgressChecks(wt: string, registry: Registry | null): DoctorCheck[] 
     });
   }
 
+  return out;
+}
+
+/** What `doctor` prints, as findings: machine-level checks, then each repository's hook state and checks. */
+export function reportFindings(
+  machine: readonly DoctorCheck[],
+  results: readonly DoctorRepoResult[],
+  opts: { showWouldFix: boolean },
+): Finding[] {
+  const out: Finding[] = [];
+  for (const c of machine) {
+    if (!isReportable(c)) continue;
+    out.push({ label: checkLabel(c), code: c.code, line: `${c.code} — ${c.detail}`, ...(c.fix !== undefined && { fix: c.fix }) });
+  }
+  for (const r of results) {
+    // A repository whose hooks are live is listed only for its other findings, which carry the path themselves.
+    const hookFailing = !r.ok || r.bypassedRepoHooks.length > 0;
+    if (hookFailing || r.fixed) {
+      const tag = r.fixed ? " [fixed]" : opts.showWouldFix ? " [would fix]" : "";
+      out.push({
+        label: hookFailing ? "FAIL" : "WARN",
+        code: r.code,
+        line: `${r.workingTree}  code=${r.code}${tag}`,
+        notes: r.bypassedRepoHooks.length > 0 ? [`repo-local hooks that never run: ${r.bypassedRepoHooks.join(", ")}`] : [],
+        fix: r.fix !== "" ? r.fix : "repo-aegis doctor --fix --yes",
+        repo: r.workingTree,
+        suffix: tag,
+      });
+    }
+    for (const c of r.checks) {
+      if (!isReportable(c)) continue;
+      out.push({
+        label: checkLabel(c),
+        code: c.code,
+        line: `${c.code} — ${c.detail}  [${r.workingTree}]`,
+        ...(c.fix !== undefined && { fix: c.fix }),
+        repo: r.workingTree,
+      });
+    }
+  }
   return out;
 }
 
@@ -407,6 +462,7 @@ export function doctor(opts: DoctorOptions): void {
         effectivePath: state.effectivePath,
         shadowedRepoHooks: state.shadowedRepoHooks,
         bypassedRepoHooks: state.bypassedRepoHooks,
+        fix: state.fix,
         fixed,
         checks,
       });
@@ -440,16 +496,18 @@ export function doctor(opts: DoctorOptions): void {
       summary: { scanned, failed, fixed: fixedCount, destinationsRecorded: recordedDestinations },
     });
   } else {
-    emitText(`doctor: scanned ${scanned} repo(s) under ${roots.join(", ")}`);
-    if (egressChecksOn) {
-      emitText(`doctor: recorded ${recordedDestinations} checkout(s) into the destination cache`);
-    }
-    for (const c of machine) {
-      if (!isReportable(c)) continue;
-      emitText(`  ${checkLabel(c)} ${c.code} — ${c.detail}`);
-      if (c.fix !== undefined) emitText(`       fix: ${c.fix}`);
-    }
+    const verbose = opts.verbose === true;
+    emitText(
+      `doctor: scanned ${scanned} repo(s) under ${roots.join(", ")}` +
+        (egressChecksOn ? `; recorded ${recordedDestinations} checkout(s) into the destination cache` : ""),
+    );
+    const findings = reportFindings(machine, results, { showWouldFix });
+    const lines = collapseFindings(findings, verbose);
+    for (const text of renderLines(lines, verbose)) emitText(text);
     const machineNotes = machine.filter(c => isReportable(c) && !isFailure(c)).length;
+    const fixFirst = fixFirstLines(lines);
+    // The list's heading rides on the summary line, so a short run stays short.
+    const tail = fixFirst.length > 0 ? `. ${fixFirst[0]}` : "";
     if (results.length === 0 && machineFailed === 0) {
       // "all clean" is a claim; a WARN or SKIP line printed above contradicts it.
       emitText(
@@ -458,24 +516,13 @@ export function doctor(opts: DoctorOptions): void {
           : `doctor: no failures (${machineNotes} warning, info or skipped finding(s) above)`,
       );
     } else {
-      for (const r of results) {
-        const tag = r.fixed ? " [fixed]" : showWouldFix ? " [would fix]" : "";
-        emitText(`  ${repoIsFailing(r) ? "FAIL" : "WARN"} ${r.workingTree}  code=${r.code}${tag}`);
-        if (r.bypassedRepoHooks.length > 0) {
-          emitText(`       repo-local hooks that never run: ${r.bypassedRepoHooks.join(", ")}`);
-        }
-        for (const c of r.checks) {
-          if (!isReportable(c)) continue;
-          emitText(`       ${checkLabel(c)} ${c.code} — ${c.detail}`);
-          if (c.fix !== undefined) emitText(`            fix: ${c.fix}`);
-        }
-      }
       emitText(
         showWouldFix
-          ? `doctor: ${failed} failing, ${fixedCount} fixed (pass --fix --yes to apply)`
-          : `doctor: ${failed} failing, ${fixedCount} fixed`,
+          ? `doctor: ${failed} failing, ${fixedCount} fixed (pass --fix --yes to apply)${tail}`
+          : `doctor: ${failed} failing, ${fixedCount} fixed${tail}`,
       );
     }
+    for (const text of fixFirst.slice(1)) emitText(text);
   }
 
   if (failed > 0) process.exit(1);

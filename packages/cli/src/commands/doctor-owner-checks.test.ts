@@ -14,13 +14,14 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
-import { pinnedHookCommand, type Registry } from "@de-otio/repo-aegis-core";
+import { parseRegistryText, pinnedHookCommand, renderHookScript, type Registry } from "@de-otio/repo-aegis-core";
 import { doctor } from "./doctor.js";
 import {
   findRealGh,
   ghLocationReason,
   ghOwnerChecks,
   parseAuthStatusText,
+  ownerIdentityChecks,
   registryStateChecks,
   untrustedDirReason,
   untrustedGhReason,
@@ -215,6 +216,7 @@ describe("ghOwnerChecks — several accounts", () => {
     const bob = logins.find(c => c.account === "bob")!;
     assert.equal(alice.ok, true);
     assert.equal(bob.ok, false);
+    assert.equal(bob.severity, "warn", "an unregistered login is a warning (P3-C): rule h refusing it is the designed outcome");
     assert.match(bob.detail, /gh account bob/);
     assert.match(bob.fix ?? "", /engagements add --personal-org bob/);
   });
@@ -225,6 +227,9 @@ describe("ghOwnerChecks — several accounts", () => {
     const alice = members.find(c => c.account === "alice")!;
     const bob = members.find(c => c.account === "bob")!;
     assert.equal(alice.ok, false);
+    assert.equal(alice.severity, "info", "X-9: the fix says `or leave it`, so it is a count, not a failure");
+    assert.deepEqual(alice.names, ["side-project-org"]);
+    assert.match(alice.detail, /belongs to 1 organisation\(s\)/);
     assert.match(alice.fix ?? "", /side-project-org/);
     assert.doesNotMatch(alice.fix ?? "", /stranger-org|customer-b-org|acme-corp/);
     assert.equal(bob.ok, false);
@@ -369,6 +374,7 @@ describe("ghOwnerChecks — gh absent, logged out, or unlistable", () => {
     assert.match(login[0]!.detail, /only the active account was checked/);
     const member = byCode(checks, "GH_MEMBER_ORG_UNREGISTERED")[0]!;
     assert.equal(member.ok, false);
+    assert.equal(member.severity, "info");
     assert.match(member.detail, /only the active account was checked/);
     assert.match(member.fix ?? "", /other-org/);
     assert.equal(stub.switched(), false);
@@ -592,10 +598,12 @@ describe("doctor — owner checks end to end", () => {
     const w = makeWorld("redaction", REGISTRY_YAML, stub.path);
     satisfyMachineChecks(w);
 
-    const text = runDoctor(docOpts(w), w.env);
-    assert.equal(text.exitCode, 1, "an unregistered gh login is a failure");
-    assert.match(text.stdout, /FAIL GH_LOGIN_UNREGISTERED/);
-    assert.match(text.stdout, /FAIL GH_MEMBER_ORG_UNREGISTERED/);
+    // --verbose: the fix lines are where the org names are allowed to appear.
+    const text = runDoctor({ ...docOpts(w), verbose: true }, w.env);
+    assert.equal(text.exitCode, undefined, "an unregistered gh login is a warning (P3-C), not a failure");
+    assert.match(text.stdout, /WARN GH_LOGIN_UNREGISTERED/);
+    assert.match(text.stdout, /INFO GH_MEMBER_ORG_UNREGISTERED/);
+    assert.doesNotMatch(text.stdout, /FAIL GH_/);
     assert.match(text.stdout, /INFO REGISTERED_ORG_NOT_MEMBER/);
 
     const orgNames = ["acme-corp", "side-project-org", "stranger-org", "customer-b-org", "old-engagement-org"];
@@ -665,7 +673,7 @@ describe("doctor — owner checks end to end", () => {
     const r = runDoctor(docOpts(w), w.env);
     assert.equal(r.exitCode, 1);
     assert.match(r.stdout, /FAIL REGISTRY_UNREADABLE/);
-    assert.match(r.stdout, /fix: upgrade repo-aegis \(this one reads schemaVersion up to 3\)/);
+    assert.match(r.stdout, /Fix these first:\n\s+upgrade repo-aegis \(this one reads schemaVersion up to 3\)/);
     assert.equal(stub.calls(), "");
   });
 
@@ -674,7 +682,7 @@ describe("doctor — owner checks end to end", () => {
     const w = makeWorld("enc-registry", null, stub.path);
     satisfyMachineChecks(w);
     writeFileSync(`${w.registryFile}.age`, "age-encryption.org/v1\n");
-    const r = runDoctor(docOpts(w), w.env);
+    const r = runDoctor({ ...docOpts(w), verbose: true }, w.env);
     assert.match(r.stdout, /WARN REGISTRY_ENCRYPTED/);
     assert.doesNotMatch(r.stdout, /FAIL REGISTRY_/);
     assert.match(r.stdout, /fix: repo-aegis registry decrypt/);
@@ -692,7 +700,7 @@ describe("doctor — owner checks end to end", () => {
     const r = runDoctor(docOpts(w), w.env);
     assert.equal(r.exitCode, 1);
     assert.match(r.stdout, /FAIL OWNERS_UNDECLARED/);
-    assert.match(r.stdout, /fix: .*from their own terminal/);
+    assert.match(r.stdout, /Fix these first:\n\s+repo-aegis engagements add .*from their own terminal/);
   });
 
   it("warnings and info never change the exit code", () => {
@@ -1086,5 +1094,162 @@ describe("ghOwnerChecks — a redirected gh never reads another account's token"
     const { asked } = run(stub);
     assert.equal(asked, false);
     assert.doesNotMatch(stub.calls(), /--user/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// X-9 / P3-C: severities and a short report
+// ---------------------------------------------------------------------------
+
+describe("doctor — recalibrated severities (X-9, P3-C)", () => {
+  function satisfyGuard(w: World): void {
+    writeFileSync(
+      join(w.claudeHome, "settings.json"),
+      JSON.stringify({
+        // A bare `Edit` deny rule covers every protected path, so REGISTRY_AGENT_WRITABLE stays out of these cases.
+        permissions: { deny: ["Edit"] },
+        hooks: {
+          PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: pinnedHookCommand(currentEnforcementPin(), "hook guard-egress --agent claude") }] }],
+        },
+      }),
+    );
+  }
+
+  /** The repo-aegis hook scripts, rendered for this install's pin, in `<aegis home>/hooks`. */
+  function installHooks(w: World): string {
+    const dir = join(w.aegisHome, "hooks");
+    mkdirSync(dir, { recursive: true });
+    for (const name of ["pre-commit", "pre-push"] as const) {
+      writeFileSync(join(dir, name), renderHookScript(name, currentEnforcementPin()), { mode: 0o755 });
+      chmodSync(join(dir, name), 0o755);
+    }
+    // The machine's global git config: the hooks directory and `push.default = nothing`.
+    writeFileSync(w.env["GIT_CONFIG_GLOBAL"]!, `[push]\n\tdefault = nothing\n[core]\n\thooksPath = ${dir}\n`);
+    return dir;
+  }
+
+  function repo(w: World, name: string, cfg: Record<string, string>): void {
+    const dir = join(w.scanRoot, name);
+    mkdirSync(dir, { recursive: true });
+    const env = { ...process.env, ...w.env, PATH: process.env["PATH"] ?? "" };
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir, env });
+    for (const [k, v] of Object.entries(cfg)) execFileSync("git", ["config", "--local", k, v], { cwd: dir, env });
+  }
+
+  const emptyPath = (): string => {
+    const dir = join(root, "empty-path-sev");
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+  const noGhEnv = (w: World): Record<string, string> => ({
+    ...w.env,
+    PATH: `${join(w.aegisHome, "bin")}${delimiter}${emptyPath()}${delimiter}${join(root, "git-only")}`,
+  });
+
+  it("a fresh install plus a third-party clone gives 0 FAIL (P3-C)", () => {
+    const w = makeWorld("p3c-fresh", "always_block: []\npersonalOrgs:\n  - alice\nengagements: []\n", emptyPath());
+    satisfyGuard(w);
+    const hooks = installHooks(w);
+    // Someone else's repository: an org the person never registered, no class, no cached visibility.
+    repo(w, "third-party-clone", { "remote.origin.url": "git@github.com:third-party-org/lib.git", "core.hooksPath": hooks });
+
+    const r = runDoctor(docOpts(w), noGhEnv(w));
+    assert.doesNotMatch(r.stdout, /^\s+FAIL /m, r.stdout);
+    assert.equal(r.exitCode, undefined, r.stdout);
+    assert.match(r.stdout, /WARN CLASS_VISIBILITY_UNRESOLVED/);
+    assert.match(r.stdout, /WARN PERSONAL_ORG_UNREGISTERED/);
+  });
+
+  it("a hook that is not installed still FAILs (P3-C)", () => {
+    const w = makeWorld("p3c-nohook", "always_block: []\npersonalOrgs:\n  - alice\nengagements: []\n", emptyPath());
+    satisfyGuard(w);
+    writeFileSync(w.env["GIT_CONFIG_GLOBAL"]!, "[push]\n\tdefault = nothing\n");
+    repo(w, "hookless", { "remote.origin.url": "git@github.com:alice/x.git" });
+
+    const r = runDoctor(docOpts(w), noGhEnv(w));
+    assert.equal(r.exitCode, 1, r.stdout);
+    assert.match(r.stdout, /^\s+FAIL .*code=HOOKS_/m);
+    assert.match(r.stdout, /Fix these first:/);
+  });
+
+  it("OWNER_IDENTITY_UNMAPPED is reported only when the registry defines an identity (P3-C)", () => {
+    const noIdentity = ownerIdentityChecks(parseRegistryText("schemaVersion: 3\npersonalOrgs:\n  - alice\nengagements: []\n"));
+    assert.deepEqual(noIdentity, []);
+    const withIdentity = ownerIdentityChecks(
+      parseRegistryText(
+        "schemaVersion: 3\nidentities:\n  me: { kind: gh-login, login: alice }\npersonalOrgs:\n  - alice\n  - bob\nengagements: []\n",
+      ),
+    );
+    assert.deepEqual(withIdentity.flatMap(c => c.names ?? []), ["alice", "bob"]);
+  });
+
+  it("a run shaped like the 0.13.2 motivating one: at most 3 FAIL and at most 10 lines, with the repeats collapsed", () => {
+    // 14 checkouts with a repo-local core.hooksPath equal to the global one (info), three of them unclassified (warn);
+    // an unregistered gh login and an org nobody registered; an identity registry with requireIdentity and an unmapped owner.
+    const stub = makeStub([{ login: "alice", token: TOKEN_ALICE, orgs: ["example-org", "stranger-org"] }]);
+    const registryYaml = [
+      "schemaVersion: 3",
+      "identities:",
+      "  me: { kind: gh-login, login: alice-person }",
+      "requireIdentity: true",
+      "personalOrgs:",
+      "  - { name: example-org, person: me }",
+      "engagements:",
+      "  - id: customer-a",
+      "    name: Customer A",
+      "    markers:",
+      "      - customer-a-marker",
+      "    githubOrgs:",
+      "      - customer-a-org",
+      "",
+    ].join("\n");
+    const w = makeWorld("x9-motivating", registryYaml, stub.path);
+    satisfyGuard(w);
+    const hooks = installHooks(w);
+    for (let i = 0; i < 14; i++) {
+      const classified = i >= 3;
+      repo(w, `repo-${String(i).padStart(2, "0")}`, {
+        "remote.origin.url": "git@github.com:example-org/x.git",
+        "core.hooksPath": hooks,
+        ...(classified ? { "repo-aegis.class": "private-strict", "repo-aegis.visibility": "private" } : {}),
+      });
+    }
+
+    const r = runDoctor(docOpts(w), w.env);
+    const lines = r.stdout.split("\n").filter(l => l !== "");
+    const fails = lines.filter(l => /^\s+FAIL /.test(l));
+    assert.ok(fails.length <= 3, `FAIL lines: ${fails.join(" | ")}`);
+    assert.ok(lines.length <= 10, `${lines.length} lines:\n${r.stdout}`);
+    assert.match(r.stdout, /HOOKS_PATH_LOCAL_DUPLICATE: 14 repositories \(repo-aegis doctor --json lists them\)/);
+    assert.match(r.stdout, /CLASS_VISIBILITY_UNRESOLVED: 3 repositories/);
+    assert.match(r.stdout, /WARN GH_LOGIN_UNREGISTERED/);
+    assert.match(r.stdout, /INFO GH_MEMBER_ORG_UNREGISTERED/);
+    assert.match(r.stdout, /FAIL OWNER_IDENTITY_UNMAPPED/);
+    assert.doesNotMatch(r.stdout, /TAAAD_AGENT_WRITABLE/, "no owner maps to an App, so taaad is not mentioned");
+    assert.match(r.stdout, /Fix these first:\n\s+map each owner to an identity/);
+    assert.equal(r.exitCode, 1, "requireIdentity with an unmapped owner is refused today, so it still fails the run");
+  });
+
+  it("--verbose and --json still give every item the default text collapses", () => {
+    const w = makeWorld("x9-verbose", "always_block: []\npersonalOrgs:\n  - example-org\nengagements: []\n", emptyPath());
+    satisfyGuard(w);
+    const hooks = installHooks(w);
+    for (let i = 0; i < 3; i++) {
+      repo(w, `repo-${i}`, {
+        "remote.origin.url": "git@github.com:example-org/x.git",
+        "core.hooksPath": hooks,
+        "repo-aegis.class": "private-strict",
+        "repo-aegis.visibility": "private",
+      });
+    }
+    const plain = runDoctor(docOpts(w), noGhEnv(w));
+    assert.match(plain.stdout, /HOOKS_PATH_LOCAL_DUPLICATE: 3 repositories/);
+    const verbose = runDoctor({ ...docOpts(w), verbose: true }, noGhEnv(w));
+    assert.equal(verbose.stdout.split("\n").filter(l => l.includes("HOOKS_PATH_LOCAL_DUPLICATE —")).length, 3);
+    assert.match(verbose.stdout, /fix: git config --local --unset core\.hooksPath/);
+    const json = JSON.parse(runDoctor({ ...docOpts(w), json: true }, noGhEnv(w)).stdout) as {
+      results: Array<{ checks: Array<{ code: string }> }>;
+    };
+    assert.equal(json.results.flatMap(x => x.checks).filter(c => c.code === "HOOKS_PATH_LOCAL_DUPLICATE").length, 3);
   });
 });

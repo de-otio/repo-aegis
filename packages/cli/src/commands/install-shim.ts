@@ -383,6 +383,8 @@ export function checkShim(env: NodeJS.ProcessEnv = process.env): DoctorCheck[] {
       {
         code: "SHIM_STALE",
         ok: false,
+        // WARN: the older shim is first on PATH and still runs; it is out of date, not absent or shadowed.
+        severity: "warn",
         detail: "the `gh` shim on PATH was written by an earlier repo-aegis release and differs from this one's",
         fix: "repo-aegis install shim",
       },
