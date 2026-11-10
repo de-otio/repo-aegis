@@ -6,7 +6,7 @@
 //   repo-aegis identity add <name> --gh-login <login> | --app <slug>
 //   repo-aegis identity remove <name>            (refused while referenced)
 //   repo-aegis identity require --off
-//   repo-aegis engagements set-identity <id> [--person <name>] [--agent <name>] [--clear]
+//   repo-aegis engagements set-identity <id> [--person <name|none>] [--agent <name|none>] [--clear]
 //   repo-aegis engagements set-identity --personal-org <org> [...same options]
 //
 // Every one is TTY-gated like `engagements add --personal-org` and is on the
@@ -60,6 +60,13 @@ export interface SetIdentityOptions extends BaseOptions {
   agent?: string;
   clear?: boolean;
 }
+
+/**
+ * `--person none` / `--agent none` clear that one column. It is a reserved word, not a login: `--person` and
+ * `--agent` take registry-local identity NAMES (IDENTITY_NAME_REGEX), never a GitHub login or App slug, and
+ * "none" satisfies that regex, so `identity add` refuses it as a name (else it could never be mapped).
+ */
+export const CLEAR_COLUMN_WORD = "none";
 
 function audit(change: string): void {
   try {
@@ -123,6 +130,9 @@ export function identityAdd(name: string | undefined, opts: IdentityAddOptions):
   const usage = (error: string): never => failUsage(error, opts);
   if (!IDENTITY_NAME_REGEX.test(identity)) {
     usage("identity name must match ^[a-z0-9][a-z0-9-]{0,62}$ (lowercase, digits, hyphens; no leading hyphen)");
+  }
+  if (identity === CLEAR_COLUMN_WORD) {
+    usage(`"${CLEAR_COLUMN_WORD}" is reserved (the mapping commands use it to clear a column); pick another name`);
   }
   if ((opts.ghLogin === undefined) === (opts.app === undefined)) {
     usage("identity add takes exactly one of --gh-login <login> (a person) or --app <slug> (a GitHub App)");
@@ -282,7 +292,8 @@ function checkReference(doc: Doc, column: "person" | "agent", name: string): voi
 /**
  * `engagements set-identity`. The target is an engagement id, or a personal org with `--personal-org`
  * (chosen to mirror `engagements add --personal-org`: personal orgs have no command group of their own).
- * `--person` / `--agent` set that column and leave the other alone; `--clear` removes both.
+ * `--person` / `--agent` set that column and leave the other alone; `--person none` / `--agent none` clear
+ * just that column (the other is untouched); `--clear` removes both.
  */
 export function engagementsSetIdentity(id: string | undefined, opts: SetIdentityOptions): void {
   const orgArg = opts.personalOrg;
@@ -298,17 +309,22 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
   if (orgArg === undefined && (id === undefined || id === "")) {
     failUsage("engagements set-identity needs an <engagement-id> (or --personal-org <org>)", opts);
   }
-  const person = opts.person?.trim().toLowerCase();
-  const agent = opts.agent?.trim().toLowerCase();
-  if (opts.clear === true && (person !== undefined || agent !== undefined)) {
+  const personArg = opts.person?.trim().toLowerCase();
+  const agentArg = opts.agent?.trim().toLowerCase();
+  if (opts.clear === true && (personArg !== undefined || agentArg !== undefined)) {
     failUsage("--clear cannot be combined with --person or --agent", opts);
   }
-  if (opts.clear !== true && person === undefined && agent === undefined) {
-    failUsage("give --person <name>, --agent <name> or --clear", opts);
+  if (opts.clear !== true && personArg === undefined && agentArg === undefined) {
+    failUsage(`give --person <name>, --agent <name> or --clear (\`none\` as the name clears just that column)`, opts);
   }
-  for (const [col, v] of [["person", person], ["agent", agent]] as const) {
+  for (const [col, v] of [["person", personArg], ["agent", agentArg]] as const) {
     if (v !== undefined && !IDENTITY_NAME_REGEX.test(v)) failUsage(`--${col}: not a valid identity name`, opts);
   }
+  // Per column: a string sets it, null clears it, undefined leaves it. `--clear` is both columns null.
+  const column = (v: string | undefined): ColumnEdit => (opts.clear === true || v === CLEAR_COLUMN_WORD ? null : v);
+  const person = column(personArg);
+  const agent = column(agentArg);
+  const sets = typeof person === "string" || typeof agent === "string";
   const org = orgArg?.trim().toLowerCase();
   if (org !== undefined && !ORG_NAME_REGEX.test(org)) failUsage("--personal-org: not a valid org name", opts);
 
@@ -316,25 +332,23 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
   const result = withRegistryLock(opts, () => {
     const doc = loadDoc(path);
     const ownersBefore = ownerCount(doc);
-    if (opts.clear !== true) {
-      if (person !== undefined) checkReference(doc, "person", person);
-      if (agent !== undefined) checkReference(doc, "agent", agent);
-    }
+    if (typeof person === "string") checkReference(doc, "person", person);
+    if (typeof agent === "string") checkReference(doc, "agent", agent);
     let changed = false;
     if (org !== undefined) {
-      changed = editPersonalOrg(doc, org, person, agent, opts.clear === true);
+      changed = editPersonalOrg(doc, org, person, agent);
     } else {
       const node = findEngagementNode(doc, id!);
       if (node === null) throw new RegistryCliError("ENGAGEMENT_NOT_FOUND", `engagement "${id}" not found`);
-      if (opts.clear !== true && personalOrgItemNames(node).length === 0) {
+      if (sets && personalOrgItemNames(node).length === 0) {
         throw new RegistryCliError("ENGAGEMENT_HAS_NO_ORGS", `engagement "${id}" has no githubOrgs, so an identity would map nothing; add an org first`);
       }
-      changed = editMapColumns(node, person, agent, opts.clear === true);
+      changed = editMapColumns(node, person, agent);
     }
-    const warning = person !== undefined && opts.clear !== true ? identityLoginWarning(doc, person) : null;
+    const warning = typeof person === "string" ? identityLoginWarning(doc, person) : null;
     if (!changed) return { changed: false, firstSet: false, render: null, warning };
     let firstSet = false;
-    if (opts.clear !== true) {
+    if (sets) {
       ensureSchemaVersion(doc, REGISTRY_IDENTITIES_MIN_VERSION, opts);
       if (doc.get("requireIdentity") === undefined) {
         doc.set("requireIdentity", true);
@@ -344,7 +358,7 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
     commitRegistry(doc, path, { ...opts, ownersBefore, command: { kind: "identity-change" } });
     return { changed: true, firstSet, render: renderMarkers(loadRegistry(path)), warning };
   });
-  if (result.changed) audit(opts.clear === true ? "set-identity-clear" : "set-identity");
+  if (result.changed) audit(sets ? "set-identity" : "set-identity-clear");
   const target = org !== undefined ? `personal org ${org}` : `engagement ${id}`;
   if (opts.json) {
     emitJson({
@@ -356,11 +370,17 @@ export function engagementsSetIdentity(id: string | undefined, opts: SetIdentity
     });
     return;
   }
-  if (!result.changed) emitText(`${target}: identities unchanged`);
-  else emitText(`${target}: identities ${opts.clear === true ? "cleared" : "set"}`);
+  if (!result.changed) {
+    emitText(`${target}: identities unchanged${opts.clear === true ? "" : ` (${UNCHANGED_HINT})`}`);
+  } else emitText(`${target}: identities ${sets ? "set" : "cleared"}`);
   if (result.firstSet) emitText("requireIdentity set to true (turn it off with `repo-aegis identity require --off`)");
   if (result.warning !== null) process.stderr.write(`repo-aegis: ${result.warning}\n`);
 }
+
+/** One column of a call: a name sets it, null clears it, undefined leaves it alone. */
+type ColumnEdit = string | null | undefined;
+
+const UNCHANGED_HINT = `to clear one column use \`--agent ${CLEAR_COLUMN_WORD}\` or \`--person ${CLEAR_COLUMN_WORD}\`; to clear both use \`--clear\``;
 
 /** The `githubOrgs` of an engagement node. */
 function personalOrgItemNames(node: YAMLMap): string[] {
@@ -368,18 +388,19 @@ function personalOrgItemNames(node: YAMLMap): string[] {
   return isSeq(seq) ? seq.items.map(strOf).filter((x): x is string => x !== null) : [];
 }
 
-/** Set or clear `person` / `agent` on a map node. True when the node changed. */
-function editMapColumns(node: YAMLMap, person: string | undefined, agent: string | undefined, clear: boolean): boolean {
+/** Set (string), clear (null) or leave (undefined) `person` / `agent` on a map node. True when the node changed. */
+function editMapColumns(node: YAMLMap, person: ColumnEdit, agent: ColumnEdit): boolean {
   let changed = false;
-  const apply = (col: "person" | "agent", v: string | undefined): void => {
-    if (clear) {
+  const apply = (col: "person" | "agent", v: ColumnEdit): void => {
+    if (v === undefined) return;
+    if (v === null) {
       if (node.has(col)) {
         node.delete(col);
         changed = true;
       }
       return;
     }
-    if (v === undefined || strOf(node.get(col)) === v) return;
+    if (strOf(node.get(col)) === v) return;
     node.set(col, v);
     changed = true;
   };
@@ -393,14 +414,14 @@ function editMapColumns(node: YAMLMap, person: string | undefined, agent: string
  * (flow style, as in the plan), and an object entry left with only its name becomes a plain string again,
  * so an unmapped org looks exactly as it did in schemaVersion 2. Comments on the entry are kept.
  */
-function editPersonalOrg(doc: Doc, org: string, person: string | undefined, agent: string | undefined, clear: boolean): boolean {
+function editPersonalOrg(doc: Doc, org: string, person: ColumnEdit, agent: ColumnEdit): boolean {
   const seq = doc.get("personalOrgs");
   if (!isSeq(seq)) throw new RegistryCliError("PERSONAL_ORG_NOT_FOUND", `personal org "${org}" is not registered (engagements add --personal-org registers one)`);
   const idx = (seq as YAMLSeq).items.findIndex(item => personalOrgItemName(item) === org);
   if (idx < 0) throw new RegistryCliError("PERSONAL_ORG_NOT_FOUND", `personal org "${org}" is not registered (engagements add --personal-org registers one)`);
   const item = seq.items[idx];
   if (isMap(item)) {
-    const changed = editMapColumns(item, person, agent, clear);
+    const changed = editMapColumns(item, person, agent);
     if (item.items.length === 1 && item.has("name")) {
       const plain = new Scalar(org);
       plain.comment = item.comment ?? null;
@@ -409,10 +430,11 @@ function editPersonalOrg(doc: Doc, org: string, person: string | undefined, agen
     }
     return changed;
   }
-  if (clear) return false;
+  // A plain-string entry has no columns, so there is nothing to clear; only a set turns it into an object.
+  if (typeof person !== "string" && typeof agent !== "string") return false;
   const value: Record<string, string> = { name: org };
-  if (person !== undefined) value["person"] = person;
-  if (agent !== undefined) value["agent"] = agent;
+  if (typeof person === "string") value["person"] = person;
+  if (typeof agent === "string") value["agent"] = agent;
   const node = flowMap(doc, value);
   if (item instanceof Scalar) {
     node.comment = item.comment ?? null;

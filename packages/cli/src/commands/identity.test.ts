@@ -360,6 +360,108 @@ describe("engagements set-identity", () => {
     assert.equal(load(env).identityMap!.get("mapped-org")!.person!.name, "me", "other mappings untouched");
   });
 
+  it("--agent none clears only the agent column; --person none clears only the person column", () => {
+    const env = setup(V3);
+    const a = set(env, "customer-a", { agent: "none" });
+    assert.equal(a.exitCode, undefined, a.stderr);
+    assert.equal(JSON.parse(a.stdout).changed, true);
+    const m = load(env).identityMap!.get("customer-a-org")!;
+    assert.equal(m.person!.name, "work");
+    assert.equal(m.agent, undefined);
+    assert.doesNotMatch(read(env), /agent: work-bot/);
+
+    const env2 = setup(V3);
+    const p = set(env2, "customer-a", { person: "none" });
+    assert.equal(p.exitCode, undefined, p.stderr);
+    const m2 = load(env2).identityMap!.get("customer-a-org")!;
+    assert.equal(m2.person, undefined);
+    assert.equal(m2.agent!.name, "work-bot");
+    // other owners are untouched
+    assert.equal(load(env2).identityMap!.get("mapped-org")!.person!.name, "me");
+  });
+
+  it("`none` is case-insensitive and can be combined with a set on the other column (move an owner from App to person)", () => {
+    const env = setup(V3);
+    const r = set(env, "customer-a", { person: "me", agent: "NONE" });
+    assert.equal(r.exitCode, undefined, r.stderr);
+    const m = load(env).identityMap!.get("customer-a-org")!;
+    assert.equal(m.person!.name, "me");
+    assert.equal(m.agent, undefined);
+  });
+
+  it("both none is the same as --clear (the entry ends with no identity at all)", () => {
+    const env = setup(V3);
+    const r = set(env, "customer-a", { person: "none", agent: "none" });
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.equal(JSON.parse(r.stdout).changed, true);
+    assert.equal(load(env).identityMap!.has("customer-a-org"), false);
+    const env2 = setup(V3);
+    set(env2, "customer-a", { clear: true });
+    assert.equal(read(env), read(env2));
+  });
+
+  it("`none` clears a personal org column; clearing the last one returns the entry to a plain string", () => {
+    const env = setup(V3);
+    set(env, undefined, { personalOrg: "mapped-org", agent: "none" });
+    const m = load(env).identityMap!.get("mapped-org")!;
+    assert.equal(m.person!.name, "me");
+    assert.equal(m.agent, undefined);
+    set(env, undefined, { personalOrg: "mapped-org", person: "none" });
+    assert.equal(load(env).identityMap!.has("mapped-org"), false);
+    assert.deepEqual(load(env).personalOrgs, ["plain-org", "mapped-org"]);
+  });
+
+  it("--agent none on an entry with no agent column is unchanged, writes nothing, and says how to clear", () => {
+    const env = setup(V3);
+    const before = read(env);
+    const r = set(env, "customer-b", { agent: "none" });
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.equal(JSON.parse(r.stdout).changed, false);
+    assert.equal(read(env), before);
+    // a plain-string personal org has no columns either
+    const plain = set(env, undefined, { personalOrg: "plain-org", person: "none" });
+    assert.equal(JSON.parse(plain.stdout).changed, false);
+    assert.equal(read(env), before);
+    // none on a v2 file with nothing mapped does not raise the schema version
+    const v2 = setup(V2);
+    const v2before = read(v2);
+    set(v2, "customer-a", { agent: "none" });
+    assert.equal(read(v2), v2before);
+  });
+
+  it("the text message for an unchanged result names `--agent none`, `--person none` and `--clear`", () => {
+    const env = setup(V3);
+    const r = set(env, "customer-a", { person: "work", json: false });
+    assert.equal(r.exitCode, undefined, r.stderr);
+    assert.match(r.stdout, /customer-a: identities unchanged/);
+    assert.match(r.stdout, /--agent none/);
+    assert.match(r.stdout, /--person none/);
+    assert.match(r.stdout, /--clear/);
+    // a successful change does not carry the hint
+    const changed = set(env, "customer-a", { person: "me", json: false });
+    assert.match(changed.stdout, /identities set/);
+    assert.doesNotMatch(changed.stdout, /--clear/);
+  });
+
+  it("`none` is never an identity name: identity add refuses it, so a mapping can never be shadowed", () => {
+    const env = setup(V2);
+    const before = read(env);
+    const r = run(env, () => identityAdd("none", { ghLogin: "alice", registryPath: env.registryPath, stderrIsTTY: true, pathEnv: "", claudeHome: NO_CLAUDE, json: true }));
+    assert.equal(r.exitCode, 2);
+    assert.equal(JSON.parse(r.stderr).code, "USAGE");
+    assert.match(r.stderr, /reserved/);
+    assert.equal(read(env), before);
+  });
+
+  it("`none` clearing needs the same terminal as every set-identity call", () => {
+    const env = setup(V3);
+    const before = read(env);
+    const r = run(env, () => engagementsSetIdentity("customer-a", { agent: "none", registryPath: env.registryPath, stderrIsTTY: false }));
+    assert.equal(r.exitCode, 2);
+    assert.match(r.stderr, /IDENTITY_CHANGE_NEEDS_TTY/);
+    assert.equal(read(env), before);
+  });
+
   it("a personal org: a plain entry becomes an object (comment kept), and clearing returns it to a plain string", () => {
     const env = setup(V3);
     set(env, undefined, { personalOrg: "plain-org", person: "me", agent: "me-bot" });

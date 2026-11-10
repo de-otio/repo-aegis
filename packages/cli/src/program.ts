@@ -189,8 +189,8 @@ export async function buildProgram(): Promise<Command> {
       "map an engagement's orgs (or, with --personal-org, one personal org) to GitHub identities: --person is a gh-login identity, --agent a github-app identity. The first one sets requireIdentity. Needs a terminal; an agent must not run it.",
     )
     .option("--personal-org <org>", "target a personal org instead of an engagement <id>")
-    .option("--person <name>", "identity name acting when a person is present (kind gh-login)")
-    .option("--agent <name>", "identity name acting when no person is present (kind github-app)")
+    .option("--person <name>", "identity name acting when a person is present (kind gh-login); `none` clears just this column")
+    .option("--agent <name>", "identity name acting when no person is present (kind github-app); `none` clears just this column")
     .option("--clear", "remove both identities from the target")
     .action(async (id: string | undefined, opts, cmd) => {
       const { engagementsSetIdentity } = await import("./commands/identity.js");
