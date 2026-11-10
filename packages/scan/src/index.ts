@@ -15,7 +15,7 @@ import { encryptFile, decryptFile, writeBufferTo, AgeNotFoundError, AgeError } f
 import { runSemanticSweep, type SemanticCandidate } from "./semantic-sweep.js";
 import { loadAllProfiles } from "./profile-loader.js";
 import { rebuildProfiles } from "./rebuild-profiles.js";
-import { loadRegistry, repoAegisHome } from "@de-otio/repo-aegis-core";
+import { loadRegistry, repoAegisHome, REFUSAL_GUIDE, withRefusalTrailer } from "@de-otio/repo-aegis-core";
 import type { OllamaConfig } from "@de-otio/repo-aegis-llm";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -80,7 +80,9 @@ function splitOwnerRepo(full: string): { owner: string; repo: string } | null {
 }
 
 function emitError(payload: { code: string; error: string; details?: unknown }, exitCode = 2): never {
-  process.stderr.write(JSON.stringify(payload) + "\n");
+  // X-10: a code in the shared refusal table ends with its version, next step and person-only answer.
+  const shown = REFUSAL_GUIDE[payload.code] !== undefined ? { ...payload, error: withRefusalTrailer(payload.code, payload.error) } : payload;
+  process.stderr.write(JSON.stringify(shown) + "\n");
   process.exit(exitCode);
 }
 

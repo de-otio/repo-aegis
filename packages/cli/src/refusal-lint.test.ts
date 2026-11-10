@@ -58,7 +58,16 @@ const NOT_REFUSAL_UNIONS = new Set(["DoctorCheckCode", "HookStateCode"]);
  *  F. any code-shaped literal ending `_NEEDS_TTY`, `_NEEDS_HUMAN`, `_NEEDS_APP`, `_REFUSED`;
  *  G. a `code: "X"` literal followed within 400 characters by a `reason`, `why` or `fixes` key (a refusal object);
  *  H. the first argument of `auditRefusal(` / `pushRefusal(`;
- *  I. `action: "refuse"` followed closely by `code: "X"` (hook-policy's refuse decision).
+ *  I. `action: "refuse"` followed closely by `code: "X"` (hook-policy's refuse decision);
+ *  J. the `code:` of every `emitError(` call, K. an error class's own `readonly code`, L. a code given to an
+ *     error class constructor: the plain CLI errors (`PAUSE_TOO_LONG`, `LOCK_TIMEOUT`, `MIGRATION_NOT_CONFIRMED`, …).
+ *     They stop a person as hard as a guard refusal, so they get a next step and a guide row too.
+ *
+ * NOT covered, on purpose: `repo-aegis doctor` findings (`DoctorCheckCode` and the `doctor-*-checks` files). A
+ * finding is not a refusal: nothing is blocked, and each carries its own `fix` line (printed by `doctor`, and
+ * documented in the same guide table for `explain`). Hook state codes (`HookStateCode`) are likewise status, not
+ * refusals. `audit` finding codes (`detail.code`) are findings too, except `PUBLISHED_ARCHIVE_ESCAPE`, whose
+ * refusal to scan is covered by rule G.
  */
 export function deriveRefusalCodes(files: { path: string; text: string }[]): Map<string, string> {
   const found = new Map<string, string>();
@@ -103,6 +112,23 @@ export function deriveRefusalCodes(files: { path: string; text: string }[]): Map
     for (const m of t.matchAll(new RegExp(`\\b(?:auditRefusal|pushRefusal)\\(\\s*"(${CODE})"`, "g"))) add(m[1], f.path);
     // I: a refuse decision object
     for (const m of t.matchAll(new RegExp(`action:\\s*"refuse"[^]{0,80}?code:\\s*"(${CODE})"`, "g"))) add(m[1], f.path);
+    // J: every code an `emitError(` call can print (the plain CLI errors: exit 2 with `{ code, error }`). The first
+    //    `code:` of the call's argument, as a literal (`USAGE` too: a single word) or a constant. A call whose code
+    //    is `err.code` is covered by K and L, where that code is declared.
+    const callStarts = [...t.matchAll(/\bemitError\(/g)].map(m => m.index!);
+    callStarts.forEach((start, i) => {
+      const end = Math.min(start + 900, callStarts[i + 1] ?? Infinity);
+      const arg = /\bcode:\s*([A-Za-z_"][A-Za-z0-9_"]*)/.exec(t.slice(start, end));
+      if (arg === null) return;
+      const tok = arg[1]!;
+      const lit = /^"([A-Z][A-Z0-9_]+)"$/.exec(tok);
+      add(lit !== null ? lit[1] : consts.get(tok), f.path);
+    });
+    // K: an error class that declares its own code (`readonly code = "X"`), which `emitError({ code: err.code })` prints.
+    for (const m of t.matchAll(/\breadonly code(?:: [^=;]+)? = "([A-Z][A-Z0-9_]+)"/g)) add(m[1], f.path);
+    for (const m of t.matchAll(/this\.code = "([A-Z][A-Z0-9_]+)"/g)) add(m[1], f.path);
+    // L: a code handed to an error class constructor (`new RegistryCliError("X", …)`, `new GitCredentialInstallError(X, …)`).
+    for (const m of t.matchAll(/\bnew \w*Error\(\s*([A-Z_"][A-Z0-9_"]*)\s*,/g)) add(resolveToken(m[1]!), f.path);
   }
   return found;
 }
@@ -166,6 +192,47 @@ describe("refusal lint (X-10)", () => {
     const once = withRefusalTrailer("PUSH_IMPLICIT_TARGET", "a bare push was refused.");
     assert.ok(once.endsWith("[PUSH_IMPLICIT_TARGET; details: repo-aegis explain PUSH_IMPLICIT_TARGET]"));
     assert.equal(withRefusalTrailer("PUSH_IMPLICIT_TARGET", once), once);
+  });
+
+  it("the scan reads plain CLI errors: an emitError code, a single-word code, an error class's own code, a constructor argument", () => {
+    const fake = [
+      {
+        path: "y.ts",
+        text:
+          'emitError({ code: "FRESH_CLI_ERROR", error: "x" }, opts);\n' +
+          'emitError({ code: "USAGE", error: "y" }, opts);\n' +
+          'class E extends Error { readonly code = "CLASS_OWN_CODE" as const; }\n' +
+          'throw new RegistryCliError("CTOR_CODE", "z");\n' +
+          // a doctor finding is not a refusal: it is never reached by these rules
+          'const finding = { code: "DOCTOR_ONLY_FINDING", severity: "warn", fix: "x" };',
+      },
+    ];
+    assert.deepEqual([...deriveRefusalCodes(fake).keys()].sort(), ["CLASS_OWN_CODE", "CTOR_CODE", "FRESH_CLI_ERROR", "USAGE"]);
+  });
+
+  it("a plain CLI error through the CLI's emitError ends with the shared trailer, and a code outside the table is left alone", async () => {
+    const { emitError } = await import("./format.js");
+    const realWrite = process.stderr.write.bind(process.stderr);
+    const realExit = process.exit;
+    let out = "";
+    // test seam: capture stderr and turn process.exit into a throw
+    process.stderr.write = ((s: string | Uint8Array) => ((out += String(s)), true)) as typeof process.stderr.write;
+    process.exit = ((c?: number) => {
+      throw new Error(`exit ${c}`);
+    }) as typeof process.exit;
+    try {
+      assert.throws(() => emitError({ code: "PAUSE_TOO_LONG", error: "too long" }, { json: true }), /exit 2/);
+      const shown = JSON.parse(out) as { code: string; error: string };
+      assert.ok(shown.error.startsWith("too long repo-aegis "), shown.error);
+      assert.ok(shown.error.endsWith("[PAUSE_TOO_LONG; details: repo-aegis explain PAUSE_TOO_LONG]"), shown.error);
+      assert.match(shown.error, /Only a person can run it: yes\. \[/);
+      out = "";
+      assert.throws(() => emitError({ code: "NOT_A_CODE_IN_THE_TABLE", error: "plain" }, { json: true }), /exit 2/);
+      assert.equal((JSON.parse(out) as { error: string }).error, "plain");
+    } finally {
+      process.stderr.write = realWrite;
+      process.exit = realExit;
+    }
   });
 
   it("the scan itself flags a code that has no entry (mutation check on the derivation)", () => {
