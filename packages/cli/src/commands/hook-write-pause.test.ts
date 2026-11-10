@@ -14,7 +14,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { cliBuilt, runCli } from "../_subprocess-utils.js";
-import { auditLogPath, mintPause, pausePath } from "@de-otio/repo-aegis-core";
+import { decisionLogPath, mintPause, pausePath } from "@de-otio/repo-aegis-core";
 
 const HOUR = 3_600_000;
 const NOTICE = /repo-aegis: paused until \d\d:\d\d(?:, cross-org checks stay on)? \(resume: repo-aegis resume\)/;
@@ -300,16 +300,12 @@ describe("hook scan-after-write under a pause: detection is not paused", { skip:
     assert.match((r.json as Out).systemMessage ?? "", NOTICE);
   });
 
-  it("`paused-allow` is audited only when the pause lifted something: a hit turned advisory, not a clean write", () => {
-    const records = (home: string): Array<{ action: string; details?: Record<string, unknown> }> => {
-      const log = auditLogPath(home);
-      return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(l => l !== "").map(l => JSON.parse(l) as { action: string; details?: Record<string, unknown> }) : [];
+  it("a paused allow is logged only when the pause lifted something: a hit turned advisory, not a clean write", () => {
+    const records = (home: string): Array<Record<string, unknown>> => {
+      const log = decisionLogPath(home);
+      return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(l => l !== "").map(l => JSON.parse(l) as Record<string, unknown>) : [];
     };
-    const withAudit = (): string => {
-      const home = aegisHome("active");
-      writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
-      return home;
-    };
+    const withAudit = (): string => aegisHome("active");
     const cwd = repo("cwd", "git@github.com:alpha-org/src.git", "alpha");
     // a clean file: nothing lifted, so no record
     const cleanHome = withAudit();
@@ -318,13 +314,15 @@ describe("hook scan-after-write under a pause: detection is not paused", { skip:
     const c = runCli(cleanHome, cwd, ["hook", "scan-after-write"], { input: JSON.stringify({ tool_input: { file_path: clean }, cwd }) });
     assert.equal(c.code, 0);
     assert.match((c.json as Out).systemMessage ?? "", NOTICE, "still says it is paused");
-    assert.deepEqual(records(cleanHome).filter(r => r.action === "paused-allow"), []);
+    assert.deepEqual(records(cleanHome).filter(r => r["outcome"] === "notice"), []);
     // a marker hit: the pause turned a block into advice, so one record
     const hitHome = withAudit();
     assert.equal(scan(hitHome, cwd).code, 0);
-    const allowed = records(hitHome).filter(r => r.action === "paused-allow");
+    const allowed = records(hitHome).filter(r => r["outcome"] === "notice");
     assert.equal(allowed.length, 1);
-    assert.deepEqual(allowed[0]!.details, { layer: "hook scan-after-write", verb: "write" });
+    assert.equal(allowed[0]!["layer"], "scan-after-write");
+    assert.equal(allowed[0]!["verb"], "write");
+    assert.equal(allowed[0]!["paused"], "machine");
   });
 
   it("after expiry the hit blocks again (exit 1)", () => {

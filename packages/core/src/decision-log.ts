@@ -124,14 +124,60 @@ function inList<T extends string>(list: readonly T[], v: unknown): T | null {
 }
 
 const okVersion = (v: unknown): string | null => (typeof v === "string" && VERSION_RE.test(v) ? v : null);
-const okCode = (v: unknown): string | null => (typeof v === "string" && CODE_RE.test(v) ? v : null);
+const okCode = (v: unknown): string | null => (typeof v === "string" && CODE_RE.test(v) && !tokenShaped(v) ? v : null);
+
+/** A ref that names a file-system location (`x/Users/jdoe/...`): a path can carry a customer's name, so it is not copied. */
+function pathShaped(v: string): boolean {
+  return /(?:^|\/)(?:Users|home|root|etc|var|tmp|private|opt|usr|mnt|Volumes|srv|proc)\//i.test(v) || /\.(?:txt|md|json|ya?ml|env|pem|key|log)$/i.test(v);
+}
+
+/**
+ * Whether `v` has the shape of a credential: a known token prefix (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`,
+ * `glpat-`, `xox?-`), an AWS access key id anywhere in it, or one long unbroken run of letters and digits (a hash or a secret
+ * pasted as a name; hyphens and underscores break the run, so a long descriptive branch name is fine). A branch can legitimately be named like a token (a person typed one by mistake); the log must not copy
+ * it, so a ref or a code like that is recorded as `"invalid"`. A heuristic, deliberately broad: a false "invalid" costs one
+ * field of one record.
+ */
+function tokenShaped(v: string): boolean {
+  return (
+    /(?:^|[^A-Za-z0-9])(?:gh[pousr]_|github_pat_|glpat-|xox[abprs]-)/i.test(v) ||
+    /(?:AKIA|ASIA|AGPA|AIDA|AIPA|ANPA|ANVA|AROA|ABIA|ACCA)[A-Z0-9]{12,}/.test(v) ||
+    /[A-Za-z0-9+=]{32,}/.test(v) ||
+    // a base64-looking run (an AWS secret key, say): 30+ key characters with a lower-case letter, an upper-case letter and a digit
+    (v.match(/[A-Za-z0-9+/=]{30,}/g) ?? []).some(run => /[a-z]/.test(run) && /[A-Z]/.test(run) && /[0-9]/.test(run))
+  );
+}
 const okApprovalId = (v: unknown): string | null => (typeof v === "string" && APPROVAL_ID_RE.test(v) ? v : null);
 
-/** One to three words, each `/^[a-z][a-z-]{0,30}$/`, joined by single spaces. */
+/**
+ * The closed word list a verb is built from (spec §3): the commands and sub-commands repo-aegis parses, and the few words
+ * its own entry points use (`write`, `commit`, `credential`, `raw network call`). A word outside it makes the whole verb
+ * `"invalid"`: the pattern alone would admit any lower-case word, a customer's name included.
+ */
+export const DECISION_VERB_WORDS: ReadonlySet<string> = new Set([
+  // programs
+  "git", "gh", "npm",
+  // git
+  "push", "fetch", "pull", "clone", "commit", "ls-remote", "credential", "remote", "send-pack",
+  // gh groups
+  "alias", "api", "attestation", "auth", "browse", "cache", "codespace", "completion", "config", "extension", "gist",
+  "gpg-key", "issue", "label", "org", "pr", "project", "release", "repo", "ruleset", "run", "search", "secret",
+  "ssh-key", "status", "variable", "workflow",
+  // gh and npm sub-commands
+  "create", "edit", "merge", "comment", "review", "list", "view", "close", "reopen", "delete", "fork", "sync", "checkout",
+  "diff", "checks", "ready", "lock", "unlock", "pin", "unpin", "transfer", "develop", "set", "remove", "upload", "download",
+  "archive", "unarchive", "rename", "enable", "disable", "watch", "rerun", "cancel", "publish", "add", "get", "install",
+  // the shapes the egress parser names
+  "shell", "unknown", "mutating", "unrecognised", "recognised",
+  // this tool's own entry points
+  "write", "raw", "network", "call",
+]);
+
+/** One to three words from {@link DECISION_VERB_WORDS}, each `/^[a-z][a-z-]{0,30}$/`, joined by single spaces. */
 function okVerb(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const words = v.split(" ");
-  return words.length >= 1 && words.length <= 3 && words.every(w => VERB_WORD_RE.test(w)) ? v : null;
+  return words.length >= 1 && words.length <= 3 && words.every(w => VERB_WORD_RE.test(w) && DECISION_VERB_WORDS.has(w)) ? v : null;
 }
 
 /** `owner/repo` or `owner/*`, lower-case, through {@link safeDestination}. */
@@ -153,6 +199,7 @@ function okRef(v: unknown): string | null {
   if (!REF_RE.test(short)) return null;
   if (short.includes("..") || short.includes("//") || short.includes("@{")) return null;
   if (short.endsWith(".lock") || short.endsWith("/")) return null;
+  if (tokenShaped(short) || pathShaped(short)) return null;
   return short;
 }
 
@@ -281,7 +328,8 @@ export function buildDecisionRecord(input: DecisionInput): DecisionRecord {
   if (input.destination !== undefined) {
     const d = input.destination;
     const safe = d !== null && typeof d === "object" && typeof d.org === "string" && typeof d.repo === "string" ? safeDestination(d.org, d.repo) : null;
-    rec.destination = safe === null ? INVALID : `${safe.org}/${safe.repo}`;
+    // A name shaped like a credential is not copied either (an owner or repo can be anything a person typed).
+    rec.destination = safe === null || tokenShaped(d.org) || tokenShaped(d.repo) ? INVALID : `${safe.org}/${safe.repo}`;
   }
   if (input.refKind !== undefined) rec.refKind = orInvalid(inList(DECISION_REF_KINDS, input.refKind));
   if (input.ref !== undefined) rec.ref = okRef(input.ref) ?? INVALID;
