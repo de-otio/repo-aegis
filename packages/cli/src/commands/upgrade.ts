@@ -22,20 +22,23 @@
 // nothing, not even the "last version seen" record the once-per-version notice reads.
 //
 // It never pins the hooks or the shim to a copy that will not last, and never rolls them back. They run a pinned CLI
-// by absolute path; `upgrade` run from a worktree build, an `npx` copy or a project node_modules would re-pin every
+// by absolute path; `upgrade` run from a worktree build, an `npx` copy or a project devDependency would re-pin every
 // hook there, and removing that copy later refuses every commit and push until a person runs `install hooks`. So each
 // step reads its pin back from the scripts (`pinVerdict`) and refuses when the running CLI is ephemeral (unless
 // `--force`) or older than the pinned version. Anything else is re-pinned, including a pin to another working install
-// that is not newer: after `nvm install` or `brew upgrade node` the old global is still on disk.
+// that is not newer: after `nvm install` or `brew upgrade node` the old global is still on disk. The two person-gated
+// steps (managed drop-in, credential helper) pin to the running CLI as well, so they get the ephemeral check too (they
+// have no pin to read back, so no rollback check).
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join, sep } from "node:path";
 import { appendAuditRecord, inspectHookScripts, isPinnedHookCommand, parsePinFromScript, PIN_VERSION_PATTERN, pinProblem, repoAegisHome, shellUnquote, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { isHumanTerminal, readLine, type ConfirmOptions } from "../require-terminal.js";
+import { compareVersions } from "../semver.js";
 import { recordVersion } from "../version-notice.js";
 import { gitCredentialHelperStale, type GitCredentialCheckOptions } from "./doctor-git-credential-checks.js";
-import { canonical, unusable, versionIsOlder } from "./doctor-pin-checks.js";
+import { canonical, unusable } from "./doctor-pin-checks.js";
 import { managedDropinStaleCheck } from "./doctor-managed-checks.js";
 import { defaultClaudeHome, installClaudeMd, readSettingsFile } from "./install-claude-md.js";
 import { installGitCredential } from "./install-git-credential.js";
@@ -49,7 +52,7 @@ import { resolveTaaadPin } from "./taaad-pin.js";
 export interface UpgradeOptions extends OutputOptions {
   /** Report what would be done; change nothing. */
   dryRun?: boolean;
-  /** Pin the hooks and the shim to this install even when it looks temporary (a git checkout, an npx cache, a project node_modules). */
+  /** Pin the hooks and the shim to this install even when it looks temporary (a git checkout, an npx cache, a project devDependency). `--force` can lock out every commit and push once that copy is removed. */
   force?: boolean;
   /** Where Claude Code's `CLAUDE.md` lives (default `~/.claude`), passed on to `install claude-md`. */
   claudeHome?: string;
@@ -251,25 +254,36 @@ function anyPinDiffers(existing: readonly EnforcementPin[], pin: EnforcementPin)
 
 /**
  * Is `cli` (a realpath) a copy that will not last: a git checkout (a `.git` file or directory in an ancestor, as in a
- * worktree build), an `npx` cache (`/_npx/`), or a project `node_modules` that is not npm's global one? Pinning the
- * hooks there works until the copy is removed, and then every commit and push is refused.
+ * worktree build, an `npm link` or `npm i -g .` from a checkout, or a project devDependency, whose project is a git
+ * repository) or an `npx` cache (`/_npx/`)? Pinning the hooks there works until the copy is removed, and then every
+ * commit and push is refused. There is deliberately no bare `node_modules` rule: pnpm, yarn and bun keep their global
+ * installs in directories that have one but no `lib/node_modules`, and a project's own `node_modules` is caught by the
+ * `.git` walk.
  *
- * The npm global prefix is derived without spawning `npm prefix -g`: the Node executable's own prefix (`<prefix>/bin/node`,
- * so `<prefix>/lib/node_modules` on Unix and `<prefix>/node_modules` on Windows), the same under `npm_config_prefix`,
- * and any path with a `lib/node_modules` segment, which is where Unix installs global packages even when
- * `process.execPath` resolves into a Homebrew `Cellar` directory. A global install under a prefix that none of these
- * names is judged by its `.git` ancestors and `node_modules` like any other, and `--force` overrides the verdict.
+ * Global installs are recognised, before the `.git` walk (a dotfiles repository in `$HOME` must not make them
+ * ephemeral), without spawning a package manager: the Node executable's own prefix (`<prefix>/bin/node`, so
+ * `<prefix>/lib/node_modules`), the same under `npm_config_prefix`, any `lib/node_modules` segment (where Unix installs
+ * global packages even when `process.execPath` resolves into a Homebrew `Cellar` directory), and the known pnpm, yarn
+ * and bun global roots. Anywhere else a global install is judged by its `.git` ancestors, and `--force` overrides.
+ *
+ * Unix only: Windows globals (`%APPDATA%/npm/node_modules`) and Windows hooks are not supported, and this does not try to
+ * classify them.
  */
+/** Where pnpm (`$PNPM_HOME/global/<n>`), yarn (`~/.config/yarn/global`) and bun (`~/.bun/install/global`) keep global packages. */
+const GLOBAL_ROOT_MARKERS: readonly string[] = ["/pnpm/global/", "/yarn/global/", "/.bun/install/global/"];
+
 export function isEphemeralCli(cli: string, opts: { execPath?: string; env?: NodeJS.ProcessEnv } = {}): boolean {
   const path = cli.split(sep).join("/");
   if (path.includes("/_npx/")) return true;
   const execPath = opts.execPath ?? process.execPath;
   const env = opts.env ?? process.env;
   const prefixes = [dirname(dirname(execPath)), env["npm_config_prefix"], env["NPM_CONFIG_PREFIX"]].filter((p): p is string => typeof p === "string" && p !== "");
-  const globalRoots = prefixes.flatMap(p => [join(p, "lib", "node_modules"), join(p, "node_modules")]);
-  const isGlobal = path.includes("/lib/node_modules/") || globalRoots.some(root => cli === root || cli.startsWith(root + sep));
+  const globalRoots = prefixes.map(p => join(p, "lib", "node_modules"));
+  const isGlobal =
+    path.includes("/lib/node_modules/") ||
+    GLOBAL_ROOT_MARKERS.some(m => path.includes(m)) ||
+    globalRoots.some(root => cli === root || cli.startsWith(root + sep));
   if (isGlobal) return false;
-  if (path.includes("/node_modules/")) return true;
   for (let dir = dirname(cli); ; dir = dirname(dir)) {
     if (existsSync(join(dir, ".git"))) return true;
     if (dirname(dir) === dir) return false;
@@ -298,7 +312,7 @@ export interface PinVerdictInput {
  *  1. Rolling back: an existing pin that still works names a version NEWER than the running one (an old devDependency
  *     run by npx, a stale global). The fix is to run the newer install's `upgrade`, or `installer` from this one to
  *     roll back on purpose.
- *  2. Pinning to a copy that will not last (`ephemeral`: a worktree build, an npx cache, a project `node_modules`):
+ *  2. Pinning to a copy that will not last (`ephemeral`: a worktree build or `npm link`, an npx cache, a project devDependency):
  *     it works until that copy is removed, then every commit and push is refused. Refused whether the old pin works
  *     or is gone, unless the scripts already point at this very CLI. The fix is to run `upgrade` from the global
  *     install, or pass `--force`.
@@ -308,11 +322,10 @@ export interface PinVerdictInput {
  * with no way to finish the upgrade from the install they just made.
  */
 export function pinVerdict(i: PinVerdictInput): PinVerdict {
-  const runningCli = canonical(i.running.cli);
   const runningVersion = i.running.version;
   for (const p of i.existing) {
     if (unusable(p.node, "exec") || unusable(p.cli, "read")) continue; // gone: nothing to roll back from
-    if (p.version !== undefined && runningVersion !== undefined && versionIsOlder(runningVersion, p.version)) {
+    if (p.version !== undefined && runningVersion !== undefined && compareVersions(runningVersion, p.version) === -1) {
       return {
         ok: false,
         detail:
@@ -321,13 +334,24 @@ export function pinVerdict(i: PinVerdictInput): PinVerdict {
       };
     }
   }
+  return ephemeralVerdict(i);
+}
+
+/**
+ * The ephemeral half of {@link pinVerdict} alone, for the person-gated steps (the managed drop-in, the credential
+ * helper): they have no pin to read back, so `existing` is empty there. Refused unless the scripts already point at
+ * this very CLI or `force` is set.
+ */
+export function ephemeralVerdict(i: Pick<PinVerdictInput, "existing" | "running" | "ephemeral" | "force" | "what" | "installer">): PinVerdict {
+  const runningCli = canonical(i.running.cli);
   const alreadyHere = i.existing.length > 0 && i.existing.every(p => canonical(p.cli) === runningCli);
   if (i.ephemeral && !i.force && !alreadyHere) {
     return {
       ok: false,
       detail:
-        `this install (${i.running.cli}) looks temporary (a git checkout, an npx cache or a project node_modules), so pinning ${i.what} to it ` +
-        "would refuse every commit and push once it is removed: run upgrade from the global install (`npm i -g @de-otio/repo-aegis`, then `repo-aegis upgrade`), or pass --force (UPGRADE_REFUSED)",
+        `this install (${i.running.cli}) looks temporary (a git checkout or worktree build, an \`npm link\`, an npx cache or a project devDependency), so pinning ${i.what} to it ` +
+        "would refuse every commit and push once it is removed: run upgrade from the global install (`npm i -g @de-otio/repo-aegis`, then `repo-aegis upgrade`)" +
+        `, or run \`${i.installer}\` from a lasting install. To pin to this copy anyway, knowing that, pass --force (UPGRADE_REFUSED)`,
     };
   }
   return { ok: true };
@@ -361,6 +385,9 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
   const isEphemeral = (): boolean => deps.ephemeral ?? (ephemeral ??= isEphemeralCli(pin.cli));
   const judge = (existing: readonly EnforcementPin[], what: string, installer: string): PinVerdict =>
     pinVerdict({ existing, running, ephemeral: isEphemeral(), force: opts.force === true, what, installer });
+  // The person-gated steps have no pin to read back, but they pin to this CLI just the same.
+  const judgeEphemeral = (what: string, installer: string): PinVerdict =>
+    ephemeralVerdict({ existing: [], running, ephemeral: isEphemeral(), force: opts.force === true, what, installer });
   /** Not stale: report it in the JSON, say nothing in the text. */
   const quiet = (step: StepName, found: Found): void => add(step, found.state === "not-installed" ? "not-installed" : "current", found.detail);
 
@@ -411,7 +438,9 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
   {
     const found = findDropIn(managedEnv, pin);
     const command = `repo-aegis install claude-md${opts.claudeHome !== undefined ? ` --claude-home ${opts.claudeHome}` : ""}`;
+    let dropInVerdict: PinVerdict;
     if (found.state !== "stale") quiet("claude-md", found);
+    else if (!(dropInVerdict = judgeEphemeral("the managed drop-in", command)).ok) add("claude-md", "refused", dropInVerdict.detail);
     else if (!person()) add("claude-md", "run-yourself", "writing the managed drop-in needs a person at a terminal (sudo asks for a password)", command);
     else if (dryRun) add("claude-md", "would-upgrade", "would rewrite the managed drop-in (asks for your sudo password)");
     else {
@@ -456,7 +485,9 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
   {
     const stale = gitCredentialHelperStale(deps.credential);
     const command = "repo-aegis install git-credential";
+    let credentialVerdict: PinVerdict;
     if (!stale) quiet("git-credential", { state: "current", detail: "no outdated credential helper" });
+    else if (!(credentialVerdict = judgeEphemeral("the git credential helper", command)).ok) add("git-credential", "refused", credentialVerdict.detail);
     else if (!person()) add("git-credential", "run-yourself", "the credential helper decides which GitHub account an agent's push uses, so only a person at a terminal installs it", command);
     else if (dryRun) add("git-credential", "would-upgrade", "would re-pin the git credential helper");
     else {

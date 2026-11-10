@@ -166,8 +166,9 @@ adds one, and a second run says `nothing to upgrade`. `--dry-run` shows what it 
 
 Your hooks and the `gh` wrapper are pinned to one install, and `upgrade` moves that pin to the one running
 it, with two exceptions that end in `REFUSED` and exit 1. It will not pin to a copy that will not last (a
-git checkout or worktree build, an `npx` cache, a project `node_modules`): run `upgrade` from the global
-install (`npm i -g @de-otio/repo-aegis`), or pass `--force`. (Such a copy re-pinning your hooks would
+git checkout or worktree build, an `npm link`, an `npx` cache, a project devDependency): run `upgrade` from the global
+install (`npm i -g @de-otio/repo-aegis`). `--force` pins there anyway, and once that copy is removed every commit and
+push is refused until `install hooks` runs from a lasting install. (Such a copy re-pinning your hooks would
 refuse every commit once it was removed.) And it will not roll back: if they are pinned to a newer
 version, run the newer install's `upgrade`, or `repo-aegis install hooks` from this one to roll back on
 purpose. After `nvm install` or `brew upgrade node`, with the old install still on disk, it re-pins.

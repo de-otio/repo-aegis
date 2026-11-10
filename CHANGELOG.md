@@ -50,16 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two steps that need a person (the managed drop-in's `sudo` write, the credential helper) run only
   at a person's terminal; otherwise they are listed under `run yourself:` with the exact command and
   are not counted as failures (a person who answers `n` at the `sudo` prompt has `declined`, exit 0).
-  Exit 1 when an installer failed or a step was refused (below); `--force` pins to a temporary copy anyway. An agent may run `upgrade`: it
+  Exit 1 when an installer failed or a step was refused (below); `--force` pins to a temporary copy anyway (and then every commit and push is refused once it is removed). An agent may run `upgrade`: it
   only re-runs installers an agent may already run, so it is not in the person-only commands.
 - **`upgrade` never pins the hooks or the shim to a copy that will not last, and never rolls them
   back.** They run a CLI pinned by absolute path; `upgrade` run from a worktree build, an `npx` copy or a
-  project `node_modules` would re-pin all of them there, and removing that copy later refuses every
+  project devDependency would re-pin all of them there, and removing that copy later refuses every
   commit and push until a person runs `install hooks`. Each step (hooks, shim, and the hint for the hooks
   in Claude Code's `settings.json`) now reads its pin back from its scripts and refuses (step `REFUSED`,
   nothing rewritten, exit 1) in two cases: the running CLI is temporary (a `.git` ancestor, `/_npx/`, or a
-  project `node_modules` outside npm's global prefix; derived from `process.execPath`,
-  `npm_config_prefix` and `lib/node_modules`, no `npm` spawn), whether the old pin works or is already
+  project devDependency in a git repository, an `npm link`; global installs of npm, pnpm, yarn and bun are
+  recognised without spawning a package manager, and the claude-md and git-credential steps get the same check), whether the old pin works or is already
   gone, unless `--force`; or the running version is older than the pin that still works (`--force` does
   not override that). Each refusal names the fix (run `upgrade` from the global install, or the step's own
   installer) and ends with `UPGRADE_REFUSED`, which `repo-aegis explain` knows. Anything else is re-pinned, including a pin to another working install that is not newer, so

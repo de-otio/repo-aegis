@@ -10,7 +10,8 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { inspectHookScripts, parsePinFromScript, pinnedHookCommand, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { captureOutput, fakeGh, scrubGitEnv, type CaptureResult } from "../_test-utils.js";
 import { makeFakeSystem, type FakeSystem } from "../_managed-test-utils.js";
@@ -390,6 +391,20 @@ describe("upgrade: the managed drop-in (a root write behind a sudo password)", (
     assert.match(runUpgrade(c.fx, {}, { pin: c.newPin, managedEnv: c.sys.env, terminal: NO_PERSON }).stdout, /^nothing to upgrade/, "and a re-run is a no-op");
   });
 
+  it("M-C: a running CLI that will not last is refused before the root write: nothing is written even with a person at the terminal", () => {
+    const c = staleDropIn();
+    const before = dropInText(c);
+    const out = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome }, { pin: c.newPin, managedEnv: c.sys.env, terminal: PERSON, ephemeral: true });
+    assert.equal(out.exitCode, 1, out.stdout);
+    assert.match(out.stdout, /upgrade: claude-md\s+REFUSED.*looks temporary.*`repo-aegis install claude-md/);
+    assert.doesNotMatch(out.stdout, /upgrade: claude-md\s+done/);
+    assert.equal(c.sys.toolCalls().length, 0, "no privileged call at all");
+    assert.equal(dropInText(c), before, "the drop-in is untouched");
+    assert.equal(dropInStale(c, c.newPin), true);
+    const forced = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome, force: true }, { pin: c.newPin, managedEnv: c.sys.env, terminal: PERSON, ephemeral: true });
+    assert.match(forced.stdout, /upgrade: claude-md\s+done/, "--force still pins there on purpose");
+  });
+
   it("a person who answers no has declined, not failed: nothing written, exit 0, the command to retry is listed", () => {
     const c = staleDropIn();
     const before = dropInText(c);
@@ -430,6 +445,15 @@ describe("upgrade: the git credential helper (its own terminal gate)", () => {
     assert.match(out.stdout, /upgrade: git-credential\s+done/);
     assert.equal(stale(), false);
     assert.match(runUpgrade(fx, {}, { credential: credential(), terminal: NO_PERSON }).stdout, /^nothing to upgrade/);
+  });
+
+  it("M-C: a running CLI that will not last is refused, and the helper's config is untouched even with a person", () => {
+    const before = readFileSync(fx.globalConfig, "utf8");
+    const out = runUpgrade(fx, {}, { credential: credential(), terminal: { stderrIsTTY: true }, ephemeral: true });
+    assert.equal(out.exitCode, 1, out.stdout);
+    assert.match(out.stdout, /upgrade: git-credential\s+REFUSED.*looks temporary.*`repo-aegis install git-credential`/);
+    assert.equal(readFileSync(fx.globalConfig, "utf8"), before);
+    assert.equal(stale(), true);
   });
 
   it("no repo-aegis helper configured: nothing to do, and none is installed", () => {
@@ -494,7 +518,8 @@ describe("upgrade: it never moves the pin to an install that merely ran it", () 
   });
 
   describe("a running CLI that will not last (a git checkout, an npx cache, a project node_modules)", () => {
-    const ephemeralRefusal = /looks temporary.*run upgrade from the global install \(`npm i -g @de-otio\/repo-aegis`, then `repo-aegis upgrade`\), or pass --force \(UPGRADE_REFUSED\)/;
+    const ephemeralRefusal =
+      /looks temporary.*npm link.*run upgrade from the global install \(`npm i -g @de-otio\/repo-aegis`, then `repo-aegis upgrade`\), or run `repo-aegis install \w+( [\w-]+)?` from a lasting install\. To pin to this copy anyway, knowing that, pass --force \(UPGRADE_REFUSED\)/;
 
     it("is refused while the old pin still works: nothing rewritten, exit 1, the version not recorded", () => {
       const fx = makeFixture();
@@ -602,20 +627,35 @@ describe("upgrade: it never moves the pin to an install that merely ran it", () 
       assert.equal(isEphemeralCli(cliIn(root, ".npm", "_npx", "abc123", "node_modules", "@de-otio", "repo-aegis", "dist"), prefixed(root)), true);
     });
 
-    it("a project node_modules outside the global prefix is ephemeral; the global one is not", () => {
+    it("a project devDependency (its project is a git repository) is ephemeral; the npm global one is not", () => {
       const root = join(tmp, `eph-${n++}`);
+      mkdirSync(join(root, "project", ".git"), { recursive: true });
       assert.equal(isEphemeralCli(cliIn(root, "project", "node_modules", "@de-otio", "repo-aegis", "dist"), prefixed(root)), true);
       const global = cliIn(root, "prefix", "lib", "node_modules", "@de-otio", "repo-aegis", "dist");
       assert.equal(isEphemeralCli(global, prefixed(root)), false);
     });
+
+    // M-A: these managers have a `node_modules` in the path but no `lib/node_modules`; a bare `node_modules` rule refused every
+    // routine upgrade for them. The first assertion has no `.git` anywhere above, so only dropping that rule keeps them global.
+    for (const [manager, parts] of [
+      ["pnpm", [".local", "share", "pnpm", "global", "5", ".pnpm", "@de-otio+repo-aegis@1.0.0", "node_modules", "@de-otio", "repo-aegis", "dist"]],
+      ["yarn", [".config", "yarn", "global", "node_modules", "@de-otio", "repo-aegis", "dist"]],
+      ["bun", [".bun", "install", "global", "node_modules", "@de-otio", "repo-aegis", "dist"]],
+    ] as const) {
+      it(`a ${manager} global install is not ephemeral, with or without a dotfiles .git above it`, () => {
+        const root = join(tmp, `eph-${n++}`);
+        const cli = cliIn(root, ...parts);
+        assert.equal(isEphemeralCli(cli, prefixed(root)), false, "no .git");
+        mkdirSync(join(root, ".git"), { recursive: true });
+        assert.equal(isEphemeralCli(cli, prefixed(root)), false, "a dotfiles repository above it");
+      });
+    }
 
     it("a global install is recognised by the Node prefix, npm_config_prefix, or a lib/node_modules segment, even under a .git", () => {
       const root = join(tmp, `eph-${n++}`);
       mkdirSync(join(root, ".git"), { recursive: true }); // the whole tree sits in a repository (a dotfiles repo in $HOME)
       const viaNode = cliIn(root, "prefix", "lib", "node_modules", "@de-otio", "repo-aegis", "dist");
       assert.equal(isEphemeralCli(viaNode, prefixed(root)), false);
-      const winStyle = cliIn(root, "prefix", "node_modules", "@de-otio", "repo-aegis", "dist");
-      assert.equal(isEphemeralCli(winStyle, prefixed(root)), false);
       const custom = cliIn(root, "custom-prefix", "lib", "node_modules", "@de-otio", "repo-aegis", "dist");
       assert.equal(isEphemeralCli(custom, { execPath: "/somewhere/else/bin/node", env: { npm_config_prefix: join(root, "custom-prefix") } }), false);
       const homebrew = cliIn(root, "homebrew", "lib", "node_modules", "@de-otio", "repo-aegis", "dist"); // execPath resolves into a Cellar
@@ -651,6 +691,32 @@ describe("upgrade: it never moves the pin to an install that merely ran it", () 
     assert.ok(row !== null, "UPGRADE_REFUSED has no row in doc/agent-guide.md");
     assert.match(row.recovery, /global install/);
     assert.match(row.recovery, /newer install's `upgrade`/);
+  });
+
+  it("a prerelease running version is older than the release it would replace: refused (one comparator with the notice)", () => {
+    const fx = makeFixture();
+    const now = fx.run(() => currentEnforcementPin());
+    pinnedTo(fx, { ...makePin(join(fx.base, "release-install")), version: "0.14.0" });
+    const before = snapshot(fx);
+    const out = runUpgrade(fx, {}, { pin: { ...now, version: "0.14.0-rc.1" } });
+    assert.equal(out.exitCode, 1, out.stdout);
+    assert.match(out.stdout, /upgrade: hooks\s+REFUSED.*newer than this install/);
+    assert.deepEqual(snapshot(fx), before);
+  });
+
+  // Every other test injects `ephemeral`; this one runs the real wiring (`isEphemeralCli` on the running CLI). The tests run
+  // from a checkout (a `.git` directory, or a worktree's `.git` file, above dist), which is exactly what it must call temporary.
+  const inCheckout = existsSync(join(resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", ".."), ".git"));
+  it("without the seam, the build under test is judged temporary and refused", { skip: !inCheckout }, () => {
+    const fx = makeFixture();
+    pinnedTo(fx, { ...makePin(join(fx.base, "old-global")), version: "0.0.1" });
+    const before = snapshot(fx);
+    const out = runUpgrade(fx, {}, { ephemeral: undefined });
+    assert.equal(out.exitCode, 1, out.stdout);
+    assert.match(out.stdout, /upgrade: hooks\s+REFUSED.*looks temporary/);
+    assert.deepEqual(snapshot(fx), before);
+    const forced = runUpgrade(fx, { force: true }, { ephemeral: undefined });
+    assert.match(forced.stdout, /upgrade: hooks\s+done/);
   });
 
   it("the same CLI path with a newer pinned version is refused too (an in-place downgrade is a person's choice)", () => {

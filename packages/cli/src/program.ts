@@ -809,7 +809,7 @@ export async function buildProgram(): Promise<Command> {
       "after upgrading repo-aegis: re-run the installers whose output is stale (git hook scripts, the gh shim, the managed Claude Code drop-in, the git credential helper), one line per step. Steps that need a person at a terminal (the drop-in's sudo write, the credential helper) are listed under `run yourself:` when none is attached. Never installs what was not installed.",
     )
     .option("--dry-run", "report what would be done; change nothing")
-    .option("--force", "pin the hooks and the shim to this install even when it looks temporary (a git checkout, an npx cache, a project node_modules); never overrides a version rollback")
+    .option("--force", "pin to this install even when it looks temporary (a git checkout, an npx cache, a project devDependency); once that copy is removed every commit and push is refused until `install hooks` runs from a lasting install; never overrides a version rollback")
     .option("--claude-home <dir>", "override default ~/.claude location (for the claude-md step)")
     .action((opts, cmd) => {
       upgrade(withGlobals(opts, cmd), { version: packageVersion() });

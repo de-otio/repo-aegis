@@ -20,6 +20,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { statePath } from "@de-otio/repo-aegis-core";
+import { compareVersions } from "./semver.js";
 
 /** Top-level commands that never print the notice. `upgrade` and `init` record the version instead. */
 const QUIET_COMMANDS: ReadonlySet<string> = new Set([
@@ -70,51 +71,13 @@ export function recordVersion(home: string, version: string): boolean {
   }
 }
 
-const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
-
-/** Semver precedence of two prerelease strings (`rc.2` against `rc.10`): numeric identifiers by value and below alphanumeric ones, a shorter list below a longer one it prefixes. */
-function comparePrerelease(a: string, b: string): number {
-  const x = a.split(".");
-  const y = b.split(".");
-  for (let i = 0; i < Math.max(x.length, y.length); i++) {
-    const p = x[i];
-    const q = y[i];
-    if (p === undefined) return -1;
-    if (q === undefined) return 1;
-    const pn = /^\d+$/.test(p);
-    const qn = /^\d+$/.test(q);
-    if (pn && qn) {
-      const d = Number(p) - Number(q);
-      if (d !== 0) return d < 0 ? -1 : 1;
-    } else if (pn !== qn) {
-      return pn ? -1 : 1;
-    } else if (p !== q) {
-      return p < q ? -1 : 1;
-    }
-  }
-  return 0;
-}
-
 /**
- * Is `running` a newer release than `seen`? Ordered like semver: `MAJOR.MINOR.PATCH` numerically, and a prerelease
- * below its release (`0.14.0-rc.1` < `0.14.0`), prereleases among themselves numerically (`rc.2` < `rc.10`). A
- * version that is not semver at all (a dev tree) cannot be ordered, so any difference counts as news: a missed
- * notice costs more than a spare one. Build metadata (`+build`) is ignored.
+ * Is `running` a newer release than `seen`? Ordered like semver (see `compareVersions`). A version that is not semver
+ * at all (a dev tree) cannot be ordered, so any difference counts as news: a missed notice costs more than a spare one.
  */
 export function isNewer(running: string, seen: string): boolean {
-  const a = SEMVER.exec(running);
-  const b = SEMVER.exec(seen);
-  if (a === null || b === null) return running !== seen;
-  for (let i = 1; i <= 3; i++) {
-    const d = Number(a[i]) - Number(b[i]);
-    if (d !== 0) return d > 0;
-  }
-  const pa = a[4];
-  const pb = b[4];
-  if (pa === undefined && pb === undefined) return false;
-  if (pa === undefined) return true; // a release is newer than its own prerelease
-  if (pb === undefined) return false;
-  return comparePrerelease(pa, pb) > 0;
+  const c = compareVersions(running, seen);
+  return c === null ? running !== seen : c > 0;
 }
 
 /** The one line the notice prints (without its newline). */
