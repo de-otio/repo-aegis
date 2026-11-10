@@ -375,7 +375,29 @@ function legacyDropIn(): { fx: Fixture; file: string; seam: UpgradeDeps["legacyM
   return { fx, file, seam: { uid: 1000, systemDir } };
 }
 
+/** The egress guard registered in the fixture's settings.json, so the drop-in may go. */
+function registerGuard(fx: Fixture): void {
+  const command = "repo-aegis hook guard-egress";
+  writeFileSync(join(fx.claudeHome, "settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] } }));
+}
+
 describe("upgrade: a legacy managed drop-in (listed with the command that removes it; never removed)", () => {
+  it("hooks not yet in settings.json: `install claude-md` is listed FIRST, before the removal, so no window without a guard", () => {
+    const c = legacyDropIn();
+    const out = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome }, { legacyManaged: c.seam });
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.match(out.stdout, /upgrade: claude-md\s+needs you .*not yet registered.*FIRST/);
+    assert.match(out.stdout, new RegExp(`run yourself:\\n {2}repo-aegis install claude-md --claude-home ${escapeRe(c.fx.claudeHome)} {2}&& {2}[a-z]+ rm '[^']*50-repo-aegis-1000\\.json'`));
+  });
+
+  it("hooks already in settings.json: only the removal is listed", () => {
+    const c = legacyDropIn();
+    registerGuard(c.fx);
+    const out = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome }, { legacyManaged: c.seam });
+    assert.doesNotMatch(out.stdout, /install claude-md/);
+    assert.match(out.stdout, /run yourself:\n {2}[a-z]+ rm /);
+  });
+
   it("none present: the step is quiet and the report says not-installed", () => {
     const fx = makeFixture();
     const out = runUpgrade(fx, { json: true }, { legacyManaged: { uid: 1000, systemDir: join(fx.base, "no-such-dir") } });
@@ -386,7 +408,8 @@ describe("upgrade: a legacy managed drop-in (listed with the command that remove
 
   it("one present: listed under `run yourself:` with the removal line, exit 0, and the file is untouched", () => {
     const c = legacyDropIn();
-    const out = runUpgrade(c.fx, {}, { legacyManaged: c.seam });
+    registerGuard(c.fx);
+    const out = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome }, { legacyManaged: c.seam });
     assert.equal(out.exitCode, undefined, `listing is not a failure: ${out.stderr}`);
     assert.match(out.stdout, /upgrade: claude-md\s+needs you/);
     assert.match(out.stdout, /run yourself:\n {2}[a-z]+ rm '[^']*50-repo-aegis-1000\.json'\n/);
@@ -405,13 +428,14 @@ describe("upgrade: a legacy managed drop-in (listed with the command that remove
     const c = legacyDropIn();
     mkdirSync(join(c.fx.home, "state"), { recursive: true });
     writeFileSync(join(c.fx.home, "state", "claude-md-managed.json"), JSON.stringify({ createdDirs: { system: true, dropin: true } }));
-    const out = runUpgrade(c.fx, { json: true }, { legacyManaged: c.seam });
+    registerGuard(c.fx);
+    const out = runUpgrade(c.fx, { json: true, claudeHome: c.fx.claudeHome }, { legacyManaged: c.seam });
     assert.equal(out.exitCode, undefined);
     const report = JSON.parse(out.stdout) as UpgradeReport;
     assert.equal(report.runYourself.length, 1);
     assert.equal(report.runYourself[0]!.step, "claude-md");
     assert.match(report.runYourself[0]!.command, /rm '[^']*50-repo-aegis-1000\.json'.*rmdir /);
-    const dry = runUpgrade(c.fx, { dryRun: true }, { legacyManaged: c.seam });
+    const dry = runUpgrade(c.fx, { dryRun: true, claudeHome: c.fx.claudeHome }, { legacyManaged: c.seam });
     assert.match(dry.stdout, /run yourself:\n {2}[a-z]+ rm /);
     assert.ok(existsSync(c.file));
   });

@@ -116,6 +116,8 @@ function hookCommands(pin: EnforcementPin) {
 
 interface InstallClaudeMdOptions extends OutputOptions {
   claudeHome?: string;
+  /** Text output: print each hook's full command and every deny rule (default: one line per hook). */
+  verbose?: boolean;
   /**
    * When true, do the work but suppress all stdout/stderr emission.
    * emitError still fires on hard failure. Used by `init`.
@@ -871,44 +873,40 @@ export function installClaudeMd(opts: InstallClaudeMdOptions): void {
     return;
   }
 
+  // One line per hook, the pin once; the full command text (~3 KB each) and every deny rule only with --verbose.
+  const verbose = opts.verbose === true;
   if (claudeMdAppended) emitText(`appended snippet to ${claudeMdPath}`);
   else emitText(`snippet already present in ${claudeMdPath}`);
-  if (checkWriteMerge.added) emitText(`registered PreToolUse(Write|Edit|MultiEdit) hook in ${settingsPath}`);
-  else emitText(`PreToolUse(Write|Edit|MultiEdit) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${cmd.checkWrite}`);
-  if (merge.added) emitText(`registered PostToolUse(Write|Edit|MultiEdit) hook in ${settingsPath}`);
-  else emitText(`PostToolUse(Write|Edit|MultiEdit) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${cmd.scanAfterWrite}`);
-  if (guardEgressMerge.added) emitText(`registered PreToolUse(Bash) hook in ${settingsPath}`);
-  else emitText(`PreToolUse(Bash) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${cmd.guardEgress}`);
-  if (bashMerge.added) emitText(`registered PostToolUse(Bash) hook in ${settingsPath}`);
-  else emitText(`PostToolUse(Bash) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${cmd.scanBash}`);
-  if (egressReceiptMerge.added) emitText(`registered PostToolUse(Bash) hook in ${settingsPath}`);
-  else emitText(`PostToolUse(Bash) hook already registered in ${settingsPath}`);
-  emitText(`  command: ${cmd.egressReceipt}`);
-  if (promptSubmitMerge.added) emitText(`registered UserPromptSubmit hook in ${settingsPath}`);
-  else emitText(`UserPromptSubmit hook already registered in ${settingsPath}`);
-  emitText(`  command: ${cmd.promptSubmit}`);
-  if (firstTouchMerge) {
-    if (firstTouchMerge.added) {
-      emitText(`registered SessionStart hook in ${settingsPath}`);
-    } else {
-      emitText(`SessionStart hook already registered in ${settingsPath}`);
-    }
-    emitText(`  command: ${cmd.firstTouch}`);
+  emitText(`hooks in ${settingsPath} (pinned to ${pin.cli}${pin.version !== undefined ? ` ${pin.version}` : ""}):`);
+  const hookLines: Array<[string, string, MergeResult, string]> = [
+    ["PreToolUse(Write|Edit|MultiEdit)", "check-write", checkWriteMerge, cmd.checkWrite],
+    ["PostToolUse(Write|Edit|MultiEdit)", "scan-after-write", merge, cmd.scanAfterWrite],
+    ["PreToolUse(Bash)", "guard-egress", guardEgressMerge, cmd.guardEgress],
+    ["PostToolUse(Bash)", "scan-bash-output", bashMerge, cmd.scanBash],
+    ["PostToolUse(Bash)", "egress-receipt", egressReceiptMerge, cmd.egressReceipt],
+    ["UserPromptSubmit", "prompt-submit", promptSubmitMerge, cmd.promptSubmit],
+    ...(firstTouchMerge !== null ? [["SessionStart", "first-touch", firstTouchMerge, cmd.firstTouch] as [string, string, MergeResult, string]] : []),
+  ];
+  for (const [event, name, m, command] of hookLines) {
+    emitText(`  ${event.padEnd(34)} ${name.padEnd(17)} ${m.added ? "registered" : "already registered"}`);
+    if (verbose) emitText(`    command: ${command}`);
   }
   emitText(
     denyInstall.added.length > 0
-      ? `registered ${denyInstall.added.length} permissions.deny rule(s) protecting the registry, approvals, hooks and shim in ${settingsPath}`
-      : `permissions.deny rules for the registry already registered in ${settingsPath}`,
+      ? `registered ${denyInstall.added.length} of ${denyInstall.plan.rules.length} permissions.deny rule(s) protecting the registry, approvals, hooks and shim`
+      : `all ${denyInstall.plan.rules.length} permissions.deny rule(s) protecting the registry, approvals, hooks and shim already registered`,
   );
   if (denyInstall.legacyRemoved.length > 0) {
     emitText(`removed ${denyInstall.legacyRemoved.length} broader deny rule(s) written by an earlier build`);
   }
-  for (const rule of denyInstall.plan.rules) emitText(`  rule: ${rule}`);
-  for (const line of denyAdviceLines(denyInstall.plan)) emitText(`  ${line}`);
+  if (verbose) {
+    for (const rule of denyInstall.plan.rules) emitText(`  rule: ${rule}`);
+    for (const line of denyAdviceLines(denyInstall.plan)) emitText(`  ${line}`);
+  } else {
+    for (const w of denyInstall.plan.warnings) emitText(`  warning: ${w}`);
+    emitText(`  verify in a sandboxed Bash session: touch ${denyInstall.plan.verifyPath}   (it should fail with a permission error)`);
+    emitText("  (--verbose prints each hook command and deny rule)");
+  }
   if (legacy !== null) {
     emitText("");
     for (const line of legacyDropInLines(legacy)) emitText(line);

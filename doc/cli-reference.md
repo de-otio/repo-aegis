@@ -974,6 +974,7 @@ stdin JSON natively, so `jq` is no longer required.
 |---|---|---|
 | `--claude-home <dir>` | `~/.claude` | override default location |
 | `--dry-run` / `--print-only` | off | preview the would-be settings.json + CLAUDE.md additions |
+| `--verbose` | off | print each hook's full command and every deny rule (by default: one line per hook, the pin once, and the deny-rule count) |
 | `--user-settings` | off | no-op, kept for one release: `settings.json` is the only target (prints a one-line note) |
 | `--first-touch` | off | also register the SessionStart `first-touch` hook |
 | `--uninstall` | off | strip the CLAUDE.md block and the settings.json entries (run this **before** `npm rm -g repo-aegis`); if a legacy root-owned drop-in is still installed, prints the command that removes it (it never runs `sudo` itself) |
@@ -1048,7 +1049,7 @@ check functions) and re-runs the matching installer, in this order, one line per
 |---|---|---|
 | `hooks` | `<home>/hooks/pre-commit` or `pre-push` is not what this release writes (`HOOKS_SCRIPT_STALE`), or one is missing or not executable | rewrites both scripts (the part of `install hooks` that goes stale; `core.hooksPath` is not touched) |
 | `shim` | the `gh` shim is an earlier release's script, or was rendered for another pin or home (`SHIM_STALE`; judged whether or not the shim is first on `PATH`) | `install shim` (keeps the taaad the shim already pins while that launcher still exists; otherwise the first `taaad` on `PATH`, then the old pin as a last resort) |
-| `claude-md` | a legacy root-owned managed drop-in from 0.13 or earlier is still installed (`MANAGED_LEGACY_PRESENT`) | nothing: listed under `run yourself:` with the command that removes it (it needs root, and repo-aegis never runs `sudo`). Quiet and `not-installed` when there is none |
+| `claude-md` | a legacy root-owned managed drop-in from 0.13 or earlier is still installed (`MANAGED_LEGACY_PRESENT`) | nothing: listed under `run yourself:` with the command that removes it (it needs root, and repo-aegis never runs `sudo`). When the egress guard is not yet registered in `settings.json`, the line starts with `repo-aegis install claude-md  &&`, because removing the drop-in first leaves no guard. Quiet and `not-installed` when there is none |
 | `user-settings` | a repo-aegis hook command in Claude Code's own `settings.json` (what `init` writes by default) is pinned to another Node or install than this one | nothing: listed under `run yourself:` as `repo-aegis install claude-md`, or `REFUSED` under the two cases above |
 | `git-credential` | a repo-aegis credential helper for `https://github.com` is configured, but it is another install's (`GIT_CREDENTIAL_HELPER_ORDER`'s stale case) | `install git-credential` (global git config) |
 

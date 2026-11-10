@@ -438,6 +438,7 @@ export async function buildProgram(): Promise<Command> {
     )
     .option("--dry-run", "preview the would-be settings.json + CLAUDE.md additions without writing")
     .option("--print-only", "alias for --dry-run")
+    .option("--verbose", "print each hook's full command and every deny rule (default: one line per hook)")
     .option(
       "--first-touch",
       "also register a SessionStart hook that calls `repo-aegis hook first-touch` (Phase 1 onboarding)",
