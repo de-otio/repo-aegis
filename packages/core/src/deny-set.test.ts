@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, utimesSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
   PRIVATE_INFRA_FILE_STEM,
   MIN_AUTO_BLOCK_IDENTIFIER_LENGTH,
   SELF_IDENTITY_FILE_STEM,
+  removeLegacyDenySetCache,
 } from "./deny-set.js";
 import { isPublishableStem } from "./ci-output.js";
 import { GlobTooBroadError } from "./globs.js";
@@ -45,9 +46,8 @@ before(() => {
   tmp = mkdtempSync(join(tmpdir(), "repo-aegis-denyset-"));
   markersDir = join(tmp, "markers");
   // computeDenySet now consults the registry (for `alwaysBlockExemptPaths`)
-  // and, for calls that don't pass `cachePath`, the default cache location.
-  // Point REPO_AEGIS_HOME at the temp dir so neither ever reaches the
-  // developer's real `~/.config/repo-aegis`.
+  // and sweeps the legacy cache location. Point REPO_AEGIS_HOME at the temp
+  // dir so neither ever reaches the developer's real `~/.config/repo-aegis`.
   priorHome = process.env["REPO_AEGIS_HOME"];
   process.env["REPO_AEGIS_HOME"] = tmp;
   setupMarkers();
@@ -148,57 +148,55 @@ describe("computeDenySet", () => {
     rmSync(join(markersDir, "customer-c.txt"));
   });
 
-  it("writes a cache file with the expected shape on miss", () => {
-    const cachePath = join(tmp, "cache-shape.json");
+  it("computes fresh every call: an edit that keeps size and mtime is still seen (no cache)", () => {
     const repo = makeRepo("private-strict");
-    const ds = computeDenySet(repo, { markersDir, cachePath });
-    assert.ok(existsSync(cachePath), "cache file written");
-    const cached = JSON.parse(readFileSync(cachePath, "utf8")) as {
-      schemaVersion: number;
-      key: string;
-      files: unknown[];
-      patterns: string[];
-      combinedRegex: string;
-    };
-    // Bumped to 5 alongside the strict/exemptible regex split, and to 6 when
-    // the class-gated `_self_identity` stem arrived; a stale cache must be
-    // rejected on each of those, or the new shape would be missing from every
-    // warm machine and the feature would silently never engage.
-    assert.equal(cached.schemaVersion, 6);
-    assert.equal(typeof cached.key, "string");
-    assert.equal(cached.key.length, 64, "fingerprint is sha256 hex");
-    assert.deepEqual(cached.patterns, ds.patterns);
-    assert.equal(cached.combinedRegex, ds.combinedRegex);
-  });
-
-  it("invalidates cache when a marker file changes (mtime updated)", () => {
-    const cachePath = join(tmp, "cache-invalidate.json");
-    const repo = makeRepo("private-strict");
-    const ds1 = computeDenySet(repo, { markersDir, cachePath });
-
-    // Change a marker file with a NEW mtime + different size.
     const acmePath = join(markersDir, "customer-a.txt");
-    writeFileSync(acmePath, "completely-different-content\n");
+    // A fixed time, set by path before and after the edit: no stat-then-write on the same path.
+    const fixed = new Date(Date.UTC(2026, 0, 1));
+    utimesSync(acmePath, fixed, fixed);
+    const ds1 = computeDenySet(repo, { markersDir });
+    assert.ok(ds1.patterns.includes("acme-corp"));
 
-    const ds2 = computeDenySet(repo, { markersDir, cachePath });
-    assert.notDeepEqual(ds2.patterns, ds1.patterns, "cache must invalidate on marker change");
-    assert.ok(ds2.patterns.includes("completely-different-content"));
+    // Same byte length ("acme-corp" -> "acme-c0rp"), mtime restored: the old
+    // fingerprint (mtime + size) could not tell these apart.
+    writeFileSync(acmePath, "acme-c0rp\nacme\\.com\n");
+    utimesSync(acmePath, fixed, fixed);
+    const ds2 = computeDenySet(repo, { markersDir });
+    assert.ok(ds2.patterns.includes("acme-c0rp"), "the edit must be visible immediately");
+    assert.ok(!ds2.patterns.includes("acme-corp"));
 
-    // Restore for downstream tests.
     setupMarkers();
   });
 
-  it("cachePath: null disables caching", () => {
-    const repo = makeRepo("private-strict");
-    const initialFiles = readdirSync(tmp).filter(f => f.endsWith(".json")).length;
-    computeDenySet(repo, { markersDir, cachePath: null });
-    const after = readdirSync(tmp).filter(f => f.endsWith(".json")).length;
-    assert.equal(after, initialFiles, "no cache file should be written");
+  it("writes no cache file anywhere under the home", () => {
+    computeDenySet(makeRepo("private-strict"), { markersDir });
+    assert.equal(existsSync(join(tmp, "state", "deny-set.cache.json")), false);
+  });
+
+  it("removeLegacyDenySetCache deletes the old cache file once, silently", () => {
+    const home = mkdtempSync(join(tmp, "legacy-"));
+    mkdirSync(join(home, "state"), { recursive: true });
+    const cache = join(home, "state", "deny-set.cache.json");
+    writeFileSync(cache, JSON.stringify({ schemaVersion: 6, key: "k" }));
+    assert.equal(removeLegacyDenySetCache(home), true);
+    assert.equal(existsSync(cache), false);
+    assert.equal(removeLegacyDenySetCache(home), false, "nothing left to delete, and no throw");
+    // Other state is untouched.
+    writeFileSync(join(home, "state", "audit.log"), "x");
+    removeLegacyDenySetCache(home);
+    assert.equal(existsSync(join(home, "state", "audit.log")), true);
+  });
+
+  it("removeLegacyDenySetCache never throws (a directory in the way, a missing home)", () => {
+    const home = mkdtempSync(join(tmp, "legacy-dir-"));
+    mkdirSync(join(home, "state", "deny-set.cache.json"), { recursive: true });
+    assert.doesNotThrow(() => removeLegacyDenySetCache(home));
+    assert.doesNotThrow(() => removeLegacyDenySetCache(join(tmp, "no-such-home")));
   });
 
   it("populates patternSources parallel to patterns", () => {
     const repo = makeRepo("private-strict");
-    const ds = computeDenySet(repo, { markersDir, cachePath: null });
+    const ds = computeDenySet(repo, { markersDir });
     assert.equal(ds.patternSources?.length, ds.patterns.length, "lengths must match");
     // Spot-check: alphabetical file order is _always, customer-a, customer-b
     const alwaysIdx = ds.patterns.findIndex(p => p === "PROJECT-CODENAME-ALPHA");
@@ -213,7 +211,7 @@ describe("computeDenySet", () => {
 
   describe("auto-block engagement identifiers (self-marker)", () => {
     it("blocks each engagement's own id, not just its marker-file contents", () => {
-      const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+      const ds = computeDenySet(makeRepo("private-strict"), { markersDir });
       assert.ok(ds.patterns.includes("customer-a"), "engagement id is auto-blocked");
       assert.ok(ds.patterns.includes("customer-b"), "engagement id is auto-blocked");
       // The id pattern is attributed to its own engagement.
@@ -227,7 +225,7 @@ describe("computeDenySet", () => {
       // customer-derived id leaked freely. It must now block its own id.
       writeFileSync(join(markersDir, "zero-marker-customer.txt"), "; no markers populated yet\n");
       try {
-        const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+        const ds = computeDenySet(makeRepo("private-strict"), { markersDir });
         assert.ok(
           ds.patterns.includes("zero-marker-customer"),
           "zero-marker engagement must still block its identifier",
@@ -242,7 +240,7 @@ describe("computeDenySet", () => {
     });
 
     it("does NOT auto-block the _always system stem", () => {
-      const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+      const ds = computeDenySet(makeRepo("private-strict"), { markersDir });
       assert.ok(!ds.patterns.includes(ALWAYS_FILE_STEM), "_always is not an identifier");
     });
 
@@ -251,7 +249,7 @@ describe("computeDenySet", () => {
       // pattern (e.g. `a.b+c` must not also match `axbcc`).
       writeFileSync(join(markersDir, "a.b+c.txt"), "; empty\n");
       try {
-        const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+        const ds = computeDenySet(makeRepo("private-strict"), { markersDir });
         assert.ok(ds.patterns.includes("a\\.b\\+c"), "special chars are escaped");
         assert.equal(scanText("literal a.b+c here", ds).length, 1, "matches the literal");
         assert.equal(scanText("regex axbcc here", ds).length, 0, "does not match as a regex");
@@ -264,43 +262,16 @@ describe("computeDenySet", () => {
       assert.ok(MIN_AUTO_BLOCK_IDENTIFIER_LENGTH >= 3);
       writeFileSync(join(markersDir, "qa.txt"), "; empty\n");
       try {
-        const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath: null });
+        const ds = computeDenySet(makeRepo("private-strict"), { markersDir });
         assert.ok(!ds.patterns.includes("qa"), "too-short id is not auto-blocked");
       } finally {
         rmSync(join(markersDir, "qa.txt"));
       }
     });
 
-    it("ignores a stale-schema cache so the auto-block takes effect on upgrade", () => {
-      // A pre-0.4 cache has the old schemaVersion and patterns WITHOUT the
-      // engagement identifiers (and the same fingerprint key, since no marker
-      // file changed). computeDenySet must ignore it and recompute, or the fix
-      // would be silently inert on machines with a warm cache.
-      const cachePath = join(tmp, "cache-stale-schema.json");
-      writeFileSync(
-        cachePath,
-        JSON.stringify({
-          schemaVersion: 2,
-          key: "stale-but-shaped-key",
-          files: [],
-          patterns: ["acme-corp"],
-          patternSources: ["customer-a"],
-          combinedRegex: "acme-corp",
-          warnings: [],
-        }),
-      );
-      const ds = computeDenySet(makeRepo("private-strict"), { markersDir, cachePath });
-      assert.ok(
-        ds.patterns.includes("customer-a"),
-        "stale-schema cache must be ignored; identifier auto-blocked after recompute",
-      );
-      rmSync(cachePath, { force: true });
-    });
-
     it("customer-coupled: blocks OTHER engagement ids but not the repo's own", () => {
       const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
         markersDir,
-        cachePath: null,
       });
       assert.ok(!ds.patterns.includes("customer-a"), "own id is not blocked (file excluded)");
       assert.ok(ds.patterns.includes("customer-b"), "other engagement id is blocked");
@@ -342,7 +313,6 @@ describe("computeDenySet — _private_infra gating", () => {
     withInfra();
     const ds = computeDenySet(makeRepo("public-eligible"), {
       markersDir,
-      cachePath: null,
       publicFacing: true,
     });
     assert.ok(ds.patterns.includes(INFRA), "private-infra pattern must be active");
@@ -353,7 +323,6 @@ describe("computeDenySet — _private_infra gating", () => {
     withInfra();
     const ds = computeDenySet(makeRepo("private-strict"), {
       markersDir,
-      cachePath: null,
       publicFacing: false,
     });
     assert.ok(!ds.patterns.includes(INFRA), "must not fire in a private repo");
@@ -366,7 +335,6 @@ describe("computeDenySet — _private_infra gating", () => {
     withInfra();
     const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
       markersDir,
-      cachePath: null,
       publicFacing: false,
     });
     assert.ok(!ds.patterns.includes(INFRA));
@@ -376,7 +344,6 @@ describe("computeDenySet — _private_infra gating", () => {
     withInfra();
     const ds = computeDenySet(makeRepo("public-eligible"), {
       markersDir,
-      cachePath: null,
       publicFacing: true,
     });
     // `_always` is likewise excluded; neither system stem is an engagement id.
@@ -384,17 +351,14 @@ describe("computeDenySet — _private_infra gating", () => {
     assert.ok(!ds.patterns.includes(ALWAYS_FILE_STEM));
   });
 
-  it("does not serve a stale cached set when public-facing flips", () => {
+  it("reflects a public-facing flip immediately", () => {
     withInfra();
-    const cachePath = join(tmp, "gate-cache.json");
     const repo = makeRepo("private-strict");
-    const priv = computeDenySet(repo, { markersDir, cachePath, publicFacing: false });
+    const priv = computeDenySet(repo, { markersDir, publicFacing: false });
     assert.ok(!priv.patterns.includes(INFRA));
-    // Same repo, same marker files — only the visibility changed. Were
-    // publicFacing absent from the fingerprint, this would hit the stale entry
-    // and silently under-block a now-public repo.
-    const pub = computeDenySet(repo, { markersDir, cachePath, publicFacing: true });
-    assert.ok(pub.patterns.includes(INFRA), "cache must not mask the flip to public");
+    // Same repo, same marker files — only the visibility changed.
+    const pub = computeDenySet(repo, { markersDir, publicFacing: true });
+    assert.ok(pub.patterns.includes(INFRA), "the flip to public must show");
   });
 });
 
@@ -451,7 +415,6 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
   it("splits the deny set by class without disturbing combinedRegex", () => {
     const ds = computeDenySet(makeRepo("public-eligible"), {
       markersDir: classDir,
-      cachePath: null,
       publicFacing: true,
       exemptPaths: ["**/test/**"],
     });
@@ -478,7 +441,6 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
     writeRegistry(home); // no alwaysBlockExemptPaths
     const ds = computeDenySet(makeRepo("private-strict"), {
       markersDir: classDir,
-      cachePath: null,
       publicFacing: false,
       registryPath: join(home, "engagements.yaml"),
     });
@@ -489,7 +451,6 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
     writeRegistry(home, []);
     const ds = computeDenySet(makeRepo("private-strict"), {
       markersDir: classDir,
-      cachePath: null,
       publicFacing: false,
       registryPath: join(home, "engagements.yaml"),
     });
@@ -500,7 +461,6 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
     writeRegistry(home, ["**/vendor-fixtures/**"]);
     const ds = computeDenySet(makeRepo("private-strict"), {
       markersDir: classDir,
-      cachePath: null,
       publicFacing: false,
       registryPath: join(home, "engagements.yaml"),
     });
@@ -512,7 +472,6 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
     const repo = { ...makeRepo("private-strict"), alwaysBlockExemptPaths: ["**/golden/**"] };
     const ds = computeDenySet(repo, {
       markersDir: classDir,
-      cachePath: null,
       publicFacing: false,
       registryPath: join(home, "engagements.yaml"),
     });
@@ -524,7 +483,6 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
     const repo = { ...makeRepo("private-strict"), alwaysBlockExemptPaths: ["**/golden/**"] };
     const ds = computeDenySet(repo, {
       markersDir: classDir,
-      cachePath: null,
       publicFacing: false,
       registryPath: join(home, "engagements.yaml"),
     });
@@ -536,7 +494,6 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
     const repo = { ...makeRepo("private-strict"), alwaysBlockExemptPaths: ["**/golden/**"] };
     const ds = computeDenySet(repo, {
       markersDir: classDir,
-      cachePath: null,
       publicFacing: false,
       registryPath: join(home, "engagements.yaml"),
     });
@@ -558,7 +515,6 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
           () =>
             computeDenySet(makeRepo("private-strict"), {
               markersDir: classDir,
-              cachePath: null,
               publicFacing: false,
               registryPath: join(home, "engagements.yaml"),
             }),
@@ -573,7 +529,6 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
           () =>
             computeDenySet(repo, {
               markersDir: classDir,
-              cachePath: null,
               publicFacing: false,
               registryPath: join(home, "engagements.yaml"),
             }),
@@ -583,17 +538,14 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
     }
   });
 
-  it("changing the exempt paths invalidates the cached deny set", () => {
+  it("a changed exempt-path list shows immediately", () => {
     // The marker files are untouched between the two calls, so a fingerprint
     // that omitted the resolved exempt-path list would serve the first
     // (stale) entry and a registry edit would appear to do nothing.
-    const cachePath = join(tmp, "exempt-cache.json");
-    rmSync(cachePath, { force: true });
     const repo = makeRepo("private-strict");
 
     const first = computeDenySet(repo, {
       markersDir: classDir,
-      cachePath,
       publicFacing: false,
       exemptPaths: ["**/test/**"],
     });
@@ -601,59 +553,16 @@ describe("computeDenySet — `_always`-only path exemptions", () => {
 
     const second = computeDenySet(repo, {
       markersDir: classDir,
-      cachePath,
       publicFacing: false,
       exemptPaths: ["**/golden/**"],
     });
     assert.deepEqual(
       second.exemptPaths,
       ["**/golden/**"],
-      "cache must not mask a change to the exempt-path list",
+      "a change to the exempt-path list must show",
     );
   });
 
-  it("a cache hit still carries the split and the exempt paths", () => {
-    const cachePath = join(tmp, "exempt-cache-hit.json");
-    rmSync(cachePath, { force: true });
-    const repo = makeRepo("private-strict");
-    const opts = {
-      markersDir: classDir,
-      cachePath,
-      publicFacing: false,
-      exemptPaths: ["**/test/**"],
-    };
-    const cold = computeDenySet(repo, opts);
-    const warm = computeDenySet(repo, opts);
-    assert.equal(warm.strictRegex, cold.strictRegex);
-    assert.equal(warm.exemptibleRegex, cold.exemptibleRegex);
-    assert.deepEqual(warm.exemptPaths, cold.exemptPaths);
-    assert.notEqual(warm.strictRegex, undefined);
-  });
-
-  it("a v4-schema cache is rejected so the split takes effect on upgrade", () => {
-    const cachePath = join(tmp, "v4-cache.json");
-    writeFileSync(
-      cachePath,
-      JSON.stringify({
-        schemaVersion: 4,
-        key: "shaped-but-stale",
-        files: [],
-        patterns: ["zetaquadrant"],
-        patternSources: ["customer-z"],
-        combinedRegex: "zetaquadrant",
-        warnings: [],
-      }),
-    );
-    const ds = computeDenySet(makeRepo("private-strict"), {
-      markersDir: classDir,
-      cachePath,
-      publicFacing: false,
-      exemptPaths: ["**/test/**"],
-    });
-    assert.equal(typeof ds.strictRegex, "string", "recomputed, not served from v4");
-    assert.deepEqual(ds.exemptPaths, ["**/test/**"]);
-    rmSync(cachePath, { force: true });
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -681,7 +590,6 @@ describe("computeDenySet — _self_identity gating", () => {
   it("includes identity patterns in a customer-coupled repo", () => {
     const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
       markersDir: selfDir,
-      cachePath: null,
       publicFacing: false,
     });
     assert.ok(ds.patterns.includes(SELF), "our own name must not reach a customer repo");
@@ -692,7 +600,6 @@ describe("computeDenySet — _self_identity gating", () => {
     it(`EXCLUDES them in a ${cls} repo, where our own name belongs`, () => {
       const ds = computeDenySet(makeRepo(cls), {
         markersDir: selfDir,
-        cachePath: null,
         // Both values of the private-infra gate, so the two gates cannot be
         // confused for one another.
         publicFacing: cls === "public-eligible",
@@ -711,12 +618,10 @@ describe("computeDenySet — _self_identity gating", () => {
     // through as "not one of my engagements".
     const coupled = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
       markersDir: selfDir,
-      cachePath: null,
       publicFacing: false,
     });
     const scratch = computeDenySet(makeRepo("scratch", ["customer-a"]), {
       markersDir: selfDir,
-      cachePath: null,
       publicFacing: false,
     });
     assert.ok(coupled.patterns.includes(SELF));
@@ -726,7 +631,6 @@ describe("computeDenySet — _self_identity gating", () => {
   it("scanText over a customer-coupled deny set hits an identity literal", () => {
     const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
       markersDir: selfDir,
-      cachePath: null,
       publicFacing: false,
     });
     const hits = scanText(`maintained by ${SELF} — see the internal tracker`, ds);
@@ -745,7 +649,6 @@ describe("computeDenySet — _self_identity gating", () => {
     // name in their repository; only generic secret shapes are exemptible.
     const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
       markersDir: selfDir,
-      cachePath: null,
       publicFacing: false,
       exemptPaths: ["**/test/**"],
     });
@@ -756,7 +659,6 @@ describe("computeDenySet — _self_identity gating", () => {
   it("never auto-blocks the reserved stem as a literal identifier", () => {
     const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
       markersDir: selfDir,
-      cachePath: null,
       publicFacing: false,
     });
     assert.ok(!ds.patterns.includes(SELF_IDENTITY_FILE_STEM));
@@ -767,62 +669,25 @@ describe("computeDenySet — _self_identity gating", () => {
     assert.equal(isPublishableStem(ALWAYS_FILE_STEM), true);
   });
 
-  it("the cache key separates a customer-coupled set from a private-strict one", () => {
+  it("a customer-coupled set and a private-strict one stay separate across calls", () => {
     // Same marker files, same mtimes, same exempt paths — only the class
     // differs. A fingerprint blind to the gate would serve whichever set was
     // computed first to both.
-    const cachePath = join(tmp, "self-gate-cache.json");
-    rmSync(cachePath, { force: true });
     const priv = computeDenySet(makeRepo("private-strict"), {
       markersDir: selfDir,
-      cachePath,
       publicFacing: false,
     });
     assert.ok(!priv.patterns.includes(SELF));
     const coupled = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
       markersDir: selfDir,
-      cachePath,
       publicFacing: false,
     });
-    assert.ok(coupled.patterns.includes(SELF), "cache must not mask the class gate");
+    assert.ok(coupled.patterns.includes(SELF), "the class gate must apply");
     // …and back again, so neither direction is the lucky one.
     const priv2 = computeDenySet(makeRepo("private-strict"), {
       markersDir: selfDir,
-      cachePath,
       publicFacing: false,
     });
     assert.ok(!priv2.patterns.includes(SELF));
-    rmSync(cachePath, { force: true });
-  });
-
-  it("a v5-schema cache is rejected so the new stem takes effect on upgrade", () => {
-    // The marker files' mtimes and sizes are unchanged by an upgrade, so
-    // without the CACHE_VERSION bump a warm machine would be served a deny set
-    // that never knew about `_self_identity` — the feature silently inert.
-    const cachePath = join(tmp, "v5-cache.json");
-    writeFileSync(
-      cachePath,
-      JSON.stringify({
-        schemaVersion: 5,
-        key: "shaped-but-stale",
-        files: [],
-        patterns: ["STALE-CACHE-SENTINEL"],
-        patternSources: [ALWAYS_FILE_STEM],
-        combinedRegex: "STALE-CACHE-SENTINEL",
-        strictRegex: "",
-        exemptibleRegex: "STALE-CACHE-SENTINEL",
-        exemptPaths: [],
-        warnings: [],
-      }),
-    );
-    const ds = computeDenySet(makeRepo("customer-coupled", ["customer-a"]), {
-      markersDir: selfDir,
-      cachePath,
-      publicFacing: false,
-      exemptPaths: [],
-    });
-    assert.ok(!ds.patterns.includes("STALE-CACHE-SENTINEL"), "v5 entry must be rejected");
-    assert.ok(ds.patterns.includes(SELF), "recomputed with the new stem");
-    rmSync(cachePath, { force: true });
   });
 });

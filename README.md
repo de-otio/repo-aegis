@@ -63,21 +63,25 @@ in [doc/guide-data-leak-prevention.md](doc/guide-data-leak-prevention.md).
 - **Flags secrets in command output.** Private keys, GitHub tokens and JWTs that show up in the
   agent's shell output are flagged, so you know to rotate them. (Same caveat as above: this hook
   exits 1, and whether Claude Code shows that to the agent is unverified.)
-- **Is hard for an agent to switch off.** For Claude Code the hooks are installed as a
-  root-owned settings file and run a pinned copy of repo-aegis, so an agent cannot edit them
-  away. (`--user-settings` uses your own settings file instead, for machines without `sudo`.)
+- **Is hard for an agent to switch off by accident.** For Claude Code the hooks go into
+  `~/.claude/settings.json` and run a pinned copy of repo-aegis, with deny rules on the files that
+  decide what is allowed. That stops an agent from editing its own guard away without meaning to. It
+  does not stop one that is set on removing it.
 - **Picks the right GitHub account per client (optional).** Map each GitHub owner to the
   account, and optionally a GitHub App, that should act for it. Several agents can then work
   for different clients at the same time without anyone switching the active `gh` account.
   See [Setting up identities](doc/configuration.md#setting-up-identities-a-walkthrough).
 - **Enforces in CI too.** `repo-aegis install ci` generates GitHub Actions workflows that run the
-  same checks on the server. Bypassing a local hook does not get past them.
+  same checks on the server. Bypassing a local hook does not get past them. The checks that need
+  the network are a separate package so the gate never loads them: `repo-aegis-scan audit --org`
+  sweeps an org's code search for your markers, and `repo-aegis-scan audit --published` scans a
+  packed tarball before you publish it (both were flags of `repo-aegis audit`; see
+  [doc/cli-reference.md](doc/cli-reference.md#repo-aegis-scan-audit)).
 
 ## Requirements
 
 - macOS or Linux, with git. Node.js 22 or later (CI tests 22 and 24).
 - `gh` (GitHub CLI), if you want `gh` commands checked.
-- `sudo`, for the root-owned Claude Code settings file. Without it, use `--user-settings`.
 - Full protection is for **Claude Code**. **Codex CLI**, **Cursor**, **Copilot CLI** and
   **Antigravity CLI** (which replaced Gemini CLI; `--agent gemini` stays for the old one) can get
   the egress check, and Cursor also a post-edit scan. They are configured by hand from snippets
@@ -89,8 +93,7 @@ in [doc/guide-data-leak-prevention.md](doc/guide-data-leak-prevention.md).
 
 The easy way: point your coding agent at this repository and ask it to **"install and configure
 repo-aegis"**. It follows [doc/agent-install.md](doc/agent-install.md), and it stops and asks
-you for the steps only a person may do (registering GitHub orgs, typing `y` for the root-owned
-settings file).
+you for the steps only a person may do (registering GitHub orgs, approving a publish).
 
 By hand:
 
@@ -104,9 +107,7 @@ By hand:
    `init` creates the registry, installs the git hooks and installs the Claude Code hooks. It
    asks nothing and does not use `sudo`. The git hooks go into git's **global** `core.hooksPath`,
    so they cover every repository on this machine (`repo-aegis install hooks --local` limits them
-   to one repository). The Claude Code hooks go into your own `settings.json`. To move them into
-   the root-owned file, run `repo-aegis install claude-md` afterwards: that one shows what it will
-   write, asks `[y/N]`, and then `sudo` asks for your password.
+   to one repository). The Claude Code hooks go into your own `~/.claude/settings.json`.
 
 2. **Install the `gh` wrapper** so that `gh` commands are checked too:
 
@@ -159,7 +160,7 @@ By hand:
 - `~/.config/repo-aegis/` (the registry and state);
 - git hooks in the repositories you install them into;
 - a block in `~/.claude/CLAUDE.md`;
-- a root-owned Claude Code settings file (or `~/.claude/settings.json`);
+- hook entries and deny rules in `~/.claude/settings.json`;
 - the `gh` wrapper directory;
 - optionally, a git credential helper.
 
@@ -174,9 +175,9 @@ repo-aegis doctor
 ```
 
 Most releases change something repo-aegis generated onto your machine: the git hook scripts, the `gh`
-wrapper, the root-owned Claude Code settings file, the credential helper's pin. Until those are
-rewritten, `doctor` reports them as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`,
-`MANAGED_DROPIN_STALE`) and the new behaviour does not apply. `repo-aegis upgrade` finds each stale
+wrapper, the hooks in your Claude Code `settings.json`, the credential helper's pin. Until those are
+rewritten, `doctor` reports them as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`)
+and the new behaviour does not apply. `repo-aegis upgrade` finds each stale
 one the way `doctor` does, re-runs its installer in a fixed order (hooks, shim, claude-md,
 git-credential) and prints one line per step. It only rewrites installs that are already there and never
 adds one, and a second run says `nothing to upgrade`. `--dry-run` shows what it would do and changes nothing.
@@ -190,11 +191,11 @@ refuse every commit once it was removed.) And it will not roll back: if they are
 version, run the newer install's `upgrade`, or `repo-aegis install hooks` from this one to roll back on
 purpose. After `nvm install` or `brew upgrade node`, with the old install still on disk, it re-pins.
 
-Two steps need a person: the root-owned settings file (`sudo` asks for your password) and the git
-credential helper (it decides which GitHub account an agent pushes as). Where no person is at a
-terminal, for example when an agent runs `upgrade`, they are not run and not counted as failures.
-They are listed under `run yourself:` with the exact command to type, as is
-`repo-aegis install claude-md --user-settings` when the hooks in your `~/.claude/settings.json` (what
+The git credential helper needs a person (it decides which GitHub account an agent pushes as). Where no
+person is at a terminal, for example when an agent runs `upgrade`, it is not run and not counted as a failure.
+It is listed under `run yourself:` with the exact command to type, as are a legacy root-owned settings
+file from 0.13 or earlier (removing it needs root, so `upgrade` only prints the command) and
+`repo-aegis install claude-md` when the hooks in your `~/.claude/settings.json` (what
 `init` writes) are pinned to a Node or install that has moved (refused, with the same two exceptions,
 when this install is older or temporary). After you upgrade, the first
 command you run prints ``repo-aegis <version> is new here: run `repo-aegis upgrade` ``, once, on stderr
@@ -218,9 +219,6 @@ highest version seen, so two installs sharing a home do not announce themselves 
 Working in another repository, where those files are not on disk? Every refusal ends
 `[CODE; details: repo-aegis explain CODE]`, and `repo-aegis explain <CODE>` prints the guide's text for it
 (the guides ship in the npm package; `explain --list` names every code).
-
-Optional add-ons: [packages/llm](packages/llm/README.md) (local-LLM marker suggestions and a
-semantic audit sweep; never part of the blocking checks) and [packages/mcp](packages/mcp/README.md).
 
 ## Companion tools
 
@@ -281,11 +279,16 @@ repo-aegis uninstall --yes    # removes every install step
 npm uninstall -g @de-otio/repo-aegis
 ```
 
-`uninstall` reverses the git hooks, the Claude Code wiring (including the root-owned settings
-file), the CI workflows, the `gh` wrapper, the git credential helper and the decision log (`state/decisions.jsonl`
-and its rotations, the on/off switch, the old `gh-decisions.jsonl`, and the `$TMPDIR` fallback). `--purge-repos` also
-clears repo-aegis's git config in your classified repositories. `--purge-home` also deletes
-`~/.config/repo-aegis/`. See `repo-aegis uninstall --help`.
+`uninstall` reverses the git hooks, the Claude Code wiring, the CI workflows, the `gh` wrapper, the git
+credential helper and the decision log (`state/decisions.jsonl` and its rotations, the on/off switch, the old
+`gh-decisions.jsonl`, and the `$TMPDIR` fallback). `--purge-repos` also clears repo-aegis's git config in your
+classified repositories. `--purge-home` also deletes `~/.config/repo-aegis/`. See `repo-aegis uninstall --help`.
+
+**Upgrading from 0.13 or earlier with a root-owned managed drop-in installed?** That feature was
+removed. `repo-aegis doctor` reports `MANAGED_LEGACY_PRESENT`, and `repo-aegis uninstall` prints the
+exact command that removes the file (repo-aegis never runs `sudo` itself). Run
+`repo-aegis install claude-md` first, so the hooks are in `~/.claude/settings.json`, then remove the
+drop-in. See [Removing a legacy managed drop-in](doc/configuration.md#removing-a-legacy-managed-drop-in).
 
 ## Development
 

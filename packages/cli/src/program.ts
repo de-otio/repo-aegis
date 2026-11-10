@@ -8,7 +8,7 @@
 // hard failures inside subcommand handlers) lives in the bin wrapper or
 // the individual command modules — never in this file.
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -362,34 +362,6 @@ export async function buildProgram(): Promise<Command> {
     .action((opts, cmd) => classify(withGlobals(opts, cmd)));
 
   program
-    .command("suggest-markers")
-    .description(
-      "LLM-assisted marker discovery (Phase 2 onboarding). Runs prose extraction + local Ollama call against a repo and suggests regex markers to add to an engagement.",
-    )
-    .requiredOption("--engagement <id>", "engagement id to add markers to")
-    .option("--from <path>", "repo to scan (default: cwd)")
-    .option("--model <id>", "Ollama model id (default: llama3.2:3b)")
-    .option("--endpoint <url>", "Ollama endpoint (default: http://127.0.0.1:11434)")
-    .option(
-      "--allow-remote-model",
-      "allow non-loopback Ollama endpoint (sends customer prose data to a remote service)",
-    )
-    .option(
-      "--accept-remote-author-domains",
-      "send git-log author email domains even when the endpoint is non-loopback",
-    )
-    .option(
-      "--auto-accept-above <n>",
-      "auto-accept candidates with confidence >= n (number in [0,1])",
-      v => parseFloat(v),
-    )
-    .option("--dry-run", "print candidates and exit without persisting")
-    .action(async (opts, cmd) => {
-      const { suggestMarkers } = await import("./commands/suggest-markers.js");
-      await suggestMarkers(withGlobals(opts, cmd));
-    });
-
-  program
     .command("scan-env")
     .description(
       "discover private package-registry hosts from this machine's toolchain configs (~/.npmrc, pip.conf, ~/.docker/config.json, ~/.m2/settings.xml, ~/.cargo/config.toml, ~/.yarnrc.yml) and offer them as markers. Dry-run unless --accept is given; never reads auth tokens.",
@@ -458,11 +430,11 @@ export async function buildProgram(): Promise<Command> {
 
   install
     .command("claude-md")
-    .description("install the Claude Code hooks and deny rules as a root-owned managed-settings drop-in (asks for your sudo password), plus a CLAUDE.md snippet")
+    .description("install the Claude Code hooks and deny rules into ~/.claude/settings.json, plus a CLAUDE.md snippet")
     .option("--claude-home <dir>", "override default ~/.claude location")
     .option(
       "--user-settings",
-      "write the hooks and deny rules to ~/.claude/settings.json instead of the managed drop-in: for containers and other places without sudo (that file must then stay per machine)",
+      "no-op, kept for one release: writing to ~/.claude/settings.json is now the only mode (the root-owned drop-in was removed)",
     )
     .option("--dry-run", "preview the would-be settings.json + CLAUDE.md additions without writing")
     .option("--print-only", "alias for --dry-run")
@@ -472,7 +444,7 @@ export async function buildProgram(): Promise<Command> {
     )
     .option(
       "--uninstall",
-      "remove the managed drop-in (asks for your sudo password, from a terminal), strip the managed CLAUDE.md block and remove repo-aegis hook entries from settings.json (idempotent). Run this BEFORE `npm rm -g repo-aegis`",
+      "strip the CLAUDE.md block and remove repo-aegis hook entries from settings.json (idempotent); if a legacy root-owned drop-in is still installed, prints the command that removes it. Run this BEFORE `npm rm -g repo-aegis`",
     )
     .action((opts, cmd) => {
       const merged = withGlobals(opts, cmd) as {
@@ -481,6 +453,9 @@ export async function buildProgram(): Promise<Command> {
         userSettings?: boolean;
       };
       if (merged.printOnly) merged.dryRun = true;
+      if (merged.userSettings === true) {
+        process.stderr.write("note: --user-settings is now the only mode; the flag is ignored and will be removed in a later release\n");
+      }
       installClaudeMd(merged);
     });
 
@@ -573,42 +548,52 @@ export async function buildProgram(): Promise<Command> {
 
   program
     .command("audit")
-    .description("composite repo audit: marker scan, lockfile, fixtures, remote consistency, optional org/published sweep")
+    .description("composite repo audit: marker scan, lockfile, fixtures, remote consistency, hooks (the org/published sweeps moved to `repo-aegis-scan audit`)")
     .option("--history", "also sweep full git history with `git log -G` per pattern (slow)")
     .option("--no-marker-scan", "skip the marker scan over tracked files")
     .option("--no-lockfile-check", "skip package-lock.json non-public-registry check")
     .option("--no-fixture-check", "skip scan of fixture/__fixtures__/testdata directories")
     .option("--no-hooks-check", "skip the git-hooks liveness check (core.hooksPath wiring); the generated CI workflow always sets this — hooks are never installed on a CI runner")
     .option("--no-remote-check", "skip the remote-vs-class consistency check")
-    .option("--org <org>", "also run a one-shot GitHub code-search sweep against this org (needs GH_TOKEN)")
-    .option("--published <pkg-or-tarball>", "also scan a packed npm tarball, VSIX bundle, or npm package name")
-    .option("--no-secret-scan", "with --published: skip the universal secret-shape scan (PEM keys, JWTs, forge tokens) over archive contents")
+    // Moved to `repo-aegis-scan audit` (P2-E). Still parsed, hidden from --help, and
+    // answered with the exact replacement command and exit 2. Drop after one release.
+    .addOption(new Option("--org <org>", "moved to `repo-aegis-scan audit --org`").hideHelp())
+    .addOption(new Option("--published <pkg-or-tarball>", "moved to `repo-aegis-scan audit --published`").hideHelp())
+    .addOption(new Option("--no-secret-scan", "moved with --published").hideHelp())
     .option("--ignore-allowlist-comments", "report findings a `repo-aegis: allow` comment suppresses (audit-grade strict; audit never applies waivers, so there is no --ignore-waivers counterpart)")
-    .option("--token <env-var>", "env var holding the GitHub token for --org (default GH_TOKEN)")
-    .option("--max-queries <n>", "cap on --org seed-derived queries per run (default 30)", v => parseInt(v, 10))
-    .option("--accept-cross-border", "consent to sending --org seed substrings to GitHub (or set REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1)")
+    .addOption(new Option("--token <env-var>", "moved with --org").hideHelp())
+    .addOption(new Option("--max-queries <n>", "moved with --org").argParser((v: string) => parseInt(v, 10)).hideHelp())
+    .addOption(new Option("--accept-cross-border", "moved with --org").hideHelp())
     .option("--min-patterns <n>", "exit 2 if the computed deny set has fewer than <n> patterns (fail closed on a missing registry)", v => parseInt(v, 10))
     .option("--require-deny-set", "sugar for --min-patterns 1")
     .option("--redact-attribution", "strip engagement ids and engagement-derived pattern ids from output (set this for anything published: PR comments, issues, public job logs)")
     .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
     .action((opts, cmd) => audit(withGlobals(opts, cmd)));
 
-  // `registry` subcommand group — at-rest encryption of the engagement
-  // registry. Lives here so the user can shut a machine down with a
-  // ciphertext-only registry between work sessions, then re-decrypt
-  // before resuming. `loadRegistry` deliberately does NOT auto-decrypt
-  // (it throws `RegistryEncryptedError`); the user must explicitly
-  // run `repo-aegis registry decrypt --identity <path>` first.
-  const registry = program.command("registry").description("manage the engagement registry's at-rest encryption");
+  // `registry` subcommand group. At-rest encryption of the registry is being
+  // removed (it is not part of accident prevention). `encrypt` is gone and only
+  // tells you so; `decrypt` stays for at least one release so an already-encrypted
+  // registry can be migrated. `loadRegistry` deliberately does NOT auto-decrypt
+  // (it throws `RegistryEncryptedError`); a person runs
+  // `repo-aegis registry decrypt --identity <path>`.
+  const registry = program.command("registry").description("migrate an encrypted engagement registry back to plaintext (at-rest encryption is removed)");
 
-  const { registryEncrypt } = await import("./commands/registry-encrypt.js");
   const { registryDecrypt } = await import("./commands/registry-decrypt.js");
 
   registry
     .command("encrypt")
-    .description("encrypt the engagement registry to engagements.yaml.age and remove the plaintext")
-    .requiredOption("--recipient <pubkey>", "age recipient public key (age1... or ssh-ed25519 ...)")
-    .action((opts, cmd) => registryEncrypt(withGlobals(opts, cmd)));
+    .description("removed in 0.15.0; exits 2")
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action((_opts, cmd) => {
+      emitError(
+        {
+          code: "REGISTRY_ENCRYPT_REMOVED",
+          error: "registry encrypt was removed in 0.15.0; at-rest encryption is not part of accident prevention",
+        },
+        withGlobals({}, cmd),
+      );
+    });
 
   registry
     .command("decrypt")
@@ -686,19 +671,18 @@ export async function buildProgram(): Promise<Command> {
       hookFirstTouch(withGlobals(opts, cmd));
     });
 
+  // legacy-managed-remover: remove in 0.17
+  // A root-owned drop-in written by 0.13 or earlier still runs this on SessionStart until its owner removes
+  // it; an unknown command would exit 1 and print a hook error at every session start.
   hook
-    .command("managed-heartbeat")
-    .description("SessionStart (managed drop-in only): record that Claude Code loaded the managed settings, for `doctor`'s MANAGED_HOOKS_NOT_FIRING")
-    .action(async () => {
-      const { hookManagedHeartbeat } = await import("./commands/hook-managed-heartbeat.js");
-      hookManagedHeartbeat();
-    });
+    .command("managed-heartbeat", { hidden: true })
+    .description("no-op: only a legacy managed drop-in calls this (`repo-aegis doctor` reports it as MANAGED_LEGACY_PRESENT)")
+    .action(() => {});
 
   // `audit-log` subcommand group — operator compliance trail. OFF by
   // default; opt-in via `audit-log on`. State-changing operations
   // (allow/deny, engagements add/end/remove, classify --apply, init,
-  // install hooks/claude-md/gitignore/ci, render, registry encrypt/
-  // decrypt) emit one JSONL record per success when enabled. The log
+  // install hooks/claude-md/gitignore/ci, render, registry decrypt) emit one JSONL record per success when enabled. The log
   // never contains literal marker patterns or matched substrings —
   // only structural metadata (engagement ids, counts, paths).
   const auditLog = program
@@ -870,12 +854,12 @@ export async function buildProgram(): Promise<Command> {
     .action((opts, cmd) => doctor(withGlobals(opts, cmd)));
 
   // One command after upgrading the package: re-run the installers whose generated output `doctor` calls stale.
-  // Allowed for agents: it only re-runs installers an agent may already run, and the two that need a person
-  // (the managed drop-in's sudo write, the credential helper) are listed, not run, when no person is at a terminal.
+  // Allowed for agents: it only re-runs installers an agent may already run, and what needs a person
+  // (the credential helper; removing a legacy root-owned drop-in) is listed, not run, when no person is at a terminal.
   program
     .command("upgrade")
     .description(
-      "after upgrading repo-aegis: re-run the installers whose output is stale (git hook scripts, the gh shim, the managed Claude Code drop-in, the git credential helper), one line per step. Steps that need a person at a terminal (the drop-in's sudo write, the credential helper) are listed under `run yourself:` when none is attached. Never installs what was not installed.",
+      "after upgrading repo-aegis: re-run the installers whose output is stale (git hook scripts, the gh shim, the git credential helper), one line per step. Steps that need a person at a terminal (the credential helper; removing a legacy root-owned drop-in) are listed under `run yourself:` when none is attached. Never installs what was not installed.",
     )
     .option("--dry-run", "report what would be done; change nothing")
     .option("--force", "pin to this install even when it looks temporary (a git checkout, an npx cache, a project devDependency); once that copy is removed every commit and push is refused until `install hooks` runs from a lasting install; never overrides a version rollback")

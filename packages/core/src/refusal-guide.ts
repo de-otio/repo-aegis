@@ -107,11 +107,6 @@ export const REFUSAL_GUIDE: Readonly<Record<string, RefusalGuideEntry>> = {
   OWNER_ADD_NEEDS_TTY: person("A person runs the command from their own terminal; the refusal prints it."),
   OWNER_SET_EMPTY_NEEDS_TTY: person("A person runs the command from their own terminal; removing one owner among several needs none."),
   GIT_CREDENTIAL_NEEDS_TTY: person("A person runs `repo-aegis install git-credential` from their own terminal."),
-  REGISTRY_ENCRYPT_NEEDS_TTY: person("A person runs the command from their own terminal, if they want encryption at rest."),
-  MANAGED_NEEDS_TTY: person("A person runs `repo-aegis install claude-md` from their own terminal."),
-  MANAGED_NOT_CONFIRMED: person("A person re-runs `repo-aegis install claude-md` in a terminal and types `y` at the prompt."),
-  PRIVILEGED_TOOL_UNSAFE: person("A person fixes the tool or directory the message names, or uses `--user-settings`."),
-  SYSTEM_DIR_UNSAFE: person("A person fixes the directory the message names, or uses `--user-settings`."),
 
   // ---- a person's repair of their own setup ----
   GIT_CREDENTIAL_ORDER_REFUSED: person("A person removes or reorders the other github.com credential helper the message names, then runs `repo-aegis install git-credential` again."),
@@ -122,7 +117,6 @@ export const REFUSAL_GUIDE: Readonly<Record<string, RefusalGuideEntry>> = {
   INVALID_UPSTREAM: person("A person corrects the value to a valid <owner>/<repo> and runs the command again."),
   FS_ERROR: person("A person fixes the permissions the details name and tries again."),
   PUBLISHED_ARCHIVE_ESCAPE: person("A person inspects the archive, which has an entry that escapes its directory, and rebuilds the package without it."),
-  SUDO_NOPASSWD: person("A person decides whether `sudo` should ask for a password."),
 
   // ---- plain CLI errors (exit 2 with `{ code, error }`): a wrong flag, a missing file, a registry or config a person must repair.
   // The agent's own mistakes are `agent`; anything that needs a decision, a terminal or an edit to a person's files is `person`.
@@ -140,19 +134,15 @@ export const REFUSAL_GUIDE: Readonly<Record<string, RefusalGuideEntry>> = {
   RESERVED_ID: agent("Choose another id; `_always` is reserved (its markers live in the registry's `always_block` field)."),
   REMOVE_REQUIRES_HARD: agent("For a soft removal run `repo-aegis engagements end <id> --purge`; `--hard` is erasure and your human's call."),
   LOCK_TIMEOUT: agent("Wait a moment and retry once; if it repeats, tell your human there may be a stale lockfile."),
-  BUNDLE_FENCE_COLLISION: agent("Re-run once (a fresh delimiter is chosen); if it fails again, tell your human."),
 
   REGISTRY_NOT_FOUND: agent("Run `repo-aegis init`, after confirming with your human first when `REPO_AEGIS_HOME` is not the default."),
   REGISTRY_PARSE: person("A person runs `repo-aegis status` in a terminal and repairs the registry file it names."),
   REGISTRY_UNREADABLE: person("A person runs `repo-aegis status` in a terminal to see why the registry cannot be read."),
-  REGISTRY_LOAD_ERROR: person("A person repairs the registry file, or points `--registry` at a valid one."),
   REGISTRY_ENCRYPTED: agent("Ask your human for the age identity file path, then run `repo-aegis registry decrypt --identity <path>` with exactly that path."),
-  REGISTRY_ALREADY_ENCRYPTED: person("A person looks at the leftover marker or ciphertext and resolves it."),
   REGISTRY_NOT_ENCRYPTED: person("A person looks at the leftover marker or file and resolves it."),
   REGISTRY_WOULD_BE_INVALID: person("A person fixes the duplicate (nothing was written) and runs `repo-aegis doctor`."),
   OUTSIDE_WORKING_TREE: person("A person checks which path was outside the repository; it is not re-run on another path."),
   CUSTOMER_COUPLED_NO_ENGAGEMENT: agent("Ask your human which engagement the repository references, then run `repo-aegis allow <id>`."),
-  DENY_SET_BELOW_FLOOR: person("A person makes the engagement registry available and runs it again; the floor is never lowered to pass."),
   WAIVER_PARSE: person("A person fixes `.repo-aegis.yml`; the message names what is wrong."),
   REPO_OVERRIDE_PARSE_ERROR: person("A person fixes `.repo-aegis.yml`; the message names what is wrong."),
   GLOB_TOO_BROAD: person("A person narrows the glob in `.repo-aegis.yml` to something smaller than the whole repository."),
@@ -174,7 +164,6 @@ export const REFUSAL_GUIDE: Readonly<Record<string, RefusalGuideEntry>> = {
   MARKERS_WRITE_PROTECTED: person("A person runs `repo-aegis render` from their own terminal."),
   WORKFLOW_EXISTS: person("A person passes `--force` if the existing workflow should be overwritten."),
   WORKFLOW_MODIFIED: person("A person reviews the edited workflow and removes it by hand if it should go."),
-  DROPIN_INVALID: person("A person fixes the path the message names; there is no override."),
   PIN_PATH_UNSUPPORTED: person("A person installs repo-aegis at an ordinary path; there is no override."),
   PIN_UNUSABLE: person("A person reinstalls repo-aegis at a stable path, then runs `repo-aegis install git-credential`."),
   SETTINGS_PARSE_ERROR: person("A person repairs `~/.claude/settings.json`; an agent does not edit it."),
@@ -194,16 +183,14 @@ export const REFUSAL_GUIDE: Readonly<Record<string, RefusalGuideEntry>> = {
   WRITE_FAILED: person("A person checks the permissions of the file the message names and tries again."),
   DOCS_MISSING: person("A person reinstalls `@de-otio/repo-aegis`, or runs `npm run build` in a checkout."),
   EXPLAIN_DOCS_MISSING: person("A person reinstalls `@de-otio/repo-aegis`, or runs `npm run build` in a checkout."),
-  REMOTE_DISALLOWED: person("A person decides whether that Ollama endpoint is allowed; the opt-in flag is not added to make it pass."),
-  OLLAMA_ERROR: person("A person starts `ollama serve`, pulls the model and runs the command again."),
-  PROSE_EXTRACTION_FAILED: person("A person reads what the message names and decides whether to retry."),
-  TOKEN_EXTRACTION_FAILED: person("A person reads what the message names and decides whether to retry."),
-  BUNDLE_TOO_LARGE: person("A person decides whether to shrink the corpus; the details carry the size."),
-  ROOT_CONTAINMENT: person("A person looks at the path that resolved into a protected directory; it is not bypassed."),
   PARSE_ERROR: person("A person fixes the query file the message names."),
   TOKEN_MISSING: person("A person exports `GH_TOKEN`, or the variable `--token` names."),
   QUERY_VALIDATION: person("A person fixes the queries the details list."),
   STATE_PARSE_ERROR: person("A person resolves the corrupt state file; it is not truncated."),
+  // ---- removed in 0.15.0: the old command or flag now refuses with a pointer ----
+  AUDIT_NETWORK_MOVED: agent("Run the replacement the message names: `repo-aegis-scan audit --org <org>` or `--published`."),
+  REGISTRY_ENCRYPT_REMOVED: agent("Do not retry; an already-encrypted registry is migrated with `repo-aegis registry decrypt`."),
+  REMOVED: agent("Drop the removed option or command; the message says which release removed it."),
 };
 
 /** The version of the repo-aegis that is running this code, read once from the package that holds it. */

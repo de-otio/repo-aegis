@@ -186,7 +186,6 @@ JSON:
   "allowedEngagements": [{ "id": "customer-a", "name": "Customer A", "active": true }],
   "denySet": { "files": ["_always", "customer-b"], "patternCount": 27 },
   "alwaysBlock": { "patternCount": 3 },
-  "regexBackend": "re2",
   "zeroMarkerEngagements": [],
   "warnings": [],
   "hooks": { /* HookState: effectivePath, origin, expectedPath, scripts, … */ }
@@ -195,13 +194,12 @@ JSON:
 
 `zeroMarkerEngagements` lists the ids of **active** engagements that have no
 markers (an engagement with nothing to match protects nothing; add markers by
-hand or with [`suggest-markers`](#repo-aegis-suggest-markers)). Ids only, never
+hand in the registry or with [`scan-env`](#scan-env)). Ids only, never
 patterns.
 
-`regexBackend` is `"re2"` when the optional `re2` dependency is
-installed and active for pattern validation, or `"in-process"`
-otherwise. See the design doc's locked-decisions row "Regex backend
-(validation)" for what the field means.
+Marker patterns are validated in-process (a static check for nested unbounded
+quantifiers such as `(a+)+`, then a CPU-time check); there is no `re2` backend and
+the `regexBackend` field was removed in 0.15.0.
 
 When the registry defines identities or maps owners to them (schemaVersion 3),
 the JSON also carries `identity`:
@@ -686,7 +684,7 @@ Defines an identity: `--gh-login` makes a `gh-login` identity (a person),
 slugs are lower-cased and validated against the schema's shapes; a login is
 kept as typed. The first identity writes `schemaVersion: 3`, and is refused
 (`MULTIPLE_INSTALLS`) while a `repo-aegis` on `PATH`, or one an installed hook,
-the shim or a Claude Code hook (managed drop-in or `settings.json`) is pinned to, cannot read version 3: it is judged by the supported
+the shim or a Claude Code hook (`settings.json`) is pinned to, cannot read version 3: it is judged by the supported
 version read from that install's own core package, never by running it (an
 older pinned `hook check-write` exits 1, which is non-blocking, so it would stop
 protecting cross-org writes). Adding the same
@@ -888,23 +886,16 @@ merge.
 
 ### `repo-aegis install claude-md`
 
-Wires the repo-aegis hooks into Claude Code. By default the hooks and the
-deny rules (items 2 and 3) are written to a **root-owned managed-settings
-drop-in** (`/Library/Application Support/ClaudeCode/managed-settings.d/
-50-repo-aegis-<uid>.json` on macOS, `/etc/claude-code/managed-settings.d/…` on
-Linux), from your own terminal: it shows the path, size, digest and a diff,
-asks `[y/N]`, and `sudo` asks for your password. Each hook starts with a uid
-guard so other accounts on the machine are unaffected. The first run also
-removes repo-aegis's earlier entries from `~/.claude/settings.json` once the
-drop-in is verified. `--user-settings` writes `~/.claude/settings.json` instead
-(containers, no `sudo`). Details, recovery and caveats:
-[configuration.md](configuration.md#the-claude-code-managed-drop-in).
+Wires the repo-aegis hooks into Claude Code: the hooks and the deny rules
+(items 2 and 3) go into `~/.claude/settings.json`. Nothing here needs `sudo`.
+The root-owned managed drop-in that 0.13 and earlier could write instead was
+removed; see [configuration.md](configuration.md#removing-a-legacy-managed-drop-in)
+for taking an existing one out.
 1. Appends a managed block to `~/.claude/CLAUDE.md` describing how the
    agent should react to a marker hit, and how to recover from an egress
    denial (re-issue explicitly; never set `REPO_AEGIS_EGRESS_HUMAN`; read
    the `PUBLISHED →` receipt after a publish).
-2. Adds entries to the managed drop-in (or `~/.claude/settings.json` with
-   `--user-settings`), all idempotent. The commands
+2. Adds entries to `~/.claude/settings.json`, all idempotent. The commands
    below are shown by hook name; each is written as a one-line `sh` command
    that runs the hook on the **pinned** node and CLI by absolute path and
    exits 2 (blocking) if either is gone and no `repo-aegis` at least as new as
@@ -941,10 +932,8 @@ reports the count per event.
    (`prompt-approvals/**`: an agent that could write one would have approved
    itself), the destination cache (`destinations.json`: rules e-g read a cached entry's class and visibility, so a forged "private" entry for a public repo would skip the person check; every writer treats a failed write as a cache miss), `hooks/**` (the git hook scripts), `bin/**`
    (the `gh` shim), `markers/**` (the rendered deny set the write scan and
-   the hooks read; editing it silently drops markers) and two files under
-   `state/` that an enforcement path trusts: `deny-set.cache.json` (an
-   unauthenticated cache; a forged entry with no patterns switches the scanner
-   off) and the uninstall ledger, under `REPO_AEGIS_HOME`
+   the hooks read; editing it silently drops markers) and the uninstall ledger
+   under `state/`, which an enforcement path trusts, under `REPO_AEGIS_HOME`
    (default `~/.config/repo-aegis`; the markers directory follows
    `REPO_AEGIS_MARKERS_DIR`).
    Without them the agent's own file tools can add an owner to
@@ -960,7 +949,7 @@ reports the count per event.
    `markers/**` is denied, an agent-run `repo-aegis render` is refused inside
    the sandbox (`MARKERS_WRITE_PROTECTED`: a person runs `render` from their own
    terminal); the other flows that re-render (`engagements add|end|remove`,
-   `markers add`, `suggest-markers --auto-accept-above`, `init`) already fail
+   `markers add`, `init`) already fail
    earlier, because they rewrite the denied registry file. A
    registry relocated to `$HOME`, `/` or a git work tree is denied as a file
    only, with a warning. `hooks/**`, `bin/**`, `prompt-approvals/**` and `markers/**` are narrow
@@ -984,14 +973,16 @@ stdin JSON natively, so `jq` is no longer required.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--claude-home <dir>` | `~/.claude` | override default location |
-| `--dry-run` / `--print-only` | off | preview the would-be drop-in (or settings.json) + CLAUDE.md additions; runs nothing as root |
-| `--user-settings` | off | write `~/.claude/settings.json` instead of the managed drop-in; `doctor` warns `ENFORCEMENT_IN_USER_SETTINGS` |
+| `--dry-run` / `--print-only` | off | preview the would-be settings.json + CLAUDE.md additions |
+| `--user-settings` | off | no-op, kept for one release: `settings.json` is the only target (prints a one-line note) |
 | `--first-touch` | off | also register the SessionStart `first-touch` hook |
-| `--uninstall` | off | remove the drop-in (terminal and `sudo` password; run this **before** `npm rm -g repo-aegis`), the managed CLAUDE.md block and the settings.json entries |
+| `--uninstall` | off | strip the CLAUDE.md block and the settings.json entries (run this **before** `npm rm -g repo-aegis`); if a legacy root-owned drop-in is still installed, prints the command that removes it (it never runs `sudo` itself) |
 
-The drop-in also registers a SessionStart `hook managed-heartbeat`, which records
-`state/managed-hooks-seen` so `doctor` can tell that Claude Code loads the file
-(`MANAGED_HOOKS_NOT_FIRING`).
+With a legacy drop-in on the machine, `install claude-md` and `--uninstall` print
+`sudo rm '<path>'` (and a `sudo rmdir` line for a directory the old install
+created), and `--json` carries `legacyManagedDropIn` (`files`, `commands`) or
+`null`. The old ledger and heartbeat marker under `state/` are deleted by
+`--uninstall` once the drop-in is gone.
 
 ### `repo-aegis doctor`
 
@@ -1057,14 +1048,14 @@ check functions) and re-runs the matching installer, in this order, one line per
 |---|---|---|
 | `hooks` | `<home>/hooks/pre-commit` or `pre-push` is not what this release writes (`HOOKS_SCRIPT_STALE`), or one is missing or not executable | rewrites both scripts (the part of `install hooks` that goes stale; `core.hooksPath` is not touched) |
 | `shim` | the `gh` shim is an earlier release's script, or was rendered for another pin or home (`SHIM_STALE`; judged whether or not the shim is first on `PATH`) | `install shim` (keeps the taaad the shim already pins while that launcher still exists; otherwise the first `taaad` on `PATH`, then the old pin as a last resort) |
-| `claude-md` | the managed drop-in differs from what `install claude-md` would write (`MANAGED_DROPIN_STALE`) | `install claude-md`: a root write, behind a `sudo` password and a typed `y` |
-| `user-settings` | a repo-aegis hook command in Claude Code's own `settings.json` (what `init` writes by default) is pinned to another Node or install than this one | nothing: listed under `run yourself:` as `repo-aegis install claude-md --user-settings`, or `REFUSED` under the two cases above |
+| `claude-md` | a legacy root-owned managed drop-in from 0.13 or earlier is still installed (`MANAGED_LEGACY_PRESENT`) | nothing: listed under `run yourself:` with the command that removes it (it needs root, and repo-aegis never runs `sudo`). Quiet and `not-installed` when there is none |
+| `user-settings` | a repo-aegis hook command in Claude Code's own `settings.json` (what `init` writes by default) is pinned to another Node or install than this one | nothing: listed under `run yourself:` as `repo-aegis install claude-md`, or `REFUSED` under the two cases above |
 | `git-credential` | a repo-aegis credential helper for `https://github.com` is configured, but it is another install's (`GIT_CREDENTIAL_HELPER_ORDER`'s stale case) | `install git-credential` (global git config) |
 
-- **It never pins to a copy that will not last, and never rolls back.** The hooks, the shim and the user-settings hooks run a CLI pinned by absolute path. `upgrade` reads each step's pin back from its scripts and judges every step on its own; a step is **refused** (`REFUSED`, ending in the code `UPGRADE_REFUSED`, which `repo-aegis explain` knows; nothing rewritten, exit 1, the version not recorded) in two cases, each with its own fix. (1) The running CLI is *ephemeral*: its realpath has a `.git` file or directory in an ancestor (a worktree build, an `npm link` or `npm i -g .` from a checkout, or a project devDependency, whose project is a git repository) or contains `/_npx/` (an `npx` cache). There is no bare `node_modules` rule: pnpm, yarn and bun global installs live under a `node_modules` too. The scripts would stop working when that copy is removed, so every commit and push would be refused. This applies to the three pinned steps and to the two person-gated ones (`claude-md`, `git-credential`), whether the old pin works or is already gone (unless the scripts already point at this very CLI). Fix: run `upgrade` from the global install (`npm i -g @de-otio/repo-aegis`, then `repo-aegis upgrade`; a developer on an `npm link` runs the step's own installer, for example `repo-aegis install hooks`, from a lasting install). `--force` pins to the temporary copy anyway, and once that copy is removed every commit and push is refused until `install hooks` runs from a lasting install. Global installs are recognised, before the `.git` walk, without spawning a package manager: from `process.execPath` (`<prefix>/bin/node`, so `<prefix>/lib/node_modules`), from `npm_config_prefix`, by any `lib/node_modules` path segment (where Homebrew keeps global packages although `process.execPath` resolves into its `Cellar`), and by the pnpm (`/pnpm/global/`), yarn (`/yarn/global/`) and bun (`/.bun/install/global/`) global roots. A global install elsewhere is judged by its `.git` ancestors; `--force` is the way out. Unix only: Windows hooks are not supported, and Windows global paths are not classified. (2) The running version is older than the pinned `__ra_version` of a pin that still works: it would roll enforcement back. Fix: run the newer install's `upgrade`, or the step's own installer (`repo-aegis install hooks`, `install shim`, `install claude-md --user-settings`) from this install to roll back on purpose. `--force` does not override this. Anything else is re-pinned, including a pin to another working install that is not newer (after `nvm install` or `brew upgrade node` the old global is still on disk) and a pin whose node or CLI file is gone. The two person-gated steps get only the ephemeral check (they have no pin to read back, so no rollback check): a person at the terminal who runs `upgrade` from a lasting install chooses it. Versions are compared with the same semver ordering as the notice (a prerelease is below its release).
-- **Never adds an install.** A missing shim, no drop-in, no helper: that step is `not-installed`/`current` in `--json` and silent in text. A `gh` at `<home>/bin` that is not a repo-aegis shim is the person's and is left alone.
-- **Steps that need a person** (`claude-md`, `git-credential`) run only when a person is at a terminal (the same test `install git-credential` and `approve` use); their own prompts and gates still apply. With none attached they are **not run and not failures**: they are listed under `run yourself:` with the exact command. A person who answers `n` at the `claude-md` prompt has `declined`: nothing is written, the exit code is 0 and the command is listed. `upgrade` is not person-only, because every installer it runs is one an agent may already run; it is not in `core/human-commands.ts`.
-- **Not handled.** For a root account (uid 0) `upgrade` reports the managed drop-in as `not-installed` while `doctor` judges it. `MANAGED_DROPIN_LEDGER_STALE` and `MANAGED_DROPIN_ORPHANED` are not `upgrade`'s: follow the `fix` in `doctor`'s finding. Only the `*_STALE` findings that re-running an installer cures are covered. It does not run `selftest` yet.
+- **It never pins to a copy that will not last, and never rolls back.** The hooks, the shim and the user-settings hooks run a CLI pinned by absolute path. `upgrade` reads each step's pin back from its scripts and judges every step on its own; a step is **refused** (`REFUSED`, ending in the code `UPGRADE_REFUSED`, which `repo-aegis explain` knows; nothing rewritten, exit 1, the version not recorded) in two cases, each with its own fix. (1) The running CLI is *ephemeral*: its realpath has a `.git` file or directory in an ancestor (a worktree build, an `npm link` or `npm i -g .` from a checkout, or a project devDependency, whose project is a git repository) or contains `/_npx/` (an `npx` cache). There is no bare `node_modules` rule: pnpm, yarn and bun global installs live under a `node_modules` too. The scripts would stop working when that copy is removed, so every commit and push would be refused. This applies to the two pinned steps, the user-settings hint and the person-gated `git-credential`, whether the old pin works or is already gone (unless the scripts already point at this very CLI). Fix: run `upgrade` from the global install (`npm i -g @de-otio/repo-aegis`, then `repo-aegis upgrade`; a developer on an `npm link` runs the step's own installer, for example `repo-aegis install hooks`, from a lasting install). `--force` pins to the temporary copy anyway, and once that copy is removed every commit and push is refused until `install hooks` runs from a lasting install. Global installs are recognised, before the `.git` walk, without spawning a package manager: from `process.execPath` (`<prefix>/bin/node`, so `<prefix>/lib/node_modules`), from `npm_config_prefix`, by any `lib/node_modules` path segment (where Homebrew keeps global packages although `process.execPath` resolves into its `Cellar`), and by the pnpm (`/pnpm/global/`), yarn (`/yarn/global/`) and bun (`/.bun/install/global/`) global roots. A global install elsewhere is judged by its `.git` ancestors; `--force` is the way out. Unix only: Windows hooks are not supported, and Windows global paths are not classified. (2) The running version is older than the pinned `__ra_version` of a pin that still works: it would roll enforcement back. Fix: run the newer install's `upgrade`, or the step's own installer (`repo-aegis install hooks`, `install shim`, `install claude-md`) from this install to roll back on purpose. `--force` does not override this. Anything else is re-pinned, including a pin to another working install that is not newer (after `nvm install` or `brew upgrade node` the old global is still on disk) and a pin whose node or CLI file is gone. The person-gated `git-credential` step gets only the ephemeral check (it has no pin to read back, so no rollback check): a person at the terminal who runs `upgrade` from a lasting install chooses it. Versions are compared with the same semver ordering as the notice (a prerelease is below its release).
+- **Never adds an install.** A missing shim, no helper: that step is `not-installed`/`current` in `--json` and silent in text. A `gh` at `<home>/bin` that is not a repo-aegis shim is the person's and is left alone.
+- **Steps that need a person** (`git-credential`) run only when a person is at a terminal (the same test `install git-credential` and `approve` use); their own prompts and gates still apply. With none attached they are **not run and not failures**: they are listed under `run yourself:` with the exact command. A person who answers `n` at the credential helper's prompt has `declined`: nothing is written, the exit code is 0 and the command is listed. The `claude-md` step never runs anything: a legacy drop-in needs root to remove, so it is always listed. `upgrade` is not person-only, because every installer it runs is one an agent may already run; it is not in `core/human-commands.ts`.
+- **Not handled.** For a root account (uid 0) the legacy drop-in check runs against root's own uid like any other. Only the `*_STALE` findings that re-running an installer cures are covered. It does not run `selftest` yet.
 - `--dry-run` prints what each step would do (a refusal included) and changes nothing, including the "last version seen" record below.
 - After a run that re-pinned something, with no step failed or refused, it runs `repo-aegis selftest` and prints its
   lines under `selftest:` (`--json`: a `selftest` field). A layer that is not ok exits 1: the files were re-pinned, but
@@ -1153,8 +1144,22 @@ probed — neither depends on visibility.
 
 ### `repo-aegis audit`
 
-Composite repo health check, useful as a CI step or before publishing
-a tarball / VSIX.
+Composite local repo health check, useful as a CI step. It reads files and
+git state only; it makes no network calls and extracts no archives.
+
+The org sweep and the published-archive scan are not part of it any more:
+`--org`, `--published` and their companions (`--no-secret-scan`, `--token`,
+`--max-queries`, `--accept-cross-border`) moved to
+[`repo-aegis-scan audit`](#repo-aegis-scan-audit). For one release the old flags
+still parse (they are hidden from `--help`), print the exact replacement
+command, run nothing, and exit **2**:
+
+```
+repo-aegis: `audit --org` and `audit --published` moved to `repo-aegis-scan audit --org example-org --accept-cross-border` (install: `npm install -g @de-otio/repo-aegis-scan`). Run `repo-aegis audit` without those flags for the local checks.
+```
+
+A job that ran `repo-aegis audit --org X` now needs two steps: `repo-aegis audit`
+for the local checks and `repo-aegis-scan audit --org X` for the sweep.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -1164,13 +1169,7 @@ a tarball / VSIX.
 | `--no-fixture-check` | — | skip fixture/__fixtures__/testdata directory scan |
 | `--no-remote-check` | — | skip the remote-vs-class consistency check |
 | `--no-hooks-check` | — | skip the git-hooks liveness check (`core.hooksPath` wiring); the generated CI workflow always sets this — hooks are never installed on a CI runner |
-| `--org <org>` | — | run a one-shot GitHub code-search sweep against this org (needs token) |
-| `--published <pkg-or-tarball>` | — | scan a packed npm tarball, VSIX bundle, or npm package name |
-| `--no-secret-scan` | — | with `--published`: skip the universal secret-shape scan over archive contents |
 | `--ignore-allowlist-comments` | off | report findings a `repo-aegis: allow` comment suppresses (audit-grade strict) |
-| `--token <env-var>` | `GH_TOKEN` | env var holding the GitHub token for `--org` |
-| `--max-queries <n>` | 30 | cap on `--org` seed-derived queries per run |
-| `--accept-cross-border` | off | consent to sending `--org` seed substrings to GitHub |
 | `--min-patterns <n>` | 0 | exit **2** if the computed deny set has fewer than `<n>` patterns (see `check`) |
 | `--require-deny-set` | off | sugar for `--min-patterns 1` |
 | `--redact-attribution` | off | strip engagement attribution from output (see `check`) |
@@ -1224,7 +1223,31 @@ visible in `audit` output even though `check` doesn't block on it.
 Engagement and `_private_infra` hits are never informational, at any
 path.
 
-### `audit --org` notes
+### `repo-aegis-scan audit`
+
+Moved here from `repo-aegis audit --org` / `--published` so the gate CLI imports no
+HTTP client and never runs `npm pack`. It lives in `@de-otio/repo-aegis-scan`
+(`npm install -g @de-otio/repo-aegis-scan`). Behaviour, check names (`org-scan`,
+`published`), finding codes and the JSON envelope are the same as before; the
+differences are that only these two checks run, and that at least one of `--org` /
+`--published` is required (neither is a usage error, exit **2**).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--org <org>` | — | run a one-shot GitHub code-search sweep against this org (needs token) |
+| `--published <pkg-or-tarball>` | — | scan a packed npm tarball, VSIX bundle, or npm package name |
+| `--no-secret-scan` | — | with `--published`: skip the universal secret-shape scan over archive contents |
+| `--token <env-var>` | `GH_TOKEN` | env var holding the GitHub token for `--org` |
+| `--max-queries <n>` | 30 | cap on `--org` seed-derived queries per run |
+| `--accept-cross-border` | off | consent to sending `--org` seed substrings to GitHub |
+| `--min-patterns <n>` / `--require-deny-set` | 0 / off | exit **2** if the deny set has fewer than `<n>` patterns; `REPO_AEGIS_MIN_PATTERNS` applies too (see `check`) |
+| `--redact-attribution` | off | strip engagement attribution from output (see `check`) |
+| `--verbose` | off | reveal literal matches (NEVER from hooks) |
+| `--cwd <dir>`, `--registry-path <path>`, `--home <dir>`, `--json` | — | as on `repo-aegis` |
+
+Exit code: 1 if a check fails, 2 on usage error or an unmet floor, 0 if clean.
+
+#### `--org` notes
 
 Sending markers (or substrings derived from them) to GitHub Code
 Search is a cross-border data transfer. The `--accept-cross-border`
@@ -1232,7 +1255,7 @@ flag (or the `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1` env var) is a
 hard gate for compliance. The seed query budget is capped at
 `--max-queries` (default 30).
 
-### `audit --published` notes
+#### `--published` notes
 
 Accepts:
 - npm tarball path (`.tgz`)
@@ -1378,9 +1401,9 @@ Classifies the current repo from its remote and the registry and prints a
 
 ### `repo-aegis hook managed-heartbeat`
 
-The SessionStart hook of the managed drop-in. Records a timestamp in
-`state/managed-hooks-seen` so `doctor` can tell that Claude Code loads the
-drop-in (`MANAGED_HOOKS_NOT_FIRING`). Evidence, not a gate: it always exits 0.
+Hidden, and a no-op that exits 0 with no output. Only a legacy managed drop-in
+(0.13 and earlier) calls it, on SessionStart; it stays so that drop-in does not
+print a hook error at every session start until it is removed. Removed in 0.17.
 
 ---
 
@@ -2037,13 +2060,8 @@ now reports, unless `--no-egress-checks`:
 | `ENFORCEMENT_UNPINNED` (**fail**) | an installed git hook, the shim or a Claude Code hook command calls `repo-aegis` by name (an install from before the enforcement pin) | `repo-aegis install hooks` / `install shim` / `install claude-md` |
 | `ENFORCEMENT_PIN_MISSING` (**fail**) | a pinned node or CLI path no longer exists, so the hook or shim falls back to the `repo-aegis` on `PATH` when it is at least the pinned version, and refuses otherwise | `repo-aegis install hooks` / `repo-aegis install shim` / `repo-aegis install claude-md` |
 | `MULTIPLE_INSTALLS` (warn) | more than one `repo-aegis` on `PATH` (each listed with its version), or the first one is not the pinned one | keep one install, then re-run `install hooks` and `install shim` |
-| `GUARD_HOOK_UNREGISTERED` (**fail**) | neither the managed drop-in nor Claude Code `settings.json` has a `guard-egress` entry | `repo-aegis install claude-md` |
-| `MANAGED_DROPIN_UNREADABLE` (**fail**) | the managed drop-in is not `0644` (directories `0755`), so Claude Code starts without it | `repo-aegis install claude-md` |
-| `MANAGED_DROPIN_STALE` / `MANAGED_DROPIN_NOT_ROOT_OWNED` (warn) | the managed drop-in differs from what would be written now; it or a directory above it is owned by a user, writable by group or others or a symlink. It still applies, so these are warnings | `repo-aegis install claude-md` |
-| `MANAGED_DROPIN_ORPHANED` (**fail** when its pin points at missing files, warn when only the ledger entry is missing) / `MANAGED_DROPIN_LEDGER_STALE` (warn) | the drop-in has no ledger entry or its pin points at missing files (every hook blocks); or the ledger names a drop-in that is gone | `repo-aegis install claude-md`, or remove it with the `sudo rm` line `doctor` prints; `install claude-md --uninstall` clears a stale ledger |
-| `MANAGED_HOOKS_DISABLED` / `MANAGED_SOURCE_SHADOWED` / `MANAGED_HOOKS_NOT_FIRING` (**fail**) | another managed file sets `disableAllHooks: true`; a macOS `com.anthropic.claudecode` profile outranks the files; or a Claude Code session started after the last heartbeat (server-managed policy and MDM keys make Claude Code ignore drop-ins, invisibly) | check `/status` in Claude Code lists `(drop-ins)`; have the policy owner add the hooks, or `install claude-md --user-settings` |
-| `SUDO_NOPASSWD` (warn) | `sudo -n -k true` succeeds, so an agent with a fake terminal can rewrite or remove the drop-in: no stronger than the user file | require a sudo password for this account |
-| `ENFORCEMENT_IN_USER_SETTINGS` (warn) | repo-aegis hooks are in `~/.claude/settings.json`, which must stay per machine | `repo-aegis install claude-md` |
+| `GUARD_HOOK_UNREGISTERED` (**fail**) | Claude Code `settings.json` has no `guard-egress` entry | `repo-aegis install claude-md` |
+| `MANAGED_LEGACY_PRESENT` (warn) | a root-owned managed drop-in from 0.13 or earlier (`.../managed-settings.d/50-repo-aegis-<uid>.json`) is still installed; repo-aegis no longer writes, updates or checks it, so its hooks run pinned to whatever Node and CLI it was last written for | `repo-aegis install claude-md`, then remove the file in your own terminal with the `sudo rm '<path>'` line the fix prints |
 | `CLASS_VISIBILITY_UNRESOLVED` (warn, per repo) | a repo with a GitHub remote has no explicit class or no cached visibility (a third party's clone, say, that you have not classified) | `repo-aegis classify --apply && repo-aegis status` in that repo |
 | `PERSONAL_ORG_UNREGISTERED` (warn, per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
 | `REGISTRY_UNREADABLE` (**fail**) | the registry exists but does not parse or validate, or a newer repo-aegis wrote it (`schemaVersion` above what this build reads), so rule h asks (agent hook) or refuses (pre-push, the shim) every non-interactive egress that has a destination | repair the file (`repo-aegis status` shows why); for a newer schema, upgrade repo-aegis, then `repo-aegis install hooks` and `repo-aegis install claude-md` |
@@ -2241,7 +2259,7 @@ sandbox: proxy variables set: DOCKER_HTTPS_PROXY, HTTPS_PROXY; ps readable: no; 
 | `pre-push` | a push to a declared-public destination (must be refused as `PUBLIC_PUSH_NEEDS_HUMAN`), then to a declared-private one (must go out), through the same hooks | `FAILED` + why, or `refuses: <code>` |
 | `shim` | `gh pr create` to a private then a public destination through a copy of the installed shim whose pinned `--home` is the temp home, with a stub `gh` | `not installed`, `not first on PATH` (checked on the real `PATH`), `refuses: <code>`, or `FAILED` |
 | `credential helper` | the helper command from git's global configuration (this CLI when none is installed), with its `--home` swapped for a temp home that maps one owner to an App and pins a stub `taaad`, asked for that owner's credential from your real environment and git configuration | `refuses: <code>` (for example `AGENT_PUSH_CREDENTIAL_CONFIG` when a trace variable is set). With no helper in git's configuration the line reads `ok (not installed in git's global configuration)`: the helper is optional, and the flow ran this CLI directly |
-| `egress hook` | reads `settings.json` and the managed drop-in for the `PreToolUse(Bash)` `guard-egress` entry | `not registered` |
+| `egress hook` | reads `settings.json` for the `PreToolUse(Bash)` `guard-egress` entry | `not registered` |
 
 The `sandbox:` line names the proxy variables set (names only, never values), whether the process list could be
 read, and whether stderr is a terminal. `--json` prints `{ version, ok, layers: [{ layer, ok, status, detail }],
@@ -2254,33 +2272,21 @@ audit log are not read or written; `ssh` and `taaad` are stubs on `PATH`, `GIT_A
 temp directory is removed afterwards, also when a layer fails. It cannot say whether Claude Code loaded the
 registered hook (the SessionStart heartbeat covers that), and it never asks your own credential helper for anything.
 
-### `repo-aegis suggest-markers`
+### `repo-aegis registry decrypt --identity <path>`
 
-LLM-assisted marker discovery: extracts prose from a repo, asks a **local**
-Ollama model for candidate tokens and proposes regex markers for an
-engagement. Off the deterministic gate path; it runs only when invoked. See
-[packages/llm/README.md](../packages/llm/README.md).
+Migration only. Decrypts an `engagements.yaml.age` that an earlier version
+produced back to `engagements.yaml` (mode 600) and removes the ciphertext and the
+`state/registry.encrypted` marker. It refuses when there is no ciphertext
+(`REGISTRY_NOT_ENCRYPTED`) or a plaintext registry is already present. The CLI
+never decrypts on demand: while the registry is encrypted, commands that need it
+fail with `REGISTRY_ENCRYPTED` (and `doctor` warns) until a person runs `decrypt`.
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--engagement <id>` | required | engagement to add markers to |
-| `--from <path>` | cwd | repo to scan |
-| `--model <id>` | `llama3.2:3b` | Ollama model id |
-| `--endpoint <url>` | `http://127.0.0.1:11434` | Ollama endpoint |
-| `--allow-remote-model` | off | allow a non-loopback endpoint (sends the repo's prose to a remote service) |
-| `--accept-remote-author-domains` | off | send git-log author email domains even to a non-loopback endpoint |
-| `--auto-accept-above <n>` | — | auto-accept candidates with confidence at or above `n` (0 to 1) |
-| `--dry-run` | off | print candidates and exit without persisting |
-
-### `repo-aegis registry encrypt --recipient <pubkey>` / `registry decrypt --identity <path>`
-
-Encrypts the registry at rest with `age` (`engagements.yaml` becomes
-`engagements.yaml.age`, the plaintext is removed) and reverses it. `encrypt`
-refuses with `REGISTRY_ALREADY_ENCRYPTED` when a ciphertext or the
-`state/registry.encrypted` marker exists; `decrypt` refuses when there is no
-ciphertext. The CLI never decrypts on demand: while the registry is encrypted,
-commands that need it fail with `REGISTRY_ENCRYPTED` until a person runs
-`decrypt`.
+`registry encrypt` was removed in 0.15.0: at-rest encryption is not part of
+accident prevention. It now prints `registry encrypt was removed in 0.15.0;
+at-rest encryption is not part of accident prevention` and exits 2 (code
+`REGISTRY_ENCRYPT_REMOVED`; the old `--recipient` flag is accepted and ignored).
+`registry decrypt` stays for at least one release. `age` is still used for the
+sweep query blobs (`repo-aegis-scan encrypt-query` / `decrypt-query`).
 
 ### `repo-aegis audit-log on | off | show [--all] | path`
 
@@ -2295,10 +2301,14 @@ state-changing command appends one JSONL record of structural metadata
 Reverses every install step in one command: git hooks, global gitignore block,
 the Claude Code wiring (`install claude-md --uninstall`), the CI workflow(s),
 the `gh` shim and the git credential helper. A **dry run** unless `--yes`.
+A legacy root-owned managed drop-in (0.13 and earlier) cannot be removed from
+here, since that needs root: it is reported as a failing step with the `sudo rm`
+line to run yourself (dry run too; `--json`: a `legacy managed drop-in` step
+with `details.files` and `details.commands`).
 `--purge-repos` also unsets the `repo-aegis.*` git config in every repo under
 the scan roots (default `~/repos`, `~/code`, `~/src`, `~/projects`);
 `--purge-home` also deletes `~/.config/repo-aegis/` (registry, audit log,
-profiles, caches). Without `--purge-home` it still removes the **decision log**:
+caches). Without `--purge-home` it still removes the **decision log**:
 `state/decisions.jsonl` and its `.1`..`.3` rotations, `state/decision-log.json`, the legacy
 `state/gh-decisions.jsonl`, and the `$TMPDIR/repo-aegis-<uid>/` fallback directory for the *current*
 `$TMPDIR` (a sandbox's own `$TMPDIR` may differ; its copy is the sandbox's to clear), as the step
@@ -2343,16 +2353,12 @@ repo-aegis-scan run \
   [--no-update-state]               # dry-run
   [--prune-state-older-than <days>] # drop seenIso entries older than this
   [--reveal-matches]                # include literal snippets in output (default OFF)
-  [--semantic]                      # embedding-based sweep alongside the regex one (needs Ollama)
-  [--ollama-endpoint <url>]         # default: http://127.0.0.1:11434
-  [--ollama-model <id>]             # embedding model; default: nomic-embed-text
-  [--ollama-timeout-ms <n>]
-  [--allow-remote-ollama]           # permit a non-loopback endpoint (default OFF)
-  [--semantic-max-bytes-per-candidate <n>]  # default: 16384
 ```
 
-`--semantic` is off by default, asynchronous and advisory; it needs an
-engagements registry and the profile files that `rebuild-profiles` builds.
+`--semantic`, the `--ollama-*` flags and `--semantic-max-bytes-per-candidate`
+were removed in 0.15.0 (with the LLM features). Passing one exits 2 with a
+`REMOVED` error rather than being ignored.
+
 - 0: completed; either no new hits, or new hits filed via issue/markdown
 - 1: completed; new hits found AND `--output-format=json` (caller must react)
 - 2: error (token missing, query parse fail, all-queries-failed,
@@ -2376,11 +2382,3 @@ and you don't want to commit plain-text query strings. Other flags:
 Inverse of `encrypt-query`. `--output <path>` writes the cleartext there
 (default: stdout).
 
-### `repo-aegis-scan rebuild-profiles`
-
-Builds the per-engagement embedding profiles that `run --semantic` compares
-against. Flags: `--ollama-endpoint`, `--ollama-model`, `--ollama-timeout-ms`
-and `--allow-remote-ollama` (as for `run`), `--threshold <n>` (cosine
-threshold for new profiles, default 0.78), `--diff` (report stored-vs-current
-manifest drift without embedding or writing), `--engagement <id...>`
-(restrict to these engagements) and `--registry <path>`.

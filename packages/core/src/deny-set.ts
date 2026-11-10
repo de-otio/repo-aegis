@@ -1,17 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
-import {
-  denySetCachePath as defaultDenySetCachePath,
+  legacyDenySetCachePath,
   markersDir as defaultMarkersDir,
   registryPath as defaultRegistryPath,
 } from "./paths.js";
@@ -116,7 +108,7 @@ export interface DenySet {
    * compute time) and already merged from registry + per-repo config.
    *
    * Stored as glob strings rather than compiled RegExps so a DenySet stays
-   * JSON-serialisable — the on-disk cache round-trips it verbatim.
+   * JSON-serialisable.
    *
    * Absent or empty means no path is exempt.
    */
@@ -155,7 +147,7 @@ export const BUILTIN_ALWAYS_BLOCK_EXEMPT_PATHS: readonly string[] = [
  *
  * Resolution lives here, not in the CLI, so that every caller that already
  * holds a {@link DenySet} gets the exemptions without threading a second
- * config object through: `check`, the hooks, the MCP tools and the VS Code
+ * config object through: `check`, the hooks and the VS Code
  * extension all call {@link computeDenySet} and nothing else.
  *
  * **Registry read failures fall back to the built-in default rather than
@@ -185,7 +177,7 @@ export function loadExemptPaths(
   // "additive within an already-permitted class" is the most it may do.
   const merged: string[] = [];
   for (const g of [...base, ...(repo.alwaysBlockExemptPaths ?? [])]) {
-    // Trim only for the duplicate check and for a stable cache fingerprint;
+    // Trim only for the duplicate check;
     // an empty or whitespace-only entry is NOT dropped, it is handed to
     // compileGlobs below so it surfaces as a config error like any other
     // unusable glob.
@@ -208,11 +200,6 @@ export interface DenySetOptions {
   publicFacing?: boolean;
   markersDir?: string;
   /**
-   * Path to the cache file. Default: `<home>/state/deny-set.cache.json`.
-   * Pass `null` to disable caching entirely (useful for tests).
-   */
-  cachePath?: string | null;
-  /**
    * Path to the engagement registry consulted for `alwaysBlockExemptPaths`.
    * Default: {@link defaultRegistryPath}. Tests point this at a temp file so
    * they exercise the real YAML read rather than a stubbed list.
@@ -226,128 +213,29 @@ export interface DenySetOptions {
   exemptPaths?: readonly string[];
 }
 
-// Bumped to 2 when patternSources was added; bumped to 3 when engagement
-// identifiers became auto-blocked self-markers (the computed pattern set changed
-// without any marker-file mtime change, so older caches must be invalidated —
-// the read path's schemaVersion check returns null, falling through to
-// recompute).
-// Bumped to 4 when the class-gated `_private_infra` stem was introduced: the
-// computed pattern set changed shape without any marker-file mtime change, so
-// caches written by 0.5.x must be invalidated on upgrade (same reasoning as the
-// 2 -> 3 bump in 0.4.1).
-// Bumped to 5 when the deny set gained the strict/exemptible regex split and
-// the resolved exempt-path list. Identical reasoning once more: the *computed*
-// shape changed while every marker file's mtime and size stayed the same, so a
-// cache written by 0.6.x would otherwise be served forever with no `strictRegex`
-// and no `exemptPaths` — the new fields would read as "absent", which scanners
-// interpret (correctly, and fail-closed) as "no exemptions", and the feature
-// would silently do nothing on every already-warm machine.
-// Bumped to 6 when the class-gated `_self_identity` stem was introduced. The
-// same reasoning a third time: the *computed* pattern set changed shape while
-// every marker file's mtime and size stayed the same, so a cache written by
-// 0.7.x would be served to a customer-coupled repo forever without the new
-// stem — the feature would silently do nothing on every already-warm machine,
-// which is precisely the failure mode this counter exists to prevent.
-const DENY_SET_CACHE_VERSION = 6;
-
-interface CacheEntry {
-  schemaVersion: number;
-  key: string;
-  files: DenySetFile[];
-  patterns: string[];
-  patternSources: string[];
-  combinedRegex: string;
-  strictRegex: string;
-  exemptibleRegex: string;
-  exemptPaths: string[];
-  warnings: string[];
-}
+// The deny set is computed fresh on every call. There used to be an on-disk
+// cache keyed by a marker-file mtime+size fingerprint; it could serve a stale
+// set after an edit that kept both, and a forged entry could switch the scanner
+// off. Computing is a directory read plus the marker files, so it was not worth
+// the failure modes. The old cache file is removed once per process.
+let legacyCacheSwept = false;
 
 /**
- * Build a fingerprint of the inputs to computeDenySet. Two calls with the
- * same fingerprint produce the same deny set. Includes:
- *   - repo class + sorted engagements (these change the per-engagement
- *     filtering applied to the marker file set)
- *   - the marker dir's file list, mtimes, and sizes (any edit to a marker
- *     file or addition/removal invalidates the cache)
+ * Best-effort, silent: delete the pre-0.14 `state/deny-set.cache.json`.
+ * Returns whether a file was removed. Exported for the test; callers use
+ * {@link computeDenySet}, which sweeps once per process.
+ *
+ * @internal
  */
-function computeFingerprint(
-  repo: RepoConfig,
-  dir: string,
-  publicFacing: boolean,
-  selfIdentityActive: boolean,
-  exemptPaths: readonly string[],
-): string {
-  const fileSummaries: string[] = [];
-  if (existsSync(dir)) {
-    const files = readdirSync(dir).filter(f => f.endsWith(".txt")).sort();
-    for (const f of files) {
-      const st = statSync(join(dir, f));
-      fileSummaries.push(`${f}:${st.mtimeMs}:${st.size}`);
-    }
-  }
-  const sortedEng = [...repo.engagements].sort().join(",");
-  // `publicFacing` participates because it gates whether `_private_infra.txt`
-  // joins the set. It can flip without any marker-file or class change (the
-  // cached GitHub visibility being refreshed by `status`), so omitting it would
-  // serve a stale deny set from cache after a repo is made public.
-  // The resolved exempt-path list participates because it is derived from
-  // files this fingerprint does NOT stat — the registry YAML and the repo's
-  // `.repo-aegis.yml`. Editing either changes what the deny set means without
-  // touching a single marker file, so leaving it out would serve a stale
-  // (possibly over-permissive) deny set from cache after a config change.
-  // JSON-encoded rather than joined on a separator: a glob is a path pattern
-  // and may legally contain whatever separator character we might pick, so a
-  // naive join would let two different lists collide on one fingerprint.
-  // `selfIdentityActive` participates for the same reason as `publicFacing`:
-  // it gates whether `_self_identity.txt` joins the set. Today it is derived
-  // from `repo.class`, which is already in the fingerprint, so this term is
-  // redundant — deliberately. The gate and its cache key must not be able to
-  // drift apart if the gate ever widens (a destination-supplied class, say),
-  // and a redundant term costs one character of hash input.
-  const input =
-    `v${DENY_SET_CACHE_VERSION}|${repo.class}|${sortedEng}|` +
-    `pf=${publicFacing ? 1 : 0}|si=${selfIdentityActive ? 1 : 0}|` +
-    `ep=${JSON.stringify(exemptPaths)}|` +
-    fileSummaries.join(";");
-  return createHash("sha256").update(input).digest("hex");
-}
-
-function readCache(cachePath: string): CacheEntry | null {
-  if (!existsSync(cachePath)) return null;
+export function removeLegacyDenySetCache(home?: string): boolean {
   try {
-    const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<CacheEntry>;
-    if (
-      parsed.schemaVersion !== DENY_SET_CACHE_VERSION ||
-      typeof parsed.key !== "string" ||
-      !Array.isArray(parsed.files) ||
-      !Array.isArray(parsed.patterns) ||
-      !Array.isArray(parsed.patternSources) ||
-      parsed.patternSources.length !== parsed.patterns.length ||
-      typeof parsed.combinedRegex !== "string" ||
-      // Validated, not defaulted: a cache entry missing the split would be
-      // read as "no strict regex", which scanners treat as "no exemptions".
-      // That is fail-closed, but it would also make a corrupted cache look
-      // like a working one forever. Reject and recompute instead.
-      typeof parsed.strictRegex !== "string" ||
-      typeof parsed.exemptibleRegex !== "string" ||
-      !Array.isArray(parsed.exemptPaths) ||
-      !Array.isArray(parsed.warnings)
-    ) {
-      return null;
-    }
-    return parsed as CacheEntry;
+    const path = legacyDenySetCachePath(home);
+    if (!existsSync(path)) return false;
+    rmSync(path, { force: true });
+    return true;
   } catch {
-    return null;
-  }
-}
-
-function writeCache(cachePath: string, entry: CacheEntry): void {
-  try {
-    mkdirSync(dirname(cachePath), { recursive: true });
-    writeFileSync(cachePath, JSON.stringify(entry, null, 2), { mode: 0o600 });
-  } catch {
-    /* cache is best-effort; failure to write is not fatal */
+    /* a cache we cannot delete is harmless: nothing reads it any more */
+    return false;
   }
 }
 
@@ -391,14 +279,10 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
     );
   }
 
-  // Cache fast-path. Cache is keyed on (class, engagements, marker-file
-  // mtimes+sizes). An exact key match returns the cached deny set without
-  // re-reading any marker file. Caller can disable with cachePath: null
-  // (tests) or override the path. The base warnings (repo-class engagement
-  // mismatch, computed above) are always recomputed so they reflect the
-  // current call rather than what the cache wrote at fingerprint time.
-  const cachePath =
-    opts.cachePath === null ? null : opts.cachePath ?? defaultDenySetCachePath();
+  if (!legacyCacheSwept) {
+    legacyCacheSwept = true;
+    removeLegacyDenySetCache();
+  }
   const publicFacing = opts.publicFacing ?? isPublicFacing(repo);
   // The `_self_identity` gate. Deliberately NOT a `DenySetOptions` field: the
   // condition is the repo's class and nothing else, and `readRepoConfig` /
@@ -406,37 +290,12 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
   // override option would be a second, silent way to switch the stem on — the
   // kind of knob that ends up set in a hook script and never reviewed.
   const selfIdentityActive = repo.class === "customer-coupled";
-  // Resolved BEFORE the cache lookup, because the resolved list is part of the
-  // fingerprint (see computeFingerprint) — and because a too-broad glob must
-  // fail loudly even on a cache hit, rather than being masked by a warm cache
-  // written before the bad config existed.
+  // Resolved first so a too-broad glob fails loudly even when the markers
+  // directory is missing.
   const exemptPaths = resolveExemptPaths(repo, opts);
-  const fingerprint = computeFingerprint(
-    repo,
-    dir,
-    publicFacing,
-    selfIdentityActive,
-    exemptPaths,
-  );
-
-  if (cachePath !== null) {
-    const cached = readCache(cachePath);
-    if (cached !== null && cached.key === fingerprint) {
-      return {
-        files: cached.files,
-        patterns: cached.patterns,
-        patternSources: cached.patternSources,
-        combinedRegex: cached.combinedRegex,
-        strictRegex: cached.strictRegex,
-        exemptibleRegex: cached.exemptibleRegex,
-        exemptPaths: cached.exemptPaths,
-        warnings: [...warnings, ...cached.warnings.filter(w => !warnings.includes(w))],
-      };
-    }
-  }
 
   if (!existsSync(dir)) {
-    const empty: DenySet = {
+    return {
       files: [],
       patterns: [],
       patternSources: [],
@@ -446,21 +305,6 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
       exemptPaths,
       warnings,
     };
-    if (cachePath !== null) {
-      writeCache(cachePath, {
-        schemaVersion: DENY_SET_CACHE_VERSION,
-        key: fingerprint,
-        files: [],
-        patterns: [],
-        patternSources: [],
-        combinedRegex: "",
-        strictRegex: "",
-        exemptibleRegex: "",
-        exemptPaths,
-        warnings: [],
-      });
-    }
-    return empty;
   }
 
   const own = new Set(repo.engagements);
@@ -550,7 +394,7 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
     else strictPatterns.push(p);
   }
 
-  const result: DenySet = {
+  return {
     files,
     patterns,
     patternSources,
@@ -560,23 +404,4 @@ export function computeDenySet(repo: RepoConfig, opts: DenySetOptions = {}): Den
     exemptPaths,
     warnings,
   };
-
-  if (cachePath !== null) {
-    writeCache(cachePath, {
-      schemaVersion: DENY_SET_CACHE_VERSION,
-      key: fingerprint,
-      files,
-      patterns,
-      patternSources,
-      combinedRegex: result.combinedRegex,
-      strictRegex: result.strictRegex ?? "",
-      exemptibleRegex: result.exemptibleRegex ?? "",
-      exemptPaths,
-      // Cache only the input-derived warnings; the call-time class mismatch
-      // warning is recomputed above per call.
-      warnings: [],
-    });
-  }
-
-  return result;
 }

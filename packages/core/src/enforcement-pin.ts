@@ -145,8 +145,6 @@ interface FallbackSelect {
   fix: string;
   /** Exit status for the refusals. */
   exitCode: number;
-  /** Text appended to every message (the managed drop-in names the file to remove). */
-  tail?: string;
 }
 
 /**
@@ -162,7 +160,7 @@ function fallbackSelect(o: FallbackSelect): string[] {
   const q = shellQuote;
   const say = (...words: string[]): string => `printf '${"%s".repeat(words.length)}\\n' ${words.join(" ")} >&2`;
   const head = q(`repo-aegis: ${o.blocked}: the pinned enforcement binary is missing or not usable (`);
-  const tail = `${o.fix}${o.tail ?? ""}`;
+  const tail = o.fix;
   const missing = `"$__ra_missing"`;
   const fb = `"$__ra_fb"`;
   const fv = `"$__ra_fv"`;
@@ -314,79 +312,6 @@ export function pinnedHookCommand(pin: EnforcementPin, hookArgs: string, opts: {
 export function isPinnedHookCommand(command: string, hookName: string): boolean {
   return (
     command.startsWith("if [ -f ") &&
-    command.includes("; then exec ") &&
-    command.includes(` hook ${hookName}`) &&
-    (command.endsWith("; exit 2") || command.endsWith("; exit 0"))
-  );
-}
-
-// ---------------------------------------------------------------------------
-// The managed drop-in's hook commands (doc/plan-pin-enforcement-binary.md D8)
-// ---------------------------------------------------------------------------
-
-/** The `id` the managed hook commands ask for the account's uid. By absolute path: a `PATH` lookup could be shadowed. */
-export const MANAGED_ID_PATH = "/usr/bin/id";
-
-/** Where a managed hook command runs, and what it names when it blocks. */
-export interface ManagedHookContext {
-  /** The uid of the account the drop-in is for, digits only. */
-  uid: string;
-  /** Absolute path of the drop-in file: the exit-2 message tells the person to `sudo rm` it. */
-  dropinPath: string;
-  /** Test seam: the `id` to run, default {@link MANAGED_ID_PATH}. */
-  idPath?: string;
-  /** The hook must never block (see {@link pinnedHookCommand}): a failing `id` or a missing pin exits 0, not 2. */
-  failOpen?: boolean;
-}
-
-/**
- * A hook `command` for the managed-settings drop-in: {@link pinnedHookCommand}
- * behind a uid guard, in POSIX `sh` (dash on Debian and Ubuntu). Its PATH
- * fallback and refusals say the same things, plus the command that removes it.
- *
- * A managed file applies to every account on the machine but the pin names one
- * account's node and CLI, so a hook must do nothing for the others. The guard
- * asks `/usr/bin/id` by absolute path (D8.4): a `PATH` lookup, or a failing
- * `id`, must not turn into a pass, so a failing `id` blocks (exit 2) and a
- * different uid exits 0. The guard comes BEFORE the pin check: another account
- * often cannot even see the pin (home directories are 0750).
- *
- * The blocking message names both ways out (D8.10): re-pin, or remove the
- * root-owned file, whose literal path it prints. The user cannot edit that file.
- */
-export function managedHookCommand(pin: EnforcementPin, hookArgs: string, ctx: ManagedHookContext): string {
-  assertPinnable(pin);
-  if (!/^[0-9]+$/.test(ctx.uid)) throw new Error("the uid is not a number");
-  if (/[\n\r\0]/.test(ctx.dropinPath)) throw new Error("the drop-in path contains a newline or NUL character");
-  const n = shellQuote(pin.node);
-  const c = shellQuote(pin.cli);
-  const remove = `sudo rm ${shellQuote(ctx.dropinPath)}`;
-  const idFailed = shellQuote(
-    `repo-aegis: cannot tell which user this is (${ctx.idPath ?? MANAGED_ID_PATH} failed), so this managed hook blocks the tool call; ` +
-      `to remove it run: ${remove}`,
-  );
-  const code = ctx.failOpen === true ? 0 : 2;
-  return (
-    `__u=$(${ctx.idPath ?? MANAGED_ID_PATH} -u 2>/dev/null) || { printf '%s\\n' ${idFailed} >&2; exit ${code}; }; ` +
-    `[ "$__u" = ${ctx.uid} ] || exit 0; ` +
-    `if [ -f ${n} ] && [ -x ${n} ] && [ -f ${c} ] && [ -r ${c} ]; then exec ${n} ${c} ${hookArgs}; fi; ` +
-    `__ra_version=${shellQuote(pin.version ?? "")}; __ra_missing=${shellQuote(`${pin.node}, ${pin.cli}`)}; ` +
-    `${fallbackSelect({
-      blocked: "hook blocked",
-      fix: "repo-aegis install claude-md",
-      exitCode: code,
-      tail: `   or remove this managed hook: ${remove}`,
-    }).join("; ")}; ` +
-    // Tells the fallback it is one (the hook then shows the person a notice: exit-0 stderr is dropped).
-    `REPO_AEGIS_PIN_FALLBACK=1; export REPO_AEGIS_PIN_FALLBACK; exec "$__ra_fb" ${hookArgs}; exit ${code}`
-  );
-}
-
-/** True when `command` is a {@link managedHookCommand} that runs `hookName` (for example `guard-egress`). */
-export function isManagedHookCommand(command: string, hookName: string): boolean {
-  return (
-    command.startsWith("__u=$(") &&
-    command.includes(" -u 2>/dev/null) || { printf '%s\\n' ") &&
     command.includes("; then exec ") &&
     command.includes(` hook ${hookName}`) &&
     (command.endsWith("; exit 2") || command.endsWith("; exit 0"))

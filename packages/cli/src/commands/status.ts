@@ -5,7 +5,6 @@ import {
   readRepoConfig,
   computeDenySet,
   isActive,
-  getRegexBackend,
   isPublicFacing,
   resolveHookState,
   appendAuditRecord,
@@ -217,7 +216,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   const denying = denySet.files.map(f => f.stem);
 
   // [SEC H-5] follow-up: surface engagements that have zero markers so
-  // the user knows to run suggest-markers (or hand-add markers).
+  // the user knows to add markers (engagements.yaml, or `scan-env`).
   // Active-only — ended engagements with retained markers don't count.
   const zeroMarkerEngagements = registryEngagements
     .filter(e => e.active && e.markerCount === 0)
@@ -306,7 +305,6 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
       patternCount: denySet.patterns.length,
     },
     alwaysBlock: { patternCount: alwaysBlockCount },
-    regexBackend: getRegexBackend(),
     zeroMarkerEngagements,
     warnings: denySet.warnings,
     hooks,
@@ -347,7 +345,6 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   );
   emitText(`  blocked:  ${denying.length === 0 ? "(none — marker dir empty)" : denying.join(", ")}`);
   emitText(`  patterns: ${denySet.patterns.length} active (+ ${alwaysBlockCount} always-block)`);
-  emitText(`  regex:    ${getRegexBackend()}`);
   for (const line of identityLines(identitySummary)) emitText(line);
   for (const line of hooksStatusLines(hooks)) emitText(line);
   for (const line of pauseLines(pause)) emitText(line);
@@ -360,7 +357,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
       `  warning:  ${zeroMarkerEngagements.length} engagement(s) with 0 markers: ${zeroMarkerEngagements.join(", ")}`,
     );
     emitText(
-      `            run \`repo-aegis suggest-markers --engagement <id> --from <repo>\` to populate`,
+      `            add markers in engagements.yaml (\`markers:\`) or run \`repo-aegis scan-env --accept engagement --engagement <id>\``,
     );
   }
   for (const w of denySet.warnings) emitText(`  warning:  ${w}`);

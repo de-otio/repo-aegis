@@ -30,8 +30,7 @@ In scope:
   (`packages/core`).
 - Marker-rendering pipeline (`packages/core/src/render.ts` →
   `~/.config/repo-aegis/markers/*.txt`).
-- Suggest-markers LLM integration (`packages/llm`,
-  `packages/scan`) and MCP server (`packages/mcp`).
+- The centralised sweep (`packages/scan`).
 - VS Code extension (`packages/vscode`).
 
 Out of scope (please report through the normal issue tracker):

@@ -6,10 +6,7 @@
 // and CLI by absolute path and fails closed with exit 2 when either is gone,
 // instead of resolving `repo-aegis` on the agent's PATH.
 //
-// T19 (D8.6): every case here goes through `--user-settings`, the fallback that
-// writes the user's settings.json exactly as D7 did; the default target is now the
-// managed drop-in (install-claude-md-managed.test.ts), so these cases would
-// otherwise stop being about this file.
+// Every case passes `--user-settings`, now an ignored flag: `settings.json` is the only target.
 //
 // Subprocess cases use a temp REPO_AEGIS_HOME and a temp claude home; nothing
 // reads or writes the real ones. Placeholder names only.

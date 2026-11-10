@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/repo-aegis-core",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Core library for repo-aegis: engagement registry, deny-set computation, marker scanner",
   "license": "GPL-3.0-or-later",
   "author": "Richard Myers",
@@ -31,9 +31,6 @@
     "proper-lockfile": "^4.1.2",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
-  },
-  "optionalDependencies": {
-    "re2": "^1.27.0"
   },
   "devDependencies": {
     "@types/proper-lockfile": "^4.1.4"

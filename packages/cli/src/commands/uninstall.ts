@@ -19,7 +19,7 @@
 //   - --purge-repos: sweep `repo-aegis.*` git config keys out of every
 //     repo under one or more scan roots.
 //   - --purge-home: delete `~/.config/repo-aegis/` (the registry,
-//     markers, audit log, deny-set cache, leak-context flag, age
+//     markers, audit log, leak-context flag, age
 //     ciphertext, embedding profiles).
 //
 // Defaults to dry-run for any destructive step. `--yes` to actually
@@ -43,6 +43,7 @@ import { emitJson, emitText, emitError, type OutputOptions } from "../format.js"
 import { installHooks } from "./install-hooks.js";
 import { installGitignore } from "./install-gitignore.js";
 import { installClaudeMd } from "./install-claude-md.js";
+import { detectLegacyDropIn, legacyDropInLines, type LegacySeams } from "./legacy-managed-remover.js";
 import { installCi } from "./install-ci.js";
 import { installShim, shimPathFor } from "./install-shim.js";
 import { gitCredentialInstalled, installGitCredential } from "./install-git-credential.js";
@@ -65,6 +66,8 @@ interface UninstallOptions extends OutputOptions {
   cwd?: string;
   /** Suppress stdout/stderr. emitError still fires on hard failure. */
   silent?: boolean;
+  /** Test seam: where a legacy managed drop-in is looked for. Honoured only under the Node test runner. */
+  legacyManaged?: LegacySeams;
 }
 
 interface StepReport {
@@ -144,6 +147,7 @@ export function uninstall(opts: UninstallOptions): void {
         silent: true,
         json: false,
         ...(opts.claudeHome !== undefined && { claudeHome: opts.claudeHome }),
+        ...(opts.legacyManaged !== undefined && { legacyManaged: opts.legacyManaged }),
       }),
     );
     if (cwdIsGitRepo) {
@@ -199,6 +203,14 @@ export function uninstall(opts: UninstallOptions): void {
       ok: true,
       details: { dryRun: true, wouldRemove: decisionLogFiles().length > 0 ? `${decisionLogFiles().length} file(s): decisions.jsonl and its rotations, decision-log.json, gh-decisions.jsonl, the $TMPDIR fallback` : null },
     });
+  }
+
+  // legacy-managed-remover: remove in 0.17
+  // A root-owned drop-in from 0.13 or earlier is not removed here (it needs root): the person is told how.
+  // Reported in dry-run too, since nothing below changes what is installed.
+  const legacy = detectLegacyDropIn(opts.legacyManaged);
+  if (legacy !== null) {
+    reports.push({ step: "legacy managed drop-in (remove it yourself)", ok: false, details: { files: legacy.files, commands: legacy.commands } });
   }
 
   // 2. --purge-repos
@@ -309,6 +321,7 @@ export function uninstall(opts: UninstallOptions): void {
     const d = r.details as { wouldRemove?: string | null } | undefined;
     if (d && typeof d.wouldRemove === "string") emitText(`      would remove ${d.wouldRemove}`);
   }
+  if (legacy !== null) for (const line of legacyDropInLines(legacy)) emitText(`    ${line}`);
   if (purgeHomeReport) {
     if (purgeHomeReport.removed) emitText(`  ✓ purge-home: removed ${purgeHomeReport.path}`);
     else emitText(`  · purge-home: ${purgeHomeReport.path} (${purgeHomeReport.reason})`);

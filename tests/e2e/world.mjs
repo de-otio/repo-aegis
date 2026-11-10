@@ -8,7 +8,7 @@
 // set, `ps` unreadable, no TTY, no route to GitHub, and the PACKED package rather than the workspace.
 //
 // WHAT THIS BUILDS, per call to `makeWorld()`:
-//   - the packed tarballs (`npm pack` of the four workspace packages, or the directory named by E2E_TARBALL_DIR, so a
+//   - the packed tarballs (`npm pack` of the three workspace packages, or the directory named by E2E_TARBALL_DIR, so a
 //     published release can be replayed), extracted into a temp prefix: what an `npm install` would put on disk.
 //     Third-party dependencies are linked in from this checkout's node_modules, but ONLY the closure of what the
 //     tarballs declare, so a dependency missing from a package.json fails here. No registry is needed to run.
@@ -46,7 +46,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** The workspace packages the CLI needs, in the order npm packs them. */
-export const PACKAGES = ["core", "llm", "scan", "cli"];
+export const PACKAGES = ["core", "scan", "cli"];
 
 /** A dead localhost port: nothing listens on the discard port in a test run, and a connect fails at once. */
 export const DEAD_PROXY = "http://127.0.0.1:9";
@@ -149,16 +149,19 @@ export function installTarballs(tarballs, prefix, hoistedModules = join(REPO_ROO
   }
   // The closure of declared third-party dependencies. `optionalDependencies` are linked when present and skipped otherwise.
   const queue = [];
-  const queueDeps = (pkg) => {
-    for (const d of Object.keys(pkg.dependencies ?? {})) queue.push({ name: d, optional: false, from: pkg.name });
-    for (const d of Object.keys(pkg.optionalDependencies ?? {})) queue.push({ name: d, optional: true, from: pkg.name });
+  // `fromDir` is where the declaring package really lives: a dependency npm could not hoist (a different major than
+  // another package wants) sits in that package's own node_modules, so look there before the hoisted directory.
+  const queueDeps = (pkg, fromDir) => {
+    for (const d of Object.keys(pkg.dependencies ?? {})) queue.push({ name: d, optional: false, from: pkg.name, fromDir });
+    for (const d of Object.keys(pkg.optionalDependencies ?? {})) queue.push({ name: d, optional: true, from: pkg.name, fromDir });
   };
-  for (const { pkg } of installed.values()) queueDeps(pkg);
+  for (const { pkg } of installed.values()) queueDeps(pkg, undefined);
   const linked = new Set();
   while (queue.length > 0) {
-    const { name, optional, from } = queue.shift();
+    const { name, optional, from, fromDir } = queue.shift();
     if (installed.has(name) || linked.has(name)) continue;
-    const src = join(hoistedModules, ...name.split("/"));
+    const nested = fromDir === undefined ? undefined : join(fromDir, "node_modules", ...name.split("/"));
+    const src = nested !== undefined && existsSync(join(nested, "package.json")) ? nested : join(hoistedModules, ...name.split("/"));
     if (!existsSync(join(src, "package.json"))) {
       if (optional) continue;
       throw new Error(`${from} declares ${name}, which is not installed in ${hoistedModules}: run \`npm ci\` first`);
@@ -167,7 +170,7 @@ export function installTarballs(tarballs, prefix, hoistedModules = join(REPO_ROO
     mkdirSync(dirname(dest), { recursive: true });
     symlinkSync(src, dest, "dir");
     linked.add(name);
-    queueDeps(readJson(join(src, "package.json")));
+    queueDeps(readJson(join(src, "package.json")), src);
   }
   const cli = installed.get("@de-otio/repo-aegis");
   if (cli === undefined) throw new Error("no @de-otio/repo-aegis tarball among " + tarballs.join(", "));

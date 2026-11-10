@@ -30,8 +30,6 @@ import { loadRegistry, readProcessAncestry, renderMarkers, repoAegisHome, shellQ
 import { currentEnforcementPin, versionOf } from "../enforcement-pin.js";
 import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { checkGuardHook } from "./install-claude-md.js";
-import { readDropInSettings } from "./doctor-managed-checks.js";
-import { resolveManagedEnv } from "./managed-privileged.js";
 import { checkShim } from "./install-shim.js";
 import { parseHomeFromScript, renderShimScript } from "./shim-script.js";
 
@@ -381,7 +379,7 @@ function credentialLayer(w: World, baseEnv: NodeJS.ProcessEnv): LayerResult {
 }
 
 function egressHookLayer(opts: SelftestOptions): LayerResult {
-  const checks = checkGuardHook(opts.claudeHome, readDropInSettings(resolveManagedEnv()));
+  const checks = checkGuardHook(opts.claudeHome);
   if (checks.length > 0 && checks.every(c => c.ok)) return ok("egress hook");
   return bad("egress hook", "not registered", "run `repo-aegis install claude-md`");
 }

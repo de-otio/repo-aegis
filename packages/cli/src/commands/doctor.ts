@@ -57,8 +57,7 @@ import { gitCredentialOrderChecks } from "./doctor-git-credential-checks.js";
 import { agentRemoteSshCheck, ghOwnerChecks, ownerIdentityChecks, registryStateChecks, taaadChecks, type GhCheckOptions } from "./doctor-owner-checks.js";
 import { checkLocalHooksPathDuplicate, checkPrePushHook, checkShellStartupOverrides, checkSshGithubRedirect } from "./doctor-env-checks.js";
 import { enforcementPinChecks } from "./doctor-pin-checks.js";
-import { managedDropinChecks, readDropInSettings, userSettingsEnforcementCheck } from "./doctor-managed-checks.js";
-import { resolveManagedEnv, type ManagedEnv } from "./managed-privileged.js";
+import { legacyManagedCheck, type LegacySeams } from "./legacy-managed-remover.js";
 
 interface DoctorOptions extends OutputOptions {
   scanRoot?: string[];
@@ -91,8 +90,8 @@ interface DoctorOptions extends OutputOptions {
   verbose?: boolean;
   /** Test seam: what the global `core.hooksPath` holds, for `PREPUSH_HOOK_MISSING`. */
   readGlobalHooksPath?: () => string | null;
-  /** Test seam for the managed drop-in checks: platform, uid, file system view, the privileged runner. Honoured only under the Node test runner. */
-  managed?: Partial<ManagedEnv>;
+  /** Test seam: where a legacy managed drop-in is looked for (`MANAGED_LEGACY_PRESENT`). Honoured only under the Node test runner. */
+  legacyManaged?: LegacySeams;
 }
 
 export interface DoctorRepoResult {
@@ -304,22 +303,17 @@ export function decisionLogChecks(home: string = repoAegisHome()): DoctorCheck[]
 }
 
 function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
-  // The managed drop-in (D8) is where the Claude Code hooks and deny rules live once
-  // `install claude-md` has run; the guard and deny checks read it with the user file.
-  const managedEnv = resolveManagedEnv(opts.managed);
-  const dropin = readDropInSettings(managedEnv);
   const checks = [
     checkPushDefault(),
     ...checkShim(),
     ...enforcementPinChecks(process.env, undefined, opts.claudeHome),
-    ...checkGuardHook(opts.claudeHome, dropin),
-    ...managedDropinChecks({ env: managedEnv, ...(opts.claudeHome !== undefined && { claudeHome: opts.claudeHome }) }),
+    ...checkGuardHook(opts.claudeHome),
   ];
-  const inUserFile = userSettingsEnforcementCheck(opts.claudeHome);
-  if (inUserFile !== null) checks.push(inUserFile);
+  const legacy = legacyManagedCheck(opts.legacyManaged);
+  if (legacy !== null) checks.push(legacy);
   checks.push(...registryStateChecks(reg));
   // With no registry there is nothing to protect and nothing to compare gh against.
-  if (reg.state !== "missing") checks.push(checkRegistryAgentWritable(opts.claudeHome, undefined, dropin));
+  if (reg.state !== "missing") checks.push(checkRegistryAgentWritable(opts.claudeHome));
   if (reg.state === "loaded") {
     checks.push(...ownerIdentityChecks(reg.registry));
     checks.push(...taaadChecks(reg.registry));
@@ -554,7 +548,7 @@ export function doctor(opts: DoctorOptions): void {
   // per-repo property. `checkGuardHook` is the same answer the machine checks
   // above reported, so a missing guard hook is not double-reported.
   if (egressChecksOn) {
-    const guardRegistered = checkGuardHook(opts.claudeHome, readDropInSettings(resolveManagedEnv(opts.managed))).every(c => c.ok);
+    const guardRegistered = checkGuardHook(opts.claudeHome).every(c => c.ok);
     const prePush = checkPrePushHook(guardRegistered, opts.readGlobalHooksPath);
     if (prePush !== null) machine.push(prePush);
   }

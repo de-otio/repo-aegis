@@ -7,8 +7,6 @@
   },
   "include": ["src/**/*"],
   "references": [
-    { "path": "../core" },
-    { "path": "../llm" },
-    { "path": "../scan" }
+    { "path": "../core" }
   ]
 }

@@ -18,7 +18,7 @@
 
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
 // ---- configuration --------------------------------------------------------
@@ -42,6 +42,13 @@ const GATE_PATH_ENTRY_POINTS: string[] = [
 const FORBIDDEN_PACKAGE_PATTERNS: RegExp[] = [
   /(?:^|[\\/])packages[\\/]llm[\\/]/,
   /(?:^|[\\/])@de-otio[\\/]repo-aegis-llm[\\/]/,
+];
+
+// Packages removed in P2-C (D5). The literals must not appear in any
+// shipped compiled file.
+const REMOVED_PACKAGE_LITERALS: string[] = [
+  "@de-otio/repo-aegis-mcp",
+  "packages/mcp",
 ];
 
 // String literals that must not appear in any source file reachable
@@ -235,5 +242,260 @@ describe("hot-path determinism guard", () => {
       `gate-path file(s) contain forbidden string literal(s):\n` +
         offenders.map(o => `  ${o.file}  (literal: "${o.literal}")`).join("\n"),
     );
+  });
+
+  // P2-C (D5): the MCP server package was removed. No shipped (non-test)
+  // compiled file may name it, so a re-added import fails here rather than
+  // at publish time. Scans every package's dist/, not just the gate path.
+  it("no shipped file references the removed MCP package", () => {
+    const offenders: string[] = [];
+    for (const pkg of readdirSync(join(repoRoot, "packages"))) {
+      const dist = join(repoRoot, "packages", pkg, "dist");
+      if (!existsSync(dist)) continue;
+      for (const rel of readdirSync(dist, { recursive: true }) as string[]) {
+        if (!rel.endsWith(".js") || rel.endsWith(".test.js")) continue;
+        const file = join(dist, rel);
+        const source = readFileSync(file, "utf8");
+        for (const literal of REMOVED_PACKAGE_LITERALS) {
+          if (source.includes(literal)) offenders.push(`${relative(repoRoot, file)}  (literal: "${literal}")`);
+        }
+      }
+    }
+    assert.deepEqual(offenders, [], `shipped file(s) reference the removed MCP package:\n${offenders.join("\n")}`);
+  });
+});
+
+// ---- the gate path carries no network code --------------------------------
+//
+// `audit --org` / `--published` used to live in `cli/commands/audit.ts`, which
+// imported the scan package (an HTTP client). They moved to `repo-aegis-scan
+// audit` so that nothing the gate loads can reach GitHub or run `npm pack`.
+// The guard below keeps it that way: it walks the CLI's gate modules — plus
+// the local `audit`, which stays in the CLI — and fails if any of them reaches
+// `packages/scan/` (directly or through core) or names an HTTP client.
+//
+// The honest mistake this stops: someone re-adding an "optional" network step
+// to a gate command because the sweep code is one import away.
+
+const NETWORK_FREE_ENTRY_POINTS: string[] = [
+  ...GATE_PATH_ENTRY_POINTS,
+  "packages/cli/dist/commands/audit.js",
+  "packages/cli/dist/commands/git-credential.js",
+  "packages/cli/dist/commands/hook-check-write.js",
+  "packages/cli/dist/commands/hook-guard-egress.js",
+  "packages/cli/dist/commands/hook-scan-bash-output.js",
+];
+
+const NETWORK_PACKAGE_PATTERNS: RegExp[] = [/(?:^|[\\/])packages[\\/]scan[\\/]/];
+
+// A package name standing alone as a string literal (`"@octokit/request"`,
+// `` `@de-otio/repo-aegis-scan` ``). Prose that merely mentions the scan
+// package — the moved-flag message tells people to install it — has a space,
+// not a quote, in front of the name, so it does not match.
+const NETWORK_STRING_LITERALS: RegExp[] = [
+  /["'`]@de-otio\/repo-aegis-scan["'`/]/,
+  /["'`]@octokit\//,
+];
+
+describe("gate path carries no network code (audit --org/--published moved to repo-aegis-scan)", () => {
+  let repoRoot: string;
+  let reachable: Set<string>;
+
+  before(() => {
+    repoRoot = findRepoRoot();
+    reachable = walkImportGraph(NETWORK_FREE_ENTRY_POINTS, repoRoot);
+  });
+
+  it("no gate or local-audit module resolves under packages/scan/", () => {
+    const offenders = [...reachable].filter(p =>
+      NETWORK_PACKAGE_PATTERNS.some(re => re.test(relative(repoRoot, p))),
+    );
+    assert.equal(
+      offenders.length,
+      0,
+      `gate path imports the scan package (network code):\n` +
+        offenders.map(o => `  ${relative(repoRoot, o)}`).join("\n"),
+    );
+  });
+
+  it("no reachable file names the scan package or an HTTP client as a string literal", () => {
+    const offenders: Array<{ file: string; literal: string }> = [];
+    for (const file of reachable) {
+      const source = readFileSync(file, "utf8");
+      for (const re of NETWORK_STRING_LITERALS) {
+        if (re.test(source)) offenders.push({ file: relative(repoRoot, file), literal: String(re) });
+      }
+    }
+    assert.equal(
+      offenders.length,
+      0,
+      `gate-path file(s) name a network package:\n` +
+        offenders.map(o => `  ${o.file}  (${o.literal})`).join("\n"),
+    );
+  });
+
+  // Positive control. Without it, a walker that silently stopped following
+  // imports would make the two tests above pass forever.
+  it("control: the same walk from the moved code DOES reach the scan package and the HTTP client", () => {
+    const moved = walkImportGraph(["packages/scan/dist/audit.js"], repoRoot);
+    assert.ok(
+      [...moved].some(p => NETWORK_PACKAGE_PATTERNS.some(re => re.test(relative(repoRoot, p)))),
+      "expected the scan audit module to resolve under packages/scan/",
+    );
+    assert.ok(
+      [...moved].some(p => /octokit-client\.js$/.test(p)),
+      "expected the scan audit module to reach the octokit client",
+    );
+    const literalHit = [...moved].some(p =>
+      NETWORK_STRING_LITERALS.some(re => re.test(readFileSync(p, "utf8"))),
+    );
+    assert.ok(literalHit, "expected the literal detector to fire on the moved code");
+  });
+});
+
+// ---- removed-code guard (0.15.0) -------------------------------------------
+//
+// The LLM package, `suggest-markers`, and the semantic sweep / profile rebuild
+// were deleted. Nothing may import them back in unnoticed: a stray import would
+// either fail the build or, worse, resurrect a network-calling code path next
+// to the gate. This walks every package's *source* (the gate-path walk above
+// only covers a few entry points) and every package.json.
+
+const REMOVED_SPECIFIER_PATTERNS: RegExp[] = [
+  /repo-aegis-llm/,
+  /(?:^|[\\/])packages[\\/]llm(?:[\\/]|$)/,
+  /(?:^|[\\/])(?:semantic-sweep|rebuild-profiles|suggest-markers|profile-loader)(?:\.js|\.ts)?$/,
+];
+
+function listSourceFiles(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    if (name === "node_modules" || name === "dist") continue;
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) listSourceFiles(full, out);
+    else if (name.endsWith(".ts") || name.endsWith(".mts")) out.push(full);
+  }
+  return out;
+}
+
+describe("removed LLM / semantic code stays removed", () => {
+  const repoRoot = findRepoRoot();
+  const packagesDir = join(repoRoot, "packages");
+  const packageDirs = readdirSync(packagesDir)
+    .map(n => join(packagesDir, n))
+    .filter(d => existsSync(join(d, "package.json")));
+
+  it("sees the workspace packages (the walk below is not vacuous)", () => {
+    assert.ok(packageDirs.length >= 3, `expected workspace packages, got ${packageDirs.length}`);
+  });
+
+  it("packages/llm no longer exists", () => {
+    assert.equal(existsSync(join(packagesDir, "llm")), false);
+  });
+
+  it("no source file imports the removed package or modules", () => {
+    const offenders: string[] = [];
+    for (const dir of packageDirs) {
+      const srcDir = join(dir, "src");
+      if (!existsSync(srcDir)) continue;
+      for (const file of listSourceFiles(srcDir)) {
+        if (file.endsWith("import-graph.test.ts")) continue; // this file names the patterns
+        for (const spec of extractStaticImportSpecifiers(readFileSync(file, "utf8"))) {
+          if (REMOVED_SPECIFIER_PATTERNS.some(re => re.test(spec))) {
+            offenders.push(`${relative(repoRoot, file)}  imports "${spec}"`);
+          }
+        }
+      }
+    }
+    assert.deepEqual(offenders, []);
+  });
+
+  it("no package.json depends on the removed package", () => {
+    const offenders: string[] = [];
+    for (const dir of [repoRoot, ...packageDirs]) {
+      const json = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as Record<string, unknown>;
+      for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+        const deps = json[field];
+        if (deps && typeof deps === "object" && "@de-otio/repo-aegis-llm" in deps) {
+          offenders.push(`${relative(repoRoot, join(dir, "package.json"))} (${field})`);
+        }
+      }
+    }
+    assert.deepEqual(offenders, []);
+  });
+});
+
+// ---- removed code stays removed (P2-D) -------------------------------------
+//
+// The deny-set cache, the `re2` / subprocess ReDoS backends and `registry
+// encrypt` were deleted. Nothing may import them again by accident.
+
+function sourceFiles(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    if (name === "node_modules" || name === "dist") continue;
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) sourceFiles(p, out);
+    else if (name.endsWith(".ts") && !name.endsWith(".test.ts")) out.push(p);
+  }
+  return out;
+}
+
+describe("removed modules and `re2` are not imported", () => {
+  let repoRoot: string;
+  let reachable: Set<string>;
+
+  before(() => {
+    repoRoot = findRepoRoot();
+    reachable = walkImportGraph(
+      ["packages/cli/dist/index.js", "packages/core/dist/index.js"],
+      repoRoot,
+    );
+  });
+
+  it("no file reachable from the CLI or core entry points is registry-encrypt", () => {
+    const offenders = [...reachable].filter(p => /registry-encrypt\.js$/.test(p));
+    assert.deepEqual(offenders.map(o => relative(repoRoot, o)), []);
+  });
+
+  it("no reachable file imports or requires `re2`, or the subprocess validator's node:child_process, via regex-safety", () => {
+    const offenders: string[] = [];
+    for (const file of reachable) {
+      const source = readFileSync(file, "utf8");
+      if (/["'`]re2["'`]/.test(source)) offenders.push(`${relative(repoRoot, file)} mentions re2`);
+      if (/regex-safety\.js$/.test(file) && extractStaticImportSpecifiers(source).some(s => s === "node:child_process")) {
+        offenders.push(`${relative(repoRoot, file)} spawns a subprocess`);
+      }
+    }
+    assert.deepEqual(offenders, []);
+  });
+
+  it("no package manifest declares `re2`", () => {
+    const manifests = [join(repoRoot, "package.json")];
+    for (const pkg of readdirSync(join(repoRoot, "packages"))) {
+      const m = join(repoRoot, "packages", pkg, "package.json");
+      if (existsSync(m)) manifests.push(m);
+    }
+    for (const m of manifests) {
+      const json = JSON.parse(readFileSync(m, "utf8")) as Record<string, unknown>;
+      for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+        const deps = (json[field] ?? {}) as Record<string, string>;
+        assert.equal("re2" in deps, false, `${relative(repoRoot, m)} lists re2 under ${field}`);
+      }
+    }
+  });
+
+  it("no source file imports re2 or registry-encrypt", () => {
+    const offenders: string[] = [];
+    for (const pkg of readdirSync(join(repoRoot, "packages"))) {
+      const src = join(repoRoot, "packages", pkg, "src");
+      if (!existsSync(src)) continue;
+      for (const f of sourceFiles(src)) {
+        const text = readFileSync(f, "utf8");
+        for (const spec of extractStaticImportSpecifiers(text)) {
+          if (spec === "re2" || /registry-encrypt/.test(spec)) offenders.push(`${relative(repoRoot, f)}: ${spec}`);
+        }
+        if (/_require\(["']re2["']\)|require\(["']re2["']\)/.test(text)) offenders.push(`${relative(repoRoot, f)}: require(re2)`);
+      }
+    }
+    assert.deepEqual(offenders, []);
   });
 });

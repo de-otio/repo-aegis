@@ -436,14 +436,14 @@ export function engagementsAdd(
   // Closes the window where a freshly registered org has no deny-set
   // entry to catch leaks. Surfaced both as a stderr warning (for the
   // human / agent reading text output) and as a `markerWarning` field
-  // in the JSON envelope (for the MCP-driven flow).
+  // in the JSON envelope (for machine callers).
   const markerWarning =
     markers.length === 0 ? { engagementId: id ?? "", count: 0 } : null;
   if (markerWarning) {
     writeWarning(
       `engagement "${id}" was created with 0 markers; ` +
-        `run \`repo-aegis suggest-markers --engagement ${id} --from <repo>\` ` +
-        `to populate, or add markers via \`engagements add ... --marker <pattern>\`.`,
+        `add markers by editing the engagement's \`markers:\` list in engagements.yaml, ` +
+        `or discover registry hosts with \`repo-aegis scan-env --accept engagement --engagement ${id}\`.`,
     );
   }
 

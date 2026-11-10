@@ -2,6 +2,8 @@
 
 Status: shipped in v0.11.1 (#158) (historical: the branch `fix/pin-enforcement-binary` no longer exists). The text below is the spec as written before the build.
 
+Note (0.14.0): the managed drop-in (D8 and everything that refers to it: P3 to P7, the ledger, the heartbeat, the e2e job) was **removed** as too costly for what it guaranteed. `install claude-md` writes `~/.claude/settings.json` only. What remains is detection of an existing drop-in, with the command that removes it (`doc/configuration.md`, "Removing a legacy managed drop-in"), until 0.17.
+
 Note (0.14.0): D2's strict fail-closed is replaced by a **version-gated PATH fallback**. When the pinned node or CLI is gone, the git hooks, the shim and the Claude Code hook commands run the `repo-aegis` on `PATH` only if its `--version` is at least the version recorded next to the pin (`__ra_version=`), after a warning, and refuse otherwise (nothing on `PATH`, older, a version that is not plain `MAJOR.MINOR.PATCH`, or a pin with no recorded version). The fail-open and shadowing concerns below still hold: `PATH` is never consulted while the pin works. See `doc/configuration.md`, "The pinned enforcement binary".
 
 ## 1. Problem

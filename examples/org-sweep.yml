@@ -1,10 +1,14 @@
-# `audit --org` — the cheap sibling of the full Layer-2 sweep.
+# `repo-aegis-scan audit --org` — the cheap sibling of the full Layer-2 sweep.
 #
-# One scheduled job per org, using the ordinary repo-aegis action. No queries
-# file, no state file, no second package: it derives seed queries from this
-# repo's own deny set and runs them against GitHub code search. In exchange it
-# has no memory — it reports the same finding every week until you fix it, and
-# it is capped at `--max-queries` seeds per run.
+# One scheduled job per org. No queries file, no state file: it derives seed
+# queries from this repo's own deny set and runs them against GitHub code
+# search. In exchange it has no memory — it reports the same finding every week
+# until you fix it, and it is capped at `--max-queries` seeds per run.
+#
+# This used to be `repo-aegis audit --org`, run through the repo-aegis action.
+# It moved to the scan package (`@de-otio/repo-aegis-scan`) so the gate CLI
+# carries no network code, and the action only installs the gate CLI — so this
+# example installs the scan package directly.
 #
 # Use this when you want org-level coverage without standing up the encrypted
 # queries + state-file deployment. Use `scheduled-sweep.yml` when you want
@@ -25,10 +29,14 @@
 # Secrets required:
 #   REPO_AEGIS_SEARCH_TOKEN   a fine-grained GitHub token with code-search read
 #
-# The `uses: de-otio/repo-aegis@v1` reference below is a floating major, which
-# is right for an example you are meant to read. In your own repo, pin it to a
-# full commit SHA (`de-otio/repo-aegis@<sha> # v1.2.3`) and let Dependabot move
-# it: a leak gate that an upstream tag-move can rewrite is not a gate.
+# The seeds come from the engagement registry, so the job needs one: restore it
+# the way `github-action-usage.yml` does and point REPO_AEGIS_REGISTRY at it.
+# REPO_AEGIS_MIN_PATTERNS=1 below makes a missing registry fail the job (exit 2)
+# instead of sweeping for nothing and reporting green.
+#
+# The scan package version is pinned, not `latest`: a compromised publish would
+# otherwise reach this job on its next run. Use the first release that has
+# `repo-aegis-scan audit` (see CHANGELOG) and let Dependabot or Renovate move it.
 name: repo-aegis-org-sweep
 
 on:
@@ -56,29 +64,35 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Set up Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.0.0  # zizmor: ignore[cache-poisoning]
+        with:
+          node-version: '24'
+
+      - name: Install repo-aegis-scan
+        working-directory: ${{ runner.temp }}
+        env:
+          REPO_AEGIS_SCAN_VERSION: '0.15.0'
+        # Run from RUNNER_TEMP so a PR-supplied .npmrc in the checkout cannot
+        # repoint the registry; --ignore-scripts because nothing here needs them.
+        run: | # zizmor: ignore[adhoc-packages]
+          npm install -g --ignore-scripts --registry=https://registry.npmjs.org \
+            "@de-otio/repo-aegis-scan@${REPO_AEGIS_SCAN_VERSION}"
+
       - name: Org sweep
-        # Deliberately a floating major, not a SHA: this is an example meant
-        # to be read and copied. A SHA here would silently pin every reader
-        # to whatever commit was current when the doc was written. Pin it in
-        # YOUR repo — see this file's header.
-        uses: de-otio/repo-aegis@v1 # zizmor: ignore[unpinned-uses]
         env:
           GH_TOKEN: ${{ secrets.REPO_AEGIS_SEARCH_TOKEN }}
-        with:
-          command: audit
-          # Only the org check runs: everything else is the PR gate's job and
-          # would just duplicate it on a schedule.
-          args: >-
-            --org your-org
-            --accept-cross-border
-            --max-queries 30
-            --no-marker-scan
-            --no-lockfile-check
-            --no-fixture-check
-            --no-remote-check
-            --no-hooks-check
-          fail-on-hits: 'true'
+          # Fail closed on a missing registry (see the header).
+          REPO_AEGIS_MIN_PATTERNS: '1'
           # Findings land in a job log. On a public repo that is world-readable,
-          # so attribution stays redacted (the default) — and the org name above
-          # is already public anyway, unlike your engagement ids.
-          redact-attribution: 'true'
+          # so attribution stays redacted — and the org name below is already
+          # public anyway, unlike your engagement ids.
+          REPO_AEGIS_REDACT_ATTRIBUTION: '1'
+        # Exit 1 = a hit (or a truncated or failed sweep), 2 = the audit could
+        # not run. Either fails the job, which is the point of a scheduled check.
+        run: |
+          repo-aegis-scan audit \
+            --org your-org \
+            --accept-cross-border \
+            --max-queries 30 \
+            --json

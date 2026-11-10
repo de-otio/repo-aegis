@@ -21,7 +21,6 @@ compiled output under `packages/*/dist/`.
 | `@de-otio/repo-aegis-core`    | `packages/core`     | Scanning engine, registry, state, redaction logic.  |
 | `repo-aegis` (CLI)            | `packages/cli`      | The `repo-aegis` command-line tool.                 |
 | `@de-otio/repo-aegis-scan`    | `packages/scan`     | Org-wide GitHub code-search sweep tool.             |
-| `@de-otio/repo-aegis-mcp`     | `packages/mcp`      | Model Context Protocol server for coding agents.    |
 | `repo-aegis-vscode`           | `packages/vscode`   | VSCode extension (editor diagnostics).              |
 
 ## Build
@@ -59,10 +58,10 @@ lookup inject a stub (`lookupVisibility`) instead.
 Tests must never depend on the developer's environment. If you add a test that
 runs `git`, assume no global config exists.
 
-**Sandboxed environments:** a few `llm` tests bind a loopback TCP port to mock
-Ollama. If your shell forbids `listen()` (some agent sandboxes do), those tests
-fail with `EPERM` or hang. That is an environment limit, not a defect — they
-pass in CI and on a normal machine.
+**Sandboxed environments:** a few tests bind a loopback TCP port. If your shell
+forbids `listen()` (some agent sandboxes do), those tests fail with `EPERM` or
+hang. That is an environment limit, not a defect — they pass in CI and on a
+normal machine.
 
 ### Coverage targets
 
@@ -97,7 +96,7 @@ harness), so a lower figure there is acceptable, but aim higher when you can.
 `packages/cli/src/program.test.ts` snapshots the public flag surface of every
 subcommand. **Any flag rename, addition, or removal must update
 `program.test.ts` in the same commit as the change.** This is how we keep
-shell scripts, hooks, MCP wrappers, the GitHub Action, and the VSCode
+shell scripts, hooks, the GitHub Action, and the VSCode
 extension from silently desynchronising from the CLI.
 
 If you're not sure whether your change is "flag-shaped", run `npm test` —

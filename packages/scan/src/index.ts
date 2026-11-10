@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -12,11 +12,9 @@ import { makeOctokitClient } from "./octokit-client.js";
 import { renderMarkdown } from "./output.js";
 import { fileIssue } from "./issue-filer.js";
 import { encryptFile, decryptFile, writeBufferTo, AgeNotFoundError, AgeError } from "./age.js";
-import { runSemanticSweep, type SemanticCandidate } from "./semantic-sweep.js";
-import { loadAllProfiles } from "./profile-loader.js";
-import { rebuildProfiles } from "./rebuild-profiles.js";
-import { loadRegistry, repoAegisHome, REFUSAL_GUIDE, withRefusalTrailer } from "@de-otio/repo-aegis-core";
-import type { OllamaConfig } from "@de-otio/repo-aegis-llm";
+import { runAudit, type AuditOptions } from "./audit.js";
+import { REMOVED_REBUILD_PROFILES_MESSAGE, removedRunOptionMessage } from "./removed-features.js";
+import { REFUSAL_GUIDE, withRefusalTrailer } from "@de-otio/repo-aegis-core";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as { version: string };
@@ -35,7 +33,8 @@ interface RunCliOptions {
   noUpdateState?: boolean;
   revealMatches?: boolean;
   pruneStateOlderThan?: number;
-  // ─ semantic sweep (Phase 3, P3-B-2) ─
+  // Removed in 0.15.0 (LLM features). Still parsed so that passing one fails
+  // with a message that says so, rather than a generic unknown-option error.
   semantic?: boolean;
   ollamaEndpoint?: string;
   ollamaModel?: string;
@@ -44,39 +43,9 @@ interface RunCliOptions {
   semanticMaxBytesPerCandidate?: number;
 }
 
-interface RebuildProfilesCliOptions {
-  ollamaEndpoint?: string;
-  ollamaModel?: string;
-  ollamaTimeoutMs?: number;
-  allowRemoteOllama?: boolean;
-  threshold?: number;
-  diff?: boolean;
-  engagement?: string[];
-  registry?: string;
-}
-
-const DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434";
-const DEFAULT_OLLAMA_EMBED_MODEL = "nomic-embed-text";
-const DEFAULT_OLLAMA_TIMEOUT_MS = 30_000;
-
-function buildOllamaConfig(opts: {
-  ollamaEndpoint?: string;
-  ollamaModel?: string;
-  ollamaTimeoutMs?: number;
-  allowRemoteOllama?: boolean;
-}): OllamaConfig {
-  return {
-    endpoint: opts.ollamaEndpoint ?? DEFAULT_OLLAMA_ENDPOINT,
-    model: opts.ollamaModel ?? DEFAULT_OLLAMA_EMBED_MODEL,
-    timeoutMs: opts.ollamaTimeoutMs ?? DEFAULT_OLLAMA_TIMEOUT_MS,
-    allowRemote: !!opts.allowRemoteOllama,
-  };
-}
-
-function splitOwnerRepo(full: string): { owner: string; repo: string } | null {
-  const i = full.indexOf("/");
-  if (i <= 0 || i === full.length - 1) return null;
-  return { owner: full.slice(0, i), repo: full.slice(i + 1) };
+interface AuditCliOptions extends AuditOptions {
+  home?: string;
+  registryPath?: string;
 }
 
 function emitError(payload: { code: string; error: string; details?: unknown }, exitCode = 2): never {
@@ -111,6 +80,35 @@ program
     );
   });
 
+// `audit --org` / `audit --published`: moved here from `repo-aegis audit` so the
+// CLI's gate path carries no network or archive-extraction code. Only these two
+// checks run; the local ones stay in `repo-aegis audit`.
+program
+  .command("audit")
+  .description("one-shot org code-search sweep (--org) and/or published-archive scan (--published)")
+  .option("--org <org>", "run a one-shot GitHub code-search sweep against this org (needs a token)")
+  .option("--published <pkg-or-tarball>", "scan a packed npm tarball, VSIX bundle, or npm package name")
+  .option("--no-secret-scan", "with --published: skip the universal secret-shape scan (PEM keys, JWTs, forge tokens) over archive contents")
+  .option("--token <env-var>", "env var holding the GitHub token for --org (default GH_TOKEN)")
+  .option("--max-queries <n>", "cap on --org seed-derived queries per run (default 30)", v => parseInt(v, 10))
+  .option("--accept-cross-border", "consent to sending --org seed substrings to GitHub (or set REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1)")
+  .option("--min-patterns <n>", "exit 2 if the computed deny set has fewer than <n> patterns (fail closed on a missing registry)", v => parseInt(v, 10))
+  .option("--require-deny-set", "sugar for --min-patterns 1")
+  .option("--redact-attribution", "strip engagement ids and engagement-derived pattern ids from output (set this for anything published)")
+  .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
+  .option("--cwd <dir>", "evaluate from a different working directory (default: process.cwd())")
+  .option("--registry-path <path>", "override the engagement registry path")
+  .option("--home <dir>", "override the repo-aegis home dir")
+  .option("--json", "output JSON")
+  .action(async (opts: AuditCliOptions) => {
+    if (opts.home) process.env["REPO_AEGIS_HOME"] = opts.home;
+    if (opts.registryPath) process.env["REPO_AEGIS_REGISTRY"] = opts.registryPath;
+    const run = await runAudit(opts);
+    process.stdout.write(run.stdout);
+    process.stderr.write(run.stderr);
+    process.exit(run.exitCode);
+  });
+
 program
   .command("run")
   .description("run the configured queries against GitHub code-search")
@@ -131,19 +129,16 @@ program
     "drop seen-hit entries first recorded more than N days ago (entries from pre-v2 state with no recorded date are kept)",
     v => parseInt(v, 10),
   )
-  // Semantic sweep (Phase 3). Off by default. Requires Ollama and an
-  // engagements registry with reposActive + corresponding profile files.
-  .option("--semantic", "run the embedding-based semantic sweep alongside regex (Phase 3)")
-  .option("--ollama-endpoint <url>", `Ollama base URL (default ${DEFAULT_OLLAMA_ENDPOINT})`)
-  .option("--ollama-model <id>", `embedding model id (default ${DEFAULT_OLLAMA_EMBED_MODEL})`)
-  .option("--ollama-timeout-ms <n>", "Ollama request timeout", v => parseInt(v, 10))
-  .option("--allow-remote-ollama", "permit non-loopback Ollama endpoints (default OFF)")
-  .option(
-    "--semantic-max-bytes-per-candidate <n>",
-    "trim each fetched candidate to this many UTF-8 bytes before embedding (default 16384)",
-    v => parseInt(v, 10),
-  )
+  // Removed in 0.15.0. Hidden, and rejected in the action with a clear message.
+  .addOption(new Option("--semantic").hideHelp())
+  .addOption(new Option("--ollama-endpoint <url>").hideHelp())
+  .addOption(new Option("--ollama-model <id>").hideHelp())
+  .addOption(new Option("--ollama-timeout-ms <n>").hideHelp())
+  .addOption(new Option("--allow-remote-ollama").hideHelp())
+  .addOption(new Option("--semantic-max-bytes-per-candidate <n>").hideHelp())
   .action(async (opts: RunCliOptions) => {
+    const removed = removedRunOptionMessage(opts);
+    if (removed !== null) emitError({ code: "REMOVED", error: removed });
     const format = opts.outputFormat ?? "json";
     if (!["json", "markdown", "issue"].includes(format)) {
       emitError({
@@ -230,70 +225,19 @@ program
       saveStateAtomic(opts.state, stateToWrite);
     }
 
-    // ─ Phase 3 semantic sweep ────────────────────────────────────────────
-    let semanticReport: Awaited<ReturnType<typeof runSemanticSweep>> | undefined;
-    if (opts.semantic) {
-      const home = repoAegisHome();
-      const { profiles, errors: profileErrors } = loadAllProfiles(home);
-      for (const e of profileErrors) {
-        process.stderr.write(
-          `repo-aegis-scan: profile "${e.engagementId}" failed to load: ${e.error}\n`,
-        );
-      }
-      if (profiles.length === 0) {
-        process.stderr.write(
-          `repo-aegis-scan: --semantic requested but no profiles found under ${home}/profiles/. ` +
-            `Run \`repo-aegis-scan rebuild-profiles\` first.\n`,
-        );
-      } else {
-        const ollama = buildOllamaConfig(opts);
-        // Pull contents for each new regex hit; skip entries we can't fetch.
-        const candidates: SemanticCandidate[] = [];
-        for (const h of result.hits) {
-          const rep = splitOwnerRepo(h.repo);
-          if (!rep) continue;
-          let content: string | null = null;
-          try {
-            content = await client.fetchBlobText(rep.owner, rep.repo, h.path);
-          } catch (err) {
-            process.stderr.write(
-              `repo-aegis-scan: blob fetch failed for ${h.repo}:${h.path}: ${(err as Error).message}\n`,
-            );
-            continue;
-          }
-          if (content === null) continue;
-          candidates.push({ hit: h, content });
-        }
-        semanticReport = await runSemanticSweep({
-          candidates,
-          profiles,
-          ollama,
-          ...(opts.semanticMaxBytesPerCandidate !== undefined
-            ? { maxBytesPerCandidate: opts.semanticMaxBytesPerCandidate }
-            : {}),
-        });
-        if (semanticReport.embedErrors > 0) {
-          process.stderr.write(
-            `repo-aegis-scan: semantic sweep had ${semanticReport.embedErrors} embed error(s)\n`,
-          );
-        }
-      }
-    }
-
     if (format === "json") {
       process.stdout.write(
         JSON.stringify(
           {
             summary: result.summary,
             hits: result.hits,
-            ...(semanticReport ? { semantic: semanticReport } : {}),
           },
           null,
           2,
         ) + "\n",
       );
     } else if (format === "markdown") {
-      process.stdout.write(renderMarkdown(result.summary, result.hits, semanticReport));
+      process.stdout.write(renderMarkdown(result.summary, result.hits));
     } else if (format === "issue") {
       const filed = await fileIssue(result.summary, result.hits, {
         reportRepo: opts.reportIssueRepo!,
@@ -327,14 +271,10 @@ program
         `repo-aegis-scan: degraded — ${failed}/${total} queries failed\n`,
       );
     }
-    if (
-      format === "json" &&
-      (result.summary.totalNew > 0 || (semanticReport && semanticReport.hits.length > 0))
-    ) {
+    if (format === "json" && result.summary.totalNew > 0) {
       // Per the design contract: json caller must react; issue/markdown
       // outputs already deliver the report, so they exit 0 even with
-      // new hits. Semantic hits count too — a similarity hit without a
-      // regex hit is still a finding the caller should look at.
+      // new hits.
       process.exit(1);
     }
     process.exit(0);
@@ -393,51 +333,13 @@ program
     }
   });
 
-// ─ rebuild-profiles (Phase 3) ──────────────────────────────────────────────
+// Removed in 0.15.0 (LLM features). Hidden stub so the old verb says so.
 program
-  .command("rebuild-profiles")
-  .description(
-    "build embedding profiles for active engagements (Phase 3 semantic sweep)",
-  )
-  .option("--ollama-endpoint <url>", `Ollama base URL (default ${DEFAULT_OLLAMA_ENDPOINT})`)
-  .option("--ollama-model <id>", `embedding model id (default ${DEFAULT_OLLAMA_EMBED_MODEL})`)
-  .option("--ollama-timeout-ms <n>", "Ollama request timeout", v => parseInt(v, 10))
-  .option("--allow-remote-ollama", "permit non-loopback Ollama endpoints (default OFF)")
-  .option("--threshold <n>", "cosine threshold for new profiles (default 0.78)", v => parseFloat(v))
-  .option(
-    "--diff",
-    "report stored-vs-current manifest drift; do not embed or write profiles",
-  )
-  .option(
-    "--engagement <id...>",
-    "restrict the operation to specific engagement ids (repeatable)",
-  )
-  .option("--registry <path>", "override the engagements.yaml path")
-  .action(async (opts: RebuildProfilesCliOptions) => {
-    let registry;
-    try {
-      registry = opts.registry ? loadRegistry(opts.registry) : loadRegistry();
-    } catch (err) {
-      emitError({
-        code: "REGISTRY_LOAD_ERROR",
-        error: (err as Error).message,
-      });
-    }
-    const ollama = buildOllamaConfig(opts);
-
-    const result = await rebuildProfiles({
-      registry: registry!,
-      ollama,
-      ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}),
-      ...(opts.diff ? { dryRun: true } : {}),
-      ...(opts.engagement ? { onlyEngagements: opts.engagement } : {}),
-    });
-    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-    // Exit 1 when at least one engagement reported an error during a
-    // real (non-diff) rebuild, so CI / cron treat partial failure as a
-    // hard signal.
-    if (!opts.diff && result.failed > 0) process.exit(1);
-    process.exit(0);
+  .command("rebuild-profiles", { hidden: true })
+  .allowUnknownOption()
+  .allowExcessArguments()
+  .action(() => {
+    emitError({ code: "REMOVED", error: REMOVED_REBUILD_PROFILES_MESSAGE });
   });
 
 await program.parseAsync(process.argv);

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 // Thin wrapper around the `age` CLI for symmetric file encryption /
-// decryption. Lives in core so multiple packages (scan,
-// cli/registry-encrypt) can share the same machinery without each
-// shelling out to age independently. The `age` binary is a runtime
+// decryption. Lives in core so multiple packages (scan's sweep query blobs,
+// cli's `registry decrypt` migration command) can share the same machinery
+// without each shelling out to age independently. The `age` binary is a runtime
 // dependency: callers receive `AgeNotFoundError` if it isn't on PATH.
 
 import { spawnSync } from "node:child_process";

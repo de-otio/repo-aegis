@@ -8,9 +8,7 @@ import { renderHookScript } from "./hook-scripts.js";
 import {
   fallbackVerdict,
   fallbackVerdictShell,
-  isManagedHookCommand,
   isPinnedHookCommand,
-  managedHookCommand,
   parsePinFromScript,
   pinnedHookCommand,
   pinProblem,
@@ -84,7 +82,7 @@ describe("parsePinFromScript", () => {
   });
 });
 
-describe("pinnedHookCommand / managedHookCommand: failOpen (the UserPromptSubmit revoker)", () => {
+describe("pinnedHookCommand: failOpen (the UserPromptSubmit revoker)", () => {
   const pin = { node: "/no/such/node", cli: "/no/such/cli.js" };
   const run = (command: string) => spawnSync("sh", ["-c", command], { encoding: "utf8" });
 
@@ -99,17 +97,6 @@ describe("pinnedHookCommand / managedHookCommand: failOpen (the UserPromptSubmit
     assert.ok(isPinnedHookCommand(pinnedHookCommand(pin, "hook prompt-submit", { failOpen: true }), "prompt-submit"));
     assert.ok(isPinnedHookCommand(pinnedHookCommand(pin, "hook guard-egress"), "guard-egress"));
     assert.ok(!isPinnedHookCommand(pinnedHookCommand(pin, "hook prompt-submit", { failOpen: true }), "guard-egress"));
-  });
-
-  it("the managed form: a failing id and a missing pin exit 0 when fail-open, 2 otherwise; another uid is 0 either way", () => {
-    const uid = String(process.getuid?.() ?? 501);
-    const ctx = { uid, dropinPath: "/x/drop-in.json" };
-    assert.equal(run(managedHookCommand(pin, "hook guard-egress", ctx)).status, 2);
-    assert.equal(run(managedHookCommand(pin, "hook prompt-submit", { ...ctx, failOpen: true })).status, 0);
-    assert.equal(run(managedHookCommand(pin, "hook guard-egress", { ...ctx, idPath: "/nonexistent/id" })).status, 2);
-    assert.equal(run(managedHookCommand(pin, "hook prompt-submit", { ...ctx, idPath: "/nonexistent/id", failOpen: true })).status, 0);
-    assert.equal(run(managedHookCommand(pin, "hook guard-egress", { ...ctx, uid: String(Number(uid) + 1) })).status, 0);
-    assert.ok(isManagedHookCommand(managedHookCommand(pin, "hook prompt-submit", { ...ctx, failOpen: true }), "prompt-submit"));
   });
 });
 

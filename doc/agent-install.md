@@ -44,16 +44,12 @@ do not guess:
   on disk.
 - **What the markers are for each engagement.** The user knows their
   customer's identifiers (company name, codename, canonical domain,
-  internal hostnames). Ask. Do **not** invent markers; do **not**
-  run `suggest-markers` (which sends prose to a local model) without
-  explicit user direction.
+  internal hostnames). Ask. Do **not** invent markers.
 - **Which classification to apply to each existing repo.** Use
   `classify --apply` (which derives from the git remote + registry
   org membership) when you have it; ask the user when you don't.
 - **Whether to enable the audit log** (off by default, opt-in
   compliance trail). Ask.
-- **Whether to encrypt the registry at rest.** Surface as an option;
-  do not auto-encrypt.
 
 ## Pre-flight
 
@@ -471,15 +467,15 @@ user-authored hook in the same entry.
 
 `repo-aegis install claude-md --print-only` shows exactly what would be
 written without touching disk. `repo-aegis install claude-md --uninstall`
-removes both again. These entries go into a root-owned managed-settings
-drop-in (macOS `/Library/Application Support/ClaudeCode/managed-settings.d/`,
-Linux `/etc/claude-code/managed-settings.d/`) that the person writes from their
-own terminal with `sudo`; `--user-settings` writes `~/.claude/settings.json`
-instead. See [`doc/configuration.md`](configuration.md#the-claude-code-managed-drop-in).
+removes both again. These entries go into `~/.claude/settings.json`; nothing
+needs `sudo`. If `doctor` reports `MANAGED_LEGACY_PRESENT`, an older install left a
+root-owned managed drop-in: tell the person, who removes it from their own
+terminal with the command `doctor` prints (see
+[`doc/configuration.md`](configuration.md#removing-a-legacy-managed-drop-in)). You do not run `sudo`.
 
 It also adds `permissions.deny` **Edit** rules for the registry file and its
 `.age`, the approvals store, the emergency pause (`pause.json`), the decision log's on/off switch (`state/decision-log.json`), the destination cache (`destinations.json`), `hooks/**`, `bin/**`, `prompt-approvals/**` (the hook's record of a yes at the agent prompt), `markers/**` (the rendered
-deny set) and `state/deny-set.cache.json` plus the uninstall ledger under the
+deny set) plus the uninstall ledger under the
 repo-aegis home
 (default `~/.config/repo-aegis`), so the agent cannot register an owner by
 editing `engagements.yaml`. Only Edit rules are written (Claude Code never
@@ -897,32 +893,25 @@ The user is the source of truth on this; don't probe with `find`.
 The registry lives in `~/.config/repo-aegis/engagements.yaml`. To
 sync across machines, the user can:
 
-- Encrypt the registry at rest (`repo-aegis registry encrypt
-  --recipient age1...`) and keep the ciphertext in a dotfiles repo,
-  decrypting on each machine via `registry decrypt --identity
-  <path>`.
-- Or replicate the file via their existing dotfiles workflow.
+- Replicate the file via their existing dotfiles workflow. (repo-aegis
+  no longer encrypts the registry: `registry encrypt` was removed; if
+  they keep their own `age`-encrypted copy in a dotfiles repo, they
+  decrypt it themselves before use. A repo-aegis registry left as
+  `engagements.yaml.age` is read as "no registry"; `registry decrypt
+  --identity <path>` restores it.)
 
 Don't propose a sync mechanism without asking. The registry is
-sensitive data even when it's not encrypted (it lists all the
+sensitive data (it lists all the
 user's customers and their identifying patterns).
 
 ## What you should never do during install
 
-- **Run `suggest-markers`.** It sends prose from the user's repo
-  to a local Ollama model. The user must opt in.
-- **Set `--auto-accept-above` on `suggest-markers`.** Auto-acceptance
-  bypasses the user's review of model-suggested markers.
-- **Set `--allow-remote-model` / `--allow-remote-ollama`** anywhere.
-  Sending customer prose to a non-localhost model is a compliance
-  decision.
 - **Use `--purge-repos` / `--purge-home`** in any flow. These belong
   to uninstall, not install.
 - **Echo a literal marker pattern back to the user.** They typed it;
   they don't need it back.
 - **Commit the user's `engagements.yaml` to a public repo.** It
-  contains customer identifiers in plaintext. The user owns whether
-  to encrypt-and-sync; surface that decision when relevant.
+  contains customer identifiers in plaintext.
 - **Set the `git config user.email` to a customer-derived address.**
   Repo-aegis doesn't touch git identity, but agents that "set up
   everything" sometimes do; don't.

@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-10
+
+**Less to install, less to trust.** 0.15.0 is 0.14.0 plus the deletions of the complexity review: the root-owned managed
+drop-in, the LLM features and MCP server, the deny-set cache, the `re2` subprocess validator, registry encryption, and
+the network half of `audit`. None of them stopped an accidental leak that the remaining layers do not. If you had a
+root-owned managed drop-in installed, run `repo-aegis install claude-md`, then remove the file with the command
+`repo-aegis doctor` prints.
+
+### Changed
+
+- **`audit --org` and `audit --published` moved to `repo-aegis-scan audit`.** The gate CLI no
+  longer imports an HTTP client or runs `npm pack`: the network and archive checks now live in
+  `@de-otio/repo-aegis-scan` (`npm install -g @de-otio/repo-aegis-scan`), and an import-graph test
+  in core fails if a gate module (check, the hooks, pre-push, credential helper, render, the
+  local `audit`) reaches the scan package. Behaviour is unchanged: same check names (`org-scan`,
+  `published`), finding codes, JSON envelope, cross-border consent gate, fail-closed
+  `--min-patterns` / `REPO_AEGIS_MIN_PATTERNS` floor, and `--redact-attribution`. Flags move
+  with it: `--org`, `--published`, `--no-secret-scan`, `--token`, `--max-queries`,
+  `--accept-cross-border`.
+  - **Migration.** For one release `repo-aegis audit --org|--published` still parses (hidden from
+    `--help`), runs nothing, prints the exact replacement command
+    (`moved to \`repo-aegis-scan audit --org <org> …\``, error code `AUDIT_NETWORK_MOVED`) and
+    exits 2, so a CI step that still passes them fails loudly instead of going green. The new
+    verb runs only the network checks, so a job that wanted both now runs `repo-aegis audit` for
+    the local checks and `repo-aegis-scan audit --org|--published` for the rest. `repo-aegis-scan
+    audit` with neither flag exits 2.
+  - **Callers updated.** This repo's `publish.yml` scans each tarball with the just-built
+    `packages/scan/dist` (the `--no-*-check` flags it needed to silence the local checks are gone
+    with them), and `examples/org-sweep.yml` installs the scan package and runs
+    `repo-aegis-scan audit --org` directly, because the `repo-aegis` Action installs only the gate
+    CLI. If you use `command: audit` with `--org` or `--published` through the Action, move that
+    step the same way.
+  - `@de-otio/repo-aegis` no longer depends on `@de-otio/repo-aegis-scan`. The deny-set floor's
+    decision (`resolveMinPatterns`, `denySetFloorShortfall`) moved into core so both binaries
+    enforce one definition.
+
+### Removed
+
+- **The `@de-otio/repo-aegis-mcp` MCP server package is gone.** Its tools duplicated the CLI's
+  `status`, `check`, `markers` and `engagements` commands, and the first-touch classification
+  is still available through `repo-aegis hook first-touch`. The CLI never wrote an MCP
+  config, so `repo-aegis` has no uninstall step for it. If you registered the server in your
+  own `.mcp.json` (or another agent's MCP config), delete that entry yourself. Agents can run
+  the same checks through the `repo-aegis` CLI.
+
+- **The LLM features are gone.** `repo-aegis suggest-markers`, the `@de-otio/repo-aegis-llm`
+  package, `repo-aegis-scan run --semantic` (with `--ollama-endpoint`, `--ollama-model`,
+  `--ollama-timeout-ms`, `--allow-remote-ollama` and `--semantic-max-bytes-per-candidate`) and
+  `repo-aegis-scan rebuild-profiles` were deleted, along with the Ollama dependency. They could
+  only re-rank regex hits or propose markers for a person to review, and they added a network
+  call and a place for customer prose to leave the machine. The gate is unchanged: it was always
+  regex-only and offline. Nothing in `engagements.yaml` or any other config file ever configured
+  these features, so there is no key to remove. A leftover `~/.config/repo-aegis/profiles/`
+  directory is now unused and can be deleted. Passing a removed `repo-aegis-scan` flag, or running
+  `repo-aegis-scan rebuild-profiles`, exits 2 with a `REMOVED` error that says the feature was
+  removed in 0.15.0, rather than a generic unknown-option error. To add markers, edit the
+  engagement's `markers:` list or use `repo-aegis scan-env`. The `status` and `engagements add`
+  zero-marker warnings point there now.
+
+- **The deny-set cache.** The deny set is computed fresh on every call. The cache was keyed on
+  marker-file mtime and size, so it could serve a stale set after an edit that kept both, and a
+  forged entry could switch the scanner off. Fresh computing costs about 2 to 4 ms per call
+  for a few hundred to a thousand patterns (a hook process makes one call), against 1 to 2.5 ms
+  for a cold cached call. The old `state/deny-set.cache.json` is deleted the first time anything
+  computes a deny set (best effort, silent on failure). `install claude-md` no longer writes a
+  `permissions.deny` rule for that file; a rule an earlier install wrote stays in the ledger and
+  `uninstall` still removes it. The `denySetCachePath` export is now `legacyDenySetCachePath`,
+  and the `cachePath` option of `computeDenySet` is gone.
+- **The `re2` dependency and the subprocess ReDoS validator.** Marker patterns are validated
+  in-process: a static check refuses nested unbounded quantifiers (`(a+)+`, `(\w+\s*)*`) without
+  running them, then a CPU-time check on a stress input. That is enough for the mistake it stops,
+  a catastrophic pattern typed by accident that would wedge every hook (a hook timeout lets writes
+  through unscanned). `getRegexBackend`, `setRegexBackendForTesting`, the `{ strict: true }` option
+  of `validatePatterns` and the `regexBackend` field of `status --json` (and its `regex:` line) are
+  gone. A pattern the check refuses now says "pattern has nested unbounded quantifiers (possible
+  catastrophic backtracking; consider re-anchoring)".
+- **`repo-aegis registry encrypt`.** At-rest encryption of the registry is not part of accident
+  prevention. The command now prints `registry encrypt was removed in 0.15.0; at-rest encryption is
+  not part of accident prevention` and exits 2 (`REGISTRY_ENCRYPT_REMOVED`). **`registry decrypt`
+  stays for at least one release** so a registry encrypted by an earlier version can be migrated
+  (`doctor`'s `REGISTRY_ENCRYPTED` warning names it). `age` is still used for the sweep query
+  blobs (`repo-aegis-scan encrypt-query` / `decrypt-query`).
+
+- **The root-owned managed drop-in is gone** (about 4,000 lines, one CI job, one `sudo` end-to-end
+  script). `repo-aegis install claude-md` used to write the Claude Code hooks and deny rules to
+  `/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-<uid>.json` (macOS) or
+  `/etc/claude-code/managed-settings.d/…` (Linux) with `sudo`. Its cost was `sudo`, a CI job and a
+  large surface, for a guarantee that was void wherever `sudo` takes no password. `install
+  claude-md` now always writes `~/.claude/settings.json`; `--user-settings` is accepted and
+  ignored (with a one-line note) for one release. Gone with it: the ledger, the SessionStart
+  heartbeat, the privileged helper, and the `doctor` checks `MANAGED_DROPIN_STALE`,
+  `MANAGED_DROPIN_NOT_ROOT_OWNED`, `MANAGED_DROPIN_UNREADABLE`, `MANAGED_DROPIN_ORPHANED`,
+  `MANAGED_DROPIN_LEDGER_STALE`, `MANAGED_HOOKS_DISABLED`, `MANAGED_HOOKS_NOT_FIRING`,
+  `MANAGED_SOURCE_SHADOWED`, `SUDO_NOPASSWD` and `ENFORCEMENT_IN_USER_SETTINGS`, and the refusal
+  codes `MANAGED_NEEDS_TTY`, `MANAGED_NOT_CONFIRMED`, `PRIVILEGED_TOOL_UNSAFE`,
+  `SYSTEM_DIR_UNSAFE` and `DROPIN_INVALID`. `install claude-md --json` no longer has the
+  `managed`, `migration` or `note` fields.
+- **Migration, for one release.** A drop-in already on your machine keeps running its hooks, and
+  repo-aegis never removes it (that needs root). `repo-aegis doctor` warns
+  `MANAGED_LEGACY_PRESENT` with the fix; `install claude-md`, `install claude-md --uninstall` and
+  `uninstall` print the exact `sudo rm '<path>'` line (and a `sudo rmdir` for a directory the old
+  install created); `--json` carries it as `legacyManagedDropIn`. Run `repo-aegis install claude-md`
+  first, so the hooks are in `settings.json`, then remove the file; see
+  [Removing a legacy managed drop-in](doc/configuration.md#removing-a-legacy-managed-drop-in). The
+  detection code (`legacy-managed-remover.ts`, and a hidden no-op `hook managed-heartbeat` so the
+  old drop-in's SessionStart entry does not error) is deleted in 0.17.
+- `install claude-md` no longer moves repo-aegis's entries out of `settings.json`, and the
+  `doctor` guard and deny checks no longer read a drop-in: with only a legacy drop-in installed,
+  `GUARD_HOOK_UNREGISTERED` fails until `install claude-md` is run.
+
+### Internal
+
+- An import-graph test (`no-managed-dropin.test.ts`) fails if anything imports a deleted module,
+  a deleted file reappears, or `core` exports the managed hook wrapper again.
+
 ## [0.14.0] - 2026-11-10
 
 **Agent pushes from the default Claude Code sandbox now work.** 0.13.x refused them (`AGENT_PUSH_CREDENTIAL_CONFIG`,

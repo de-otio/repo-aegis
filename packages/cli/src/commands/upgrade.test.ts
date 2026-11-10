@@ -14,18 +14,14 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectHookScripts, parsePinFromScript, pinnedHookCommand, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { captureOutput, fakeGh, scrubGitEnv, type CaptureResult } from "../_test-utils.js";
-import { makeFakeSystem, type FakeSystem } from "../_managed-test-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { lastVersionPath, readLastVersion } from "../version-notice.js";
 import { doctor } from "./doctor.js";
 import { explanationFor, loadDocs } from "./explain.js";
 import { gitCredentialHelperStale } from "./doctor-git-credential-checks.js";
-import { managedDropinStaleCheck } from "./doctor-managed-checks.js";
 import { installClaudeMd } from "./install-claude-md.js";
 import { writeHookScripts } from "./install-hooks.js";
 import { checkShim } from "./install-shim.js";
-import { managedPaths } from "./managed-dropin.js";
-import { resolveManagedEnv } from "./managed-privileged.js";
 import { parseTaaadPinFromScript, renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
 import { isEphemeralCli, upgrade, type UpgradeDeps, type UpgradeReport } from "./upgrade.js";
 import type { SelftestReport } from "./selftest.js";
@@ -33,14 +29,12 @@ import type { SelftestReport } from "./selftest.js";
 let tmp: string;
 let n = 0;
 let restoreGit: () => void;
-const fakeSystems: FakeSystem[] = [];
 
 before(() => {
   restoreGit = scrubGitEnv();
   tmp = mkdtempSync(join(tmpdir(), "repo-aegis-upgrade-"));
 });
 after(() => {
-  for (const s of fakeSystems) rmSync(s.root, { recursive: true, force: true });
   restoreGit();
   rmSync(tmp, { recursive: true, force: true });
 });
@@ -368,101 +362,58 @@ function makePin(base: string): EnforcementPin {
   return { node, cli };
 }
 
-interface ManagedCase {
-  fx: Fixture;
-  sys: FakeSystem;
-  oldPin: EnforcementPin;
-  newPin: EnforcementPin;
-  file: string;
-}
-
-/** A managed drop-in installed for one pin, and a second pin that makes it stale. */
-function staleDropIn(): ManagedCase {
+/**
+ * A legacy root-owned drop-in (0.13 or earlier) in a stand-in system directory. `upgrade` only lists the command
+ * that removes it: removing it needs root, and repo-aegis never runs the privileged tool. legacy-managed-remover: remove in 0.17.
+ */
+function legacyDropIn(): { fx: Fixture; file: string; seam: UpgradeDeps["legacyManaged"] } {
   const fx = makeFixture();
-  const sys = makeFakeSystem({ platform: "linux", uid: 1000 });
-  fakeSystems.push(sys);
-  const oldPin = makePin(join(fx.base, "old"));
-  const newPin = makePin(join(fx.base, "new"));
-  const out = fx.run(() => captureOutput(() => installClaudeMd({ claudeHome: fx.claudeHome, pin: oldPin, managed: { env: sys.env, terminal: PERSON } })));
-  assert.equal(out.exitCode, undefined, out.stderr);
-  sys.calls.length = 0;
-  return { fx, sys, oldPin, newPin, file: managedPaths("linux", 1000)!.file };
+  const systemDir = join(fx.base, "system-dir");
+  const file = join(systemDir, "managed-settings.d", "50-repo-aegis-1000.json");
+  mkdirSync(join(systemDir, "managed-settings.d"), { recursive: true });
+  writeFileSync(file, "{}\n");
+  return { fx, file, seam: { uid: 1000, systemDir } };
 }
 
-const dropInText = (c: ManagedCase): string => readFileSync(c.sys.at(c.file), "utf8");
-const dropInStale = (c: ManagedCase, pin: EnforcementPin): boolean =>
-  c.fx.run(() => !managedDropinStaleCheck(resolveManagedEnv(c.sys.env), dropInText(c), pin).ok);
+describe("upgrade: a legacy managed drop-in (listed with the command that removes it; never removed)", () => {
+  it("none present: the step is quiet and the report says not-installed", () => {
+    const fx = makeFixture();
+    const out = runUpgrade(fx, { json: true }, { legacyManaged: { uid: 1000, systemDir: join(fx.base, "no-such-dir") } });
+    const report = JSON.parse(out.stdout) as UpgradeReport;
+    assert.equal(report.steps.find(s => s.step === "claude-md")?.status, "not-installed");
+    assert.deepEqual(report.runYourself, []);
+  });
 
-describe("upgrade: the managed drop-in (a root write behind a sudo password)", () => {
-  it("without a person at a terminal it is listed under `run yourself:` with the exact command, and nothing runs as root", () => {
-    const c = staleDropIn();
-    const before = dropInText(c);
-    assert.equal(dropInStale(c, c.newPin), true, "the fixture is stale");
-
-    const out = runUpgrade(c.fx, {}, { pin: c.newPin, managedEnv: c.sys.env, terminal: NO_PERSON });
+  it("one present: listed under `run yourself:` with the removal line, exit 0, and the file is untouched", () => {
+    const c = legacyDropIn();
+    const out = runUpgrade(c.fx, {}, { legacyManaged: c.seam });
     assert.equal(out.exitCode, undefined, `listing is not a failure: ${out.stderr}`);
     assert.match(out.stdout, /upgrade: claude-md\s+needs you/);
-    assert.match(out.stdout, /run yourself:\n {2}repo-aegis install claude-md\n/);
+    assert.match(out.stdout, /run yourself:\n {2}[a-z]+ rm '[^']*50-repo-aegis-1000\.json'\n/);
     assert.doesNotMatch(out.stdout, /nothing to upgrade/);
-    assert.match(out.stdout, /next: repo-aegis doctor\n$/);
-    assert.equal(c.sys.toolCalls().length, 0, "no sudo, no tee, no mv: the installer was not run");
-    assert.equal(dropInText(c), before, "the drop-in is untouched");
-    assert.equal(dropInStale(c, c.newPin), true, "and still stale");
+    assert.ok(existsSync(c.file), "repo-aegis never removes it");
   });
 
-  it("--json lists it with the command and exits 0; --dry-run without a person lists it too", () => {
-    const c = staleDropIn();
-    const out = runUpgrade(c.fx, { json: true }, { pin: c.newPin, managedEnv: c.sys.env, terminal: NO_PERSON });
+  it("a person at a terminal changes nothing: it is still only listed (the file needs root)", () => {
+    const c = legacyDropIn();
+    const out = runUpgrade(c.fx, {}, { legacyManaged: c.seam, terminal: PERSON });
+    assert.match(out.stdout, /upgrade: claude-md\s+needs you/);
+    assert.ok(existsSync(c.file));
+  });
+
+  it("--json lists the command; the old ledger's created directories add an rmdir line; --dry-run lists it too", () => {
+    const c = legacyDropIn();
+    mkdirSync(join(c.fx.home, "state"), { recursive: true });
+    writeFileSync(join(c.fx.home, "state", "claude-md-managed.json"), JSON.stringify({ createdDirs: { system: true, dropin: true } }));
+    const out = runUpgrade(c.fx, { json: true }, { legacyManaged: c.seam });
     assert.equal(out.exitCode, undefined);
     const report = JSON.parse(out.stdout) as UpgradeReport;
-    assert.deepEqual(report.runYourself, [{ step: "claude-md", command: "repo-aegis install claude-md" }]);
-    const dry = runUpgrade(c.fx, { dryRun: true }, { pin: c.newPin, managedEnv: c.sys.env, terminal: NO_PERSON });
-    assert.match(dry.stdout, /run yourself:\n {2}repo-aegis install claude-md\n/);
-    assert.equal(c.sys.toolCalls().length, 0);
-  });
-
-  it("a custom --claude-home is carried into the command the person is told to run", () => {
-    const c = staleDropIn();
-    const out = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome }, { pin: c.newPin, managedEnv: c.sys.env, terminal: NO_PERSON });
-    assert.match(out.stdout, new RegExp(`repo-aegis install claude-md --claude-home ${c.fx.claudeHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`));
-  });
-
-  it("with a person at a terminal it runs the installer (their typed y still gates the write) and the drop-in is current", () => {
-    const c = staleDropIn();
-    const out = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome }, { pin: c.newPin, managedEnv: c.sys.env, terminal: PERSON });
-    assert.equal(out.exitCode, undefined, out.stderr);
-    assert.match(out.stdout, /upgrade: claude-md\s+done/);
-    assert.doesNotMatch(out.stdout, /run yourself/);
-    assert.ok(c.sys.toolCalls().length > 0, "the root step ran");
-    assert.equal(dropInStale(c, c.newPin), false);
-    assert.equal(dropInStale(c, c.oldPin), true, "it was rewritten for the new pin");
-    assert.match(runUpgrade(c.fx, {}, { pin: c.newPin, managedEnv: c.sys.env, terminal: NO_PERSON }).stdout, /^nothing to upgrade/, "and a re-run is a no-op");
-  });
-
-  it("M-C: a running CLI that will not last is refused before the root write: nothing is written even with a person at the terminal", () => {
-    const c = staleDropIn();
-    const before = dropInText(c);
-    const out = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome }, { pin: c.newPin, managedEnv: c.sys.env, terminal: PERSON, ephemeral: true });
-    assert.equal(out.exitCode, 1, out.stdout);
-    assert.match(out.stdout, /upgrade: claude-md\s+REFUSED.*looks temporary.*`repo-aegis install claude-md/);
-    assert.doesNotMatch(out.stdout, /upgrade: claude-md\s+done/);
-    assert.equal(c.sys.toolCalls().length, 0, "no privileged call at all");
-    assert.equal(dropInText(c), before, "the drop-in is untouched");
-    assert.equal(dropInStale(c, c.newPin), true);
-    const forced = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome, force: true }, { pin: c.newPin, managedEnv: c.sys.env, terminal: PERSON, ephemeral: true });
-    assert.match(forced.stdout, /upgrade: claude-md\s+done/, "--force still pins there on purpose");
-  });
-
-  it("a person who answers no has declined, not failed: nothing written, exit 0, the command to retry is listed", () => {
-    const c = staleDropIn();
-    const before = dropInText(c);
-    const out = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome }, { pin: c.newPin, managedEnv: c.sys.env, terminal: { ...PERSON, readAnswer: () => "n" } });
-    assert.equal(out.exitCode, undefined, out.stderr);
-    assert.match(out.stdout, /upgrade: claude-md\s+declined\s+you answered no/);
-    assert.doesNotMatch(out.stdout, /FAILED/);
-    assert.match(out.stdout, /run yourself:\n {2}repo-aegis install claude-md --claude-home /);
-    assert.equal(dropInText(c), before);
-    assert.equal(c.sys.toolCalls().length, 0);
+    assert.equal(report.runYourself.length, 1);
+    assert.equal(report.runYourself[0]!.step, "claude-md");
+    assert.match(report.runYourself[0]!.command, /rm '[^']*50-repo-aegis-1000\.json'.*rmdir /);
+    const dry = runUpgrade(c.fx, { dryRun: true }, { legacyManaged: c.seam });
+    assert.match(dry.stdout, /run yourself:\n {2}[a-z]+ rm /);
+    assert.ok(existsSync(c.file));
   });
 });
 
@@ -862,18 +813,18 @@ describe("upgrade: Claude Code's user settings (what `init` writes by default)",
     const out = runUpgrade(fx, { claudeHome: fx.claudeHome });
     assert.equal(out.exitCode, undefined, out.stderr);
     assert.match(out.stdout, /upgrade: user-settings\s+needs you/);
-    assert.match(out.stdout, new RegExp(`run yourself:\\n {2}repo-aegis install claude-md --user-settings --claude-home ${escapeRe(fx.claudeHome)}\\n`));
+    assert.match(out.stdout, new RegExp(`run yourself:\\n {2}repo-aegis install claude-md --claude-home ${escapeRe(fx.claudeHome)}\\n`));
     assert.equal(readFileSync(join(fx.claudeHome, "settings.json"), "utf8"), before);
   });
 
-  it("hooks pinned to a newer working install are refused (naming `install claude-md --user-settings`), not listed as current", () => {
+  it("hooks pinned to a newer working install are refused (naming `install claude-md`), not listed as current", () => {
     const fx = makeFixture();
     const newer = { ...makePin(join(fx.base, "newer-install")), version: "999.0.0" };
     settingsWith(fx, newer);
     const before = readFileSync(join(fx.claudeHome, "settings.json"), "utf8");
     const out = runUpgrade(fx, { claudeHome: fx.claudeHome });
     assert.equal(out.exitCode, 1, out.stdout);
-    assert.match(out.stdout, /upgrade: user-settings\s+REFUSED.*newer than this install.*`repo-aegis install claude-md --user-settings --claude-home /);
+    assert.match(out.stdout, /upgrade: user-settings\s+REFUSED.*newer than this install.*`repo-aegis install claude-md --claude-home /);
     assert.doesNotMatch(out.stdout, /needs you/);
     assert.equal(readFileSync(join(fx.claudeHome, "settings.json"), "utf8"), before);
   });

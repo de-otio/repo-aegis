@@ -298,64 +298,6 @@ app slugs; nothing secret), and `repo-aegis doctor` reports
 `OWNER_IDENTITY_UNMAPPED` for registered owners with none. Nothing yet chooses
 or injects a token from them: plain `gh` and `git` behave as before.
 
-### "Suggest markers for this engagement from the repo's prose"
-
-```sh
-# Dry-run — print the candidates as JSON, do not modify anything:
-repo-aegis suggest-markers --engagement customer-a --dry-run --json
-
-# Auto-accept candidates above a confidence threshold:
-repo-aegis suggest-markers --engagement customer-a --auto-accept-above 0.7
-
-# Without --auto-accept-above and --dry-run, prints "review-required":
-# the surviving candidate list is printed and nothing is written.
-# Re-run with --auto-accept-above (or --dry-run) once the user has reviewed.
-repo-aegis suggest-markers --engagement customer-a --json
-```
-
-Phase 2 pipeline:
-
-1. **Extract prose.** Walks the current repo with hard-coded depth/file
-   caps; reads README, CONTRIBUTING, CODEOWNERS, package.json metadata,
-   docs, top-of-file comments. Hard-skipped: `.env*`, secrets, anything
-   under `.git/`, `.ssh/`, `.aws/`, `.gnupg/`.
-2. **Ask Ollama** (local, default `http://127.0.0.1:11434`,
-   loopback-only by default) which strings look like customer
-   identifiers. Anti-injection preamble + fenced delimiters protect
-   the prompt.
-3. **Synthesise** word-boundary regexes per token kind (company,
-   codename, person-name, domain, ticket-prefix, account-id, other).
-4. **Filter:** dictionary words, dependency names from
-   `package.json` / `Cargo.toml` / `go.mod` / `pyproject.toml`,
-   patterns already in this engagement's marker list, tokens that
-   match `personalOrgs` / `$USER` / `$HOME` basename (`[SEC H-2]`).
-5. **Decide:**
-   - `--dry-run` → print, exit 0, no writes.
-   - `--auto-accept-above <T>` → accept candidates with `confidence >= T`
-     that pass the identity guard; identity-rejected candidates are
-     dropped (cannot be auto-accepted).
-   - Neither → print "review-required" candidate list and exit 0
-     without persisting. The user re-runs with one of the two flags.
-6. Approved patterns are appended to the engagement's marker list
-   under a single registry lock (`addMarkerPatterns`), `render` runs,
-   and the audit log records source basename, model id, endpoint host
-   kind, candidate / accepted / identity-rejected counts, and the
-   prompt version (`[SEC H-6]`). **Never** the literal patterns or
-   tokens.
-
-This is **discovery only** — never run on a hot path. The
-deterministic gate (PostToolUse, pre-commit, pre-push) remains regex
-against fixed marker files.
-
-If Ollama isn't installed or running, the command exits with a clear
-`OLLAMA_ERROR` rather than falling back. Ask the user.
-
-If the endpoint is non-loopback and you didn't pass
-`--allow-remote-model`, the command exits `REMOTE_DISALLOWED` before
-opening any connection. Do **not** add `--allow-remote-model` on
-your own initiative — sending customer prose to a non-local model is
-a compliance decision the user owns.
-
 ### "I just got a hit, what do I do"
 
 See [Reacting to a PostToolUse hit](#reacting-to-a-posttooluse-hit)
@@ -392,10 +334,12 @@ Composite check:
 - Fixture-directory scan.
 - Remote-vs-class consistency.
 
-Add `--history` for a full git-log sweep (slow). Add `--published
-<tarball-or-pkg>` to also scan a packed bundle. Add `--org <org>` (with
-`--accept-cross-border`) to also run a one-shot GitHub code-search
-sweep against the org.
+Add `--history` for a full git-log sweep (slow). The packed-bundle scan and
+the one-shot GitHub code-search sweep are not flags of `audit` any more: they are
+`repo-aegis-scan audit --published <tarball-or-pkg>` and
+`repo-aegis-scan audit --org <org> --accept-cross-border`. The old
+`repo-aegis audit --org|--published` flags print that replacement command and
+exit 2 without running anything.
 
 ### "End an engagement"
 
@@ -410,35 +354,23 @@ window, next `render` removes the marker file.
 `--purge` back-dates so markers are removed at next render
 immediately.
 
-### Encrypting the registry
+### Encrypted registries (migration only)
 
-The engagement registry can be encrypted at rest with age. Encryption at rest
-is deprecated (removed in 0.15.0), and `registry encrypt` is **human-only**: it
-refuses without a person's terminal (`REGISTRY_ENCRYPT_NEEDS_TTY`), and you never
-run it. An encrypted registry is read as no registry, which switches off rule h
-and collapses every engagement's org boundary to the repository's origin org.
-
-
-```sh
-repo-aegis registry encrypt --recipient age1...
-```
-
-This writes `engagements.yaml.age` next to the plaintext, removes the
-plaintext, and writes a marker file at
-`~/.config/repo-aegis/state/registry.encrypted` recording the
-recipient and the timestamp. To resume work the user runs:
+Encrypting the registry at rest is removed: `repo-aegis registry encrypt` was
+removed in 0.15.0 and prints `registry encrypt was removed in 0.15.0; at-rest
+encryption is not part of accident prevention`, then exits 2 (code
+`REGISTRY_ENCRYPT_REMOVED`). Do not suggest it. A registry that an earlier
+version encrypted (`engagements.yaml.age` beside a missing `engagements.yaml`)
+is read as "no registry" by the hooks, pre-push and the `gh` shim, and `doctor`
+warns with `REGISTRY_ENCRYPTED`. The user brings it back with:
 
 ```sh
 repo-aegis registry decrypt --identity /path/to/identity-file
 ```
 
-This restores `engagements.yaml` (chmod 600), removes the ciphertext,
-and removes the marker.
-
-**When the user does this:** between work sessions, when the machine
-will be away from a trusted environment, or when storing the home dir
-on cloud-synced storage. Encryption-at-rest is the *intended* state
-for those periods.
+This restores `engagements.yaml` (chmod 600), removes the ciphertext, and
+removes the `state/registry.encrypted` marker. `registry decrypt` stays for at
+least one release so encrypted users can migrate.
 
 **When you (the agent) hit a `REGISTRY_ENCRYPTED` error:**
 
@@ -467,9 +399,8 @@ Wait for an explicit identity-file path before invoking `registry
 decrypt`. Do not guess (e.g. "tried `~/.ssh/id_ed25519`"); a wrong
 guess at best fails noisily, at worst silently uses the wrong key.
 
-After successful decryption you can re-run the command that failed.
-At end of session, ask the user whether they want to re-encrypt with
-`registry encrypt` before stopping.
+After successful decryption you can re-run the command that failed. Do not offer
+to re-encrypt: that command is gone.
 
 ### Audit log
 
@@ -484,9 +415,8 @@ engagement registry.
 `engagements end` / `engagements remove`, `classify --apply`, `init`,
 `install hooks` / `install claude-md` / `install gitignore` /
 `install ci` / `install shim` / `install git-credential`, `render`,
-`registry encrypt` / `registry decrypt`, `waive` (add and remove),
-`approve` (mint, revoke and use of an egress approval), `suggest-markers`,
-`scan-env`, `doctor` repairs, `uninstall`, and a refused publish
+`registry decrypt`, `waive` (add and remove),
+`approve` (mint, revoke and use of an egress approval), `scan-env`, `doctor` repairs, `uninstall`, and a refused publish
 (`check-egress-refused`). The list grows with the CLI; the source of
 truth is the `appendAuditRecord` call sites in `packages/cli/src`. One
 record per successful invocation, written *after* the primary action
@@ -601,16 +531,17 @@ claude-md`, the pinned node or CLI has gone (Node upgraded or removed,
 repo-aegis reinstalled elsewhere). That refusal is the guard failing closed.
 Stop and ask your human to run `repo-aegis install claude-md` from their own
 terminal. Do not edit `settings.json`, do not run the CLI by another path, and
-do not set `disableAllHooks`. By default the hooks live in a **root-owned managed
-drop-in** (`/Library/Application Support/ClaudeCode/managed-settings.d/` on macOS,
-`/etc/claude-code/managed-settings.d/` on Linux), which you cannot edit and must
-not try to: the refusal text then also names `sudo rm '<that file>'`, a line only
-your human runs, and `repo-aegis install claude-md --uninstall`, `repo-aegis
-uninstall --yes` and any `sudo` command naming that directory are refused in your
-Bash commands (`AGENT_RAN_HUMAN_COMMAND`). With `install claude-md --user-settings`
-the hooks are in `settings.json` instead; that file then holds one machine's
-absolute paths and must not be synced or symlinked from a repository shared by
-other machines, or the same refusal appears there.
+do not set `disableAllHooks`. The hooks live in `settings.json`, which holds one
+machine's absolute paths and must not be synced or symlinked from a repository
+shared by other machines, or the same refusal appears there.
+
+A machine upgraded from 0.13 or earlier may still have a **legacy root-owned
+managed drop-in** (`/Library/Application Support/ClaudeCode/managed-settings.d/` on
+macOS, `/etc/claude-code/managed-settings.d/` on Linux). That feature was removed.
+You cannot edit that file and must not try to: its refusal text names a
+`sudo rm '<that file>'` line, which only your human runs. `repo-aegis install
+claude-md --uninstall`, `repo-aegis uninstall --yes` and any `sudo` command naming that
+directory are refused in your Bash commands (`AGENT_RAN_HUMAN_COMMAND`).
 
 Both hooks fire on every `Write`, `Edit`, and `MultiEdit` tool call.
 `scan-after-write` reads your tool-result JSON on stdin, extracts the file_path,
@@ -836,7 +767,7 @@ What the steps do:
   every git working tree underneath, and unsets `repo-aegis.class` /
   `repo-aegis.engagement` from each. Idempotent.
 - **`--purge-home`:** deletes `~/.config/repo-aegis/` (the registry,
-  audit log, marker files, deny-set cache, embedding profiles, age
+  audit log, marker files, age
   ciphertext, leak-context flag). Refused if the home path doesn't
   end in `repo-aegis` (anti-fat-finger guard against a
   `REPO_AEGIS_HOME` pointing somewhere unrelated).
@@ -1115,7 +1046,10 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | `REGISTRY_NOT_FOUND` | `engagements.yaml` missing | run `repo-aegis init`; user-confirmed if the home is non-default |
 | `REGISTRY_PARSE` | YAML invalid / shape wrong | open the registry, fix YAML; `details` carries the underlying parse error |
 | `REGISTRY_ENCRYPTED` | a registry-reading command (`status`, `engagements list`, `render`, …) found only the ciphertext (`engagements.yaml.age` present, plaintext absent). The hooks, pre-push and the `gh` shim read an encrypted registry as no registry, so they do not raise it; `doctor` reports it as a warning. Encryption at rest is removed in 0.15.0 | surface to user; ask for the age identity-file path; run `repo-aegis registry decrypt --identity <path>`. Do NOT decrypt without an explicit user-supplied path |
-| `REGISTRY_ALREADY_ENCRYPTED` / `REGISTRY_NOT_ENCRYPTED` | `registry encrypt`/`decrypt` would clobber existing state | a stale marker or leftover ciphertext; surface to the user, do not auto-resolve |
+| `REGISTRY_NOT_ENCRYPTED` | `registry decrypt` found no ciphertext, or a plaintext registry is already present and would be clobbered | a leftover marker or ciphertext; surface to the user, do not auto-resolve |
+| `REGISTRY_ENCRYPT_REMOVED` | `registry encrypt` was run; the command was removed in 0.15.0 (at-rest encryption is not part of accident prevention) | none; do not retry. An already-encrypted registry is migrated with `registry decrypt` |
+| `AUDIT_NETWORK_MOVED` | `repo-aegis audit --org` or `--published` was run; the network checks moved to `repo-aegis-scan audit` in 0.15.0 | run the replacement command the message prints; it is not a finding |
+| `REMOVED` (`repo-aegis-scan`) | a removed flag (`--semantic`, `--ollama-*`) or `rebuild-profiles` was used; the LLM features were removed in 0.15.0 | drop the option or command; nothing replaces it |
 | `PATTERN_VALIDATION` | a marker pattern failed validation (regex syntax / ReDoS / oversize) | open registry; `details` carries the engagement id and reason but **redacts the literal pattern**. The user runs `repo-aegis render` at a terminal to see the literal |
 | `ENGAGEMENT_EXISTS` | `engagements add` with an id already in use | use `engagements show <id>` to inspect, `engagements end <id>` if outdated |
 | `ENGAGEMENT_NOT_FOUND` | `allow`/`deny`/`engagements end`/`show`/`remove` query didn't match | run `engagements list --json` to see options |
@@ -1124,7 +1058,7 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | `REMOVE_REQUIRES_HARD` | `engagements remove` without `--hard` | for soft removal use `engagements end <id> --purge`; for hard removal pass `--hard` (data-subject-erasure semantics) |
 | `LOCK_TIMEOUT` | another repo-aegis process is holding the registry lock | wait and retry; if persistent, the user has a stale lockfile to investigate |
 | `OUTSIDE_WORKING_TREE` | `check --path` (CLI invocation, not the hook) resolved a file outside the *named* repo's working tree, even after symlink resolution | the file is genuinely outside any git tree the call was scoped to. Surface to the user; do NOT auto-rerun on a different path. The PostToolUse hook does NOT raise this — it resolves the destination tree from the path automatically. |
-| `PATH_NOT_SCANNED` | `check --path` / `repo_aegis_check_path` read nothing: the one file it was asked to scan was skipped (missing, unreadable, binary, or over `--max-file-bytes`), or the directory it was given held no readable file | **this is not a clean result — nothing was scanned.** `error` names the reason. A missing file usually means a wrong path: relative paths resolve against `--cwd` (the repo), not your shell's cwd. Fix the path or the size limit and re-run; never report the file as clean. |
+| `PATH_NOT_SCANNED` | `check --path` read nothing: the one file it was asked to scan was skipped (missing, unreadable, binary, or over `--max-file-bytes`), or the directory it was given held no readable file | **this is not a clean result — nothing was scanned.** `error` names the reason. A missing file usually means a wrong path: relative paths resolve against `--cwd` (the repo), not your shell's cwd. Fix the path or the size limit and re-run; never report the file as clean. |
 | `PATH_TOO_MANY_FILES` | a directory `--path` holds more files than `--max-files` (default 10000) | **nothing was scanned** — the run refused rather than report a truncated scan. Scan a narrower directory, or pass a higher `--max-files`. |
 | `VISIBILITY_UNRESOLVED` | `classify --apply` matched a `personalOrgs` org but could not determine whether the repo is public | the correct class depends on the answer and guessing is unsafe in both directions. Re-run with an account that can see the repo (`GH_TOKEN=$(gh auth token --user <user>) …`), or surface the choice to the user, who sets it with `git config repo-aegis.class <class>`. Do NOT pick one yourself. |
 | `CROSS_ORG_WRITE` | the PreToolUse hook (`hook check-write`) refused a write whose destination tree's trust boundary does not overlap the launcher's (exit 2, the write did not happen). The PostToolUse hook raises it only on a legacy install without the PreToolUse hook, after the write | surface to the user and name the offending path; do not retry. If it came from the PostToolUse hook the file is already on disk, so propose reverting it. Do NOT modify `personalOrgs` / `githubOrgs` to widen the boundary; that's a compliance decision the user owns. |
@@ -1146,11 +1080,6 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | `GIT_CONFIG_ERROR` / `GIT_ERROR` | a git plumbing call failed | `details` carries the underlying git stderr |
 | `RENDER_ERROR` | unexpected render failure | unusual; surface to user |
 | `REGISTRY_ERROR` | `hook check-write` or `hook scan-after-write` could not read the registry: it does not parse or validate, or a newer repo-aegis wrote it (both exit 2, `check-write` refuses the write; the message names no org). An encrypted registry is not an error here: it is read as no registry | surface to the user: for a parse failure they run `repo-aegis status` or `doctor` in a terminal to see why; for "written by a newer repo-aegis" they upgrade repo-aegis and run `repo-aegis install claude-md` |
-| `OLLAMA_ERROR` | `suggest-markers` could not reach the Ollama server | the user must `ollama serve` and pull the model; do not retry blindly |
-| `REMOTE_DISALLOWED` | Ollama endpoint failed `[SEC H-1]` validation (non-loopback without the matching opt-in flag, bad protocol, user-info, `localhost` resolves to non-loopback). Raised by `suggest-markers` (flag: `--allow-remote-model`) and by `repo-aegis-scan` (flag: `--allow-remote-ollama`). | surface to user; do not auto-add either opt-in flag |
-| `BUNDLE_TOO_LARGE` | extracted prose exceeded the model's context budget | `details.bytes` carries the size; the user owns whether to shrink the corpus |
-| `BUNDLE_FENCE_COLLISION` | extracted prose contained the chosen fence delimiter | retry happens automatically with a fresh delimiter; surfacing this means the retry also failed |
-| `ROOT_CONTAINMENT` | `extractProse` resolved a forbidden ancestor path (`~/.config/repo-aegis`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/git`) | a likely symlink-attack indicator; do NOT bypass |
 | `PUSH_IMPLICIT_TARGET` | egress guard: `git push` without both `<remote>` and `<refspec>` | re-issue as `git push <remote> <branch>`. The guard never rewrites the command for you; do not ask it to. |
 | `EGRESS_AFTER_CD` | egress guard: a publishing command follows a `cd`/`pushd` in the same command line | use `git -C <abs-path>` or `gh --repo <org>/<repo>`, and give the publishing command its own tool call |
 | `EGRESS_UNGUARDED_CHAIN` | egress guard: a publishing command is joined to earlier segments with `;`, `\|\|` or `&` | chain with `&&`, or run it as a separate call |
@@ -1215,7 +1144,6 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | `PAUSE_ACTIVE` (`doctor`, a warning; also shown by `status`) | a person paused repo-aegis: its hooks, egress guard, `gh` shim and git credential helper are standing aside until the expiry (`repo-aegis: paused until 14:30, cross-org checks stay on (resume: repo-aegis resume)`), for the whole machine or for one repository. A machine-wide pause keeps the cross-org checks on. `approve`, `pause`, identity changes and uninstall stay person-only, and a write to `pause.json` is refused (`PAUSE_FILE_WRITE_REFUSED`) | carry on with the work, and take extra care that nothing private leaves: nothing is checking. You may run `repo-aegis resume` if the work that needed the pause is done; you cannot set or extend one. |
 | <a id="approvals_file_write_refused"></a>`APPROVALS_FILE_WRITE_REFUSED` | the write hook refused a write to the egress approvals file (`egress-approvals.json` in the repo-aegis home), however the path was spelled (letter case, a symlinked directory, a symlink to it even before the file exists): only `repo-aegis approve`, run by a person in a terminal, mints an approval, so an agent that wrote one would be approving its own publish | stop. Tell your human what you need and let them run `repo-aegis approve`. Do not write the file by another route. |
 | <a id="pause_file_write_refused"></a>`PAUSE_FILE_WRITE_REFUSED` | the write hook refused a write to the emergency pause file (`pause.json` in the repo-aegis home): that file switches repo-aegis off, so only `repo-aegis pause`, run by a person in a terminal, may create it | stop. Tell your human what is wrong and let them decide. Do not write the file by another route. |
-| `REGISTRY_ENCRYPT_NEEDS_TTY` | `repo-aegis registry encrypt` was run without a person's terminal (an encrypted registry is read as none: rule h and the org boundaries go off) | do not retry or wrap it. Encryption at rest is deprecated; if the user wants it, they run the line themselves. |
 | `CROSS_ORG_EGRESS` / `CROSS_ORG_PUSH` | egress guard: the pushed repo (or the payload's tree) belongs to a trust boundary disjoint from the destination's | this is the boundary both incidents crossed. Stop; name the destination to the user. Do NOT widen `personalOrgs` / `githubOrgs` to make it pass. |
 | `PAYLOAD_MARKER_HIT` | egress guard: the body file matches the destination's deny set (`selfIdentity` included for a customer-coupled destination) | run `repo-aegis check --path <file>` from the destination repo to see which stems (never `--verbose` from a hook); redact; re-run. The reason carries a hit count only. |
 | `PUBLIC_EGRESS_NEEDS_HUMAN` / `PUBLIC_PUSH_NEEDS_HUMAN` | egress guard: public destination, or `merge` / `release` / `publish` / `repo edit` / `workflow run`, and no human present | on Claude Code this arrives as a permission prompt — the user's decision. In `default` and `acceptEdits` mode the user's yes lasts 2 minutes for that exact command (same verb, same repository and ref, endpoint and method, PR number or tag) and also lets it through git's pre-push hook and the `gh` shim; any other command asks again, a yes also ends the moment the user types anything else (the push then asks again), and in `auto` mode a yes does not carry down at all. If a later layer still refuses (the yes expired, or the pre-push script is older than the installed repo-aegis: `repo-aegis install hooks`), re-run the same command once and let the user answer again — never re-shape it. Elsewhere: tell the user what would be published where and stop. Never set `REPO_AEGIS_EGRESS_HUMAN`; never re-shape the command to dodge the rule. |
@@ -1236,14 +1164,10 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | `HOOKS_PATH_LOCAL_DUPLICATE` (`doctor`, info) | a repo-local `core.hooksPath` equals the global one, so it adds nothing | surface the `fix` line (`git config --local --unset core.hooksPath`); a person runs it, nothing else needs doing meanwhile |
 | `REGISTRY_AGENT_WRITABLE` / `GH_BINARY_UNTRUSTED` / `GH_CONFIG_REDIRECT` / `PREPUSH_HOOK_MISSING` / `SHELL_STARTUP_OVERRIDES` / `SSH_GITHUB_REDIRECT` (`doctor`, warnings and info) | no `permissions.deny` Edit rule for the registry, approvals, hooks, shim and rendered-markers paths; the `gh` first on `PATH` is in an agent-writable or non-standard place; the guard hook is registered but the global `core.hooksPath` is not the repo-aegis hooks directory; a shell startup file exports `GH_REPO`, `GH_HOST`, `GIT_SSH_COMMAND`, `SRT_*` or `REPO_AEGIS_*`; `Host github.com` in the ssh config points elsewhere or is proxied | suggest the `fix` line (`install claude-md` / `install hooks` / remove the export). Never print a startup file's value. |
 | `ENFORCEMENT_UNPINNED` / `ENFORCEMENT_PIN_MISSING` (`doctor`, failures) | an installed git hook, the `gh` shim or a Claude Code hook command in `settings.json` still calls `repo-aegis` by name (written before the pin existed), so a `repo-aegis` or `node` first on `PATH` decides what enforces; or a pinned node or CLI path no longer exists (Node moved or upgraded, install removed), so that git hook exits 1, that shim refuses publishing verbs, and a Claude Code hook exits 2 on every matching tool call | surface the `fix` line (`repo-aegis install hooks`, `install shim` and/or `install claude-md`). A person at a terminal normally runs it; never look for another way to make a hook pass |
-| `UPGRADE_REFUSED` (`upgrade`, a `REFUSED` step, exit 1) | `repo-aegis upgrade` left the hooks, the `gh` shim, the managed drop-in, the credential helper or the user-settings hint alone because re-pinning from the running install would be the wrong move: the running CLI is temporary (a git checkout or worktree build, an `npm link`, an `npx` cache, a project devDependency), or it is older than the version the existing pin still runs. Nothing was written | surface the step line. For a temporary copy: a person runs `repo-aegis upgrade` from the global install (`npm i -g @de-otio/repo-aegis`). For an older one: run the newer install's `upgrade`. Do not pass `--force` or run `install hooks` / `install shim` from a temporary copy to get past it |
+| `UPGRADE_REFUSED` (`upgrade`, a `REFUSED` step, exit 1) | `repo-aegis upgrade` left the hooks, the `gh` shim, the credential helper or the user-settings hint alone because re-pinning from the running install would be the wrong move: the running CLI is temporary (a git checkout or worktree build, an `npm link`, an `npx` cache, a project devDependency), or it is older than the version the existing pin still runs. Nothing was written | surface the step line. For a temporary copy: a person runs `repo-aegis upgrade` from the global install (`npm i -g @de-otio/repo-aegis`). For an older one: run the newer install's `upgrade`. Do not pass `--force` or run `install hooks` / `install shim` from a temporary copy to get past it |
 | `MULTIPLE_INSTALLS` (`doctor`, warning) | more than one `repo-aegis` is reachable on `PATH` (listed with each version), or the first one is not the pinned one, so a terminal and an agent's shell can run different versions | surface the list; the user keeps one install, removes the rest, then re-runs `install hooks` and `install shim` so the pin follows it. Doctor never runs the candidates; versions come from `package.json` |
 | `PIN_PATH_UNSUPPORTED` (`install hooks`, `install shim`, `install claude-md`) | the Node or CLI path contains a newline or NUL, which cannot be written into the generated script | tell the user to install at an ordinary path; there is no override |
-| `MANAGED_DROPIN_STALE` / `MANAGED_DROPIN_NOT_ROOT_OWNED` (`doctor`, warnings) / `MANAGED_DROPIN_UNREADABLE` (`doctor`, a failure) | the managed drop-in differs from what `install claude-md` would write now (moved Node or CLI, a new release, an edit); it or a directory above it is owned by a user, writable by group or others, or a symlink (so an agent could edit what enforces); it is not `0644` / its directories not `0755` (Claude Code starts without a source it cannot read) | surface the `fix` line. A person runs `repo-aegis install claude-md` from their own terminal (sudo asks for their password). Never try to change the file or its directories yourself |
-| `MANAGED_DROPIN_ORPHANED` (`doctor`: a failure when its pin points at missing files, a warning when only the ledger entry is missing) / `MANAGED_DROPIN_LEDGER_STALE` (`doctor`, a warning) | the drop-in exists but the ledger has no entry for it or its pin points at missing files (every hook then blocks with exit 2); or the ledger names a drop-in that is gone (removed by hand) | tell the user to re-run `repo-aegis install claude-md`, or to remove it themselves with the `sudo rm '<path>'` line in the `fix`; for a stale ledger entry `repo-aegis install claude-md --uninstall` clears it. You do not run `sudo` |
-| `MANAGED_HOOKS_DISABLED` / `MANAGED_SOURCE_SHADOWED` / `MANAGED_HOOKS_NOT_FIRING` (`doctor`, failures) | another managed file sets `disableAllHooks: true`; a macOS configuration profile for Claude Code outranks the managed files; or a Claude Code session started after the last drop-in heartbeat, so Claude Code is not loading the drop-in at all (a server-managed policy or an MDM key makes it ignore file drop-ins, and nothing local shows that) | enforcement through Claude Code hooks is not active. Tell the user plainly, and that `/status` in Claude Code should list `(drop-ins)`; do not work around it |
-| `SUDO_NOPASSWD` / `ENFORCEMENT_IN_USER_SETTINGS` (`doctor`, warnings) | `sudo` runs without a password, so the drop-in is no stronger than the user settings file; the hooks are in `~/.claude/settings.json` (written with `--user-settings`, or before the drop-in existed), which must stay per machine | surface the `fix` line; `repo-aegis install claude-md` moves the hooks into the drop-in |
-| `MANAGED_NEEDS_TTY` / `MANAGED_NOT_CONFIRMED` / `PRIVILEGED_TOOL_UNSAFE` / `SYSTEM_DIR_UNSAFE` / `DROPIN_INVALID` (`install claude-md`) | the drop-in is written (or removed) as root and needs a person at a terminal who types `y`; `sudo` or a tool it would run, or the system directory or a parent, is not root-owned/safe; the rendered drop-in failed validation (for example a path with a newline) | tell the user to run the command in their own terminal; for the two safety refusals the output says what is wrong and offers `--user-settings`. There is no flag that skips any of them |
+| `MANAGED_LEGACY_PRESENT` (`doctor`, warning; also printed by `install claude-md`, `install claude-md --uninstall` and `uninstall`) | a root-owned managed drop-in from 0.13 or earlier (`managed-settings.d/50-repo-aegis-<uid>.json`) is still installed. repo-aegis no longer writes or checks it, and never removes it (that needs root): its hooks still run, pinned to whatever Node and CLI it was last written for | surface the `fix` line. A person runs `repo-aegis install claude-md`, then the `sudo rm '<path>'` line from their own terminal. You do not run `sudo` |
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` / `GUARD_HOOK_UNREGISTERED` (`doctor`; `SHIM_NOT_FIRST`, `SHIM_MISSING` and `GUARD_HOOK_UNREGISTERED` are failures, `SHIM_STALE` a warning; `SHIM_NOT_FIRST` is a failure because the shim is the only guard for a `gh` call the hook does not parse) | the `gh` shim is absent, shadowed on `PATH`, or left over from an earlier release; the guard hook is not in `settings.json` | suggest `repo-aegis install shim` / fixing `PATH` order / `repo-aegis install claude-md`. A shadowed shim is also why a `gh` verb can be refused with `SHIM_UNREACHABLE_NEEDS_HUMAN`. |
 | `NOT_IMPLEMENTED` | the command is registered but has no implementation in this version | use a command `repo-aegis --help` lists. |
 | `UNKNOWN_CODE` (`explain`) | `repo-aegis explain` was given something that is not a known code or topic; the message lists the nearest names | run `repo-aegis explain --list` and ask again with a code from it. |
@@ -1263,29 +1187,31 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | `HOOKS_PATH_LOCAL_SHADOW` (`install hooks`) | a repo-local `core.hooksPath` would shadow the global value being installed, so the hooks would not run in that repository | your human unsets the repository's own `core.hooksPath` (the details show it). |
 | `PAUSE_NOT_REMOVED` (`resume`) | the pause file could not be removed (permissions) | a person removes it with `repo-aegis resume` from their own terminal. |
 | `WRITE_FAILED` (`suggest-markers`, `scan-env`) | the synthesised patterns could not be written to the registry | your human checks the permissions of the file the message names, then retries. |
-| `PROSE_EXTRACTION_FAILED` / `TOKEN_EXTRACTION_FAILED` (`suggest-markers`) | reading the repository's prose, or the model's token extraction, failed; the message says how | surface to your human; do not retry blindly. |
 | `WAIVE_NONINTERACTIVE` | `repo-aegis waive` was run with stdin not a TTY: a waiver is a person's decision, never a hook's, script's or agent's | ask your human to run it from their own terminal. |
-| `DENY_SET_BELOW_FLOOR` | `check`/`audit` ran with a `--min-patterns` floor and the deny set was smaller (exit 2). A scan that had nothing to match is not a clean scan | the engagement registry was probably not available; diagnose it (`repo-aegis status --json` shows `denySet.patternCount`) and never lower the floor to make it pass. |
 | `AGE_NOT_FOUND` / `AGE_ERROR` | an encrypt or decrypt needs the `age` binary and it is missing, or `age` itself failed | your human installs `age` (https://age-encryption.org) or checks the identity or recipient the message names. |
 | `GLOB_TOO_BROAD` | a path-scoped exemption glob matches every path (`*`, `**`, `**/*`, an empty string) | your human narrows it in `.repo-aegis.yml`; an agent must not write that file. |
 | `WAIVER_PARSE` / `REPO_OVERRIDE_PARSE_ERROR` | `.repo-aegis.yml` does not parse or validate (waivers, class and exemptions live there) | your human fixes the file; the message names what is wrong. An agent must not write it (`WAIVER_FILE_WRITE_REFUSED`). |
 | `NOT_WAIVABLE` | a waiver named a pattern that is not rooted at `_always`: engagement markers are excluded from waivers by design | `repo-aegis allow <engagement>` for an engagement-scoped finding, after your human confirms which engagement. |
 | `PARSE_ERROR` (`repo-aegis-scan`) | a queries file does not parse; the message and the details name it | your human fixes the file. |
-| `REGISTRY_LOAD_ERROR` (`repo-aegis-scan`) | `rebuild-profiles` could not load the registry | your human repairs it, or points `--registry` at a valid one. |
 
-`audit` also emits per-finding diagnostic codes inside its
-`checks[].findings[].detail.code` field (NOT top-level error codes —
-the audit command's own exit code reflects the aggregate). Watch for:
-- `ORG_SCAN_CONSENT_REQUIRED` — `audit --org` ran without
+`audit` and `repo-aegis-scan audit` also emit per-finding diagnostic codes
+inside their `checks[].findings[].detail.code` field (NOT top-level error
+codes — the command's own exit code reflects the aggregate). The `ORG_SCAN_*`
+and `PUBLISHED_*` codes below come from `repo-aegis-scan audit`. Watch for:
+- `AUDIT_NETWORK_MOVED` — a top-level error (exit 2), not a finding:
+  `repo-aegis audit` was given `--org` or `--published`, which moved to
+  `repo-aegis-scan audit`. The error text is the exact replacement command.
+  Run it; do not re-add the flag to `repo-aegis audit`.
+- `ORG_SCAN_CONSENT_REQUIRED` — `repo-aegis-scan audit --org` ran without
   `--accept-cross-border` (or `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1`).
   The user must agree to the cross-border data transfer first; do NOT
   auto-add the flag.
 - `ORG_SCAN_TRUNCATED` — the seed-derived query cap (`--max-queries`,
   default 30) was hit; the result is partial.
-- `PUBLISHED_ARCHIVE_ESCAPE` — `audit --published` extracted a
+- `PUBLISHED_ARCHIVE_ESCAPE` — `repo-aegis-scan audit --published` extracted a
   zip-slip-suspect archive (an entry resolves outside the temp dir);
   the audit refuses to scan it. Do NOT bypass.
-- `PUBLISHED_SECRET_SHAPE` — `audit --published` found a universal
+- `PUBLISHED_SECRET_SHAPE` — `repo-aegis-scan audit --published` found a universal
   secret shape (PEM private-key header, its hex form, a JWT, a forge
   token) in the archive. Reports kind, path and count, never the
   matched bytes. Treat as a stop-the-publish finding: the credential is
@@ -1294,7 +1220,7 @@ the audit command's own exit code reflects the aggregate). Watch for:
   rotating the credential — `--no-secret-scan` suppresses the check and
   is only right when the string is genuinely an example.
 - `PUBLISHED_EMPTY_DENY_SET` — **informational**, does not fail the
-  check. `audit --published` ran with a zero-pattern deny set, so
+  check. `repo-aegis-scan audit --published` ran with a zero-pattern deny set, so
   archive contents were not matched against any engagement marker. This
   is normal on CI (the registry is machine-local by design) and is
   reported so a vacuous scan cannot be mistaken for a clean one. Do NOT
@@ -1312,46 +1238,16 @@ the audit command's own exit code reflects the aggregate). Watch for:
 Generic codes you should ignore in favour of recovery:
 - `error` (no `code` field) — fatal but not categorised; surface to the user.
 
-## Centralised sweep (`repo-aegis-scan`) and Phase 3 semantic mode
+## Centralised sweep (`repo-aegis-scan`)
 
 The `repo-aegis-scan` binary is a *separate* tool from the developer
 gate: it runs in CI / cron / on a scheduled job server, sweeps GitHub
 code-search for marker hits across orgs, and reports findings as
 JSON / markdown / GitHub issues.
 
-Phase 3 adds two opt-in extensions:
-
-- `repo-aegis-scan rebuild-profiles` — for each engagement with
-  `reposActive`, walks the first available repo, embeds its
-  representative prose via Ollama, and writes
-  `~/.config/repo-aegis/profiles/<engagement-id>.json` (chmod 0600,
-  schema-versioned, sha256-stamped manifest).
-  - `--diff` re-hashes the current reference docs and reports drift
-    against the stored manifest *without* embedding or writing.
-    Surface the diff to the user before agreeing to rebuild
-    (`[SEC H-3]` defends against silent reference-document
-    manipulation).
-  - `--engagement <id>...` restricts to specific engagements.
-- `repo-aegis-scan run --semantic` — after the regex sweep, fetches
-  each new candidate's blob, embeds it, scores it against every
-  profile, and reports engagements over the per-profile threshold.
-  Best-effort: Ollama failures increment a counter (`embedErrors`)
-  but never abort the regex sweep.
-
-Output gains a `semantic` JSON section / "Semantic hits" markdown
-table with columns: engagement, similarity, threshold, candidate
-URL. **Never** the candidate's text or the profile's reference
-content — only the scalar similarity and the URL.
-
-If you're running this from an agent context:
-
-- `--allow-remote-ollama` is gated behind the same `[SEC H-1]`
-  validation as Phase 2; do not auto-set it.
-- The semantic sweep is *advisory*. Treat it as a triage signal,
-  not a block. A semantic hit without a regex hit means "this file
-  looks semantically like customer X's content but didn't match a
-  literal marker" — possibly a real leak, possibly a false positive
-  on technical similarity.
+The embedding-based semantic mode (`run --semantic`, `rebuild-profiles`, the
+`--ollama-*` flags) was removed in 0.15.0. Passing one exits 2 with a `REMOVED`
+error; drop the flag. The regex sweep is unchanged.
 
 ## Environment variables
 
@@ -1359,7 +1255,7 @@ If you're running this from an agent context:
 |---|---|---|
 | `REPO_AEGIS_HOME` | Override `~/.config/repo-aegis` as the config home | Stderr warning printed on every TTY invocation when set; suppressed in hook context. |
 | `REPO_AEGIS_REGISTRY` | Override the registry path independently from home | Set by the `--registry-path` global flag. |
-| `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER` | Equivalent to passing `--accept-cross-border` to `audit --org` | The user must set this themselves; do not auto-set. |
+| `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER` | Equivalent to passing `--accept-cross-border` to `repo-aegis-scan audit --org` | The user must set this themselves; do not auto-set. |
 | `REPO_AEGIS_EGRESS_HUMAN` | Declares that a human is present for one publishing command (`=1`), satisfying the egress guard's "needs a person" rule where no TTY is on stderr | **Human-only, by contract.** Never set it, never suggest setting it, never wrap a command in it. Setting it from an agent is a visible act in the transcript and defeats the one control that exists for exactly that case. If a publish needs a person, say so and stop. |
 | `REPO_AEGIS_WAIVE_NONINTERACTIVE` | The equivalent escape for `repo-aegis waive` | Same contract: human-only. |
 
@@ -1413,7 +1309,7 @@ shape we don't model.
 |---|---|---|
 | `allow <id>...` | adds engagement to repo | `action`, `results`, `repo` |
 | `deny <id>...` | removes engagement from repo | `action`, `results`, `repo` |
-| `status` | repo class + allowed engagements | `repo`, `allowedEngagements`, `denySet`, `alwaysBlock`, `regexBackend`, `warnings` |
+| `status` | repo class + allowed engagements | `repo`, `allowedEngagements`, `denySet`, `alwaysBlock`, `warnings` |
 | `check --staged` | scan staged diff | `mode`, `hits`, `skipped`, `repo`, `denySet`, `advisory`, `warnings` |
 | `check --path <f\|dir>` | scan one file, or a directory tree | (same; a directory adds `filesScanned`, `skippedDirs`) |
 | `check --range <r>` | scan commit range | (same) |
@@ -1425,8 +1321,7 @@ shape we don't model.
 | `engagements end <id>` | mark ended | `action`, `id`, `ended`, `purged`, `rendered` |
 | `engagements show <id>` | show one engagement | `action`, `id`, `name`, `started`, `ended`, `active`, `markerCount`, `notes` |
 | `engagements remove <id> --hard` | hard-delete | `action`, `id`, `removed`, `rendered` |
-| `registry encrypt --recipient <pubkey>` | encrypt registry at rest | `action`, `registry`, `recipient`, `marker` |
-| `registry decrypt --identity <path>` | decrypt registry | `action`, `registry`, `identity`, `markerRemoved` |
+| `registry decrypt --identity <path>` | decrypt a registry an earlier version encrypted (migration only) | `action`, `registry`, `identity`, `markerRemoved` |
 | `init` | bootstrap | `action`, `home`, `registry`, `rendered`, `hooks`, `claude` |
 | `classify [--apply]` | auto-detect class | `action`, `remote`, `matched`, `applied`, `before`/`after` |
 | `audit` | composite repo audit | `repo`, `denySet`, `checks` |
@@ -1434,13 +1329,12 @@ shape we don't model.
 | `markers test <s>` | probe a string | `input`, `matches` |
 | `context on/off/status` | toggle strict mode | `action`, `enabled` |
 | `install hooks` | install git hooks | `action`, `hooksDir`, `installed`, `coreHooksPath` |
-| `install claude-md` | install Claude hooks: the root-owned managed drop-in (default), or `settings.json` with `--user-settings` | `action`, `mode` (`managed`/`user-settings`), `claudeHome`, `claudeMd`, then `managed` (`path`, `uid`, `platform`, `digest`, `bytes`, `installed`, `unchanged`, `createdDirs`) and `migration` (managed), or `hookCommand`, `settings` (user-settings); `note?` when it fell back to the user file; `--dry-run` adds `managed.contents` |
+| `install claude-md` | install Claude hooks into `settings.json` (`--user-settings` is a no-op) | `action`, `mode` (`user-settings`), `claudeHome`, `claudeMd`, `hookCommand`, `settings`, the other hooks, `registryDeny`; `legacyManagedDropIn` (`files`, `commands`) when a legacy drop-in is installed; `--dry-run` adds `dryRun: true` |
 | `install gitignore` | append global gitignore | `action`, `path`, `appended` |
 | `install ci` | emit GHA workflow | (printed to stdout, not JSON) |
 | `hook check-write` | (PreToolUse entry, `Write\|Edit\|MultiEdit`) refuse a cross-org, waiver-file or gh-config write before it happens | no output on allow; refusal payload (`code`, `error`, `details`) on stderr, exit 2 |
 | `hook scan-after-write` | (PostToolUse entry) scan the written file; its own logic, so no waivers and no deny-set floor | `mode`, `hits`, `historyHits`, `skipped`, `repo`, `denySet`, `advisory`, `warnings` (stderr, exit 1 on a hit unless advisory); `hits`, `skipped`, `status: "no-deny-set"`, `warnings` when the deny set is empty |
 | `hook first-touch` | (SessionStart entry) classify previously-unclassified repo | `status` (`already-classified`/`applied`/`needs-confirmation`/`skipped`), redacted `details` |
-| `suggest-markers --engagement <id> [--auto-accept-above <n>\|--dry-run]` | LLM-assisted marker discovery (Phase 2) | `action`, `engagement`, `candidates`, `accepted` (when persisting), `dryRun?`, `review?`, `identityRejected?`, `skippedDuplicates?`, `rendered?` |
 | `init --migrate-classify` | port legacy `classify.yml` to registry | `action`, `migrated`, `personalOrgs`, `engagements` |
 | `audit-log on` | enable compliance trail | `action`, `wasOn`, `isOn`, `path` |
 | `audit-log off` | disable compliance trail | `action`, `wasOn`, `isOn`, `path` |
@@ -1448,7 +1342,7 @@ shape we don't model.
 | `audit-log path` | print log file path | `action`, `path`, `enabled`, `exists` |
 | `install hooks --uninstall` | reverse `install hooks` | `action`, `hooksDir`, `removed`, `coreHooksPathUnset`, `previousCoreHooksPath` |
 | `install gitignore --uninstall` | strip managed block | `action`, `target`, `removed`, `reason?` |
-| `install claude-md --uninstall` | remove the managed drop-in (terminal, sudo), strip managed block + hook entries | `action`, `claudeMd`, `managed` (`path`, `removed`, `dirsRemoved`, `ledgerRemoved`), `settings` |
+| `install claude-md --uninstall` | strip managed block + hook entries; prints the command that removes a legacy root-owned drop-in (never runs it) | `action`, `claudeMd`, `legacyManagedDropIn` (`files`, `commands`, or `null`), `settings` |
 | `install ci --uninstall` | remove the workflow file | `action`, `target`, `removed`, `absent?` |
 | `install shim [gh]` | write the `gh` egress shim to `<home>/bin` | `action`, `path`, `changed`, `tool`, `binDir`, `pathInstruction`, `reason?` |
 | `install shim --uninstall` | remove the shim (never a file repo-aegis did not write) | `action`, `path`, `changed`, `reason?` |
