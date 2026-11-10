@@ -707,18 +707,27 @@ human-only. `--on` sets it again; it only tightens, so it needs no terminal and
 below version 3 is `NOTHING_TO_REQUIRE`. The first `set-identity` also turns it
 on.
 
-#### `repo-aegis engagements set-identity <engagement-id> [--person <name>] [--agent <name>] [--clear]`
+#### `repo-aegis engagements set-identity <engagement-id> [--person <name|none>] [--agent <name|none>] [--clear]`
 
 Maps all of an engagement's `githubOrgs` to identities. `--person` must name a
 `gh-login` identity and `--agent` a `github-app` identity
 (`IDENTITY_KIND_MISMATCH`, `IDENTITY_NOT_FOUND`); a column that is not given is
-left as it is. `--clear` removes both and cannot be combined with the others.
-The first mapping sets `schemaVersion: 3` and, unless the key is already
-present, `requireIdentity: true`.
+left as it is. `--person none` and `--agent none` clear just that column and
+leave the other alone (`--agent none` is how an owner moves from an App to a
+person: `--person me --agent none`). `none` is a reserved word: `identity add`
+refuses it as a name, so it can never shadow a real identity. Clearing a column
+that is already empty changes nothing. `--person none --agent none` is the same
+as `--clear`, which removes both and cannot be combined with `--person` or
+`--agent`. The first mapping sets `schemaVersion: 3` and, unless the key is
+already present, `requireIdentity: true`; clearing alone never raises the
+version or sets `requireIdentity`.
+
+When nothing changes, the command prints `identities unchanged` and names how to
+clear a column (`--agent none` / `--person none`) and `--clear`.
 
 **Personal orgs** (the form is `engagements set-identity --personal-org`, not a
 separate `personal-org` command): `repo-aegis engagements set-identity --personal-org <org>
-[--person <name>] [--agent <name>] [--clear]`. Personal orgs have no command
+[--person <name|none>] [--agent <name|none>] [--clear]`. Personal orgs have no command
 group of their own (they are added with `engagements add --personal-org`), so
 this mirrors that form; it takes no `<id>`. The org must already be registered
 (`PERSONAL_ORG_NOT_FOUND`): this command never adds an owner. A plain entry

@@ -272,6 +272,13 @@ All of this is run by a person, from their own terminal. Agents cannot run it.
    **The first `set-identity` turns `requireIdentity` on.** From then on an agent's write to a
    registered owner with no mapping at all is refused (`GH_IDENTITY_UNMAPPED_OWNER`). Map every
    owner `doctor` lists under `OWNER_IDENTITY_UNMAPPED`, or run `repo-aegis identity require --off`.
+
+   **Move an owner from an App to a person:** `--agent none` clears just the agent column and
+   `--person none` just the person column; the other column is left as it is. For example,
+   `repo-aegis engagements set-identity customer-a --person work --agent none` maps the person and
+   drops the App in one step. Running `--person work` alone on an owner that already has an `agent`
+   leaves the App in place (and prints `identities unchanged` if the person was already set).
+   `--clear` removes both columns.
 4. **Recommended for agent pushes** (as the mapped person account, or as an App you opt in to): `repo-aegis install git-credential` (see below).
    Without it, pushes keep using your own credential; with it, an agent's push to an App-mapped
    owner must use the HTTPS remote.

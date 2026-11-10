@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `engagements set-identity --agent none` / `--person none` clear just that column and leave the other
+  alone (an owner can move from an App to a person without `--clear` and a re-map). Works for
+  engagements and `--personal-org`; both `none` equals `--clear`; clearing needs the same terminal as
+  any set-identity call and is audited like `--clear`. `none` is now a reserved identity name:
+  `identity add none` is refused so it can never shadow a real identity.
 - **A yes at Claude Code's permission prompt now carries down to the layers below it, for that exact
   command, for 2 minutes** (prompt approvals, `doc/design/egress-guard.md` §4a.1). When the agent hook
   asks about a `git push` or a `gh` write in `default` or `acceptEdits` mode, it records the verb,
@@ -44,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `engagements set-identity` prints `identities unchanged (to clear one column use --agent none or
+  --person none; to clear both use --clear)` when nothing changed, instead of a bare "unchanged".
 - **Breaking-ish: Node.js 20 is no longer tested or documented as supported.** CI tests Node 22 and
   24, and the README and `doc/agent-install.md` now say Node.js 22 or later. No `package.json` has an
   `engines` field, so nothing changes at install time.
