@@ -792,7 +792,7 @@ below the prompt (git's pre-push hook and the `gh` shim) may honour it:
   records.
 
 - **Typing ends it.** `install claude-md` also registers a UserPromptSubmit hook,
-  `repo-aegis hook prompt-submit` (next to the others, in the managed drop-in or in
+  `repo-aegis hook prompt-submit` (next to the others, in
   `settings.json`; `--uninstall` removes it). The moment the person types, it
   deletes every prompt approval (terminal approvals are untouched). It is silent,
   exits 0 on every path and **never blocks the prompt**: its pinned command fails

@@ -884,3 +884,49 @@ describe("doctor — enforcement pin checks", () => {
     }
   });
 });
+
+describe("doctor — legacy managed drop-in (legacy-managed-remover: remove in 0.17)", () => {
+  type Finding = { code: string; ok: boolean; severity?: string; fix?: string };
+
+  /** A stand-in managed-settings directory; `withDropIn` puts a drop-in for uid 4242 in it. */
+  function legacyDir(fx: Fixture, withDropIn: boolean): { systemDir: string; file: string } {
+    const systemDir = join(fx.base, "ClaudeCode");
+    const dropinDir = join(systemDir, "managed-settings.d");
+    mkdirSync(dropinDir, { recursive: true });
+    const file = join(dropinDir, "50-repo-aegis-4242.json");
+    if (withDropIn) writeFileSync(file, "{}\n");
+    return { systemDir, file };
+  }
+  function machineFor(fx: Fixture, systemDir: string): { exitCode: number | undefined; machine: Finding[] } {
+    let exitCode: number | undefined;
+    const { stdout } = captureStdout(() => {
+      exitCode = runDoctorCapturingExit(() =>
+        fx.run(() => doctor({ scanRoot: [fx.scanRoot], claudeHome: fx.claudeHome, json: true, legacyManaged: { systemDir, uid: 4242 } })),
+      );
+    });
+    return { exitCode, machine: (JSON.parse(stdout) as { machine: Finding[] }).machine };
+  }
+
+  it("MANAGED_LEGACY_PRESENT is a warning with the remove command as its fix, and does not fail the run", () => {
+    const fx = makeFixture("legacy-present");
+    writeGlobalPushDefaultNothing(fx);
+    healthyRepo(fx, "repo-a");
+    const { systemDir, file } = legacyDir(fx, true);
+    const { exitCode, machine } = machineFor(fx, systemDir);
+    const hit = machine.find(c => c.code === "MANAGED_LEGACY_PRESENT");
+    assert.ok(hit);
+    assert.equal(hit.ok, false);
+    assert.equal(hit.severity, "warn");
+    assert.ok(hit.fix?.includes(`sudo rm '${file}'`), String(hit.fix));
+    assert.equal(exitCode, undefined);
+  });
+
+  it("no drop-in: no MANAGED_LEGACY_PRESENT, and none of the retired MANAGED_*, SUDO_NOPASSWD or ENFORCEMENT_IN_USER_SETTINGS checks", () => {
+    const fx = makeFixture("legacy-absent");
+    writeGlobalPushDefaultNothing(fx);
+    healthyRepo(fx, "repo-a");
+    const { systemDir } = legacyDir(fx, false);
+    const { machine } = machineFor(fx, systemDir);
+    assert.deepEqual(machine.filter(c => /^MANAGED_|^SUDO_NOPASSWD$|^ENFORCEMENT_IN_USER_SETTINGS$/.test(c.code)), []);
+  });
+});

@@ -31,13 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on both of its paths.
 - `Edit(<home>/prompt-approvals/**)` joins the `permissions.deny` rules `install claude-md` writes.
 - **A yes ends when the person types.** `install claude-md` registers a UserPromptSubmit hook,
-  `repo-aegis hook prompt-submit`, in the managed drop-in or in `settings.json` (`--uninstall` removes it).
+  `repo-aegis hook prompt-submit`, in `settings.json` (`--uninstall` removes it).
   It deletes every prompt approval when the person types to the agent, is silent, exits 0 and never
   blocks the prompt (its pinned command exits 0, not 2, if the pinned binary is gone). So a yes followed
   by the person typing before the push, and a "no" followed by the person's next message, both mean the
   push asks again. `repo-aegis approve --revoke prompt` does the same by hand and leaves terminal
   approvals alone. Re-run `repo-aegis install claude-md` once to register it, or run
-  `repo-aegis upgrade`; with the managed drop-in, `doctor` reports `MANAGED_DROPIN_STALE` until you do.
+  `repo-aegis upgrade`.
 - Prompt approvals bind more exactly: a mutating `gh api` binds the HTTP method as well as the endpoint
   (a yes to a PATCH is not a yes to a DELETE); `gh pr|issue edit|merge|comment|review <n>` and
   `gh release create|edit|upload <tag>` bind the number or tag when one is given (no target: the
@@ -110,15 +110,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unreadable fails anywhere else, so run `npm run test:e2e` inside the Claude Code sandbox before a release.
 
 - **`repo-aegis upgrade [--dry-run] [--json]`: one command after an upgrade.** It finds every stale
-  install the way `doctor` does (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`, `MANAGED_DROPIN_STALE`, a
+  install the way `doctor` does (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`, a
   credential helper pinned to another install) and re-runs the matching installer in a fixed order
   (hooks, shim, claude-md, git-credential), one line per step, ending `next: repo-aegis doctor`. When it
   re-pinned something it then runs `repo-aegis selftest` and exits 1 if a layer still does not work.
   After upgrading the package, run it instead of the three `install` commands. It never installs what
   was not installed, a second run prints `nothing to upgrade`, and `--dry-run` changes nothing. The
-  two steps that need a person (the managed drop-in's `sudo` write, the credential helper) run only
-  at a person's terminal; otherwise they are listed under `run yourself:` with the exact command and
-  are not counted as failures (a person who answers `n` at the `sudo` prompt has `declined`, exit 0).
+  credential helper runs only at a person's terminal, and a legacy root-owned drop-in (which needs
+  root to remove) is only listed; both appear under `run yourself:` with the exact command and are
+  not counted as failures (a person who answers `n` at the credential helper's prompt has `declined`, exit 0).
   Exit 1 when an installer failed or a step was refused (below); `--force` pins to a temporary copy anyway (and then every commit and push is refused once it is removed). An agent may run `upgrade`: it
   only re-runs installers an agent may already run, so it is not in the person-only commands.
 - **`upgrade` never pins the hooks or the shim to a copy that will not last, and never rolls them
@@ -136,10 +136,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run does not record the version. `upgrade` also keeps the pinned taaad while that launcher still exists
   (a different `taaad` first on `PATH` no longer replaces it), leaves a `gh` at `<home>/bin` that is not a
   repo-aegis shim alone (it failed on every run), and lists
-  `repo-aegis install claude-md --user-settings` under `run yourself:` when the hooks in Claude Code's
-  `settings.json` are pinned to a Node or install that has moved. Not covered by `upgrade`: a root
-  account's managed drop-in, and `MANAGED_DROPIN_LEDGER_STALE` / `MANAGED_DROPIN_ORPHANED` (follow
-  `doctor`'s fix).
+  `repo-aegis install claude-md` under `run yourself:` when the hooks in Claude Code's
+  `settings.json` are pinned to a Node or install that has moved. Its `claude-md` step only detects a
+  legacy root-owned drop-in (see Removed) and lists the command that removes it.
 - **A once-per-version notice.** The version last seen is kept in `<home>/state/last-version`, and it
   keeps the highest version seen (ordered like semver: a prerelease is below its release), so two installs
   sharing a home do not announce themselves in turn.
@@ -220,9 +219,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a version (an older install) is refused as before (exit 1 for the git hooks, exit 2 for
   the shim and the Claude Code hooks). `PATH` is never consulted while the pin works.
   `ENFORCEMENT_PIN_MISSING` stays a `doctor` failure. **The generated scripts and hook commands
-  changed, so existing installs show as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`,
-  `MANAGED_DROPIN_STALE`) until you re-run `repo-aegis install hooks`, `repo-aegis install shim` and
-  `repo-aegis install claude-md`, or run `repo-aegis upgrade`.**
+  changed, so existing installs show as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`) until you re-run
+  `repo-aegis install hooks`, `repo-aegis install shim` and `repo-aegis install claude-md`, or run
+  `repo-aegis upgrade`.**
 - **An encrypted registry is treated as no registry.** Encryption at rest is deprecated and goes
   away in 0.15.0. Until then an encrypted registry no longer refuses every publish or every
   Write: the hooks, pre-push, the `gh` shim and the write hooks run as if there were none (rule h
@@ -296,8 +295,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`doctor` fails only when something is refused today or a guard is silently inert, and its report is
   short** (X-9, which also covers P3-C). Moved from fail to **warn**: `PUSH_DEFAULT_IMPLICIT`,
   `GH_LOGIN_UNREGISTERED`, `PERSONAL_ORG_UNREGISTERED`, `CLASS_VISIBILITY_UNRESOLVED`, `SHIM_STALE`,
-  `MANAGED_DROPIN_STALE`, `MANAGED_DROPIN_NOT_ROOT_OWNED`, `MANAGED_DROPIN_LEDGER_STALE`, and
-  `MANAGED_DROPIN_ORPHANED` when only the ledger entry is missing (a pin on missing files still fails).
+  (and, before the managed drop-in was removed, the `MANAGED_DROPIN_*` checks).
   `GH_MEMBER_ORG_UNREGISTERED` is now **info** with a count (its own fix says "or leave it"). A fresh
   install plus a clone of someone else's repository gives no FAIL; a hook that is not installed, a shim
   that is missing or not first on `PATH`, and the other inert-guard codes still fail, and the exit code
@@ -394,6 +392,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`doctor`'s `REGISTRY_ENCRYPTED` warning names it). `age` is still used for the sweep query
   blobs (`repo-aegis-scan encrypt-query` / `decrypt-query`).
 
+- **The root-owned managed drop-in is gone** (about 4,000 lines, one CI job, one `sudo` end-to-end
+  script). `repo-aegis install claude-md` used to write the Claude Code hooks and deny rules to
+  `/Library/Application Support/ClaudeCode/managed-settings.d/50-repo-aegis-<uid>.json` (macOS) or
+  `/etc/claude-code/managed-settings.d/…` (Linux) with `sudo`. Its cost was `sudo`, a CI job and a
+  large surface, for a guarantee that was void wherever `sudo` takes no password. `install
+  claude-md` now always writes `~/.claude/settings.json`; `--user-settings` is accepted and
+  ignored (with a one-line note) for one release. Gone with it: the ledger, the SessionStart
+  heartbeat, the privileged helper, and the `doctor` checks `MANAGED_DROPIN_STALE`,
+  `MANAGED_DROPIN_NOT_ROOT_OWNED`, `MANAGED_DROPIN_UNREADABLE`, `MANAGED_DROPIN_ORPHANED`,
+  `MANAGED_DROPIN_LEDGER_STALE`, `MANAGED_HOOKS_DISABLED`, `MANAGED_HOOKS_NOT_FIRING`,
+  `MANAGED_SOURCE_SHADOWED`, `SUDO_NOPASSWD` and `ENFORCEMENT_IN_USER_SETTINGS`, and the refusal
+  codes `MANAGED_NEEDS_TTY`, `MANAGED_NOT_CONFIRMED`, `PRIVILEGED_TOOL_UNSAFE`,
+  `SYSTEM_DIR_UNSAFE` and `DROPIN_INVALID`. `install claude-md --json` no longer has the
+  `managed`, `migration` or `note` fields.
+- **Migration, for one release.** A drop-in already on your machine keeps running its hooks, and
+  repo-aegis never removes it (that needs root). `repo-aegis doctor` warns
+  `MANAGED_LEGACY_PRESENT` with the fix; `install claude-md`, `install claude-md --uninstall` and
+  `uninstall` print the exact `sudo rm '<path>'` line (and a `sudo rmdir` for a directory the old
+  install created); `--json` carries it as `legacyManagedDropIn`. Run `repo-aegis install claude-md`
+  first, so the hooks are in `settings.json`, then remove the file; see
+  [Removing a legacy managed drop-in](doc/configuration.md#removing-a-legacy-managed-drop-in). The
+  detection code (`legacy-managed-remover.ts`, and a hidden no-op `hook managed-heartbeat` so the
+  old drop-in's SessionStart entry does not error) is deleted in 0.17.
+- `install claude-md` no longer moves repo-aegis's entries out of `settings.json`, and the
+  `doctor` guard and deny checks no longer read a drop-in: with only a legacy drop-in installed,
+  `GUARD_HOOK_UNREGISTERED` fails until `install claude-md` is run.
+
 ### Fixed
 
 - **Documentation now matches the code.** The README says what `init` does: it asks nothing, uses no
@@ -405,6 +430,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
+- An import-graph test (`no-managed-dropin.test.ts`) fails if anything imports a deleted module,
+  a deleted file reappears, or `core` exports the managed hook wrapper again.
 - One non-throwing core loader, `loadRegistryState`, returns the registry's state (`loaded`,
   `missing`, `encrypted`, `unparseable`, `newer-schema`); the hook, the shim's egress check,
   pre-push, the `gh` identity layer, the write hooks and `doctor` use it instead of each

@@ -724,10 +724,6 @@ export async function init(opts: InitOptions): Promise<void> {
       installClaudeMd({
         ...(opts.claudeHome !== undefined && { claudeHome: opts.claudeHome }),
         silent: true,
-        // `init` runs unattended and silent, and the managed drop-in needs a person to
-        // type a sudo password (D8.3): it writes the user file (D8.6). Run
-        // `repo-aegis install claude-md` afterwards to move the hooks into the drop-in.
-        userSettings: true,
         // Phase 1 onboarding: fresh installs get the SessionStart
         // hook by default so JIT classify works out of the box.
         // Existing installs (running `install claude-md` standalone)

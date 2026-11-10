@@ -4,18 +4,18 @@
 // `repo-aegis upgrade`: one command after upgrading the package.
 //
 // Nearly every release changes something repo-aegis generated onto the machine (the git hook scripts, the `gh`
-// shim, the Claude Code drop-in, the credential helper's pin). Until each is re-run, `doctor` reports a
+// shim, the Claude Code hooks, the credential helper's pin). Until each is re-run, `doctor` reports a
 // `*_STALE` finding and the new behaviour does not apply. This command finds the stale ones the way `doctor`
 // does (the same check functions, no second opinion) and re-runs the matching installer, in a fixed order:
 //
 //   hooks        HOOKS_SCRIPT_STALE      rewrites <home>/hooks/pre-commit and pre-push (no git config touched)
 //   shim         SHIM_STALE              `install shim`
-//   claude-md    MANAGED_DROPIN_STALE    `install claude-md` (a root write: sudo password, typed y)
+//   claude-md    MANAGED_LEGACY_PRESENT  a root-owned drop-in left by 0.13 or earlier: listed, with the command that removes it
 //   git-credential  a repo-aegis helper from another install   `install git-credential` (person-only gate)
 //
-// It only re-runs installers an agent may already run. The two that need a person (the managed drop-in's sudo
-// write and the credential helper's terminal gate) keep their own gates: with no person at a terminal they are
-// listed under "run yourself:" with the exact command, not run and not failed. So `upgrade` is not in
+// It only re-runs installers an agent may already run. What needs a person (removing a legacy drop-in, which needs
+// root, and the credential helper's terminal gate) is listed under "run yourself:" with the exact command, not run
+// and not failed. So `upgrade` is not in
 // core/human-commands.ts: nothing it does for an agent is a decision only a person may make.
 //
 // It never installs something that was not installed (a missing shim stays missing), and `--dry-run` changes
@@ -26,9 +26,9 @@
 // hook there, and removing that copy later refuses every commit and push until a person runs `install hooks`. So each
 // step reads its pin back from the scripts (`pinVerdict`) and refuses when the running CLI is ephemeral (unless
 // `--force`) or older than the pinned version. Anything else is re-pinned, including a pin to another working install
-// that is not newer: after `nvm install` or `brew upgrade node` the old global is still on disk. The two person-gated
-// steps (managed drop-in, credential helper) pin to the running CLI as well, so they get the ephemeral check too (they
-// have no pin to read back, so no rollback check).
+// that is not newer: after `nvm install` or `brew upgrade node` the old global is still on disk. The person-gated
+// credential-helper step pins to the running CLI as well, so it gets the ephemeral check too (it has no pin to read
+// back, so no rollback check).
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join, sep } from "node:path";
 import { appendAuditRecord, inspectHookScripts, isPinnedHookCommand, parsePinFromScript, PIN_VERSION_PATTERN, pinProblem, repoAegisHome, shellUnquote, type EnforcementPin } from "@de-otio/repo-aegis-core";
@@ -39,13 +39,11 @@ import { compareVersions } from "../semver.js";
 import { recordVersion } from "../version-notice.js";
 import { gitCredentialHelperStale, type GitCredentialCheckOptions } from "./doctor-git-credential-checks.js";
 import { canonical, unusable } from "./doctor-pin-checks.js";
-import { managedDropinStaleCheck } from "./doctor-managed-checks.js";
 import { defaultClaudeHome, installClaudeMd, readSettingsFile } from "./install-claude-md.js";
 import { installGitCredential } from "./install-git-credential.js";
 import { writeHookScripts } from "./install-hooks.js";
 import { checkShim, installShim, shimBinDir, shimPathFor } from "./install-shim.js";
-import { managedPaths } from "./managed-dropin.js";
-import { resolveManagedEnv, type ManagedEnv } from "./managed-privileged.js";
+import { detectLegacyDropIn, type LegacySeams } from "./legacy-managed-remover.js";
 import { parseTaaadPinFromScript, SHIM_HEADER_LINE } from "./shim-script.js";
 import { resolveTaaadPin } from "./taaad-pin.js";
 import { formatSelftest, runSelftest, type SelftestReport } from "./selftest.js";
@@ -71,9 +69,9 @@ export interface UpgradeDeps {
   ephemeral?: boolean;
   /** Test seam: the PATH the `gh` shim's taaad is looked up on. Default: `process.env.PATH`. */
   path?: string;
-  /** Test seam: the file system view and privileged runner of the managed drop-in. Honoured only under the Node test runner. */
-  managedEnv?: Partial<ManagedEnv>;
-  /** Test seam: the terminal verdict inputs for the two person-only steps. Honoured only under the Node test runner. */
+  /** Test seam: where a legacy managed drop-in is looked for. Honoured only under the Node test runner. */
+  legacyManaged?: LegacySeams;
+  /** Test seam: the terminal verdict inputs for the credential-helper step. Honoured only under the Node test runner. */
   terminal?: ConfirmOptions;
   /** Test seam: git's credential configuration, for the helper check. */
   credential?: GitCredentialCheckOptions;
@@ -196,16 +194,6 @@ function findShim(home: string, path: string | undefined): Found {
   return { state: "current", detail: "the shim is what this release writes" };
 }
 
-function findDropIn(env: ManagedEnv, pin: EnforcementPin): Found {
-  const paths = env.uid === 0 ? null : managedPaths(env.platform, env.uid);
-  if (paths === null) return { state: "not-installed", detail: "this account has no managed drop-in location" };
-  const current = env.fs.read(paths.file);
-  if (current === null) return { state: "not-installed", detail: "no managed drop-in is installed" };
-  const check = managedDropinStaleCheck(env, current, pin);
-  return check.ok
-    ? { state: "current", detail: "the managed drop-in is what this release writes" }
-    : { state: "stale", detail: `the managed drop-in at ${paths.file} differs from what this release writes (MANAGED_DROPIN_STALE)` };
-}
 
 // ---------------------------------------------------------------------------
 // Whose pin is it? (never pin to a copy that will not last; never roll back)
@@ -347,8 +335,7 @@ export function pinVerdict(i: PinVerdictInput): PinVerdict {
 }
 
 /**
- * The ephemeral half of {@link pinVerdict} alone, for the person-gated steps (the managed drop-in, the credential
- * helper): they have no pin to read back, so `existing` is empty there. Refused unless the scripts already point at
+ * The ephemeral half of {@link pinVerdict} alone, for the person-gated step (the credential helper): they have no pin to read back, so `existing` is empty there. Refused unless the scripts already point at
  * this very CLI or `force` is set.
  */
 export function ephemeralVerdict(i: Pick<PinVerdictInput, "existing" | "running" | "ephemeral" | "force" | "what" | "installer">): PinVerdict {
@@ -375,7 +362,6 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
   const dryRun = opts.dryRun === true;
   const home = deps.home ?? repoAegisHome();
   const pin = deps.pin ?? currentEnforcementPin();
-  const managedEnv = resolveManagedEnv(deps.managedEnv);
   const steps: StepReport[] = [];
   const runYourself: UpgradeReport["runYourself"] = [];
 
@@ -443,43 +429,31 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
     }
   }
 
-  // 3. claude-md: a root write behind a sudo password, so a person's terminal or nothing
+  // 3. claude-md: the root-owned managed drop-in is gone (0.15). A machine that still has one keeps running its hooks,
+  // pinned to whatever Node and CLI it was last written for, and only a person can remove it (it needs root, and
+  // repo-aegis never runs sudo). So this step only detects it and lists the commands. legacy-managed-remover: remove in 0.17.
   {
-    const found = findDropIn(managedEnv, pin);
-    const command = `repo-aegis install claude-md${opts.claudeHome !== undefined ? ` --claude-home ${opts.claudeHome}` : ""}`;
-    let dropInVerdict: PinVerdict;
-    if (found.state !== "stale") quiet("claude-md", found);
-    else if (!(dropInVerdict = judgeEphemeral("the managed drop-in", command)).ok) add("claude-md", "refused", dropInVerdict.detail);
-    else if (!person()) add("claude-md", "run-yourself", "writing the managed drop-in needs a person at a terminal (sudo asks for a password)", command);
-    else if (dryRun) add("claude-md", "would-upgrade", "would rewrite the managed drop-in (asks for your sudo password)");
+    const legacy = detectLegacyDropIn(deps.legacyManaged);
+    if (legacy === null) quiet("claude-md", { state: "not-installed", detail: "no legacy managed drop-in is installed" });
     else {
-      // Remember what the person typed, so an `n` at the password prompt reads as a decision, not a failure.
-      let typed: string | null = null;
-      const read = deps.terminal?.readAnswer ?? readLine;
-      const outcome = attempt(() =>
-        installClaudeMd({
-          silent: true,
-          json: false,
-          ...(opts.claudeHome !== undefined && { claudeHome: opts.claudeHome }),
-          ...(deps.pin !== undefined && { pin: deps.pin }),
-          managed: { env: deps.managedEnv ?? {}, terminal: { ...deps.terminal, readAnswer: () => (typed = read()) } },
-        }),
+      add(
+        "claude-md",
+        "run-yourself",
+        `a legacy root-owned managed drop-in is still installed (${legacy.files.join(", ")}); repo-aegis no longer writes or updates it, so its hooks stay pinned to an old Node and CLI. ` +
+          "Removing it needs root, so run the command in your own terminal",
+        legacy.commands.join("  ;  "),
       );
-      const answer = typed as string | null; // assigned inside the callback, which the compiler's flow analysis cannot see
-      if (outcome.ok) add("claude-md", "upgraded", "rewrote the managed drop-in");
-      else if (answer !== null && !/^y(es)?$/i.test(answer.trim())) add("claude-md", "declined", "you answered no: nothing was written", command);
-      else add("claude-md", "failed", outcome.reason);
     }
   }
 
-  // 3b. user-settings: the hooks `init` and `install claude-md --user-settings` put into Claude Code's own
-  // settings.json carry the pin too, and go stale when Node or the install moves. Listed, never run: whether the
-  // hooks live there rather than in the managed drop-in is the person's call. Judged like the other pinned steps:
+  // 3b. user-settings: the hooks `init` and `install claude-md` put into Claude Code's own settings.json carry the pin
+  // too, and go stale when Node or the install moves. Listed, never run (as before the drop-in went away: it is the
+  // person's call when their Claude Code hooks move). Judged like the other pinned steps:
   // when this install is older than the pin, or will not last, the line says so instead of offering the command.
   {
     const claudeHome = opts.claudeHome ?? defaultClaudeHome();
     const settingsFile = join(claudeHome, "settings.json");
-    const installer = `repo-aegis install claude-md --user-settings${opts.claudeHome !== undefined ? ` --claude-home ${opts.claudeHome}` : ""}`;
+    const installer = `repo-aegis install claude-md${opts.claudeHome !== undefined ? ` --claude-home ${opts.claudeHome}` : ""}`;
     const existing = userSettingsPins(claudeHome);
     if (!anyPinDiffers(existing, pin)) {
       add("user-settings", "current", "no repo-aegis hook in Claude Code's settings.json is pinned to another Node or install");
