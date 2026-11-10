@@ -174,7 +174,8 @@ default.
 
 If a workflow needs a registry, it must be made available to the job and
 rendered before the scan. The registry is private to the operator, so restore
-it from a secret (or an age-encrypted blob, see `repo-aegis registry encrypt`),
+it from a secret (or an age-encrypted blob you encrypt yourself with `age`;
+repo-aegis no longer has a `registry encrypt` command),
 and render it under `RUNNER_TEMP`, never the workspace, where an artifact upload
 or a `git add` could pick the markers up:
 

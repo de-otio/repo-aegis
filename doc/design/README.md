@@ -66,15 +66,15 @@ semver-major change and requires a design-doc PR.
 | Marker regex safety                         | Validate at `render`. Compile with a 100ms timeout in a subprocess; reject patterns failing the timeout. Fail closed: `render` exits 2 if any pattern is unsafe.    |
 | Registry file permissions                   | `chmod 600` on registry; `chmod 700` on directory. Applied by `init`, `render`, `engagements add/end/remove`.                                                     |
 | `--path` symlinks                           | Canonicalise via `fs.realpathSync`. Reject paths outside the cwd's git working tree (or current cwd if not in a git repo).                                       |
-| On-disk cache                               | `~/.config/repo-aegis/state/deny-set-cache.json` keyed by sha256 of `(class, engagements, marker mtimes+sizes)`. Schema-versioned (`schemaVersion: 2`); readers ignore unknown versions and recompute. |
+| Deny-set cache                              | None (removed). The deny set is computed fresh on every call (about 2-4 ms for a few hundred to a thousand patterns); the old `state/deny-set.cache.json` is deleted on first run. The fingerprint (mtime+size) could miss an edit that kept both. |
 | Per-line `repo-aegis: allow` comment        | A line containing the literal token `repo-aegis: allow` (case-insensitive) suppresses hits on that line. `--ignore-allowlist-comments` (audit-grade) disables.   |
 | Schema-versioning policy                    | Readers accept missing version (= 1) and any version ≤ MAX. Higher versions refuse with an "upgrade required" error. Writers must never lower the version.        |
 | YAML validation                             | `zod` schemas in `core/src/schemas.ts` (registry + override). Per-package schemas in `cli/commands/classify.ts` and `scan/src/queries.ts`. `formatZodError` re-exported from core. |
 | Claude Code PostToolUse hook command        | A one-line `sh` command in `~/.claude/settings.json` that runs `hook scan-after-write` on the pinned node and CLI by absolute path and exits 2 if either is gone (doc/plan-pin-enforcement-binary.md D7); formerly the bin name, PATH-resolved. No standalone shell script under `~/.claude/hooks/`. No `jq` dependency. |
 | ScanHit attribution                         | Each hit's `engagement` field carries the marker-file stem the matched pattern came from (engagement id, or `_always`). Backed by `DenySet.patternSources` parallel array. |
-| Regex backend (validation)                  | Dual-mode. `re2` is an optionalDependency; when installed, patterns that compile cleanly under re2 are provably safe (linear-time evaluator). When unavailable or rejected (e.g. lookahead), falls back to the in-process time-budget heuristic. Reported in status JSON as `regexBackend`. The scanner itself still uses native `RegExp` because marker patterns may legitimately use lookahead. |
+| Regex validation                            | In-process only (`core/regex-safety.ts`): a static scan for nested unbounded quantifiers (`(a+)+`), then a CPU-time check on a stress input. The optional `re2` dependency, the subprocess validator and the `regexBackend` status field were removed; the honest mistake it stops is a catastrophic pattern typed by accident wedging every hook. The scanner uses native `RegExp` because marker patterns may legitimately use lookahead. |
 | Operator audit log                          | Default OFF. JSONL records of every state-changing action to `~/.config/repo-aegis/state/audit.log`. Toggle with `repo-aegis audit-log on/off`. NEVER logs literal marker patterns — only structural metadata. |
-| Encrypted registry policy                   | Optional age encryption. `repo-aegis registry encrypt/decrypt`. `loadRegistry` refuses an encrypted-state registry with `RegistryEncryptedError`; auto-decrypt is deliberately not implemented. |
+| Encrypted registry policy                   | At-rest encryption is removed: `registry encrypt` prints a removal notice and exits 2; `registry decrypt` stays for at least one release as a migration path. `loadRegistry` still reports an encrypted-state registry as `RegistryEncryptedError` (read as "no registry" by the hooks; `doctor` warns); auto-decrypt is deliberately not implemented. `age` remains for the sweep query blobs. |
 | `check --push-ref`                          | Diff base for a ref the remote hasn't seen is computed via `git rev-list --boundary <ref> --not --remotes=<remote>` and scanned with the ordinary tree-diff path (`scanRange`'s machinery) — never `git log -p` (misses evil-merge content) and never `--diff-merges=first-parent` (re-presents already-pushed content as new). Zero boundaries ⇒ no diff spawned at all (`nothing-new`); several boundaries widen via `merge-base --octopus`, over-scanning rather than under-scanning; no remote-tracking refs at all ⇒ today's full-history behaviour, unchanged. `REPO_AEGIS_NEW_REF_FULL_SCAN=1` forces full-history. Any underlying git failure throws, never reports clean. |
 | `_always`-only path exemption asymmetry     | `alwaysBlockExemptPaths` narrows enforcement for `_always`-class (secret-shape) patterns only. Engagement markers and `_private_infra` are never path-exempt, at either config level, under any glob — a customer name in a test fixture is still a leak. `audit --fixture-check` always runs the full pattern set regardless of this key and demotes an exempt-path `_always` hit to an informational finding rather than dropping it, so an exemption stays visible on audit even when `check` doesn't block on it. |
 | `_always`-only, blob-keyed waivers           | `repo-aegis waive` accepts only `_always`-stem pattern ids — never engagement or `_private_infra` ids — because (1) waivers must never become a lever for weakening the customer-marker deny set, and (2) a committed pattern digest is an offline oracle for guessing its source literal, which is harmless for a generic `_always` shape and not for a customer-derived pattern. Keyed on `(patternId, blob sha)`, not path/line, so a waiver survives history rewrites and covers exactly the reviewed bytes — a new key landing in a new blob is never silently covered. |
@@ -115,7 +115,7 @@ markers/<id>.txt + markers/_always.txt
                                 │
                         deny-set computation
                         (engagement-scoped, class-aware,
-                         on-disk cached by fingerprint)
+                         computed fresh per call)
                                 │
                                 ▼
                         ScanHit[] (redacted: position +
@@ -139,7 +139,6 @@ output redaction.
 ├── classify.yml                       (optional) classify rules; class+engagement from `git remote`
 ├── state/                             mutable runtime state, chmod 700 dir
 │   ├── leak-context-mode              empty file = strict mode on; absent = off
-│   ├── deny-set-cache.json            sha256-keyed denyset cache (schemaVersion: 2)
 │   └── .lock                          proper-lockfile target for concurrent-write safety
 └── hooks/                             scaffolded by `install hooks`; chmod 700 dir
     ├── pre-commit                     bash, exec `repo-aegis check --staged`
@@ -271,7 +270,7 @@ without a major bump.
 
 Stable, contract-bearing surface:
 - Paths: `repoAegisHome`, `registryPath`, `markersDir`, `statePath`,
-  `leakContextFlagPath`, `lockFilePath`, `denySetCachePath`,
+  `leakContextFlagPath`, `lockFilePath`, `legacyDenySetCachePath`,
   `flatMarkersPath`, `isHomeOverridden`.
 - Registry: `loadRegistry`, `isActive`, `resolveEngagement`,
   `ALWAYS_BLOCK_RESERVED_ID`, `MAX_SUPPORTED_REGISTRY_SCHEMA_VERSION`,
@@ -357,8 +356,8 @@ around it.
 | Registry contents in error messages                 | Errors redirect to `engagements list`; never enumerate inline.                                                                                                                                                                          |
 | Hook output recency-pressure amplifier              | `ScanHit.matchPreview` redacted by default; literal markers never flow into agent tool-result. Hooks never pass `--verbose`.                                                                                                            |
 | Supply chain via `@latest`                          | Workflow YAML pins exact version. `npm ci` from lockfile. Trusted publishing (OIDC).                                                                                                                                                    |
-| ReDoS via marker patterns                           | `validatePatterns` runs at `render` with a subprocess timeout (100ms). Bad patterns block `render`. `re2`, when installed, is already used for this validation (see the "Regex backend" row above); the scanner itself still uses native `RegExp`.                                                                                     |
-| Registry at-rest exposure                           | `chmod 600` registry, `chmod 700` directory. Cloud-sync warning documented. Optional age-encryption: `repo-aegis registry encrypt --recipient <pubkey>` writes `engagements.yaml.age` and removes the plaintext; `repo-aegis registry decrypt --identity <path>` reverses. `loadRegistry` throws `RegistryEncryptedError` (code `REGISTRY_ENCRYPTED`) when the ciphertext is present — no auto-decrypt. |
+| ReDoS via marker patterns                           | `validatePatterns` runs at `render` and on registry/engagement edits: a static nested-quantifier scan, then an in-process CPU-time check. Bad patterns block `render`. There is no `re2` or subprocess backend; the scanner itself uses native `RegExp`. |
+| Registry at-rest exposure                           | `chmod 600` registry, `chmod 700` directory. Cloud-sync warning documented. At-rest encryption is not part of accident prevention and was removed; `repo-aegis registry decrypt --identity <path>` migrates a registry an earlier version encrypted. `loadRegistry` throws `RegistryEncryptedError` (code `REGISTRY_ENCRYPTED`) when only the ciphertext is present — no auto-decrypt. |
 | `REPO_AEGIS_HOME` silent override                   | Stderr warning on every TTY invocation. Hook context (stderr-is-pipe) suppressed because the warning would itself be a recency-pressure signal.                                                                                          |
 | Scanner issue body leaks                            | Default redacted; `--reveal-matches` is explicit opt-in. Documented "use only in private restricted repo."                                                                                                                              |
 | TOCTOU races on registry / markers                  | `withLock`/`withLockSync` (proper-lockfile) on `~/.config/repo-aegis/state/.lock` for any write under `REPO_AEGIS_HOME`. Git config writes use git's own `.git/config.lock`.                                                              |
@@ -372,7 +371,7 @@ around it.
 | Gate that silently no-ops in CI                     | A registry that fails to load (fork PR without secrets, renamed secret, bad path) yields an empty deny set, matches nothing, and exits 0 — indistinguishable from a real pass. `--min-patterns` / `--require-deny-set` exits **2** instead, enforced in the CLI where the size is computed so every caller inherits it, and checked before `check`'s `no-deny-set` early return. |
 | Zip-slip on `repo-aegis-scan audit --published`     | Post-extraction `realpathSync` check that every entry resolves under the temp dir; refuse otherwise.                                                                                                                                    |
 | Flag injection via PostToolUse `file_path`          | The hook subcommand `repo-aegis hook scan-after-write` parses stdin JSON in Node and calls `check({ path })` directly — there is no shell to inject through, and the file_path is never tokenised as a CLI argument.                     |
-| Compliance trail                                    | Audit log (when enabled) writes JSONL records of every state-changing action (`allow`, `deny`, `engagements add/end/remove`, `classify --apply`, `init`, `install hooks/claude-md/gitignore/ci`, `render`, `registry encrypt/decrypt`, `waive`, `doctor --fix`) to `~/.config/repo-aegis/state/audit.log` (chmod 600, append-only, rotates at 10 MiB). Records carry engagement ids and structural metadata only — never literal markers or matched substrings. Off by default; opt in via `repo-aegis audit-log on`. |
+| Compliance trail                                    | Audit log (when enabled) writes JSONL records of every state-changing action (`allow`, `deny`, `engagements add/end/remove`, `classify --apply`, `init`, `install hooks/claude-md/gitignore/ci`, `render`, `registry decrypt`, `waive`, `doctor --fix`) to `~/.config/repo-aegis/state/audit.log` (chmod 600, append-only, rotates at 10 MiB). Records carry engagement ids and structural metadata only — never literal markers or matched substrings. Off by default; opt in via `repo-aegis audit-log on`. |
 | Waiver mechanism reconstructing `--no-verify`       | `.repo-aegis.yml` is a file inside the repo, so a blocked coding agent could otherwise write itself a waiver and retry — the cheapest possible unblock. Three independent controls, all required: (1) the PreToolUse `hook check-write` gate refuses an agent `Write`/`Edit`/`MultiEdit` to `.repo-aegis.yml` outright; (2) `repo-aegis waive` itself refuses to add a waiver when stdin is not a TTY, unless a human explicitly sets `REPO_AEGIS_WAIVE_NONINTERACTIVE=1`; (3) `check` reports `waived: N` whenever a waiver suppressed a finding (JSON: the full list on every run), so an applied waiver is never silent. Only `_always`-stem patterns are waivable at all — see the locked-decisions row above for why. |
 
 ### Secret detection is frozen
@@ -413,18 +412,6 @@ command, hand-rolled scripts) against silent breakage.
 
 ## Shipped (optional)
 
-- **`re2` regex backend** for marker pattern validation. Listed under
-  `optionalDependencies` in `packages/core/package.json` so install
-  failures (no native build toolchain) leave us on the in-process
-  fallback. When available, patterns that compile cleanly under re2
-  are provably safe from catastrophic backtracking. `getRegexBackend()`
-  reports the active backend; `repo-aegis status --json` carries it as
-  `regexBackend`.
-- **Age-encrypted registry at rest** — `repo-aegis registry encrypt
-  --recipient <pubkey>` / `decrypt --identity <path>`. Reuses the age
-  helper at `packages/core/src/age.ts`. `loadRegistry` refuses an
-  encrypted-state registry with `RegistryEncryptedError`
-  (`REGISTRY_ENCRYPTED`); auto-decrypt is deliberately not implemented.
 - **Operator audit log** — `repo-aegis audit-log on/off/show/path`.
   JSONL records to `~/.config/repo-aegis/state/audit.log`. Default OFF.
   Covers state-changing actions only; never logs literal markers.
@@ -433,13 +420,6 @@ command, hand-rolled scripts) against silent breakage.
 
 ## Future hardening (designed but not implemented)
 
-- **Auto-decrypt-on-demand for the encrypted registry** — currently
-  `loadRegistry` throws `RegistryEncryptedError` when the ciphertext
-  is present and the user must run `registry decrypt` explicitly. A
-  future option would be a per-process opt-in (env var or flag) to
-  prompt for the identity file inline. Deliberately not the default,
-  since at-rest encryption only protects against scenarios where the
-  agent itself can be silently coerced into reading the registry.
 - **Network-isolated `repo-aegis-scan audit --published`** — mirror-registry mode
   for organisations that don't want `npm pack` to reach the public
   registry.

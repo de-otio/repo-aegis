@@ -100,13 +100,14 @@ a string is identified as a leak by the same logic at every layer.
   `check-write` hook refuses cross-org writes before they happen.
 - **One-command uninstall** (`repo-aegis uninstall`) with `--purge-repos`
   and `--purge-home` opt-ins.
-- **`re2` regex backend** for pattern *validation* (ReDoS resistance
-  when a marker is added) — install the optional `re2` dependency and
-  `getRegexBackend()` reports `"re2"`. Falls back to the in-process
-  time-budget heuristic when re2 is unavailable. Scanning itself uses the
-  native `RegExp` engine.
-- **Age-encrypted registry** — `repo-aegis registry encrypt
-  --recipient <pubkey>` / `decrypt --identity <path>`.
+- **In-process regex validation** (accident prevention for a catastrophic
+  marker pattern typed by mistake): a static check for nested unbounded
+  quantifiers, then a CPU-time check, when a marker is added or rendered.
+  The earlier optional `re2` backend and the subprocess validator were
+  removed. Scanning itself uses the native `RegExp` engine.
+- **Encrypted-registry migration** — `repo-aegis registry decrypt --identity
+  <path>` restores a registry an earlier version encrypted. `registry encrypt`
+  was removed; `age` remains for the sweep query blobs only.
 - **Operator audit log** — `repo-aegis audit-log on/off/show/path`
   (off by default).
 - **VSCode extension, GitHub Actions** — all in this monorepo.
@@ -193,6 +194,3 @@ a string is identified as a leak by the same logic at every layer.
 ### Designed but not yet implemented
 
 - **Network-isolated mode** for `repo-aegis-scan audit --published` (mirror registry).
-- **Auto-decrypt-on-demand** for `repo-aegis registry decrypt` so
-  single commands that need the registry can fetch credentials inline
-  rather than requiring an explicit decrypt step.

@@ -147,7 +147,7 @@ describe("registry v3: no existing consumer changes (A8)", () => {
         flatPath: join(dir, name, "flat.txt"),
         validatePatterns: false,
       });
-      return computeDenySet(repo, { markersDir, cachePath: null });
+      return computeDenySet(repo, { markersDir });
     };
     const a = compute("v3", V3);
     const b = compute("v2", V2);

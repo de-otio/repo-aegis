@@ -237,9 +237,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says "upgrade repo-aegis, then re-run `install hooks` and `install claude-md`" for a newer
   schema instead of "decrypt or repair". `doctor` reports a newer-schema registry as
   `REGISTRY_UNREADABLE` with the upgrade fix.
-- **`registry encrypt` is person-only** (`REGISTRY_ENCRYPT_NEEDS_TTY`): an encrypted registry is read
+- **A registry an earlier version encrypted is announced.** An encrypted registry is read
   as none, which collapses every engagement's org boundary to the repository's origin org and turns
-  rule h off, so an agent must not be able to do it. While the registry is encrypted the write hooks
+  rule h off. While the registry is encrypted the write hooks
   and the agent's egress hook (allows included) show the person a one-line notice as the JSON
   `systemMessage`; the egress hook also shows a notice when it ran through the pin fallback.
   `approve` now has a sentence of its own for an encrypted registry ("rule h is off while the
@@ -369,6 +369,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed in 0.15.0, rather than a generic unknown-option error. To add markers, edit the
   engagement's `markers:` list or use `repo-aegis scan-env`. The `status` and `engagements add`
   zero-marker warnings point there now.
+
+- **The deny-set cache.** The deny set is computed fresh on every call. The cache was keyed on
+  marker-file mtime and size, so it could serve a stale set after an edit that kept both, and a
+  forged entry could switch the scanner off. Fresh computing costs about 2 to 4 ms per call
+  for a few hundred to a thousand patterns (a hook process makes one call), against 1 to 2.5 ms
+  for a cold cached call. The old `state/deny-set.cache.json` is deleted the first time anything
+  computes a deny set (best effort, silent on failure). `install claude-md` no longer writes a
+  `permissions.deny` rule for that file; a rule an earlier install wrote stays in the ledger and
+  `uninstall` still removes it. The `denySetCachePath` export is now `legacyDenySetCachePath`,
+  and the `cachePath` option of `computeDenySet` is gone.
+- **The `re2` dependency and the subprocess ReDoS validator.** Marker patterns are validated
+  in-process: a static check refuses nested unbounded quantifiers (`(a+)+`, `(\w+\s*)*`) without
+  running them, then a CPU-time check on a stress input. That is enough for the mistake it stops,
+  a catastrophic pattern typed by accident that would wedge every hook (a hook timeout lets writes
+  through unscanned). `getRegexBackend`, `setRegexBackendForTesting`, the `{ strict: true }` option
+  of `validatePatterns` and the `regexBackend` field of `status --json` (and its `regex:` line) are
+  gone. A pattern the check refuses now says "pattern has nested unbounded quantifiers (possible
+  catastrophic backtracking; consider re-anchoring)".
+- **`repo-aegis registry encrypt`.** At-rest encryption of the registry is not part of accident
+  prevention. The command now prints `registry encrypt was removed in 0.15.0; at-rest encryption is
+  not part of accident prevention` and exits 2 (`REGISTRY_ENCRYPT_REMOVED`). **`registry decrypt`
+  stays for at least one release** so a registry encrypted by an earlier version can be migrated
+  (`doctor`'s `REGISTRY_ENCRYPTED` warning names it). `age` is still used for the sweep query
+  blobs (`repo-aegis-scan encrypt-query` / `decrypt-query`).
 
 ### Fixed
 

@@ -423,3 +423,79 @@ describe("removed LLM / semantic code stays removed", () => {
     assert.deepEqual(offenders, []);
   });
 });
+
+// ---- removed code stays removed (P2-D) -------------------------------------
+//
+// The deny-set cache, the `re2` / subprocess ReDoS backends and `registry
+// encrypt` were deleted. Nothing may import them again by accident.
+
+function sourceFiles(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    if (name === "node_modules" || name === "dist") continue;
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) sourceFiles(p, out);
+    else if (name.endsWith(".ts") && !name.endsWith(".test.ts")) out.push(p);
+  }
+  return out;
+}
+
+describe("removed modules and `re2` are not imported", () => {
+  let repoRoot: string;
+  let reachable: Set<string>;
+
+  before(() => {
+    repoRoot = findRepoRoot();
+    reachable = walkImportGraph(
+      ["packages/cli/dist/index.js", "packages/core/dist/index.js"],
+      repoRoot,
+    );
+  });
+
+  it("no file reachable from the CLI or core entry points is registry-encrypt", () => {
+    const offenders = [...reachable].filter(p => /registry-encrypt\.js$/.test(p));
+    assert.deepEqual(offenders.map(o => relative(repoRoot, o)), []);
+  });
+
+  it("no reachable file imports or requires `re2`, or the subprocess validator's node:child_process, via regex-safety", () => {
+    const offenders: string[] = [];
+    for (const file of reachable) {
+      const source = readFileSync(file, "utf8");
+      if (/["'`]re2["'`]/.test(source)) offenders.push(`${relative(repoRoot, file)} mentions re2`);
+      if (/regex-safety\.js$/.test(file) && extractStaticImportSpecifiers(source).some(s => s === "node:child_process")) {
+        offenders.push(`${relative(repoRoot, file)} spawns a subprocess`);
+      }
+    }
+    assert.deepEqual(offenders, []);
+  });
+
+  it("no package manifest declares `re2`", () => {
+    const manifests = [join(repoRoot, "package.json")];
+    for (const pkg of readdirSync(join(repoRoot, "packages"))) {
+      const m = join(repoRoot, "packages", pkg, "package.json");
+      if (existsSync(m)) manifests.push(m);
+    }
+    for (const m of manifests) {
+      const json = JSON.parse(readFileSync(m, "utf8")) as Record<string, unknown>;
+      for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+        const deps = (json[field] ?? {}) as Record<string, string>;
+        assert.equal("re2" in deps, false, `${relative(repoRoot, m)} lists re2 under ${field}`);
+      }
+    }
+  });
+
+  it("no source file imports re2 or registry-encrypt", () => {
+    const offenders: string[] = [];
+    for (const pkg of readdirSync(join(repoRoot, "packages"))) {
+      const src = join(repoRoot, "packages", pkg, "src");
+      if (!existsSync(src)) continue;
+      for (const f of sourceFiles(src)) {
+        const text = readFileSync(f, "utf8");
+        for (const spec of extractStaticImportSpecifiers(text)) {
+          if (spec === "re2" || /registry-encrypt/.test(spec)) offenders.push(`${relative(repoRoot, f)}: ${spec}`);
+        }
+        if (/_require\(["']re2["']\)|require\(["']re2["']\)/.test(text)) offenders.push(`${relative(repoRoot, f)}: require(re2)`);
+      }
+    }
+    assert.deepEqual(offenders, []);
+  });
+});

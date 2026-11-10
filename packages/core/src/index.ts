@@ -21,7 +21,7 @@ export {
   statePath,
   leakContextFlagPath,
   lockFilePath,
-  denySetCachePath,
+  legacyDenySetCachePath,
   isHomeOverridden,
   flatMarkersPath,
   auditLogPath,
@@ -527,22 +527,13 @@ export { resolveMinPatterns, denySetFloorShortfall } from "./deny-set-floor.js";
 export type { DenySetFloorInput, DenySetFloorShortfall } from "./deny-set-floor.js";
 
 // ---- regex safety --------------------------------------------------------
-// `validatePattern` (the single-pattern, in-process variant) is tagged
-// `@internal` in its source. Callers should prefer `validatePatterns`
-// (which can run strict, subprocess-backed validation). It remains
-// re-exported here so existing intra-repo imports keep working without
-// a coordinated breaking change.
+// In-process only: a static nested-quantifier scan plus a CPU-time check.
 export {
   validatePattern,
   validatePatterns,
   validateCombinedSize,
-  getRegexBackend,
 } from "./regex-safety.js";
-export type {
-  PatternValidationResult,
-  ValidatePatternsOptions,
-  RegexBackend,
-} from "./regex-safety.js";
+export type { PatternValidationResult } from "./regex-safety.js";
 
 // ---- exceptions ----------------------------------------------------------
 export {
@@ -566,7 +557,7 @@ export { EXIT_OK, EXIT_HIT, EXIT_USAGE } from "./exit-codes.js";
 // ---- age (file-encryption helpers) --------------------------------------
 // Wrapper around the `age` CLI. Used by the scan package's
 // `encrypt-query` / `decrypt-query` commands and by the cli's
-// `registry encrypt` / `registry decrypt` commands. The `age` binary
+// `registry decrypt` command (kept so encrypted users can migrate). The `age` binary
 // is a runtime requirement; absence surfaces as `AgeNotFoundError`.
 export {
   encryptFile,

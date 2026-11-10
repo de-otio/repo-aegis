@@ -45,7 +45,7 @@ and requires a new design doc PR.
 
 | Topic | Decision |
 |---|---|
-| Hot-path determinism | PostToolUse, pre-commit, pre-push hooks continue to use regex. The scanner uses native `RegExp`; re2, when installed, only validates marker patterns at `render` (see the regex-backend row in `README.md`). No semantic similarity, embedding lookup, or LLM judgement on the write/commit path. |
+| Hot-path determinism | PostToolUse, pre-commit, pre-push hooks continue to use regex. The scanner uses native `RegExp`; marker patterns are validated in-process at `render` (see the regex-validation row in `README.md`). No semantic similarity, embedding lookup, or LLM judgement on the write/commit path. |
 | Hot-path package independence | `@de-otio/repo-aegis-core` and the gate code in `@de-otio/repo-aegis` (the `check` / `hook scan-after-write` / `render` paths) must not transitively import any LLM client. Enforced by an import-graph test. |
 | Registry mutation | JIT classification can prompt; it can never silently add engagements or seed markers. The agent-guide rule (no silent registry edits) stays in force. |
 | Replacement of existing CLI verbs | All new behaviour is additive. `classify --apply`, `allow`, `engagements add` keep working unchanged for users who prefer them. |
@@ -433,7 +433,7 @@ Strategy by kind:
 - `other`: word-bounded literal escape. No fancy variants.
 
 Every synthesised regex is passed through `validatePattern` from
-`@de-otio/repo-aegis-core` (re2 backend if available). Patterns failing
+`@de-otio/repo-aegis-core` (in-process static and CPU-time checks). Patterns failing
 validation are dropped with a stderr note.
 
 ### 2.6 Filters
@@ -651,7 +651,7 @@ These extend the threat model in [`doc/design/README.md`](README.md).
 |---|---|
 | LLM endpoint exfiltration via misconfigured `endpoint` | Hostname check before connect. `--allow-remote-model` required for non-local; emits per-invocation stderr warning. |
 | Prose extraction sending secrets to the model | Lockfiles, generated dirs, vendored deps explicitly excluded. Per-file and total size caps. `.env*`, `*.pem`, `id_*` excluded by name pattern. |
-| Model output containing pathological regex | Model output is tokens, not regex. Synthesis lives in trusted code; every synthesised pattern passes `validatePattern` (re2). |
+| Model output containing pathological regex | Model output is tokens, not regex. Synthesis lives in trusted code; every synthesised pattern passes `validatePattern` (in-process checks). |
 | Org name confusion (typosquat) | Disjointness checks at parse time. Org match is exact, case-insensitive, post-normalisation. No fuzzy match. |
 | Multi-account ssh alias parsing | Explicit unit tests for each alias form. Failure mode of `parseRemoteUrl` is `null`, which leads to `skipped` status, not silent misclassification. |
 | First-touch tool auto-applying wrong class | Auto-apply only on unambiguous match (one org → one engagement). Ambiguous cases return `needs-confirmation`. |

@@ -16,7 +16,7 @@
 //   - --purge-repos: sweep `repo-aegis.*` git config keys out of every
 //     repo under one or more scan roots.
 //   - --purge-home: delete `~/.config/repo-aegis/` (the registry,
-//     markers, audit log, deny-set cache, leak-context flag, age
+//     markers, audit log, leak-context flag, age
 //     ciphertext, embedding profiles).
 //
 // Defaults to dry-run for any destructive step. `--yes` to actually

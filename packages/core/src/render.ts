@@ -76,16 +76,14 @@ export function renderMarkers(reg: Registry, opts: RenderOptions = {}): RenderRe
 
   const invalidPatterns: { engagementId: string; pattern: string; reason: string }[] = [];
   if (doValidate) {
-    // Strict mode: subprocess-backed validation that can be preemptively
-    // killed on catastrophic-backtracking patterns. Render is a manual,
-    // infrequent operation; the ~50-200ms spawn overhead is acceptable.
+    // In-process validation (static nested-quantifier scan + CPU-time check).
     for (const e of reg.engagements) {
-      const r = validatePatterns(e.markers, { strict: true });
+      const r = validatePatterns(e.markers);
       for (const inv of r.invalid) {
         invalidPatterns.push({ engagementId: e.id, pattern: inv.pattern, reason: inv.reason });
       }
     }
-    const alwaysR = validatePatterns(reg.alwaysBlock, { strict: true });
+    const alwaysR = validatePatterns(reg.alwaysBlock);
     for (const inv of alwaysR.invalid) {
       invalidPatterns.push({
         engagementId: ALWAYS_FILE_STEM,
@@ -93,7 +91,7 @@ export function renderMarkers(reg: Registry, opts: RenderOptions = {}): RenderRe
         reason: inv.reason,
       });
     }
-    const infraR = validatePatterns(reg.privateInfra ?? [], { strict: true });
+    const infraR = validatePatterns(reg.privateInfra ?? []);
     for (const inv of infraR.invalid) {
       invalidPatterns.push({
         engagementId: PRIVATE_INFRA_FILE_STEM,
@@ -101,7 +99,7 @@ export function renderMarkers(reg: Registry, opts: RenderOptions = {}): RenderRe
         reason: inv.reason,
       });
     }
-    const selfR = validatePatterns(reg.selfIdentity ?? [], { strict: true });
+    const selfR = validatePatterns(reg.selfIdentity ?? []);
     for (const inv of selfR.invalid) {
       invalidPatterns.push({
         engagementId: SELF_IDENTITY_FILE_STEM,

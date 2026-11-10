@@ -50,8 +50,6 @@ do not guess:
   org membership) when you have it; ask the user when you don't.
 - **Whether to enable the audit log** (off by default, opt-in
   compliance trail). Ask.
-- **Whether to encrypt the registry at rest.** Surface as an option;
-  do not auto-encrypt.
 
 ## Pre-flight
 
@@ -477,7 +475,7 @@ instead. See [`doc/configuration.md`](configuration.md#the-claude-code-managed-d
 
 It also adds `permissions.deny` **Edit** rules for the registry file and its
 `.age`, the approvals store, the emergency pause (`pause.json`), the destination cache (`destinations.json`), `hooks/**`, `bin/**`, `prompt-approvals/**` (the hook's record of a yes at the agent prompt), `markers/**` (the rendered
-deny set) and `state/deny-set.cache.json` plus the uninstall ledger under the
+deny set) plus the uninstall ledger under the
 repo-aegis home
 (default `~/.config/repo-aegis`), so the agent cannot register an owner by
 editing `engagements.yaml`. Only Edit rules are written (Claude Code never
@@ -895,14 +893,15 @@ The user is the source of truth on this; don't probe with `find`.
 The registry lives in `~/.config/repo-aegis/engagements.yaml`. To
 sync across machines, the user can:
 
-- Encrypt the registry at rest (`repo-aegis registry encrypt
-  --recipient age1...`) and keep the ciphertext in a dotfiles repo,
-  decrypting on each machine via `registry decrypt --identity
-  <path>`.
-- Or replicate the file via their existing dotfiles workflow.
+- Replicate the file via their existing dotfiles workflow. (repo-aegis
+  no longer encrypts the registry: `registry encrypt` was removed; if
+  they keep their own `age`-encrypted copy in a dotfiles repo, they
+  decrypt it themselves before use. A repo-aegis registry left as
+  `engagements.yaml.age` is read as "no registry"; `registry decrypt
+  --identity <path>` restores it.)
 
 Don't propose a sync mechanism without asking. The registry is
-sensitive data even when it's not encrypted (it lists all the
+sensitive data (it lists all the
 user's customers and their identifying patterns).
 
 ## What you should never do during install
@@ -912,8 +911,7 @@ user's customers and their identifying patterns).
 - **Echo a literal marker pattern back to the user.** They typed it;
   they don't need it back.
 - **Commit the user's `engagements.yaml` to a public repo.** It
-  contains customer identifiers in plaintext. The user owns whether
-  to encrypt-and-sync; surface that decision when relevant.
+  contains customer identifiers in plaintext.
 - **Set the `git config user.email` to a customer-derived address.**
   Repo-aegis doesn't touch git identity, but agents that "set up
   everything" sometimes do; don't.
