@@ -40,7 +40,7 @@
 //   - One packed install serves the whole file (the world is built once), to keep the process count down.
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -138,7 +138,7 @@ function httpsHelper(op, owner) {
 
 // ---------------------------------------------------------------------------
 // The flows. One row each. `outcome` is what the person sees; `code` is the refusal code it must name (refused rows),
-// `prove` adds the row's own evidence. Every row also asserts, in `check` below, that no token reached stderr.
+// `log` (refused rows) names the layer and code its decision-log record must carry, `prove` adds the row's own evidence. Every row also asserts, in `check` below, that no token reached stderr.
 // ---------------------------------------------------------------------------
 
 const FLOWS = [
@@ -185,6 +185,7 @@ const FLOWS = [
     // No gh that repo-aegis trusts can exist in a temp directory (see LIMITS), so the end of the road is the token step.
     // Either code means "the sandbox's conditions were not what refused it"; AGENT_PUSH_* would be the bug.
     code: /GH_BINARY_UNTRUSTED|GH_IDENTITY_UNAVAILABLE/,
+    log: { layer: "credential-helper", code: /^(?:GH_BINARY_UNTRUSTED|GH_IDENTITY_UNAVAILABLE)$/ },
     drive: () => httpsHelper("fetch", "org-person"),
     prove: (r) => assert.doesNotMatch(r.stderr, SANDBOX_REFUSAL, "refused by a sandbox condition"),
   },
@@ -192,6 +193,7 @@ const FLOWS = [
     name: "push over HTTPS, person-mapped owner: gets past every sandbox check and stops only at the token step",
     outcome: "refused",
     code: /GH_BINARY_UNTRUSTED|GH_IDENTITY_UNAVAILABLE/,
+    log: { layer: "credential-helper", code: /^(?:GH_BINARY_UNTRUSTED|GH_IDENTITY_UNAVAILABLE)$/ },
     drive: () => httpsHelper("push", "org-person"),
     prove: (r) => assert.doesNotMatch(r.stderr, SANDBOX_REFUSAL, "refused by a sandbox condition"),
   },
@@ -212,6 +214,7 @@ const FLOWS = [
     name: "push to a public destination is refused by rule g (PUBLIC_PUSH_NEEDS_HUMAN) and nothing is sent",
     outcome: "refused",
     code: /PUBLIC_PUSH_NEEDS_HUMAN/,
+    log: { layer: "pre-push", code: /^PUBLIC_PUSH_NEEDS_HUMAN$/ },
     drive: () => w.git(ctx.pub, ["push", "origin", "main"]),
     prove: () => assert.equal(bareHead("org-public/svc.git"), null, "the public bare repo received nothing"),
   },
@@ -232,6 +235,7 @@ const FLOWS = [
     name: "gh pr create through the shim to a public destination is judged and refused (PUBLIC_EGRESS_NEEDS_HUMAN), stub gh never runs",
     outcome: "refused",
     code: /PUBLIC_EGRESS_NEEDS_HUMAN/,
+    log: { layer: "shim", code: /^PUBLIC_EGRESS_NEEDS_HUMAN$/ },
     drive: () => {
       writeFileSync(join(w.root, "gh.log"), "");
       return w.run("gh", ["pr", "create", "--repo", "org-public/svc", "--title", "t", "--body", "b"], {
@@ -245,18 +249,13 @@ const FLOWS = [
     name: "commit with a marker hit is refused by the global pre-commit hook, and the marker is not echoed",
     outcome: "refused",
     code: /marker hit/,
+    log: { layer: "pre-commit", code: /^MARKER_HIT$/ },
     drive: () => commit(ctx.marker, "leak.txt", `see ${MARKER_TEXT}\n`, "leak"),
     prove: (r) => {
       assert.ok(!r.stderr.includes(MARKER_TEXT) && !r.stdout.includes(MARKER_TEXT), "the literal marker is never printed");
       assert.notEqual(w.git(ctx.marker, ["log", "-1", "--format=%s"]).stdout.trim(), "leak", "no commit was made");
     },
   },
-];
-
-/** Rows for tasks that are not built yet. They name the task and say what they will assert; they do not count as failures. */
-const TODO_FLOWS = [
-  { name: "the same push to a public destination with an active pause is allowed with a notice", task: "P1-E (pause)" },
-  { name: "the decision log holds one record per refusal above, with the facts P1-I names (proxy variable names, ps readable, tty)", task: "P1-I (decision log)" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -364,6 +363,75 @@ describe(`sandbox-shaped flows (table: ${FLOWS.length} rows)`, () => {
 });
 
 /**
+ * `repo-aegis log --json` as the installed CLI prints it: the raw text (for the leak greps) and the parsed records. The
+ * flat view (`--last`) is used so that every record is returned, not the default view's twenty newest refusals.
+ */
+function readLog() {
+  const r = w.cliRun(["log", "--json", "--last", "1000"], { cwd: w.root });
+  assert.equal(r.code, 0, `repo-aegis log failed: ${r.stdout}\n${r.stderr}`);
+  const parsed = JSON.parse(r.stdout);
+  assert.ok(Array.isArray(parsed.records), "log --json has a records array");
+  return { raw: r.stdout, records: parsed.records };
+}
+
+/** The refused rows of the table, in the order they run: each declares the layer and code its record must carry. */
+const REFUSED_ROWS = FLOWS.filter((row) => row.outcome === "refused");
+
+/** The proxy variable NAMES the sandbox env sets that the log's closed list may name (HTTPS_PROXY, no_proxy, ...), sorted. */
+const SANDBOX_PROXY_NAMES = Object.keys(sandboxEnv("/unused"))
+  .filter((n) => /^(?:docker_)?(?:https?|all|no)_proxy$/i.test(n))
+  .sort();
+assert.ok(SANDBOX_PROXY_NAMES.length >= 10, `the sandbox env sets the proxy family (${SANDBOX_PROXY_NAMES.join(",")})`);
+
+/** Assert `records` (refusals only, oldest first) are one per refused row, with the right layer and code, and the sandbox facts. */
+function assertRefusalRecords(records, { fallback }) {
+  assert.equal(
+    records.length,
+    REFUSED_ROWS.length,
+    `one refusal record per refused row (${REFUSED_ROWS.length}), got ${records.length}: ${JSON.stringify(records.map((r) => [r.layer, r.code]))}`,
+  );
+  REFUSED_ROWS.forEach((row, i) => {
+    const rec = records[i];
+    assert.equal(rec.layer, row.log.layer, `${row.name}: layer`);
+    assert.match(rec.code, row.log.code, `${row.name}: code`);
+    assert.deepEqual([...(rec.facts?.proxyVarSet ?? [])].sort(), SANDBOX_PROXY_NAMES, `${row.name}: facts.proxyVarSet names the sandbox's proxy variables`);
+    assert.equal(rec.facts?.tty, false, `${row.name}: facts.tty is recorded, and false (no stream is a TTY)`);
+    if (fallback) assert.equal(rec.facts?.logFallback, true, `${row.name}: the record went to the $TMPDIR fallback`);
+    else assert.equal(rec.facts?.logFallback, undefined, `${row.name}: the record went to the primary file`);
+  });
+}
+
+describe("the decision log holds one record per refusal in the table above", () => {
+  it("each with its layer and code, the proxy variable names and the tty fact, in the primary file", () => {
+    const { records } = readLog();
+    // Run right after the first table and before the read-only table, so the refusals here are that table's only.
+    assertRefusalRecords(
+      records.filter((r) => r.outcome === "refuse"),
+      { fallback: false },
+    );
+  });
+
+  it("holds no token, marker text, URL, path or proxy value, in any record", () => {
+    const { raw } = readLog();
+    assert.ok(raw.length > 0 && raw.includes('"layer"'), "the log has records to grep");
+    assert.ok(!raw.includes(MARKER_TEXT), "the marker text is never logged");
+    assert.doesNotMatch(raw, /gh[opsu]_/, "no token shape");
+    assert.ok(!raw.includes(APP_TOKEN), "the App token is never logged");
+    assert.ok(!raw.includes("://"), "no URL");
+    assert.ok(!raw.includes(w.root), "no filesystem path under the world");
+    // Names only: not one proxy VALUE (the userinfo secret, the dead proxy's host and port).
+    for (const value of ["example-proxy-secret", "srt.", "127.0.0.1"]) assert.ok(!raw.includes(value), `no proxy value (${value})`);
+    // And the text view of the same log says nothing the JSON may not.
+    const text = w.cliRun(["log"], { cwd: w.root });
+    assert.equal(text.code, 0, text.stderr);
+    for (const out of [text.stdout, text.stderr]) {
+      assert.ok(!out.includes(MARKER_TEXT) && !out.includes(w.root), "the text view names no marker or path");
+      assert.doesNotMatch(out, /gh[opsu]_/, "no token shape in the text view");
+    }
+  });
+});
+
+/**
  * M4: the same table with the whole REPO_AEGIS_HOME read-only (a sandbox that leaves the configuration directory outside
  * its write list). A row that fails closed there is a finding, not fixed in P1-G: it is listed in READ_ONLY_FAILS with the
  * entry point and code it ends in, and runs as a `todo` until someone decides what a read-only home should do.
@@ -383,6 +451,20 @@ describe(`the same flows with REPO_AEGIS_HOME read-only (table: ${FLOWS.length} 
     if (note !== undefined) it.todo(`${row.name} [read-only home: ${note}]`);
     else it(row.name, () => runRow(row));
   }
+});
+
+describe("the decision log keeps the refusals written while the home was read-only", () => {
+  it("each is in the $TMPDIR fallback with facts.logFallback true, and log merges it with the primary file", () => {
+    const { records, raw } = readLog();
+    const refusals = records.filter((r) => r.outcome === "refuse");
+    const fallback = refusals.filter((r) => r.facts?.logFallback === true);
+    const primary = refusals.filter((r) => r.facts?.logFallback !== true);
+    // The first table wrote its refusals to the primary file; the read-only table's went to the fallback. Both are read.
+    assertRefusalRecords(primary, { fallback: false });
+    assertRefusalRecords(fallback, { fallback: true });
+    assert.ok(Math.min(...fallback.map((r) => Date.parse(r.ts))) >= Math.max(...primary.map((r) => Date.parse(r.ts))), "the fallback records are the later ones");
+    assert.ok(!raw.includes(w.root) && !raw.includes(MARKER_TEXT) && !raw.includes("://"), "the fallback records are as clean as the primary ones");
+  });
 });
 
 describe("`repo-aegis selftest` on this install", () => {
@@ -409,8 +491,74 @@ describe("`repo-aegis selftest` on this install", () => {
   });
 });
 
-describe("flows for tasks not built yet", () => {
-  for (const f of TODO_FLOWS) {
-    it.todo(`${f.name} [${f.task}]`);
-  }
+/**
+ * P1-E. The pause is the LAST describe: it lets the public push through, so the public bare repo is no longer empty, and the
+ * table above asserts that it is. `repo-aegis pause` needs a person's terminal and this world has none, so the file is
+ * written the way `mintPause` writes it (core/pause.ts): `<REPO_AEGIS_HOME>/pause.json`, a plain file owned by this user,
+ * mode 0600, `version: 1`, ISO `createdAt` (not in the future) and `expiresAt` (no more than 8 h later), `by`, `reasonLength`.
+ * A file that fails any reader check is silently "no pause", which the controls below show.
+ */
+describe("an active machine-wide pause lets the public push through, with a notice", () => {
+  const pauseFile = () => join(w.ra, "pause.json");
+  const removePause = () => rmSync(pauseFile(), { force: true });
+  const writePause = ({ mode = 0o600, hours = 1 } = {}) => {
+    const now = new Date();
+    const state = {
+      version: 1,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + hours * 60 * 60 * 1000).toISOString(),
+      by: "e2e",
+      reasonLength: 0,
+    };
+    writeFileSync(pauseFile(), JSON.stringify(state, null, 2) + "\n", { mode });
+    chmodSync(pauseFile(), mode); // the umask may have narrowed the mode `writeFileSync` set
+  };
+  const pushPublic = () => w.git(ctx.pub, ["push", "origin", "main"]);
+
+  before(removePause);
+  // The pause must not outlive this block, whatever happened in it.
+  after(removePause);
+
+  it("control: with no pause file the same push is refused and nothing is sent", () => {
+    const r = pushPublic();
+    assert.notEqual(r.code, 0, `expected a refusal, got exit 0\n${r.stderr}`);
+    assert.match(r.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/);
+    assert.equal(bareHead("org-public/svc.git"), null, "the public bare repo received nothing");
+  });
+
+  it("control: a pause file a reader rejects (group- and world-writable) is no pause", () => {
+    writePause({ mode: 0o666 });
+    try {
+      const r = pushPublic();
+      assert.notEqual(r.code, 0, `a pause with the wrong mode must not pause anything\n${r.stderr}`);
+      assert.match(r.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/);
+      assert.doesNotMatch(r.stderr, /paused until/);
+      assert.equal(bareHead("org-public/svc.git"), null, "the public bare repo received nothing");
+    } finally {
+      removePause();
+    }
+  });
+
+  it("control: a pause file dated more than 8 h ahead is no pause", () => {
+    writePause({ hours: 9 });
+    try {
+      const r = pushPublic();
+      assert.notEqual(r.code, 0, `an over-long pause must not pause anything\n${r.stderr}`);
+      assert.match(r.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/);
+      assert.equal(bareHead("org-public/svc.git"), null, "the public bare repo received nothing");
+    } finally {
+      removePause();
+    }
+  });
+
+  it("with a valid pause the same push exits 0, the public bare repo receives the commit, and stderr carries the notice", () => {
+    writePause();
+    const r = pushPublic();
+    assert.equal(r.error, undefined, `could not run: ${String(r.error)}`);
+    assert.equal(r.code, 0, `expected the paused push to go through, got exit ${r.code}\nstderr: ${r.stderr}`);
+    assert.match(r.stderr, /repo-aegis: paused until \d\d:\d\d/, "the pause notice is on stderr");
+    assert.doesNotMatch(r.stderr, /PUBLIC_PUSH_NEEDS_HUMAN/, "the rule did not refuse");
+    assert.doesNotMatch(r.stderr, TOKEN_SHAPE, "no token on stderr");
+    assert.equal(bareHead("org-public/svc.git"), w.git(ctx.pub, ["rev-parse", "HEAD"]).stdout.trim(), "the public bare repo received the commit");
+  });
 });
