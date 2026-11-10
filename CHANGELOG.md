@@ -112,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`repo-aegis upgrade [--dry-run] [--json]`: one command after an upgrade.** It finds every stale
   install the way `doctor` does (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`, `MANAGED_DROPIN_STALE`, a
   credential helper pinned to another install) and re-runs the matching installer in a fixed order
-  (hooks, shim, claude-md, git-credential), one line per step, ending `next: repo-aegis doctor`.
+  (hooks, shim, claude-md, git-credential), one line per step, ending `next: repo-aegis doctor`. When it
+  re-pinned something it then runs `repo-aegis selftest` and exits 1 if a layer still does not work.
   After upgrading the package, run it instead of the three `install` commands. It never installs what
   was not installed, a second run prints `nothing to upgrade`, and `--dry-run` changes nothing. The
   two steps that need a person (the managed drop-in's `sudo` write, the credential helper) run only

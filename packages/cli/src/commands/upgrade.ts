@@ -48,6 +48,7 @@ import { managedPaths } from "./managed-dropin.js";
 import { resolveManagedEnv, type ManagedEnv } from "./managed-privileged.js";
 import { parseTaaadPinFromScript, SHIM_HEADER_LINE } from "./shim-script.js";
 import { resolveTaaadPin } from "./taaad-pin.js";
+import { formatSelftest, runSelftest, type SelftestReport } from "./selftest.js";
 
 export interface UpgradeOptions extends OutputOptions {
   /** Report what would be done; change nothing. */
@@ -76,6 +77,8 @@ export interface UpgradeDeps {
   terminal?: ConfirmOptions;
   /** Test seam: git's credential configuration, for the helper check. */
   credential?: GitCredentialCheckOptions;
+  /** Test seam: the selftest run after a completed upgrade that changed something. Default: {@link runSelftest}. */
+  selftest?: () => SelftestReport;
 }
 
 export type StepName = "hooks" | "shim" | "claude-md" | "user-settings" | "git-credential";
@@ -114,6 +117,12 @@ export interface UpgradeReport {
   failed: boolean;
   /** True when a stale step was left alone because re-pinning it from this install would be the wrong move. Exit 1. */
   refused: boolean;
+  /**
+   * The selftest run after the installers (P1-G, PLAN P1-H): present only when a real run re-pinned something and
+   * nothing failed or was refused. Not ok means the upgrade wrote its files but a layer still does not work from
+   * here, so the command exits 1 rather than leaving the person to find out at their next push.
+   */
+  selftest?: SelftestReport;
   next: "repo-aegis doctor";
 }
 
@@ -534,6 +543,10 @@ const TEXT_VERB: Readonly<Record<StepStatus, string>> = {
 export function upgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): UpgradeReport {
   const report = runUpgrade(opts, deps);
   const home = deps.home ?? repoAegisHome();
+  if (!report.dryRun && !report.failed && !report.refused && anyStep(report, "upgraded")) {
+    report.selftest = (deps.selftest ?? (() => runSelftest({})))(); // mutation: the report is local to this call
+  }
+  const selftestFailed = report.selftest !== undefined && !report.selftest.ok;
 
   if (!report.dryRun) {
     if (anyStep(report, "upgraded", "failed")) {
@@ -561,9 +574,14 @@ export function upgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): UpgradeRe
       emitText("run yourself:");
       for (const r of report.runYourself) emitText(`  ${r.command}`);
     }
+    if (report.selftest !== undefined) {
+      emitText(`selftest:`);
+      emitText(formatSelftest(report.selftest).replace(/^/gm, "  "));
+      if (selftestFailed) emitText("upgrade: the files were re-pinned, but a layer above still does not work from here; `repo-aegis selftest` re-runs it");
+    }
     emitText(`next: ${report.next}`);
   }
-  if (report.failed || report.refused) process.exit(1);
+  if (report.failed || report.refused || selftestFailed) process.exit(1);
   return report;
 }
 

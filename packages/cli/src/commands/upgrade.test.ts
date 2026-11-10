@@ -28,6 +28,7 @@ import { managedPaths } from "./managed-dropin.js";
 import { resolveManagedEnv } from "./managed-privileged.js";
 import { parseTaaadPinFromScript, renderShimScript, SHIM_HEADER_LINE } from "./shim-script.js";
 import { isEphemeralCli, upgrade, type UpgradeDeps, type UpgradeReport } from "./upgrade.js";
+import type { SelftestReport } from "./selftest.js";
 
 let tmp: string;
 let n = 0;
@@ -142,9 +143,56 @@ const staleCodes = (d: DoctorJson): string[] => [
 
 // `ephemeral: false` unless a test says otherwise: the build under test sits in a git worktree, which is exactly what
 // the real check calls temporary.
+// A stub selftest unless a test says otherwise: the real one spawns the installed hooks and is covered by its own tests.
+const selftestReport = (ok: boolean): SelftestReport => ({
+  version: VERSION,
+  ok,
+  layers: [{ layer: "pre-push", ok, status: ok ? "ok" : "FAILED", detail: ok ? null : "a declared-private push was refused" }],
+  sandbox: { proxyVars: [], psReadable: true, tty: false },
+});
 function runUpgrade(fx: Fixture, over: { dryRun?: boolean; json?: boolean; force?: boolean; claudeHome?: string } = {}, deps: UpgradeDeps = {}): CaptureResult {
-  return fx.run(() => captureOutput(() => void upgrade(over, { version: VERSION, terminal: NO_PERSON, ephemeral: false, ...deps })));
+  return fx.run(() => captureOutput(() => void upgrade(over, { version: VERSION, terminal: NO_PERSON, ephemeral: false, selftest: () => selftestReport(true), ...deps })));
 }
+
+describe("upgrade runs selftest after it re-pinned something (P1-H M3)", () => {
+  it("a re-pin runs selftest once and prints its layers; ok keeps exit 0", () => {
+    const fx = makeFixture();
+    writeStaleHooks(fx);
+    let calls = 0;
+    const out = runUpgrade(fx, {}, { selftest: () => (calls++, selftestReport(true)) });
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.equal(calls, 1);
+    assert.match(out.stdout, /selftest:\n  pre-push ok/);
+  });
+
+  it("a selftest that is not ok after a re-pin exits 1 and says what to re-run", () => {
+    const fx = makeFixture();
+    writeStaleHooks(fx);
+    const out = runUpgrade(fx, {}, { selftest: () => selftestReport(false) });
+    assert.equal(out.exitCode, 1);
+    assert.match(out.stdout, /pre-push FAILED/);
+    assert.match(out.stdout, /`repo-aegis selftest` re-runs it/);
+  });
+
+  it("--json carries the selftest report", () => {
+    const fx = makeFixture();
+    writeStaleHooks(fx);
+    const out = runUpgrade(fx, { json: true });
+    assert.equal((JSON.parse(out.stdout) as UpgradeReport).selftest?.ok, true);
+  });
+
+  it("is not run on a dry run, when nothing changed, or when a step was refused", () => {
+    const never = (): SelftestReport => assert.fail("selftest must not run");
+    const dry = makeFixture();
+    writeStaleHooks(dry);
+    assert.equal(runUpgrade(dry, { dryRun: true }, { selftest: never }).exitCode, undefined);
+    const noop = makeFixture();
+    assert.equal(runUpgrade(noop, {}, { selftest: never }).exitCode, undefined);
+    const refused = makeFixture();
+    writeStaleHooks(refused);
+    assert.equal(runUpgrade(refused, {}, { ephemeral: true, selftest: never }).exitCode, 1);
+  });
+});
 
 const snapshot = (fx: Fixture): Record<string, string> => {
   const out: Record<string, string> = {};

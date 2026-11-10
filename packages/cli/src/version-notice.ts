@@ -34,6 +34,10 @@ const QUIET_COMMANDS: ReadonlySet<string> = new Set([
   "uninstall",
   // Read-only by contract ("no registry, no network, no git"; it must not create a home): a state write would break that.
   "explain",
+  // Read-only like `explain` (P1-F): prints a shipped doc and nothing else.
+  "docs",
+  // Writes nothing outside $TMPDIR by contract (P1-G), and `upgrade` runs it: a state write would break both.
+  "selftest",
 ]);
 
 export function lastVersionPath(home: string): string {
