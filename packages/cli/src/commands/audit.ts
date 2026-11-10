@@ -1,28 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
   fstatSync,
-  mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
   realpathSync,
-  rmSync,
   statSync,
-  type Dirent,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import {
   computeDenySet,
-  loadRegistry,
   readRepoConfig,
-  scanFile,
   scanText,
-  isActive,
   scanRegistryEgress,
   isEgressRelevant,
   isPublicFacing,
@@ -35,16 +28,13 @@ import {
   ALWAYS_FILE_STEM,
   shouldRedactAttribution,
   redactStems,
-  scanForSecrets,
-  summariseHits,
   type RepoConfig,
   type DenySet,
   type ScanHit,
 } from "@de-otio/repo-aegis-core";
-import { emitJson, emitText, shouldRevealMatches, type OutputOptions } from "../format.js";
+import { emitError, emitJson, emitText, shouldRevealMatches, type OutputOptions } from "../format.js";
 import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
-import { runScan, makeOctokitClient } from "@de-otio/repo-aegis-scan";
 
 interface AuditOptions extends OutputOptions, DenySetFloorOptions {
   cwd?: string;
@@ -56,25 +46,68 @@ interface AuditOptions extends OutputOptions, DenySetFloorOptions {
   fixtureCheck?: boolean;
   remoteCheck?: boolean;
   hooksCheck?: boolean;
+  /**
+   * The next six moved to `repo-aegis-scan audit` (network work does not belong
+   * on the gate path). They stay on this type only so the flags still parse and
+   * `audit` can answer them with the exact replacement command; see
+   * {@link movedNetworkAuditCommand}. Nothing here acts on them.
+   */
   org?: string;
   published?: string;
-  /** Scan `--published` archive contents for universal secret shapes. */
+  /** `--no-secret-scan` (default true); only meaningful with `--published`. */
   secretScan?: boolean;
+  token?: string;
+  maxQueries?: number;
+  acceptCrossBorder?: boolean;
   /**
    * Report findings that a `repo-aegis: allow` comment currently suppresses.
    * There is deliberately no `--ignore-waivers` counterpart: `audit` never
    * applies waivers in the first place, so it is already strict there.
    */
   ignoreAllowlistComments?: boolean;
-  token?: string;
   verbose?: boolean;
-  maxQueries?: number;
-  acceptCrossBorder?: boolean;
+  /** Root-level flags (`withGlobals`); read only to rebuild the moved-flag replacement command. */
+  home?: string;
+  registryPath?: string;
 }
 
-const DEFAULT_MAX_ORG_QUERIES = 30;
+const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
 
-const ORG_CROSS_BORDER_CONSENT_ENV = "REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER";
+function shellWord(v: string): string {
+  return SHELL_SAFE.test(v) ? v : `'${v.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * `audit --org` and `audit --published` moved to `repo-aegis-scan audit`. This is
+ * the exact command to run instead: every flag the caller passed that the new
+ * command understands, in the same spelling. Null when neither moved flag was used.
+ *
+ * Exported for tests and so the wording is pinned in one place. Remove with the
+ * moved-flag shims (one release after the move).
+ */
+export function movedNetworkAuditCommand(opts: AuditOptions): string | null {
+  if (!opts.org && !opts.published) return null;
+  const args: string[] = ["audit"];
+  if (opts.org) args.push("--org", shellWord(opts.org));
+  if (opts.published) args.push("--published", shellWord(opts.published));
+  if (opts.secretScan === false) args.push("--no-secret-scan");
+  if (opts.token) args.push("--token", shellWord(opts.token));
+  if (typeof opts.maxQueries === "number" && Number.isFinite(opts.maxQueries)) {
+    args.push("--max-queries", String(opts.maxQueries));
+  }
+  if (opts.acceptCrossBorder) args.push("--accept-cross-border");
+  if (typeof opts.minPatterns === "number" && Number.isFinite(opts.minPatterns)) {
+    args.push("--min-patterns", String(opts.minPatterns));
+  }
+  if (opts.requireDenySet) args.push("--require-deny-set");
+  if (opts.redactAttribution) args.push("--redact-attribution");
+  if (opts.verbose) args.push("--verbose");
+  if (opts.cwd) args.push("--cwd", shellWord(opts.cwd));
+  if (opts.home) args.push("--home", shellWord(opts.home));
+  if (opts.registryPath) args.push("--registry-path", shellWord(opts.registryPath));
+  if (opts.json) args.push("--json");
+  return `repo-aegis-scan ${args.join(" ")}`;
+}
 
 interface Finding {
   message: string;
@@ -608,422 +641,6 @@ function checkFixtures(
   return { name: "fixtures", ok: blocking(findings).length === 0, findings };
 }
 
-// Extract literal "seeds" from a regex pattern that GitHub code-search
-// can use as substring matches. Splits on regex metacharacters and
-// keeps continuous runs of length >= 4. Best-effort; patterns that
-// produce no usable seed are silently skipped.
-function literalSeeds(pattern: string): string[] {
-  const runs = pattern.split(/[\\^$()\[\]{}?+*|.]+/);
-  return runs.filter(r => r.length >= 4);
-}
-
-async function checkOrg(
-  org: string,
-  reg: { engagements: import("@de-otio/repo-aegis-core").Engagement[]; alwaysBlock: string[] },
-  token: string,
-  maxQueries: number,
-): Promise<CheckResult> {
-  const seedSet = new Set<string>();
-  for (const e of reg.engagements) {
-    if (!isActive(e)) continue;
-    for (const p of e.markers) for (const s of literalSeeds(p)) seedSet.add(s);
-  }
-  for (const p of reg.alwaysBlock) for (const s of literalSeeds(p)) seedSet.add(s);
-
-  // Sort alphabetically so the truncation, when it happens, is deterministic
-  // across runs and across machines. Stable order also makes the "skipped"
-  // finding actionable: the operator sees the same prefix every time.
-  const allSeeds = Array.from(seedSet).sort();
-  if (allSeeds.length === 0) {
-    return {
-      name: "org-scan",
-      ok: true,
-      findings: [],
-      skipped: true,
-      skipReason: "no usable literal seeds extracted from registry patterns",
-    };
-  }
-
-  const cap = Math.max(1, maxQueries);
-  const seeds = allSeeds.slice(0, cap);
-  const skippedCount = allSeeds.length - seeds.length;
-
-  const truncationFinding: Finding | null =
-    skippedCount > 0
-      ? {
-          message: `${skippedCount} seed(s) skipped due to --max-queries budget (cap=${cap}, total=${allSeeds.length})`,
-          detail: {
-            code: "ORG_SCAN_TRUNCATED",
-            cap,
-            totalSeeds: allSeeds.length,
-            skippedCount,
-          },
-        }
-      : null;
-
-  const queries = seeds.map((s, i) => ({
-    name: `audit-seed-${i}`,
-    query: `"${s}" org:${org}`,
-  }));
-
-  const client = makeOctokitClient({ token });
-  const result = await runScan({
-    queries,
-    state: { seen: {} },
-    client,
-    interRequestSleepMs: 1500,
-    maxPagesPerQuery: 2,
-    capResultsPerQuery: 50,
-  });
-
-  const findings: Finding[] = [];
-  if (truncationFinding) findings.push(truncationFinding);
-  for (const h of result.hits) {
-    findings.push({
-      message: `${h.repo}:${h.path}${h.line !== null ? `:${h.line}` : ""}`,
-      detail: { repo: h.repo, path: h.path, line: h.line, url: h.url, query: h.query },
-    });
-  }
-
-  const allFailed = result.summary.queries.length > 0 && result.summary.queries.every(q => !q.ok);
-  if (allFailed) {
-    return {
-      name: "org-scan",
-      ok: false,
-      findings: [
-        ...(truncationFinding ? [truncationFinding] : []),
-        { message: "all org-scan queries failed", detail: { queries: result.summary.queries } },
-      ],
-    };
-  }
-
-  // The result is "ok" only when no real hits and no truncation. A truncated
-  // run is strictly worse than a clean clean run because some seeds were not
-  // queried at all — surface as a failure so the operator sees it.
-  const hitCount = result.hits.length;
-  return {
-    name: "org-scan",
-    ok: hitCount === 0 && skippedCount === 0,
-    findings,
-  };
-}
-
-// After extraction, walk the tree and verify every entry's realpath is
-// rooted under the extraction root. Catches zip-slip / tar-slip entries
-// (e.g. `../../escape.txt`) and symlinks pointing outside the archive.
-// Returns null if the tree is clean, or a string describing the offending
-// entry if any escape is detected.
-function findArchiveEscape(extractDir: string): string | null {
-  let extractReal: string;
-  try {
-    extractReal = realpathSync(extractDir);
-  } catch {
-    return `cannot resolve realpath of extraction dir ${extractDir}`;
-  }
-  const stack: string[] = [extractDir];
-  while (stack.length > 0) {
-    const dir = stack.pop()!;
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      continue;
-    }
-    for (const name of entries) {
-      const full = join(dir, name);
-      let real: string;
-      try {
-        real = realpathSync(full);
-      } catch {
-        // Broken / dangling symlink: treat as escape rather than ignore.
-        // Anything we can't realpath cleanly inside the extraction root
-        // is suspicious.
-        return `entry ${full} has unresolvable realpath`;
-      }
-      const rel = relative(extractReal, real);
-      if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
-        // entry is rooted under extractReal; recurse if it's a directory
-        // (use lstat so we don't follow symlinks again — realpath already
-        // resolved the link's target safely above).
-        let st;
-        try {
-          st = statSync(real);
-        } catch {
-          continue;
-        }
-        if (st.isDirectory()) stack.push(full);
-        continue;
-      }
-      return `entry ${full} resolves outside extraction root (-> ${real})`;
-    }
-  }
-  return null;
-}
-
-// Probe a binary's presence on PATH by running `<bin> --version`. We use
-// the binary itself (not `which`) so the result reflects exactly what
-// `spawnSync(bin, ...)` will see later — this guards against shim/PATH
-// mismatches where `which` succeeds but spawn fails or vice versa.
-// Returns a finding describing the missing binary, or null if the binary
-// runs cleanly. Mirrors the AgeNotFoundError pattern from age.ts.
-function checkBinaryAvailable(bin: string, code: string): Finding | null {
-  const probe = spawnSync(bin, ["--version"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (probe.error) {
-    const errCode = (probe.error as NodeJS.ErrnoException).code;
-    if (errCode === "ENOENT") {
-      return {
-        message: `\`${bin}\` not found on PATH; install it and retry`,
-        detail: { code, binary: bin, reason: "ENOENT" },
-      };
-    }
-    return {
-      message: `\`${bin} --version\` probe failed: ${probe.error.message}`,
-      detail: { code, binary: bin, reason: probe.error.message },
-    };
-  }
-  // Some tools exit non-zero on `--version` (rare). Treat any spawnable
-  // result as "present"; we only care that the binary is on PATH.
-  return null;
-}
-
-function checkPublished(
-  input: string,
-  cwd: string,
-  denySet: DenySet,
-  reveal: boolean,
-  secretScan: boolean,
-): CheckResult {
-  const findings: Finding[] = [];
-
-  // An empty deny set is LEGITIMATE here and must not fail the check: the
-  // engagement registry is machine-local by design (it holds customer
-  // markers, which is precisely what must never reach a public CI runner),
-  // so a publish workflow scanning its own tarball will always have zero
-  // engagement patterns. But "scanned against nothing" and "scanned clean"
-  // must not render identically — that is the exact confusion the
-  // deny-set floor exists to prevent, and a gate that reports `ok: true`
-  // after matching no patterns is the shape of a green check nobody can
-  // trust. Report it, visibly, without gating on it.
-  if (denySet.patterns.length === 0) {
-    findings.push({
-      message:
-        "marker scan was inert: the deny set has 0 patterns, so archive contents were not matched against any engagement marker",
-      detail: { code: "PUBLISHED_EMPTY_DENY_SET", patternCount: 0, secretScan },
-      informational: true,
-    });
-  }
-  const tmp = mkdtempSync(join(tmpdir(), "repo-aegis-published-"));
-  let extractDir = tmp;
-
-  try {
-    if (input.endsWith(".tgz") || input.endsWith(".tar.gz")) {
-      if (!existsSync(input)) {
-        return {
-          name: "published",
-          ok: false,
-          findings: [{ message: `tarball not found: ${input}` }],
-        };
-      }
-      const missing = checkBinaryAvailable("tar", "TAR_NOT_FOUND");
-      if (missing) {
-        return { name: "published", ok: false, findings: [missing] };
-      }
-      const r = spawnSync("tar", ["-xzf", input, "-C", tmp], { encoding: "utf8" });
-      if (r.status !== 0) {
-        return {
-          name: "published",
-          ok: false,
-          findings: [{ message: `tar extract failed: ${r.stderr}` }],
-        };
-      }
-    } else if (input.endsWith(".vsix")) {
-      if (!existsSync(input)) {
-        return {
-          name: "published",
-          ok: false,
-          findings: [{ message: `vsix not found: ${input}` }],
-        };
-      }
-      const missing = checkBinaryAvailable("unzip", "UNZIP_NOT_FOUND");
-      if (missing) {
-        return { name: "published", ok: false, findings: [missing] };
-      }
-      const r = spawnSync("unzip", ["-q", input, "-d", tmp], { encoding: "utf8" });
-      if (r.status !== 0) {
-        return {
-          name: "published",
-          ok: false,
-          findings: [{ message: `unzip failed: ${r.stderr}` }],
-        };
-      }
-    } else {
-      // Treat as npm package name; pack first.
-      const missingNpm = checkBinaryAvailable("npm", "NPM_NOT_FOUND");
-      if (missingNpm) {
-        return { name: "published", ok: false, findings: [missingNpm] };
-      }
-      const missingTar = checkBinaryAvailable("tar", "TAR_NOT_FOUND");
-      if (missingTar) {
-        return { name: "published", ok: false, findings: [missingTar] };
-      }
-      const packResult = spawnSync("npm", ["pack", "--silent", input], {
-        cwd: tmp,
-        encoding: "utf8",
-      });
-      if (packResult.status !== 0) {
-        return {
-          name: "published",
-          ok: false,
-          findings: [{ message: `npm pack failed for ${input}: ${packResult.stderr}` }],
-        };
-      }
-      const tgzs = readdirSync(tmp).filter(f => f.endsWith(".tgz"));
-      if (tgzs.length === 0) {
-        return {
-          name: "published",
-          ok: false,
-          findings: [{ message: `npm pack produced no .tgz for ${input}` }],
-        };
-      }
-      const tgz = tgzs[0]!;
-      const xr = spawnSync("tar", ["-xzf", join(tmp, tgz), "-C", tmp], { encoding: "utf8" });
-      if (xr.status !== 0) {
-        return {
-          name: "published",
-          ok: false,
-          findings: [{ message: `tar extract failed: ${xr.stderr}` }],
-        };
-      }
-    }
-
-    // Zip-slip / tar-slip defence: after extraction, verify every entry
-    // (including symlink targets) resolves within the extraction root.
-    // BSD `tar` (default on macOS) and `unzip` do not reliably reject
-    // `../../escape.txt` entries on their own.
-    const escape = findArchiveEscape(extractDir);
-    if (escape !== null) {
-      return {
-        name: "published",
-        ok: false,
-        findings: [
-          {
-            message: "extracted archive contains an entry that escapes the extraction root",
-            detail: { code: "PUBLISHED_ARCHIVE_ESCAPE", reason: escape },
-          },
-        ],
-      };
-    }
-
-    function recurse(dir: string): void {
-      // `withFileTypes` takes the entry kind from the directory read itself.
-      // The alternative — `readdirSync` then `statSync(full)` per entry — is a
-      // check-then-use on a path we then open and read (CodeQL
-      // `js/file-system-race`), and costs an extra syscall per entry for the
-      // privilege. Here the kind comes back with the entry and no separate
-      // check on the path is ever made.
-      let entries: Dirent[];
-      try {
-        entries = readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const entry of entries) {
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          recurse(full);
-          continue;
-        }
-        // Symlinks are skipped rather than followed. `findArchiveEscape`
-        // above has already rejected the whole archive if any entry — symlink
-        // targets included — resolves outside the extraction root, so a
-        // symlink that reaches this point necessarily points INSIDE, where
-        // the walk visits its target on its own. Following it would only
-        // scan the same bytes twice under a second name.
-        if (!entry.isFile()) continue;
-        // Pass extractDir as the workingTree so scanFile rejects any
-        // symlink whose realpath points outside the archive (e.g. a
-        // symlink to /etc/passwd that survived the escape check above
-        // — it can't, but defence-in-depth).
-        let r;
-        try {
-          // Full pattern set, no path exemptions and no demotion: a
-          // published tarball is the last artefact anyone can inspect, and
-          // "it was in a fixture directory" is not a reason to let a secret
-          // shape ship to a registry.
-          r = scanFile(
-            full,
-            denySet,
-            { revealMatches: reveal, ignorePathExemptions: true },
-            extractDir,
-          );
-        } catch {
-          // OutsideWorkingTreeError or similar: skip this entry; the
-          // archive-escape check above is the authoritative gate.
-          continue;
-        }
-        for (const h of r.hits) {
-          const rel = relative(extractDir, full);
-          findings.push({
-            message: `${rel}:${h.line}:${h.column}`,
-            detail: { path: rel, line: h.line, column: h.column, matchPreview: h.matchPreview },
-          });
-        }
-
-        // Universal secret shapes, independent of the deny set. This is the
-        // only part of the published check that still works when the deny
-        // set is empty — which, per the note at the top of this function, is
-        // the normal case in CI. It covers the threat that actually applies
-        // to a registry tarball: a private key, JWT, or forge token that
-        // reached the archive via build output or `files` drift rather than
-        // via a tracked source file the hooks already cover.
-        //
-        // `scanForSecrets` returns kind/offset/length and never the matched
-        // bytes, so these findings are safe to print in a public job log
-        // without the attribution-redaction machinery.
-        if (secretScan) {
-          // No stat/exists check precedes this read — the entry kind came
-          // from the directory read itself — so there is no check-then-use
-          // window to race. A read that fails simply skips the entry.
-          let text: string;
-          try {
-            text = readFileSync(full, "utf8");
-          } catch {
-            continue;
-          }
-          const secretHits = scanForSecrets(text);
-          if (secretHits.length > 0) {
-            const rel = relative(extractDir, full);
-            const summary = summariseHits(secretHits);
-            findings.push({
-              message: `${rel}: ${summary.count} secret-shaped match(es) [${summary.kinds.join(", ")}]`,
-              detail: {
-                code: "PUBLISHED_SECRET_SHAPE",
-                path: rel,
-                kinds: summary.kinds,
-                count: summary.count,
-              },
-            });
-          }
-        }
-      }
-    }
-
-    recurse(extractDir);
-    void cwd;
-  } finally {
-    try {
-      rmSync(tmp, { recursive: true, force: true });
-    } catch {
-      /* best-effort cleanup */
-    }
-  }
-
-  return { name: "published", ok: blocking(findings).length === 0, findings };
-}
-
 function checkRemote(cwd: string, repo: RepoConfig): CheckResult {
   if (!repo.isGitRepo) {
     return { name: "remote", ok: true, findings: [], skipped: true, skipReason: "not a git repo" };
@@ -1142,6 +759,23 @@ function redactCheckResult(check: CheckResult): CheckResult {
 }
 
 export async function audit(opts: AuditOptions): Promise<void> {
+  // Refuse before doing any work: running the local checks and then failing on
+  // the moved flag would look like a partial result, and a CI job that passed
+  // `--org` expects the sweep, which this command no longer performs.
+  const moved = movedNetworkAuditCommand(opts);
+  if (moved !== null) {
+    emitError(
+      {
+        code: "AUDIT_NETWORK_MOVED",
+        error:
+          `\`audit --org\` and \`audit --published\` moved to \`${moved}\` ` +
+          `(install: \`npm install -g @de-otio/repo-aegis-scan\`). ` +
+          `Run \`repo-aegis audit\` without those flags for the local checks.`,
+      },
+      opts,
+    );
+  }
+
   const cwd = opts.cwd ?? process.cwd();
   const repo = readRepoConfig(cwd);
   const denySet = computeDenySet(repo);
@@ -1201,62 +835,6 @@ export async function audit(opts: AuditOptions): Promise<void> {
     } catch {
       /* audit log must not break user-facing ops */
     }
-  }
-
-  if (opts.org) {
-    // Compliance gate: --org sends literal seeds derived from registry
-    // patterns (which can carry customer-derived strings) to GitHub.com,
-    // typically a cross-border data transfer. Require explicit consent
-    // before any network call. The check runs before the token check so
-    // the operator sees the cross-border message even when they haven't
-    // set GH_TOKEN yet.
-    const consentEnv = process.env[ORG_CROSS_BORDER_CONSENT_ENV];
-    const hasConsent = consentEnv === "1" || opts.acceptCrossBorder === true;
-    if (!hasConsent) {
-      results.push({
-        name: "org-scan",
-        ok: false,
-        findings: [
-          {
-            message:
-              "--org sends literal seed substrings (potentially customer-derived) to github.com, " +
-              "which is a cross-border data transfer; explicit consent required. " +
-              `Set ${ORG_CROSS_BORDER_CONSENT_ENV}=1 or pass --accept-cross-border to proceed.`,
-            detail: {
-              code: "ORG_SCAN_CONSENT_REQUIRED",
-              consentEnv: ORG_CROSS_BORDER_CONSENT_ENV,
-              consentFlag: "--accept-cross-border",
-            },
-          },
-        ],
-      });
-    } else {
-      const tokenVar = opts.token ?? "GH_TOKEN";
-      const token = process.env[tokenVar];
-      if (!token) {
-        results.push({
-          name: "org-scan",
-          ok: false,
-          findings: [{ message: `${tokenVar} env var is not set; cannot run --org sweep` }],
-        });
-      } else {
-        try {
-          const reg = loadRegistry();
-          const maxQueries = opts.maxQueries ?? DEFAULT_MAX_ORG_QUERIES;
-          results.push(await checkOrg(opts.org, reg, token, maxQueries));
-        } catch (err) {
-          results.push({
-            name: "org-scan",
-            ok: false,
-            findings: [{ message: `org-scan setup failed: ${(err as Error).message}` }],
-          });
-        }
-      }
-    }
-  }
-
-  if (opts.published) {
-    results.push(checkPublished(opts.published, cwd, denySet, reveal, opts.secretScan !== false));
   }
 
   const failedChecks = results.filter(c => !c.ok);

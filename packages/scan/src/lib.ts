@@ -54,6 +54,10 @@ export { encryptFile, decryptFile, writeBufferTo, AgeNotFoundError, AgeError } f
 export { makeOctokitClient } from "./octokit-client.js";
 export type { BlobClient } from "./octokit-client.js";
 
+// ---- audit --org / --published (moved from `repo-aegis audit`) -----------
+export { runAudit } from "./audit.js";
+export type { AuditOptions, AuditRun } from "./audit.js";
+
 // ---- semantic sweep (Phase 3, P3-B) -------------------------------------
 export { runSemanticSweep } from "./semantic-sweep.js";
 export type {

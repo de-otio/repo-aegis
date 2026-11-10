@@ -15,6 +15,7 @@ import { encryptFile, decryptFile, writeBufferTo, AgeNotFoundError, AgeError } f
 import { runSemanticSweep, type SemanticCandidate } from "./semantic-sweep.js";
 import { loadAllProfiles } from "./profile-loader.js";
 import { rebuildProfiles } from "./rebuild-profiles.js";
+import { runAudit, type AuditOptions } from "./audit.js";
 import { loadRegistry, repoAegisHome } from "@de-otio/repo-aegis-core";
 import type { OllamaConfig } from "@de-otio/repo-aegis-llm";
 
@@ -53,6 +54,11 @@ interface RebuildProfilesCliOptions {
   diff?: boolean;
   engagement?: string[];
   registry?: string;
+}
+
+interface AuditCliOptions extends AuditOptions {
+  home?: string;
+  registryPath?: string;
 }
 
 const DEFAULT_OLLAMA_ENDPOINT = "http://127.0.0.1:11434";
@@ -107,6 +113,35 @@ program
     process.stdout.write(
       JSON.stringify({ ok: true, validQueries: result.queries.length }, null, 2) + "\n",
     );
+  });
+
+// `audit --org` / `audit --published`: moved here from `repo-aegis audit` so the
+// CLI's gate path carries no network or archive-extraction code. Only these two
+// checks run; the local ones stay in `repo-aegis audit`.
+program
+  .command("audit")
+  .description("one-shot org code-search sweep (--org) and/or published-archive scan (--published)")
+  .option("--org <org>", "run a one-shot GitHub code-search sweep against this org (needs a token)")
+  .option("--published <pkg-or-tarball>", "scan a packed npm tarball, VSIX bundle, or npm package name")
+  .option("--no-secret-scan", "with --published: skip the universal secret-shape scan (PEM keys, JWTs, forge tokens) over archive contents")
+  .option("--token <env-var>", "env var holding the GitHub token for --org (default GH_TOKEN)")
+  .option("--max-queries <n>", "cap on --org seed-derived queries per run (default 30)", v => parseInt(v, 10))
+  .option("--accept-cross-border", "consent to sending --org seed substrings to GitHub (or set REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1)")
+  .option("--min-patterns <n>", "exit 2 if the computed deny set has fewer than <n> patterns (fail closed on a missing registry)", v => parseInt(v, 10))
+  .option("--require-deny-set", "sugar for --min-patterns 1")
+  .option("--redact-attribution", "strip engagement ids and engagement-derived pattern ids from output (set this for anything published)")
+  .option("--verbose", "reveal literal matches in scan output (NEVER from hooks)")
+  .option("--cwd <dir>", "evaluate from a different working directory (default: process.cwd())")
+  .option("--registry-path <path>", "override the engagement registry path")
+  .option("--home <dir>", "override the repo-aegis home dir")
+  .option("--json", "output JSON")
+  .action(async (opts: AuditCliOptions) => {
+    if (opts.home) process.env["REPO_AEGIS_HOME"] = opts.home;
+    if (opts.registryPath) process.env["REPO_AEGIS_REGISTRY"] = opts.registryPath;
+    const run = await runAudit(opts);
+    process.stdout.write(run.stdout);
+    process.stderr.write(run.stderr);
+    process.exit(run.exitCode);
   });
 
 program

@@ -392,10 +392,12 @@ Composite check:
 - Fixture-directory scan.
 - Remote-vs-class consistency.
 
-Add `--history` for a full git-log sweep (slow). Add `--published
-<tarball-or-pkg>` to also scan a packed bundle. Add `--org <org>` (with
-`--accept-cross-border`) to also run a one-shot GitHub code-search
-sweep against the org.
+Add `--history` for a full git-log sweep (slow). The packed-bundle scan and
+the one-shot GitHub code-search sweep are not flags of `audit` any more: they are
+`repo-aegis-scan audit --published <tarball-or-pkg>` and
+`repo-aegis-scan audit --org <org> --accept-cross-border`. The old
+`repo-aegis audit --org|--published` flags print that replacement command and
+exit 2 without running anything.
 
 ### "End an engagement"
 
@@ -1214,19 +1216,24 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | `MANAGED_NEEDS_TTY` / `MANAGED_NOT_CONFIRMED` / `PRIVILEGED_TOOL_UNSAFE` / `SYSTEM_DIR_UNSAFE` / `DROPIN_INVALID` (`install claude-md`) | the drop-in is written (or removed) as root and needs a person at a terminal who types `y`; `sudo` or a tool it would run, or the system directory or a parent, is not root-owned/safe; the rendered drop-in failed validation (for example a path with a newline) | tell the user to run the command in their own terminal; for the two safety refusals the output says what is wrong and offers `--user-settings`. There is no flag that skips any of them |
 | `SHIM_MISSING` / `SHIM_NOT_FIRST` / `SHIM_STALE` / `GUARD_HOOK_UNREGISTERED` (`doctor`; `SHIM_NOT_FIRST`, `SHIM_MISSING` and `GUARD_HOOK_UNREGISTERED` are failures, `SHIM_STALE` a warning; `SHIM_NOT_FIRST` is a failure because the shim is the only guard for a `gh` call the hook does not parse) | the `gh` shim is absent, shadowed on `PATH`, or left over from an earlier release; the guard hook is not in `settings.json` | suggest `repo-aegis install shim` / fixing `PATH` order / `repo-aegis install claude-md`. A shadowed shim is also why a `gh` verb can be refused with `SHIM_UNREACHABLE_NEEDS_HUMAN`. |
 
-`audit` also emits per-finding diagnostic codes inside its
-`checks[].findings[].detail.code` field (NOT top-level error codes —
-the audit command's own exit code reflects the aggregate). Watch for:
-- `ORG_SCAN_CONSENT_REQUIRED` — `audit --org` ran without
+`audit` and `repo-aegis-scan audit` also emit per-finding diagnostic codes
+inside their `checks[].findings[].detail.code` field (NOT top-level error
+codes — the command's own exit code reflects the aggregate). The `ORG_SCAN_*`
+and `PUBLISHED_*` codes below come from `repo-aegis-scan audit`. Watch for:
+- `AUDIT_NETWORK_MOVED` — a top-level error (exit 2), not a finding:
+  `repo-aegis audit` was given `--org` or `--published`, which moved to
+  `repo-aegis-scan audit`. The error text is the exact replacement command.
+  Run it; do not re-add the flag to `repo-aegis audit`.
+- `ORG_SCAN_CONSENT_REQUIRED` — `repo-aegis-scan audit --org` ran without
   `--accept-cross-border` (or `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1`).
   The user must agree to the cross-border data transfer first; do NOT
   auto-add the flag.
 - `ORG_SCAN_TRUNCATED` — the seed-derived query cap (`--max-queries`,
   default 30) was hit; the result is partial.
-- `PUBLISHED_ARCHIVE_ESCAPE` — `audit --published` extracted a
+- `PUBLISHED_ARCHIVE_ESCAPE` — `repo-aegis-scan audit --published` extracted a
   zip-slip-suspect archive (an entry resolves outside the temp dir);
   the audit refuses to scan it. Do NOT bypass.
-- `PUBLISHED_SECRET_SHAPE` — `audit --published` found a universal
+- `PUBLISHED_SECRET_SHAPE` — `repo-aegis-scan audit --published` found a universal
   secret shape (PEM private-key header, its hex form, a JWT, a forge
   token) in the archive. Reports kind, path and count, never the
   matched bytes. Treat as a stop-the-publish finding: the credential is
@@ -1235,7 +1242,7 @@ the audit command's own exit code reflects the aggregate). Watch for:
   rotating the credential — `--no-secret-scan` suppresses the check and
   is only right when the string is genuinely an example.
 - `PUBLISHED_EMPTY_DENY_SET` — **informational**, does not fail the
-  check. `audit --published` ran with a zero-pattern deny set, so
+  check. `repo-aegis-scan audit --published` ran with a zero-pattern deny set, so
   archive contents were not matched against any engagement marker. This
   is normal on CI (the registry is machine-local by design) and is
   reported so a vacuous scan cannot be mistaken for a clean one. Do NOT
@@ -1300,7 +1307,7 @@ If you're running this from an agent context:
 |---|---|---|
 | `REPO_AEGIS_HOME` | Override `~/.config/repo-aegis` as the config home | Stderr warning printed on every TTY invocation when set; suppressed in hook context. |
 | `REPO_AEGIS_REGISTRY` | Override the registry path independently from home | Set by the `--registry-path` global flag. |
-| `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER` | Equivalent to passing `--accept-cross-border` to `audit --org` | The user must set this themselves; do not auto-set. |
+| `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER` | Equivalent to passing `--accept-cross-border` to `repo-aegis-scan audit --org` | The user must set this themselves; do not auto-set. |
 | `REPO_AEGIS_EGRESS_HUMAN` | Declares that a human is present for one publishing command (`=1`), satisfying the egress guard's "needs a person" rule where no TTY is on stderr | **Human-only, by contract.** Never set it, never suggest setting it, never wrap a command in it. Setting it from an agent is a visible act in the transcript and defeats the one control that exists for exactly that case. If a publish needs a person, say so and stop. |
 | `REPO_AEGIS_WAIVE_NONINTERACTIVE` | The equivalent escape for `repo-aegis waive` | Same contract: human-only. |
 

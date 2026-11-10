@@ -292,13 +292,17 @@ successful filing exits `0` and the issue *is* the reaction. `2` is always an
 error.
 
 For a cheaper alternative with no state file and no second package, see
-[`examples/org-sweep.yml`](../examples/org-sweep.yml), which runs `audit --org`
-on a schedule. Note that `--accept-cross-border` there is a compliance gate, not
-a convenience flag — it sends marker-derived substrings to GitHub.
+[`examples/org-sweep.yml`](../examples/org-sweep.yml), which runs
+`repo-aegis-scan audit --org` on a schedule. That verb used to be
+`repo-aegis audit --org`; it moved to the scan package, and this action installs
+only the gate CLI, so the example installs `@de-otio/repo-aegis-scan` itself
+instead of using the action. Note that `--accept-cross-border` there is a
+compliance gate, not a convenience flag — it sends marker-derived substrings to
+GitHub.
 
 ---
 
-## Publishing artifacts: gate on `audit --published`
+## Publishing artifacts: gate on `repo-aegis-scan audit --published`
 
 A tracked-file scan does not cover what you ship. `files` / `.npmignore` drift,
 build output, and stray fixtures land in a tarball without necessarily being
@@ -315,9 +319,7 @@ Pack once, scan that artifact, publish **that same artifact**:
     set -euo pipefail
     mkdir -p "$PACK_DIR"
     tgz=$(npm pack --silent --pack-destination "$PACK_DIR")
-    repo-aegis audit --published "${PACK_DIR}/${tgz}" --json \
-      --no-marker-scan --no-lockfile-check --no-fixture-check \
-      --no-remote-check --no-hooks-check
+    repo-aegis-scan audit --published "${PACK_DIR}/${tgz}" --json
     echo "TARBALL=${PACK_DIR}/${tgz}" >> "$GITHUB_ENV"
 
 - name: Publish
@@ -327,10 +329,15 @@ Pack once, scan that artifact, publish **that same artifact**:
 Packing again at publish time would mean the bytes you scanned and the bytes you
 ship are two different archives. This repo's own
 [`publish.yml`](../.github/workflows/publish.yml) does exactly the above, and
-scans with the just-built CLI rather than the published one — a released
+scans with the just-built scanner rather than the published one — a released
 regression must not be able to bless its own tarball.
 
-`audit --published` accepts a `.tgz`, a `.vsix`, or a bare npm package name.
+`repo-aegis-scan audit --published` accepts a `.tgz`, a `.vsix`, or a bare npm
+package name. It was `repo-aegis audit --published` before the move; that flag now
+prints the replacement command and exits 2 (see
+[`audit`](cli-reference.md#repo-aegis-audit)). The scanner is a separate package
+(`npm install -g @de-otio/repo-aegis-scan`), so install it in the job before this
+step.
 
 ---
 

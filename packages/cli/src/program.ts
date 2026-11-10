@@ -8,7 +8,7 @@
 // hard failures inside subcommand handlers) lives in the bin wrapper or
 // the individual command modules — never in this file.
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -573,20 +573,22 @@ export async function buildProgram(): Promise<Command> {
 
   program
     .command("audit")
-    .description("composite repo audit: marker scan, lockfile, fixtures, remote consistency, optional org/published sweep")
+    .description("composite repo audit: marker scan, lockfile, fixtures, remote consistency, hooks (the org/published sweeps moved to `repo-aegis-scan audit`)")
     .option("--history", "also sweep full git history with `git log -G` per pattern (slow)")
     .option("--no-marker-scan", "skip the marker scan over tracked files")
     .option("--no-lockfile-check", "skip package-lock.json non-public-registry check")
     .option("--no-fixture-check", "skip scan of fixture/__fixtures__/testdata directories")
     .option("--no-hooks-check", "skip the git-hooks liveness check (core.hooksPath wiring); the generated CI workflow always sets this — hooks are never installed on a CI runner")
     .option("--no-remote-check", "skip the remote-vs-class consistency check")
-    .option("--org <org>", "also run a one-shot GitHub code-search sweep against this org (needs GH_TOKEN)")
-    .option("--published <pkg-or-tarball>", "also scan a packed npm tarball, VSIX bundle, or npm package name")
-    .option("--no-secret-scan", "with --published: skip the universal secret-shape scan (PEM keys, JWTs, forge tokens) over archive contents")
+    // Moved to `repo-aegis-scan audit` (P2-E). Still parsed, hidden from --help, and
+    // answered with the exact replacement command and exit 2. Drop after one release.
+    .addOption(new Option("--org <org>", "moved to `repo-aegis-scan audit --org`").hideHelp())
+    .addOption(new Option("--published <pkg-or-tarball>", "moved to `repo-aegis-scan audit --published`").hideHelp())
+    .addOption(new Option("--no-secret-scan", "moved with --published").hideHelp())
     .option("--ignore-allowlist-comments", "report findings a `repo-aegis: allow` comment suppresses (audit-grade strict; audit never applies waivers, so there is no --ignore-waivers counterpart)")
-    .option("--token <env-var>", "env var holding the GitHub token for --org (default GH_TOKEN)")
-    .option("--max-queries <n>", "cap on --org seed-derived queries per run (default 30)", v => parseInt(v, 10))
-    .option("--accept-cross-border", "consent to sending --org seed substrings to GitHub (or set REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER=1)")
+    .addOption(new Option("--token <env-var>", "moved with --org").hideHelp())
+    .addOption(new Option("--max-queries <n>", "moved with --org").argParser((v: string) => parseInt(v, 10)).hideHelp())
+    .addOption(new Option("--accept-cross-border", "moved with --org").hideHelp())
     .option("--min-patterns <n>", "exit 2 if the computed deny set has fewer than <n> patterns (fail closed on a missing registry)", v => parseInt(v, 10))
     .option("--require-deny-set", "sugar for --min-patterns 1")
     .option("--redact-attribution", "strip engagement ids and engagement-derived pattern ids from output (set this for anything published: PR comments, issues, public job logs)")

@@ -312,6 +312,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`doctor: 2 failing (1 machine, 1 across 219 repositories)`), and SKIPs that share a reason (two
   checks for one gh account, or `gh` absent) print as one line.
 
+- **`audit --org` and `audit --published` moved to `repo-aegis-scan audit`.** The gate CLI no
+  longer imports an HTTP client or runs `npm pack`: the network and archive checks now live in
+  `@de-otio/repo-aegis-scan` (`npm install -g @de-otio/repo-aegis-scan`), and an import-graph test
+  in core fails if a gate module (check, the hooks, pre-push, credential helper, render, the
+  local `audit`) reaches the scan package. Behaviour is unchanged: same check names (`org-scan`,
+  `published`), finding codes, JSON envelope, cross-border consent gate, fail-closed
+  `--min-patterns` / `REPO_AEGIS_MIN_PATTERNS` floor, and `--redact-attribution`. Flags move
+  with it: `--org`, `--published`, `--no-secret-scan`, `--token`, `--max-queries`,
+  `--accept-cross-border`.
+  - **Migration.** For one release `repo-aegis audit --org|--published` still parses (hidden from
+    `--help`), runs nothing, prints the exact replacement command
+    (`moved to \`repo-aegis-scan audit --org <org> …\``, error code `AUDIT_NETWORK_MOVED`) and
+    exits 2, so a CI step that still passes them fails loudly instead of going green. The new
+    verb runs only the network checks, so a job that wanted both now runs `repo-aegis audit` for
+    the local checks and `repo-aegis-scan audit --org|--published` for the rest. `repo-aegis-scan
+    audit` with neither flag exits 2.
+  - **Callers updated.** This repo's `publish.yml` scans each tarball with the just-built
+    `packages/scan/dist` (the `--no-*-check` flags it needed to silence the local checks are gone
+    with them), and `examples/org-sweep.yml` installs the scan package and runs
+    `repo-aegis-scan audit --org` directly, because the `repo-aegis` Action installs only the gate
+    CLI. If you use `command: audit` with `--org` or `--published` through the Action, move that
+    step the same way.
+  - `@de-otio/repo-aegis` no longer depends on `@de-otio/repo-aegis-scan`. The deny-set floor's
+    decision (`resolveMinPatterns`, `denySetFloorShortfall`) moved into core so both binaries
+    enforce one definition.
+
 ### Removed
 
 - **The Action's `registry` input.** It only exported `REPO_AEGIS_REGISTRY`, but `audit` and

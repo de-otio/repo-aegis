@@ -522,6 +522,10 @@ export {
 } from "./ci-output.js";
 export type { AttributedHit } from "./ci-output.js";
 
+// ---- fail-closed deny-set floor (shared by the CLI and the scan package) --
+export { resolveMinPatterns, denySetFloorShortfall } from "./deny-set-floor.js";
+export type { DenySetFloorInput, DenySetFloorShortfall } from "./deny-set-floor.js";
+
 // ---- regex safety --------------------------------------------------------
 // `validatePattern` (the single-pattern, in-process variant) is tagged
 // `@internal` in its source. Callers should prefer `validatePatterns`

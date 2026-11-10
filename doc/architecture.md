@@ -20,7 +20,10 @@ The monorepo has six packages plus a thin Action wrapper.
   code-search, filters out previously-seen hits via an atomic state
   file. Output formats: JSON, markdown report, or filed GitHub
   issue. Phase 3 adds opt-in `--semantic` mode and `rebuild-profiles`
-  verb. Deployment is packaged as the `actions/scan` composite
+  verb. It also owns `repo-aegis-scan audit --org | --published` (the one-shot
+  org sweep and the packed-archive scan), which moved out of `repo-aegis audit`
+  so the CLI's gate path imports no HTTP client and never runs `npm pack`;
+  an import-graph test in core keeps the gate modules free of it. Deployment is packaged as the `actions/scan` composite
   Action, with a reference workflow in
   [`examples/scheduled-sweep.yml`](../examples/scheduled-sweep.yml). It should
   still be **deployed from a private repo** — that is a security property, not
@@ -198,7 +201,7 @@ a string is identified as a leak by the same logic at every layer.
 
 ### Designed but not yet implemented
 
-- **Network-isolated mode** for `audit --published` (mirror registry).
+- **Network-isolated mode** for `repo-aegis-scan audit --published` (mirror registry).
 - **Auto-decrypt-on-demand** for `repo-aegis registry decrypt` so
   single commands that need the registry can fetch credentials inline
   rather than requiring an explicit decrypt step.

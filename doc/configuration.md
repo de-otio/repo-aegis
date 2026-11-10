@@ -725,7 +725,7 @@ file exists) or an empty directory.
 | `REPO_AEGIS_HOME` | Override `~/.config/repo-aegis` as the config home. Stderr warning printed on every TTY invocation when set; suppressed in hook context. |
 | `REPO_AEGIS_REGISTRY` | Override the registry path independently from home. Set by the `--registry-path` global flag. |
 | `REPO_AEGIS_MARKERS_DIR` | Override the directory of rendered marker files (default `markers/` under the config home). |
-| `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER` | Equivalent to passing `--accept-cross-border` to `audit --org`. The user must set this themselves; agents do not auto-set. |
+| `REPO_AEGIS_ACCEPT_ORG_SEED_TRANSFER` | Equivalent to passing `--accept-cross-border` to `repo-aegis-scan audit --org`. The user must set this themselves; agents do not auto-set. |
 | `REPO_AEGIS_NEW_REF_FULL_SCAN` | Set to `1` to force `check --push-ref` to fall back to a full-history scan unconditionally, bypassing the boundary-based incremental logic. Escape hatch for the rare case where the boundary derivation itself is suspect. |
 | `REPO_AEGIS_WAIVE_NONINTERACTIVE` | Set to `1` to let `repo-aegis waive` run with stdin that isn't a TTY. `waive` refuses otherwise, specifically so a hook, script, or coding agent cannot mint a waiver on its own behalf. A human deliberately scripting a waiver still has to set this themselves. |
 | `REPO_AEGIS_MIN_PATTERNS` | Minimum deny-set size; `check` and `audit` exit 2 below it. Equivalent to `--min-patterns <n>`. The composite Action sets it from its `require-deny-set` / `min-patterns` inputs rather than splicing a flag into a user-supplied `args` string, where a consumer could overwrite it. |
