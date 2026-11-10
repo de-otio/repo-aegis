@@ -53,7 +53,7 @@ export const REFUSAL_GUIDE: Readonly<Record<string, RefusalGuideEntry>> = {
   TOKEN_MINT_NEEDS_HUMAN: agent("Use plain `gh <verb> --repo <owner>/<repo> ...` and do not mint or read tokens or keychain secrets."),
   PAYLOAD_MARKER_HIT: agent("Run `repo-aegis check --path <file>` from the destination repository, redact what it names, and re-run."),
   HOOK_INPUT_TOO_LARGE: agent("Put the large content in a file and pass the file, or write it in smaller parts."),
-  AGENT_DETACHED_SESSION: agent("Run the command in the foreground, or ask your human to start the long-lived session."),
+  AGENT_DETACHED_SESSION: agent("Run the command in the foreground, or as a plain `nohup <command> &` for a dev server."),
   PATH_NOT_SCANNED: agent("Fix the path or the size limit and re-run; never report the file as clean."),
   READBACK_UNAVAILABLE: agent("Tell your human the published body was not verified and offer to show it."),
   AGENT_PUSH_NEEDS_APP: agent("Push over HTTPS: `git push https://github.com/<owner>/<repo>.git <branch>`."),

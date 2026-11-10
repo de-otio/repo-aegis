@@ -21,7 +21,7 @@ import {
   USAGE_AFTER_TERMINAL_GATE,
   withRefusalTrailer,
 } from "@de-otio/repo-aegis-core";
-import { errorRows, knownCodes, type Docs } from "./commands/explain.js";
+import { errorRows, explanationFor, knownCodes, type Docs } from "./commands/explain.js";
 
 const here = dirname(fileURLToPath(import.meta.url)); // packages/cli/dist
 const PACKAGES = resolve(here, "..", "..");
@@ -365,6 +365,27 @@ describe("refusal lint (X-10)", () => {
     assert.match(reported.join("\n"), /"code"/);
     // an allowlisted helper file may pass a code through
     assert.deepEqual(findOpaqueEmitErrors([{ path: "/x/src/require-terminal.ts", text: fake[0]!.text }]), []);
+  });
+
+  it("`explain` shows the table's next step and person-only answer, so a drift from the guide row is visible (M3)", () => {
+    const e = explanationFor(guide, "PAUSE_TOO_LONG");
+    assert.ok(e !== null);
+    assert.equal(e.nextStep, REFUSAL_GUIDE["PAUSE_TOO_LONG"]!.next);
+    assert.equal(e.personOnly, true);
+    const agentFix = explanationFor(guide, "PUSH_IMPLICIT_TARGET");
+    assert.equal(agentFix?.personOnly, false);
+    // a code the guide documents but that is not a refusal (a doctor finding) has no table entry
+    const finding = explanationFor(guide, "SHIM_STALE");
+    assert.ok(finding !== null);
+    assert.equal(finding.nextStep, null);
+    assert.equal(finding.personOnly, null);
+    // for every table code, explain agrees with the table
+    for (const [code, entry] of Object.entries(REFUSAL_GUIDE)) {
+      const x = explanationFor(guide, code);
+      assert.ok(x !== null, code);
+      assert.equal(x.nextStep, entry.next, code);
+      assert.equal(x.personOnly, entry.personOnly, code);
+    }
   });
 
   it("the scan reads plain CLI errors: an emitError code, a single-word code, an error class's own code, a constructor argument", () => {

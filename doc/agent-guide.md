@@ -1082,7 +1082,7 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 
 | Code | Meaning | Recovery |
 |---|---|---|
-| `USAGE` | flag combination invalid | re-read the command's flags; do not retry blindly |
+| `USAGE` | flag combination invalid | re-read the command's flags; do not retry blindly. When `approve`, `pause`, `identity …` or `engagements set-identity` raises it after its terminal check, the reader is a person and the refusal says so ("Only a person can run it: yes"); the code stays `USAGE`. |
 | `NOT_GIT_REPO` | command needs a git repo, this dir isn't one | confirm with `git rev-parse --is-inside-work-tree`; if user wants to scan ad-hoc, use `check --path` (which works outside a git repo) |
 | `REGISTRY_NOT_FOUND` | `engagements.yaml` missing | run `repo-aegis init`; user-confirmed if the home is non-default |
 | `REGISTRY_PARSE` | YAML invalid / shape wrong | open the registry, fix YAML; `details` carries the underlying parse error |
