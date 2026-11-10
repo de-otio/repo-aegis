@@ -223,9 +223,6 @@ Working in another repository, where those files are not on disk? Every refusal 
 `[CODE; details: repo-aegis explain CODE]`, and `repo-aegis explain <CODE>` prints the guide's text for it
 (the guides ship in the npm package; `explain --list` names every code).
 
-Optional add-ons: [packages/llm](packages/llm/README.md) (local-LLM marker suggestions and a
-semantic audit sweep; never part of the blocking checks).
-
 ## Companion tools
 
 repo-aegis is not a general secret scanner. Its small built-in secret-shape check

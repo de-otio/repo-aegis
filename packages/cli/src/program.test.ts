@@ -117,7 +117,6 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "scan-env",
       "selftest",
       "status",
-      "suggest-markers",
       "uninstall",
       "upgrade",
       "upstreams",
@@ -203,20 +202,6 @@ const EXPECTED_SHAPE: CommandShape[] = [
   {
     path: "scan-env",
     flags: ["--accept", "--engagement", "--from", "--scan-home", "--self"],
-    subcommands: [],
-  },
-  {
-    path: "suggest-markers",
-    flags: [
-      "--accept-remote-author-domains",
-      "--allow-remote-model",
-      "--auto-accept-above",
-      "--dry-run",
-      "--endpoint",
-      "--engagement",
-      "--from",
-      "--model",
-    ],
     subcommands: [],
   },
   {

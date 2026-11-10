@@ -134,7 +134,7 @@ jobs:
           # npm actually produced and have the publish step read it back, so the
           # archive that ships is provably the archive that was scanned.
           : > "$PACK_DIR/manifest.txt"
-          for pkg in core llm scan cli; do
+          for pkg in core scan cli; do
             dir="packages/${pkg}"
             name=$(node -p "require('./${dir}/package.json').name")
             echo "==> Packing ${name} from ${dir}"
@@ -167,8 +167,7 @@ jobs:
           fi
 
           # Order matters: core must publish before any package that
-          # consumes @de-otio/repo-aegis-core, and llm must publish
-          # before cli/scan (which import from it). Workspaces
+          # consumes @de-otio/repo-aegis-core (cli, scan, mcp). Workspaces
           # cross-reference each other via npm semver, NOT workspace
           # protocol, so the dependency strings already point at the
           # registry version (^0.3.0).

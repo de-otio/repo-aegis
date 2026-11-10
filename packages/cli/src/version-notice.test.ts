@@ -163,7 +163,7 @@ describe("noticeApplies: where it is never printed", () => {
     // Commands a person runs at a terminal: they print the notice. Everything else must be in QUIET_COMMANDS (checked
     // through noticeApplies), so a command that is a protocol or machine reader cannot pick the notice up by default.
     const WITH_NOTICE = new Set([
-      "allow", "approve", "audit", "audit-log", "check", "classify", "context", "deny", "doctor", "engagements", "identity", "install", "markers", "pause", "registry", "render", "resume", "scan-env", "status", "suggest-markers", "upstreams", "waive",
+      "allow", "approve", "audit", "audit-log", "check", "classify", "context", "deny", "doctor", "engagements", "identity", "install", "markers", "pause", "registry", "render", "resume", "scan-env", "status", "upstreams", "waive",
     ]);
     const top = (await buildProgram()).commands.map(c => c.name());
     const unclassified = top.filter(name => !WITH_NOTICE.has(name) && noticeApplies([name], none));

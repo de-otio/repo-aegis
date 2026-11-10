@@ -20,7 +20,7 @@
 // one row. The honest mistake the file covers: shipping a release that blocks the main path for every sandboxed agent.
 // 0.13.1 refused every sandboxed fetch and 0.13.2 refused every sandboxed push, and the unit tests passed both times.
 //
-// REPLAYING A PUBLISHED RELEASE (the regression check): `npm pack` the four packages of a published version into a
+// REPLAYING A PUBLISHED RELEASE (the regression check): `npm pack` the packages of a published version (0.13.2 still had the llm package) into a
 // directory and set E2E_TARBALL_DIR to it, e.g.
 //   npm pack --pack-destination "$TMPDIR/ra-0.13.2" @de-otio/repo-aegis@0.13.2 @de-otio/repo-aegis-core@0.13.2 \
 //     @de-otio/repo-aegis-llm@0.13.2 @de-otio/repo-aegis-scan@0.13.2

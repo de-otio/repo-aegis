@@ -298,64 +298,6 @@ app slugs; nothing secret), and `repo-aegis doctor` reports
 `OWNER_IDENTITY_UNMAPPED` for registered owners with none. Nothing yet chooses
 or injects a token from them: plain `gh` and `git` behave as before.
 
-### "Suggest markers for this engagement from the repo's prose"
-
-```sh
-# Dry-run — print the candidates as JSON, do not modify anything:
-repo-aegis suggest-markers --engagement customer-a --dry-run --json
-
-# Auto-accept candidates above a confidence threshold:
-repo-aegis suggest-markers --engagement customer-a --auto-accept-above 0.7
-
-# Without --auto-accept-above and --dry-run, prints "review-required":
-# the surviving candidate list is printed and nothing is written.
-# Re-run with --auto-accept-above (or --dry-run) once the user has reviewed.
-repo-aegis suggest-markers --engagement customer-a --json
-```
-
-Phase 2 pipeline:
-
-1. **Extract prose.** Walks the current repo with hard-coded depth/file
-   caps; reads README, CONTRIBUTING, CODEOWNERS, package.json metadata,
-   docs, top-of-file comments. Hard-skipped: `.env*`, secrets, anything
-   under `.git/`, `.ssh/`, `.aws/`, `.gnupg/`.
-2. **Ask Ollama** (local, default `http://127.0.0.1:11434`,
-   loopback-only by default) which strings look like customer
-   identifiers. Anti-injection preamble + fenced delimiters protect
-   the prompt.
-3. **Synthesise** word-boundary regexes per token kind (company,
-   codename, person-name, domain, ticket-prefix, account-id, other).
-4. **Filter:** dictionary words, dependency names from
-   `package.json` / `Cargo.toml` / `go.mod` / `pyproject.toml`,
-   patterns already in this engagement's marker list, tokens that
-   match `personalOrgs` / `$USER` / `$HOME` basename (`[SEC H-2]`).
-5. **Decide:**
-   - `--dry-run` → print, exit 0, no writes.
-   - `--auto-accept-above <T>` → accept candidates with `confidence >= T`
-     that pass the identity guard; identity-rejected candidates are
-     dropped (cannot be auto-accepted).
-   - Neither → print "review-required" candidate list and exit 0
-     without persisting. The user re-runs with one of the two flags.
-6. Approved patterns are appended to the engagement's marker list
-   under a single registry lock (`addMarkerPatterns`), `render` runs,
-   and the audit log records source basename, model id, endpoint host
-   kind, candidate / accepted / identity-rejected counts, and the
-   prompt version (`[SEC H-6]`). **Never** the literal patterns or
-   tokens.
-
-This is **discovery only** — never run on a hot path. The
-deterministic gate (PostToolUse, pre-commit, pre-push) remains regex
-against fixed marker files.
-
-If Ollama isn't installed or running, the command exits with a clear
-`OLLAMA_ERROR` rather than falling back. Ask the user.
-
-If the endpoint is non-loopback and you didn't pass
-`--allow-remote-model`, the command exits `REMOTE_DISALLOWED` before
-opening any connection. Do **not** add `--allow-remote-model` on
-your own initiative — sending customer prose to a non-local model is
-a compliance decision the user owns.
-
 ### "I just got a hit, what do I do"
 
 See [Reacting to a PostToolUse hit](#reacting-to-a-posttooluse-hit)
@@ -487,8 +429,7 @@ engagement registry.
 `install hooks` / `install claude-md` / `install gitignore` /
 `install ci` / `install shim` / `install git-credential`, `render`,
 `registry encrypt` / `registry decrypt`, `waive` (add and remove),
-`approve` (mint, revoke and use of an egress approval), `suggest-markers`,
-`scan-env`, `doctor` repairs, `uninstall`, and a refused publish
+`approve` (mint, revoke and use of an egress approval), `scan-env`, `doctor` repairs, `uninstall`, and a refused publish
 (`check-egress-refused`). The list grows with the CLI; the source of
 truth is the `appendAuditRecord` call sites in `packages/cli/src`. One
 record per successful invocation, written *after* the primary action
@@ -820,7 +761,7 @@ What the steps do:
   every git working tree underneath, and unsets `repo-aegis.class` /
   `repo-aegis.engagement` from each. Idempotent.
 - **`--purge-home`:** deletes `~/.config/repo-aegis/` (the registry,
-  audit log, marker files, deny-set cache, embedding profiles, age
+  audit log, marker files, deny-set cache, age
   ciphertext, leak-context flag). Refused if the home path doesn't
   end in `repo-aegis` (anti-fat-finger guard against a
   `REPO_AEGIS_HOME` pointing somewhere unrelated).
@@ -1129,11 +1070,6 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | `GIT_CONFIG_ERROR` / `GIT_ERROR` | a git plumbing call failed | `details` carries the underlying git stderr |
 | `RENDER_ERROR` | unexpected render failure | unusual; surface to user |
 | `REGISTRY_ERROR` | `hook check-write` or `hook scan-after-write` could not read the registry: it does not parse or validate, or a newer repo-aegis wrote it (both exit 2, `check-write` refuses the write; the message names no org). An encrypted registry is not an error here: it is read as no registry | surface to the user: for a parse failure they run `repo-aegis status` or `doctor` in a terminal to see why; for "written by a newer repo-aegis" they upgrade repo-aegis and run `repo-aegis install claude-md` |
-| `OLLAMA_ERROR` | `suggest-markers` could not reach the Ollama server | the user must `ollama serve` and pull the model; do not retry blindly |
-| `REMOTE_DISALLOWED` | Ollama endpoint failed `[SEC H-1]` validation (non-loopback without the matching opt-in flag, bad protocol, user-info, `localhost` resolves to non-loopback). Raised by `suggest-markers` (flag: `--allow-remote-model`) and by `repo-aegis-scan` (flag: `--allow-remote-ollama`). | surface to user; do not auto-add either opt-in flag |
-| `BUNDLE_TOO_LARGE` | extracted prose exceeded the model's context budget | `details.bytes` carries the size; the user owns whether to shrink the corpus |
-| `BUNDLE_FENCE_COLLISION` | extracted prose contained the chosen fence delimiter | retry happens automatically with a fresh delimiter; surfacing this means the retry also failed |
-| `ROOT_CONTAINMENT` | `extractProse` resolved a forbidden ancestor path (`~/.config/repo-aegis`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/git`) | a likely symlink-attack indicator; do NOT bypass |
 | `PUSH_IMPLICIT_TARGET` | egress guard: `git push` without both `<remote>` and `<refspec>` | re-issue as `git push <remote> <branch>`. The guard never rewrites the command for you; do not ask it to. |
 | `EGRESS_AFTER_CD` | egress guard: a publishing command follows a `cd`/`pushd` in the same command line | use `git -C <abs-path>` or `gh --repo <org>/<repo>`, and give the publishing command its own tool call |
 | `EGRESS_UNGUARDED_CHAIN` | egress guard: a publishing command is joined to earlier segments with `;`, `\|\|` or `&` | chain with `&&`, or run it as a separate call |
@@ -1260,46 +1196,16 @@ and `PUBLISHED_*` codes below come from `repo-aegis-scan audit`. Watch for:
 Generic codes you should ignore in favour of recovery:
 - `error` (no `code` field) — fatal but not categorised; surface to the user.
 
-## Centralised sweep (`repo-aegis-scan`) and Phase 3 semantic mode
+## Centralised sweep (`repo-aegis-scan`)
 
 The `repo-aegis-scan` binary is a *separate* tool from the developer
 gate: it runs in CI / cron / on a scheduled job server, sweeps GitHub
 code-search for marker hits across orgs, and reports findings as
 JSON / markdown / GitHub issues.
 
-Phase 3 adds two opt-in extensions:
-
-- `repo-aegis-scan rebuild-profiles` — for each engagement with
-  `reposActive`, walks the first available repo, embeds its
-  representative prose via Ollama, and writes
-  `~/.config/repo-aegis/profiles/<engagement-id>.json` (chmod 0600,
-  schema-versioned, sha256-stamped manifest).
-  - `--diff` re-hashes the current reference docs and reports drift
-    against the stored manifest *without* embedding or writing.
-    Surface the diff to the user before agreeing to rebuild
-    (`[SEC H-3]` defends against silent reference-document
-    manipulation).
-  - `--engagement <id>...` restricts to specific engagements.
-- `repo-aegis-scan run --semantic` — after the regex sweep, fetches
-  each new candidate's blob, embeds it, scores it against every
-  profile, and reports engagements over the per-profile threshold.
-  Best-effort: Ollama failures increment a counter (`embedErrors`)
-  but never abort the regex sweep.
-
-Output gains a `semantic` JSON section / "Semantic hits" markdown
-table with columns: engagement, similarity, threshold, candidate
-URL. **Never** the candidate's text or the profile's reference
-content — only the scalar similarity and the URL.
-
-If you're running this from an agent context:
-
-- `--allow-remote-ollama` is gated behind the same `[SEC H-1]`
-  validation as Phase 2; do not auto-set it.
-- The semantic sweep is *advisory*. Treat it as a triage signal,
-  not a block. A semantic hit without a regex hit means "this file
-  looks semantically like customer X's content but didn't match a
-  literal marker" — possibly a real leak, possibly a false positive
-  on technical similarity.
+The embedding-based semantic mode (`run --semantic`, `rebuild-profiles`, the
+`--ollama-*` flags) was removed in 0.15.0. Passing one exits 2 with a `REMOVED`
+error; drop the flag. The regex sweep is unchanged.
 
 ## Environment variables
 
@@ -1388,7 +1294,6 @@ shape we don't model.
 | `hook check-write` | (PreToolUse entry, `Write\|Edit\|MultiEdit`) refuse a cross-org, waiver-file or gh-config write before it happens | no output on allow; refusal payload (`code`, `error`, `details`) on stderr, exit 2 |
 | `hook scan-after-write` | (PostToolUse entry) scan the written file; its own logic, so no waivers and no deny-set floor | `mode`, `hits`, `historyHits`, `skipped`, `repo`, `denySet`, `advisory`, `warnings` (stderr, exit 1 on a hit unless advisory); `hits`, `skipped`, `status: "no-deny-set"`, `warnings` when the deny set is empty |
 | `hook first-touch` | (SessionStart entry) classify previously-unclassified repo | `status` (`already-classified`/`applied`/`needs-confirmation`/`skipped`), redacted `details` |
-| `suggest-markers --engagement <id> [--auto-accept-above <n>\|--dry-run]` | LLM-assisted marker discovery (Phase 2) | `action`, `engagement`, `candidates`, `accepted` (when persisting), `dryRun?`, `review?`, `identityRejected?`, `skippedDuplicates?`, `rendered?` |
 | `init --migrate-classify` | port legacy `classify.yml` to registry | `action`, `migrated`, `personalOrgs`, `engagements` |
 | `audit-log on` | enable compliance trail | `action`, `wasOn`, `isOn`, `path` |
 | `audit-log off` | disable compliance trail | `action`, `wasOn`, `isOn`, `path` |

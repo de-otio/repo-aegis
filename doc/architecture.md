@@ -6,11 +6,11 @@
 
 ## Workspace packages
 
-The monorepo has six packages plus a thin Action wrapper.
+The monorepo has five packages plus a thin Action wrapper.
 
 - **`@de-otio/repo-aegis-core`** — the registry / deny-set / scanner
-  library. Hot-path code only — deterministic, free of LLM
-  dependencies. The import-graph guard test in
+  library. Hot-path code only — deterministic, offline, and free of
+  LLM dependencies (the LLM package was removed in 0.15.0). The import-graph guard test in
   [`packages/core/src/import-graph.test.ts`](../packages/core/src/import-graph.test.ts)
   enforces this property.
 - **`@de-otio/repo-aegis`** — the developer CLI: blocks leaks at
@@ -19,8 +19,7 @@ The monorepo has six packages plus a thin Action wrapper.
   reads queries from a YAML file, runs them against GitHub
   code-search, filters out previously-seen hits via an atomic state
   file. Output formats: JSON, markdown report, or filed GitHub
-  issue. Phase 3 adds opt-in `--semantic` mode and `rebuild-profiles`
-  verb. It also owns `repo-aegis-scan audit --org | --published` (the one-shot
+  issue. It also owns `repo-aegis-scan audit --org | --published` (the one-shot
   org sweep and the packed-archive scan), which moved out of `repo-aegis audit`
   so the CLI's gate path imports no HTTP client and never runs `npm pack`;
   an import-graph test in core keeps the gate modules free of it. Deployment is packaged as the `actions/scan` composite
@@ -31,12 +30,6 @@ The monorepo has six packages plus a thin Action wrapper.
   file records where matches were found, and a code-search token spans every
   org the operator can read. See
   [data-leaks-on-github/code-search-solution.md](https://github.com/de-otio/dot-notes/blob/main/doc/topics/data-leaks-on-github/code-search-solution.md).
-- **`@de-otio/repo-aegis-llm`** — LLM-assisted helpers (Ollama HTTP
-  client, prose extraction, token synthesis, embedding profiles).
-  Off the deterministic gate path: only consumed by the CLI's
-  `suggest-markers` verb and the scanner's `--semantic` /
-  `rebuild-profiles` verbs. See
-  [packages/llm/README.md](../packages/llm/README.md).
 - **`repo-aegis-vscode`** — VSCode extension: surfaces the CLI's
   status and scan output in the editor (status bar, diagnostics,
   commands). View-only — the deterministic gate stays in the git
@@ -97,13 +90,11 @@ a string is identified as a leak by the same logic at every layer.
 - **Phase 1 — zero-config onboarding.** Org-keyed JIT classification
   on first agent touch (`hook first-touch` + `engagements add
   --github-org`).
-- **Phase 2 — LLM-assisted marker discovery.** `suggest-markers`
-  proposes customer tokens via a local Ollama model. The
-  deterministic gate remains regex-only.
-- **Phase 3 — semantic audit sweep.** `repo-aegis-scan --semantic` /
-  `rebuild-profiles`. Off-machine, asynchronous, advisory. Hot-path
-  determinism is preserved — see
-  [design/zero-config-onboarding.md](design/zero-config-onboarding.md).
+- **LLM-assisted marker discovery and the semantic sweep (removed in
+  0.15.0).** `suggest-markers`, `repo-aegis-scan --semantic` and
+  `rebuild-profiles` were deleted: the deterministic gate is regex-only
+  and the LLM paths added a network dependency and a data-egress surface
+  for little accuracy gain.
 - **Path-aware write hooks.** Cross-tree writes inside a shared
   trust boundary scan against the destination's rules; the PreToolUse
   `check-write` hook refuses cross-org writes before they happen.

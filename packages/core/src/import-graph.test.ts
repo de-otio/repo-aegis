@@ -18,7 +18,7 @@
 
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
 // ---- configuration --------------------------------------------------------
@@ -350,5 +350,76 @@ describe("gate path carries no network code (audit --org/--published moved to re
       NETWORK_STRING_LITERALS.some(re => re.test(readFileSync(p, "utf8"))),
     );
     assert.ok(literalHit, "expected the literal detector to fire on the moved code");
+  });
+});
+
+// ---- removed-code guard (0.15.0) -------------------------------------------
+//
+// The LLM package, `suggest-markers`, and the semantic sweep / profile rebuild
+// were deleted. Nothing may import them back in unnoticed: a stray import would
+// either fail the build or, worse, resurrect a network-calling code path next
+// to the gate. This walks every package's *source* (the gate-path walk above
+// only covers a few entry points) and every package.json.
+
+const REMOVED_SPECIFIER_PATTERNS: RegExp[] = [
+  /repo-aegis-llm/,
+  /(?:^|[\\/])packages[\\/]llm(?:[\\/]|$)/,
+  /(?:^|[\\/])(?:semantic-sweep|rebuild-profiles|suggest-markers|profile-loader)(?:\.js|\.ts)?$/,
+];
+
+function listSourceFiles(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    if (name === "node_modules" || name === "dist") continue;
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) listSourceFiles(full, out);
+    else if (name.endsWith(".ts") || name.endsWith(".mts")) out.push(full);
+  }
+  return out;
+}
+
+describe("removed LLM / semantic code stays removed", () => {
+  const repoRoot = findRepoRoot();
+  const packagesDir = join(repoRoot, "packages");
+  const packageDirs = readdirSync(packagesDir)
+    .map(n => join(packagesDir, n))
+    .filter(d => existsSync(join(d, "package.json")));
+
+  it("sees the workspace packages (the walk below is not vacuous)", () => {
+    assert.ok(packageDirs.length >= 3, `expected workspace packages, got ${packageDirs.length}`);
+  });
+
+  it("packages/llm no longer exists", () => {
+    assert.equal(existsSync(join(packagesDir, "llm")), false);
+  });
+
+  it("no source file imports the removed package or modules", () => {
+    const offenders: string[] = [];
+    for (const dir of packageDirs) {
+      const srcDir = join(dir, "src");
+      if (!existsSync(srcDir)) continue;
+      for (const file of listSourceFiles(srcDir)) {
+        if (file.endsWith("import-graph.test.ts")) continue; // this file names the patterns
+        for (const spec of extractStaticImportSpecifiers(readFileSync(file, "utf8"))) {
+          if (REMOVED_SPECIFIER_PATTERNS.some(re => re.test(spec))) {
+            offenders.push(`${relative(repoRoot, file)}  imports "${spec}"`);
+          }
+        }
+      }
+    }
+    assert.deepEqual(offenders, []);
+  });
+
+  it("no package.json depends on the removed package", () => {
+    const offenders: string[] = [];
+    for (const dir of [repoRoot, ...packageDirs]) {
+      const json = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as Record<string, unknown>;
+      for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+        const deps = json[field];
+        if (deps && typeof deps === "object" && "@de-otio/repo-aegis-llm" in deps) {
+          offenders.push(`${relative(repoRoot, join(dir, "package.json"))} (${field})`);
+        }
+      }
+    }
+    assert.deepEqual(offenders, []);
   });
 });

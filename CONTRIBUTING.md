@@ -58,10 +58,10 @@ lookup inject a stub (`lookupVisibility`) instead.
 Tests must never depend on the developer's environment. If you add a test that
 runs `git`, assume no global config exists.
 
-**Sandboxed environments:** a few `llm` tests bind a loopback TCP port to mock
-Ollama. If your shell forbids `listen()` (some agent sandboxes do), those tests
-fail with `EPERM` or hang. That is an environment limit, not a defect — they
-pass in CI and on a normal machine.
+**Sandboxed environments:** a few tests bind a loopback TCP port. If your shell
+forbids `listen()` (some agent sandboxes do), those tests fail with `EPERM` or
+hang. That is an environment limit, not a defect — they pass in CI and on a
+normal machine.
 
 ### Coverage targets
 
