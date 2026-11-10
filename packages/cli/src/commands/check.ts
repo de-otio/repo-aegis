@@ -68,6 +68,8 @@ import {
   loadRegistryState,
   registryUnreadable,
   appendAuditRecord,
+  pauseNotice,
+  type PauseState,
   type Registry,
   type RepoVisibility,
   CustomerCoupledNoEngagementError,
@@ -99,6 +101,7 @@ import {
 import { emitJson, emitText, emitError, shouldRevealMatches } from "../format.js";
 import { currentHumanPresent } from "../human-presence.js";
 import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
+import { pauseCoveringDestinations, pauseCoveringWorkingRepo } from "../pause-scope.js";
 
 interface CheckOptions extends DenySetFloorOptions {
   /**
@@ -844,6 +847,23 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions): CheckDestina
   return dest;
 }
 
+/**
+ * The pause covering this run, when it is a pre-commit or pre-push run (see the call site), else null. Pre-commit is
+ * scoped by the working repo's origin, pre-push by the push's destination (resolved offline, as pre-push does).
+ */
+function pausedHookRun(opts: CheckOptions): PauseState | null {
+  const prePush = (!!opts.pushRef || !!opts.range) && opts.remoteUrl !== undefined && opts.remoteUrl.trim() !== "";
+  if (!opts.staged && !prePush) return null;
+  const cwd = opts.cwd ?? process.cwd();
+  if (!prePush) return pauseCoveringWorkingRepo(cwd);
+  try {
+    const target = resolveRemoteUrl(opts.remoteUrl, undefined, { sshOverride: detectSshOverride(cwd) });
+    return pauseCoveringDestinations([target.kind === "github" ? { org: target.org, repo: target.repo } : null]);
+  } catch {
+    return null;
+  }
+}
+
 export function check(opts: CheckOptions): void {
   // Validate flags FIRST. Exactly one of --staged, --path, --range,
   // --push-ref, --history must be specified.
@@ -860,6 +880,16 @@ export function check(opts: CheckOptions): void {
       },
       opts,
     );
+  }
+
+  // P1-E: a person's emergency pause. Only for the two git-hook shapes (pre-commit `--staged`, pre-push with a
+  // remote URL): an explicit `--path`/`--range`/`--history` scan is something a person asked to read.
+  const paused = pausedHookRun(opts);
+  if (paused !== null) {
+    const notice = pauseNotice(paused);
+    if (opts.json) emitJson({ status: "paused", notice, hits: [], skipped: [], egress: [] });
+    else process.stderr.write(`${notice}\n`);
+    return;
   }
 
   const repo = readRepoConfig(opts.cwd);

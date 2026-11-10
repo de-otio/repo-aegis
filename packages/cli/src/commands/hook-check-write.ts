@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
 import { homedir } from "node:os";
-import { basename } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import {
   isGhConfigFile,
   loadRegistryState,
   OVERRIDE_FILENAME,
+  PAUSE_FILE,
+  pauseNotice,
+  repoAegisHome,
   type Registry,
 } from "@de-otio/repo-aegis-core";
+import { pauseCoveringWorkingRepo } from "../pause-scope.js";
 import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import {
   parseHookWriteFields,
@@ -141,6 +145,32 @@ export async function hookCheckWrite(): Promise<void> {
       },
       EXIT_BLOCK,
     );
+  }
+
+  // The pause state file is person-only (P1-E): an agent that could write it would switch repo-aegis off for itself.
+  // Refused wherever the pause is, paused or not, and (like the two refusals above) before any pause is honoured.
+  // `install claude-md` also denies `Edit(<home>/pause.json)`, which reaches the agent's own shell as well.
+  const target = resolve(cwd ?? process.cwd(), filePath);
+  if (dirname(target) === resolve(repoAegisHome()) && basename(target).startsWith(PAUSE_FILE)) {
+    emitJsonAndExit(
+      {
+        code: "PAUSE_FILE_WRITE_REFUSED",
+        error:
+          `agent write to ${PAUSE_FILE} refused: that file is the emergency pause, which only a person may set ` +
+          `(\`repo-aegis pause\`, from their own terminal). No approval covers this. Tell your human what is wrong ` +
+          `and let them decide. [PAUSE_FILE_WRITE_REFUSED; details: repo-aegis explain PAUSE_FILE_WRITE_REFUSED]`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
+  }
+
+  // P1-E: a person's emergency pause allows the write (the cross-org check below is one of the things paused).
+  // Detection is not paused: `scan-after-write` still reports a marker hit, as advice.
+  const paused = pauseCoveringWorkingRepo(cwd ?? process.cwd());
+  if (paused !== null) {
+    process.stdout.write(JSON.stringify({ systemMessage: pauseNotice(paused) }) + "\n");
+    process.exit(0);
   }
 
   // Missing and encrypted both run as if there were no registry (an encrypted one has no plaintext to read, and

@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { approvalsPath, mintApproval, type TerminalCheck } from "@de-otio/repo-aegis-core";
+import { approvalsPath, mintApproval, mintPause, pausePath, type TerminalCheck } from "@de-otio/repo-aegis-core";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { scrubGitEnv } from "../_test-utils.js";
 import { runGhCommand, decisionLogPath, findPlainGh, type GhCommandDeps } from "./gh-command.js";
@@ -1322,6 +1322,176 @@ describe("U4: a read whose identity cannot be produced runs as the active gh acc
 // ---------------------------------------------------------------------------
 // M1, M5: an unreadable or missing registry, and a fault in the egress parse
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// P1-E: the emergency pause at the shim
+// ---------------------------------------------------------------------------
+
+describe("P1-E: the gh shim under an emergency pause", () => {
+  const HOUR = 3_600_000;
+  const NOTICE = /^repo-aegis: paused until \d\d:\d\d \(resume: repo-aegis resume\)$/m;
+  type Kind = "active" | "expired" | "future" | "world-writable";
+
+  /** The pause file in the world's pinned home, relative to the real clock with an hour of margin each way. */
+  function setPause(w: World, kind: Kind, repo?: string): void {
+    const path = pausePath(w.home);
+    const now = Date.now();
+    const scope = repo !== undefined ? { repo } : {};
+    if (kind === "active") mintPause({ path, now: new Date(now - 60_000), durationMs: HOUR, ...scope });
+    if (kind === "expired") mintPause({ path, now: new Date(now - 2 * HOUR), durationMs: HOUR, ...scope });
+    if (kind === "future") mintPause({ path, now: new Date(now + HOUR), durationMs: HOUR, ...scope });
+    if (kind === "world-writable") {
+      mintPause({ path, now: new Date(now - 60_000), durationMs: HOUR, ...scope });
+      chmodSync(path, 0o666);
+    }
+  }
+
+  /** An egress refusal with a destination: a body file in a mode-dependent temp path, for the checkout's own repository. */
+  const EGRESS_REFUSED = ["pr", "create", "--title", "t", "--body-file", "/var/folders/xx/pr.md"];
+
+  /** A private checkout of `person-only-org/x`, so egress allows the write and only the identity rule can refuse it. */
+  function personOnlyRepo(w: World): string {
+    const dir = join(w.root, "pox");
+    mkdirSync(dir, { recursive: true });
+    const git = (...a: string[]): void => void spawnSync("git", a, { cwd: dir, stdio: "ignore" });
+    git("init", "-q", "-b", "main");
+    git("remote", "add", "origin", "git@github.com:person-only-org/x.git");
+    git("config", "repo-aegis.class", "private-strict");
+    git("config", "repo-aegis.visibility", "private");
+    return dir;
+  }
+  const POX_WRITE = ["pr", "create", "--repo", "person-only-org/x", "--title", "t", "--body", "b"];
+
+  it("control: with no pause the egress refusal exits 2 and gh never runs", () => {
+    const w = makeWorld();
+    const r = run(w, EGRESS_REFUSED, { presence: "agent", plainPath: true });
+    assert.equal(r.status, 2);
+    assert.equal(refusalCode(r), "PAYLOAD_MODE_DEPENDENT_PATH", r.err);
+    assert.deepEqual(r.ghArgv, []);
+  });
+
+  it("an active pause: gh runs without the refusal, with the fixed notice, and no receipt claims a guarded publish", () => {
+    const w = makeWorld();
+    setPause(w, "active");
+    const r = run(w, EGRESS_REFUSED, { presence: "agent", plainPath: true });
+    assert.equal(r.status, 0, r.err);
+    assert.match(r.err, NOTICE);
+    assert.equal(refusalCode(r), undefined);
+    assert.deepEqual(mainCalls(r), [EGRESS_REFUSED.join(" ")]);
+    assert.doesNotMatch(r.err, /PUBLISHED →/);
+  });
+
+  it("the identity choice is unchanged where it works: a mapped write still runs as the App, narrowed", () => {
+    const w = makeWorld();
+    setPause(w, "active");
+    const r = run(w, WRITE, { presence: "agent" });
+    assert.equal(r.status, 0, r.err);
+    assert.match(r.err, NOTICE);
+    assert.deepEqual(r.taaadArgv, ["mint --app example-bot --repo example-org/svc --permissions write --json"]);
+    assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], TOKEN_BOT);
+  });
+
+  it("an identity refusal becomes a plain run as the caller (no token attached) instead of GH_IDENTITY_WRITE_NEEDS_HUMAN", () => {
+    const w = makeWorld();
+    const cwd = personOnlyRepo(w);
+    const before = run(w, POX_WRITE, { presence: "agent", cwd });
+    assert.equal(refusalCode(before), "GH_IDENTITY_WRITE_NEEDS_HUMAN", before.err);
+    setPause(w, "active");
+    writeFileSync(join(w.stubs, "seq"), "0");
+    rmSync(join(w.stubs, "gh.argv"), { force: true });
+    const r = run(w, POX_WRITE, { presence: "agent", cwd, plainPath: true });
+    assert.equal(r.status, 0, r.err);
+    assert.match(r.err, NOTICE);
+    assert.deepEqual(mainCalls(r), [POX_WRITE.join(" ")]);
+    assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], undefined, "a pause never hands an agent a token");
+    assert.deepEqual(r.taaadArgv, []);
+  });
+
+  it("verbs that read tokens or change gh's config stay refused for an agent while paused", () => {
+    const w = makeWorld();
+    const candidates = [["auth", "token"], ["auth", "token", "--user", "alice"], ["auth", "status"], ["config", "set", "pager", "x"], ["alias", "set", "x", "y"], ["extension", "install", "o/r"]];
+    // Which of these an agent is refused WITHOUT a pause (not every `auth` verb reads a token).
+    const refused = candidates.filter(args => run(w, args, { presence: "agent", plainPath: true }).status === 2);
+    assert.ok(refused.some(a => a.join(" ") === "auth token"), "control: `gh auth token` is refused without a pause");
+    setPause(w, "active");
+    for (const args of refused) {
+      rmSync(join(w.stubs, "gh.argv"), { force: true });
+      const r = run(w, args, { presence: "agent", plainPath: true });
+      assert.equal(r.status, 2, `${args.join(" ")}: ${r.err}`);
+      assert.deepEqual(r.ghArgv, [], args.join(" "));
+    }
+  });
+
+  it("after expiry (clock past the end) the refusal is back with no command run", () => {
+    const w = makeWorld();
+    setPause(w, "expired");
+    const r = run(w, EGRESS_REFUSED, { presence: "agent", plainPath: true });
+    assert.equal(r.status, 2);
+    assert.equal(refusalCode(r), "PAYLOAD_MODE_DEPENDENT_PATH", r.err);
+    assert.deepEqual(r.ghArgv, []);
+  });
+
+  it("a future-dated or world-writable pause file is no pause", () => {
+    for (const kind of ["future", "world-writable"] as const) {
+      const w = makeWorld();
+      setPause(w, kind);
+      const r = run(w, EGRESS_REFUSED, { presence: "agent", plainPath: true });
+      assert.equal(r.status, 2, kind);
+      assert.deepEqual(r.ghArgv, [], kind);
+    }
+  });
+
+  it("--repo: a call whose destination is that repository passes (case-insensitively); another repository is still refused", () => {
+    const inScope = makeWorld();
+    setPause(inScope, "active", "example-org/svc");
+    const ok = run(inScope, EGRESS_REFUSED, { presence: "agent", plainPath: true });
+    assert.equal(ok.status, 0, ok.err);
+    assert.match(ok.err, NOTICE);
+
+    const upper = makeWorld();
+    setPause(upper, "active", "example-org/svc");
+    const named = ["pr", "create", "--repo", "Example-Org/SVC", "--title", "t", "--body-file", "/var/folders/xx/pr.md"];
+    assert.equal(run(upper, named, { presence: "agent", plainPath: true }).status, 0);
+
+    const other = makeWorld();
+    setPause(other, "active", "other-org/y");
+    const refused = run(other, EGRESS_REFUSED, { presence: "agent", plainPath: true });
+    assert.equal(refused.status, 2);
+    assert.doesNotMatch(refused.err, NOTICE);
+    assert.deepEqual(refused.ghArgv, []);
+  });
+
+  it("--repo: a read, which names no destination to cover, is out of scope", () => {
+    const w = makeWorld();
+    setPause(w, "active", "example-org/svc");
+    const r = run(w, READ, { presence: "agent" });
+    assert.doesNotMatch(r.err, NOTICE);
+  });
+
+  it("the pause is read from the PINNED home only: a pause in the caller's REPO_AEGIS_HOME buys nothing", { skip: !cliBuilt() }, () => {
+    const w = makeWorld();
+    const planted = join(w.root, "planted");
+    mkdirSync(planted, { recursive: true });
+    mintPause({ path: pausePath(planted), now: new Date(Date.now() - 60_000), durationMs: HOUR });
+    const env: NodeJS.ProcessEnv = {
+      PATH: [w.stubs, process.env["PATH"] ?? ""].join(":"),
+      HOME: process.env["HOME"] ?? "",
+      REPO_AEGIS_VISIBILITY_LOOKUP: "0",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      REPO_AEGIS_HOME: planted,
+    };
+    const r = spawnSync(process.execPath, [cliPath, "gh", "--home", w.home, "--", ...EGRESS_REFUSED], { cwd: w.repo, env, encoding: "utf8" });
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /PAYLOAD_MODE_DEPENDENT_PATH/);
+    // and the real pause, in the pinned home, does apply to the same subprocess
+    setPause(w, "active");
+    const paused = spawnSync(process.execPath, [cliPath, "gh", "--home", w.home, "--", ...EGRESS_REFUSED], { cwd: w.repo, env, encoding: "utf8" });
+    assert.equal(paused.status, 0, paused.stderr);
+    assert.match(paused.stderr, NOTICE);
+  });
+});
 
 describe("M1: verbs that read tokens are refused without a person whatever the registry", () => {
   it("a missing registry: `gh auth token` is GH_AUTH_NEEDS_HUMAN for an agent, and runs for a person", () => {

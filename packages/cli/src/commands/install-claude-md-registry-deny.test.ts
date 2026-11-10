@@ -78,7 +78,7 @@ function install(e: Env, opts: Record<string, unknown> = {}): { stdout: string }
 const LEDGER = "state/claude-md-deny-rules.json";
 
 describe("registryDenyPlan", () => {
-  it("denies Edit on the registry, its .age, the approvals store, the destination cache, the two trusted state files, hooks/**, bin/**, prompt-approvals/**, markers/** and the pinned code — and nothing else", () => {
+  it("denies Edit on the registry, its .age, the approvals store, the pause file, the destination cache, the two trusted state files, hooks/**, bin/**, prompt-approvals/**, markers/** and the pinned code — and nothing else", () => {
     const e = makeEnv("plan");
     const h = e.aegisHome;
     const pin = outsideGitPin();
@@ -87,6 +87,8 @@ describe("registryDenyPlan", () => {
       `Edit(/${h}/engagements.yaml)`,
       `Edit(/${h}/engagements.yaml.age)`,
       `Edit(/${h}/egress-approvals.json)`,
+      // the emergency pause: an agent that could write it would have switched repo-aegis off for itself
+      `Edit(/${h}/pause.json)`,
       `Edit(/${h}/destinations.json)`,
       `Edit(/${h}/state/deny-set.cache.json)`,
       `Edit(/${h}/state/claude-md-deny-rules.json)`,

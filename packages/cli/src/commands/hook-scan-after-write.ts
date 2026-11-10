@@ -7,6 +7,8 @@ import {
   scanFile,
   CustomerCoupledNoEngagementError,
   EXIT_HIT,
+  pauseNotice,
+  type PauseState,
   type RepoJson,
   type ScanHit,
   type SkippedFile,
@@ -14,6 +16,7 @@ import {
 } from "@de-otio/repo-aegis-core";
 import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import { parseHookWriteFields, readHookStdin, WRITE_HOOK_INPUT_MAX_BYTES } from "./hook-input.js";
+import { pauseCoveringWorkingRepo } from "../pause-scope.js";
 
 interface HookOptions {
   /** When true, do not exit non-zero on hits — return as if clean. Useful
@@ -95,7 +98,15 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   // Set once the registry is known to be encrypted: every answer then carries the person-facing `systemMessage`
   // (Claude Code drops stderr on exit 0), once per call.
   let notice: string | undefined;
-  const emit: (value: unknown, exitCode: number) => never = (value, exitCode) =>
+  // P1-E: set once a person's emergency pause covers this write. Detection is not paused: every answer still carries
+  // what the scan found, but as advice (exit 0, `advisory: true`), with the fixed notice and a count (never a marker).
+  let paused: PauseState | null = null;
+  const emit: (value: unknown, exitCode: number) => never = (value, exitCode) => {
+    if (paused !== null) {
+      const hits = (value as { hits?: unknown }).hits;
+      const found = Array.isArray(hits) && hits.length > 0 ? `; ${hits.length} marker hit(s) found, advisory while paused` : "";
+      emitJsonAndExit({ ...(value as object), advisory: true, systemMessage: `${pauseNotice(paused)}${found}` }, 0);
+    }
     emitJsonAndExit(
       {
         ...(value as object),
@@ -104,12 +115,14 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
       },
       exitCode,
     );
+  };
 
   if (!filePath) {
     if (input.truncated) emit({ code: "HOOK_INPUT_TOO_LARGE", error: NOT_SCANNED_REASON }, 2);
     process.exit(0);
   }
   if (!existsSync(filePath)) process.exit(0);
+  paused = pauseCoveringWorkingRepo(cwd ?? process.cwd());
 
   // Missing: no registry => no engagements, no orgs. Treat the whole world as one boundary and scan with an empty
   // deny set. The agent would have run `repo-aegis init` already if engagement scoping were in use; the hook should

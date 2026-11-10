@@ -53,7 +53,9 @@ export type DoctorCheckCode =
   | "SSH_GITHUB_REDIRECT"
   // Phase U (doc/plan-landscape-recommendations.md): a duplicate local hooks path, and an SSH origin where agents need HTTPS.
   | "HOOKS_PATH_LOCAL_DUPLICATE"
-  | "AGENT_REMOTE_IS_SSH";
+  | "AGENT_REMOTE_IS_SSH"
+  // The person-only emergency pause (complexity-review P1-E): protection is deliberately off until it expires.
+  | "PAUSE_ACTIVE";
 
 /**
  * How loudly a failing check speaks. Only `fail` makes `doctor` exit 1.

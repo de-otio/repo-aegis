@@ -62,6 +62,7 @@ import {
   isPrintableDestination,
   loadRegistryState,
   parseEgressIntents,
+  pauseNotice,
   ruleHSkipNote,
   ruleHStatus,
   SHAPE_RULE_CODES,
@@ -69,11 +70,13 @@ import {
   type DetachedHit,
   type EgressDecision,
   type HumanOnlyKind,
+  type PauseState,
   type Registry,
   type RegistryState,
   type RuleHStatus,
 } from "@de-otio/repo-aegis-core";
 import { currentHumanPresent } from "../human-presence.js";
+import { pauseCoveringDestinations, pauseCoveringIntents } from "../pause-scope.js";
 import { ENCRYPTED_REGISTRY_NOTICE } from "./hook-policy.js";
 import { ghShimIsFirstOnPath } from "./install-shim.js";
 import { adapterFor, type HookVerdict, type HostAdapter } from "./hook-hosts/index.js";
@@ -357,8 +360,14 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
 
     // R6 (plan §8.2): a raw HTTP client writing to the GitHub API, or `gh auth token` next to a network
     // call. Shape rules on the command text: no registry, no approval, and no `ask`.
+    // P1-E: a machine-wide pause lifts this one (it has no destination, so a repository-scoped pause does not).
+    // Read only when the rule fired, so the common path still does no I/O. The refusals below it are NOT lifted.
     const network = checkNetworkRules(command);
-    if (network !== null) deny(adapter, network.code, network.reason, { verb: "(raw network call)" });
+    let pausedNetwork: PauseState | null = null;
+    if (network !== null) {
+      pausedNetwork = pauseCoveringDestinations([]);
+      if (pausedNetwork === null) deny(adapter, network.code, network.reason, { verb: "(raw network call)" });
+    }
     // Commands only a person may run (`approve`, owner adds, `upstreams add`,
     // `init --migrate-classify|--force`): refused in ANY agent Bash text, with
     // or without a terminal, before the egress parse and its early exit. A pty
@@ -382,7 +391,13 @@ export async function hookGuardEgress(opts: HookGuardEgressOptions): Promise<voi
     const intents = parseEgressIntents(command, egressParseOptions(opts.env ?? process.env, cwd));
     // The common case: no publishing operation in the command line. Exit
     // before touching the registry or the filesystem.
-    if (intents.length === 0) emit(adapter, { action: "allow" });
+    if (intents.length === 0) emit(adapter, pausedNetwork === null ? { action: "allow" } : { action: "allow", notice: pauseNotice(pausedNetwork) });
+
+    // P1-E: a person's emergency pause. After every person-only refusal above (the human-only verbs, the detached
+    // starts, the identity rules), which a pause never lifts, and before the registry is read or the egress policy
+    // runs: an in-scope pause allows the command, with the fixed notice where the host shows one.
+    const paused = pauseCoveringIntents(intents, cwd ?? process.cwd());
+    if (paused !== null) emit(adapter, { action: "allow", notice: pauseNotice(paused) });
 
     const loaded = loadRegistryOrEmpty();
     registryNote = loaded.note;

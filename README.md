@@ -199,6 +199,24 @@ contents only, not in a live session, and only with repo-aegis installed first;
 see [doc/plan-landscape-recommendations.md](doc/plan-landscape-recommendations.md)
 (section 5). Run `repo-aegis doctor` after installing either one.
 
+## If repo-aegis blocks you
+
+Under a deadline, a refusal that is wrong should cost one command, and that command should undo itself. From
+your own terminal (an agent cannot run it):
+
+```sh
+repo-aegis pause --for 1h                       # everything on this machine; default 1h, at most 8h
+repo-aegis pause --for 30m --repo owner/repo    # only that repository
+repo-aegis pause --list                         # what is paused, and until when
+repo-aegis resume                               # end it now
+```
+
+While a pause lasts, the git hooks, the agent hooks, the `gh` wrapper and the git credential helper stand aside
+and print `repo-aegis: paused until 14:30 (resume: repo-aegis resume)`. It always expires; `status` and
+`doctor` show it. A marker found in a file an agent just wrote is still reported, as advice. `approve`,
+identity changes and `uninstall` stay person-only, and a pause cannot be set or extended by an agent. It is not
+a substitute for fixing the false positive: see `repo-aegis explain <CODE>`. Details: [doc/cli-reference.md](doc/cli-reference.md).
+
 ## Uninstalling
 
 ```sh

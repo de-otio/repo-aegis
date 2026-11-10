@@ -41,6 +41,10 @@ import {
   checkTerminal,
   identityPresence,
   loadRegistryState,
+  parseEgressIntents,
+  egressParseOptions,
+  pauseNotice,
+  pausePath,
   personLoginOf,
   refusal,
   registeredOwners,
@@ -50,6 +54,7 @@ import {
   type GhCallTarget,
   type EgressIntent,
   type Identity,
+  type PauseState,
   type IdentityChoice,
   type IdentityPresence,
   type IdentityScope,
@@ -58,7 +63,8 @@ import {
   type TerminalCheck,
 } from "@de-otio/repo-aegis-core";
 import type { OutputOptions } from "../format.js";
-import { evaluateEgress, readbackResult, type AllowVerdict, type EgressEvaluation } from "./egress-check.js";
+import { pauseCoveringIntents } from "../pause-scope.js";
+import { buildGhCommand, evaluateEgress, readbackResult, type AllowVerdict, type EgressEvaluation } from "./egress-check.js";
 import { gitSpawnViolation, readCredentialConfig, type ConfigEntry } from "../git-credential-config.js";
 import { resolveTrustedGh } from "./doctor-owner-checks.js";
 import { fetchLoginToken, ghChildEnv, mintAppToken, runGhAsNobody, tokensEqual } from "./gh-identity-token.js";
@@ -787,6 +793,23 @@ export function runGhCommand(args: string[], opts: GhCommandOptions, deps: GhCom
   }
 }
 
+/** The pause covering this call (and the intents parsed for it, null on a parse fault), or null. */
+function pausedGhRun(args: readonly string[], cwd: string, home: string): { pause: PauseState; intents: EgressIntent[] | null } | null {
+  try {
+    const path = pausePath(home);
+    let intents: EgressIntent[] | null = null;
+    try {
+      intents = parseEgressIntents(buildGhCommand([...args]), egressParseOptions(process.env, cwd));
+    } catch {
+      intents = null; // a parse fault: a machine-wide pause still covers the call; a scoped one cannot say where it goes
+    }
+    const pause = pauseCoveringIntents(intents ?? [], cwd, { path });
+    return pause === null ? null : { pause, intents };
+  } catch {
+    return null;
+  }
+}
+
 function runPinned(
   args: string[],
   home: string,
@@ -795,23 +818,35 @@ function runPinned(
   deps: GhCommandDeps,
   io: { out: (t: string) => void; err: (t: string) => void },
 ): number {
+  // P1-E: a person's emergency pause (read from the pinned home). In scope, the egress decision is not made at all,
+  // and a refusal of the identity step below becomes a plain run as the caller; the intents are still parsed, for
+  // the identity step and to say where the call goes. Verbs that read or change tokens and gh's own config
+  // (`auth`, `config`, `alias`, `extension`) are identity surface, and keep their refusal: a pause never lets an
+  // agent read the person's token.
+  const paused = pausedGhRun(args, cwd, home);
+
   // 1. The egress decision, as `egress-check` makes it.
   let verdict: AllowVerdict | null = null;
   let intents: EgressIntent[] | null = null;
-  try {
-    const ev = (deps.evaluate ?? evaluateEgress)(args, cwd);
-    if (ev.kind === "deny") {
-      io.err(ev.stderrLine);
-      return 2;
+  if (paused !== null) {
+    io.err(`${pauseNotice(paused.pause)}\n`);
+    intents = paused.intents;
+  } else {
+    try {
+      const ev = (deps.evaluate ?? evaluateEgress)(args, cwd);
+      if (ev.kind === "deny") {
+        io.err(ev.stderrLine);
+        return 2;
+      }
+      if (ev.kind === "fault") {
+        io.err(`repo-aegis gh: the egress decision failed (${ev.message}); proceeding\n`);
+      } else {
+        verdict = ev.verdict;
+        intents = ev.intents;
+      }
+    } catch (err) {
+      io.err(`repo-aegis gh: the egress decision failed (${(err as Error).message}); proceeding\n`);
     }
-    if (ev.kind === "fault") {
-      io.err(`repo-aegis gh: the egress decision failed (${ev.message}); proceeding\n`);
-    } else {
-      verdict = ev.verdict;
-      intents = ev.intents;
-    }
-  } catch (err) {
-    io.err(`repo-aegis gh: the egress decision failed (${(err as Error).message}); proceeding\n`);
   }
 
   // 2 and 3. The identity.
@@ -836,6 +871,7 @@ function runPinned(
       : { kind: "plain", note: "repo-aegis faulted while choosing a GitHub identity" };
   }
 
+  if (outcome.kind === "refuse" && paused !== null && !args.some(a => AUTH_GROUPS.includes(a))) outcome = { kind: "plain" };
   if (outcome.kind === "refuse") {
     io.err(refusalLine(outcome.code, outcome.reason, verbOf(args, intents ?? [])));
     return 2;

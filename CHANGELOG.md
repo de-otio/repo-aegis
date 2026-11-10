@@ -41,6 +41,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented: for scripted `claude -p` runs, pass an explicit `--permission-mode` other than
   `default`/`acceptEdits`. The hook input has no headless indicator, and `permission_mode` reads
   `default` there too.
+- **An emergency pause: `repo-aegis pause`, `pause --list`, `resume`.** For "repo-aegis is wrong right now
+  and I have to ship". A person at a terminal runs `repo-aegis pause [--for 1h] [--repo <owner>/<repo>]
+  [--reason <text>]`; it needs a TTY like `approve` (`PAUSE_NEEDS_TTY`), always expires (default 1h, at most
+  8h: `PAUSE_TOO_LONG`) and is written to `<home>/pause.json`, which a reader accepts only when it is a plain
+  file owned by this user, not group- or world-writable, not dated in the future and not longer than the cap
+  (anything else is no pause). While a pause covers a command, pre-commit and pre-push, the egress guard (every
+  host), the write hooks, the `gh` shim and the git credential helper allow and print
+  `repo-aegis: paused until 14:30 (resume: repo-aegis resume)`; the credential helper prints nothing and steps
+  aside, and `scan-after-write` still reports a marker hit as advice. The person-only verbs stay refused for an
+  agent, paused or not: `pause` is in the human-only list (`AGENT_RAN_HUMAN_COMMAND`), `Edit(<home>/pause.json)`
+  joins the `permissions.deny` rules `install claude-md` writes (re-run it once), and `hook check-write` refuses a
+  write to the file (`PAUSE_FILE_WRITE_REFUSED`). An agent may run `resume`, which only turns protection back on.
+  `status` and `doctor` (`PAUSE_ACTIVE`, a warning) show an active pause; `pause` and `resume` are audit records
+  (the reason's length, never its text); `uninstall` removes the file.
 
 ### Changed
 

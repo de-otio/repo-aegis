@@ -35,6 +35,8 @@ import {
   readCachedVisibility,
   recordWorkingTree,
   loadRegistryState,
+  readActivePause,
+  pauseNotice,
   type HookState,
   type HookStateCode,
   type Registry,
@@ -224,6 +226,27 @@ let recordedDestinations = 0;
  */
 const loadRegistryForDoctor = (): RegistryLoad => loadRegistryState();
 
+/**
+ * `PAUSE_ACTIVE` (a warning): a person paused repo-aegis, so protection is off on purpose until the expiry. Reported
+ * whatever `--no-egress-checks` says, because it changes what every other line means. A warning, not a failure: it
+ * is the person's own choice and ends by itself, so it must not turn a green job red. The scope is not named.
+ */
+export function pauseChecks(): DoctorCheck[] {
+  const pause = readActivePause();
+  if (pause === null) return [];
+  return [
+    {
+      code: "PAUSE_ACTIVE",
+      ok: false,
+      severity: "warn",
+      detail:
+        `repo-aegis is paused for ${pause.repo === undefined ? "everything on this machine" : "one repository"} until ` +
+        `${pause.expiresAt}: its hooks, egress guard, gh shim and git credential helper are standing aside (${pauseNotice(pause)})`,
+      fix: "repo-aegis resume",
+    },
+  ];
+}
+
 function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
   // The managed drop-in (D8) is where the Claude Code hooks and deny rules live once
   // `install claude-md` has run; the guard and deny checks read it with the user file.
@@ -341,7 +364,7 @@ export function doctor(opts: DoctorOptions): void {
     ? loadRegistryForDoctor()
     : { state: "missing" };
   const registry = regLoad.state === "loaded" ? regLoad.registry : null;
-  const machine = egressChecksOn ? machineChecks(opts, regLoad) : [];
+  const machine = [...pauseChecks(), ...(egressChecksOn ? machineChecks(opts, regLoad) : [])];
 
   const results: DoctorRepoResult[] = [];
   let scanned = 0;

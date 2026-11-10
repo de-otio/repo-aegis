@@ -33,6 +33,8 @@ export const AGENT_RAN_HUMAN_COMMAND = "AGENT_RAN_HUMAN_COMMAND";
 
 export type HumanOnlyKind =
   | "approve"
+  // The emergency pause (P1-E): a global, time-boxed off switch only a person may set. `resume` only re-enables protection, so an agent may run it.
+  | "pause"
   | "owner-add"
   | "upstream-add"
   | "init-migrate"
@@ -459,6 +461,7 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
   // never mints). `--list` stays refused: its output names org scopes, which can be customer names.
   const revokeOnly = win.includes("--revoke") && !win.includes("--list");
   if (win.includes("approve") && !revokeOnly) return "approve";
+  if (win.includes("pause")) return "pause";
   const at = (word: string): number => win.indexOf(word);
   const eng = at("engagements");
   if (eng !== -1 && win.indexOf("add", eng) !== -1 && (win.includes("--personal-org") || win.includes("--github-org"))) {
@@ -583,6 +586,13 @@ const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string; w
   approve: {
     what: "repo-aegis approve",
     fix: "repo-aegis approve <owner>/<repo>   (or <owner>/*)",
+  },
+  pause: {
+    what: "repo-aegis pause",
+    fix: "repo-aegis pause [--for 1h] [--repo <owner>/<repo>]   (and repo-aegis resume to end it early)",
+    why:
+      "A pause switches repo-aegis off for a while, so it counts only when a person decides to run it; an agent that ran it " +
+      "would be switching off its own guard, with or without a terminal attached",
   },
   "owner-add": {
     what: "repo-aegis engagements add --personal-org/--github-org",
