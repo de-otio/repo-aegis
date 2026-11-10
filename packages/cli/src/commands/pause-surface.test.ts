@@ -116,7 +116,8 @@ describe("doctor reports PAUSE_ACTIVE as a warning", () => {
   it("the text report labels it WARN", () => {
     const r = withEnv("REPO_AEGIS_HOME", home("active"), () => captureOutput(() => doctor({ scanRoot: [emptyRoot()], egressChecks: false })));
     assert.match(r.stdout, /WARN PAUSE_ACTIVE — repo-aegis is paused for everything on this machine until /);
-    assert.match(r.stdout, /fix: repo-aegis resume/);
+    // X-9: only FAIL lines get a `fix:` line; the warning's detail carries the way out itself.
+    assert.match(r.stdout, /resume: repo-aegis resume/);
   });
 
   it("an expired, invalid or absent pause is not reported", () => {
