@@ -37,6 +37,9 @@ jobs:
       - run: npm test
       - run: npm run test:cov
         if: matrix.node == '24'
+        env:
+          # the suite plus c8's report outgrew node's default heap (about 4 GB): "heap out of memory" after all tests passed
+          NODE_OPTIONS: --max-old-space-size=8192
 
   action-smoke:
     runs-on: ubuntu-latest
