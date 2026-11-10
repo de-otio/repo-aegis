@@ -49,14 +49,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   detected (proxy variable names, `ps` readable, tty). Exit 0 when every layer is ok, 1 otherwise. It never touches
   your repositories, the registry, approvals, the audit log or the network (`ssh` and `taaad` are stubs; the
   children get no TTY and never `REPO_AEGIS_EGRESS_HUMAN`), and an agent may run it: run it first when anything is
-  refused.
+  refused. Its git ignores git's system-wide configuration and keeps a caller's `GIT_SSH_COMMAND` that starts with
+  `ssh` (the sandbox's does); your global git configuration stays, because the hooks path and the helper line live
+  there. A setup failure removes its temp directory.
 - **A sandbox-shaped end-to-end release gate** (`npm run test:e2e`, `tests/e2e/`; a CI job and a required step
   before `gh release create`, see CONTRIBUTING.md). It installs the packed tarballs into a temp prefix, runs the
   real installers against a temp HOME, and drives real `git` and the `gh` shim against local bare repositories with
-  `HTTPS_PROXY` and `DOCKER_HTTPS_PROXY` set to a dead port, a failing `ps` first on PATH, no TTY and no network.
-  Flows are a table (one row each, with the outcome and refusal code it must end in). `E2E_TARBALL_DIR` replays a
-  published release: run against `@de-otio/repo-aegis@0.13.2` it fails the sandboxed push row
-  (`AGENT_PUSH_CREDENTIAL_CONFIG`). Rows for the pause (P1-E) and the decision log (P1-I) are `todo` until those exist.
+  the sandbox's environment (the proxy family in both cases pointing at a dead port, `GIT_SSH_COMMAND` with its
+  ProxyCommand, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`, `SANDBOX_RUNTIME`, `CLAUDECODE`), a
+  failing `ps` first on PATH, no TTY and no network. Flows are a table (one row each, with the outcome and refusal
+  code it must end in), run a second time with `REPO_AEGIS_HOME` read-only. `E2E_TARBALL_DIR` replays a published
+  release: run inside the Claude Code sandbox, both `@de-otio/repo-aegis@0.13.2` and `@0.13.1` fail four HTTPS
+  credential rows with `AGENT_PUSH_CHAIN_UNREADABLE`. (`AGENT_PUSH_CREDENTIAL_CONFIG`, the 0.13.2 refusal outside
+  the sandbox, is not verified by this gate.) Rows for the pause (P1-E) and the decision log (P1-I) are `todo` until
+  those exist. CI runs it on Linux (where `/proc` makes the process list readable, so the leg sets
+  `E2E_PS_READABLE_OK=1`) and on macOS under `sandbox-exec` with `ps` denied; the test that the process list is
+  unreadable fails anywhere else, so run `npm run test:e2e` inside the Claude Code sandbox before a release.
 
 ### Changed
 

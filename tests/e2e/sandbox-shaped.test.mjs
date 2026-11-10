@@ -6,8 +6,15 @@
 //
 // It installs the PACKED tarballs into a temp prefix (see world.mjs), runs the real CLI's installers against a temp
 // HOME and REPO_AEGIS_HOME, and drives real `git` and the real `gh` shim against local bare repos, under the
-// conditions of an agent sandbox: HTTPS_PROXY and DOCKER_HTTPS_PROXY pointing at a dead localhost port, a failing
-// `ps` first on PATH, no TTY on any stream, and no route to GitHub.
+// conditions of an agent sandbox: the sandbox's own environment (the proxy family pointing at a dead localhost port,
+// GIT_SSH_COMMAND with its ProxyCommand, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT/KEY/VALUE, SANDBOX_RUNTIME,
+// CLAUDECODE: `sandboxEnv` in world.mjs), a failing `ps` first on PATH, no TTY on any stream, and no route to GitHub.
+//
+// WHERE IT MEANS SOMETHING. The condition that broke 0.13.1 and 0.13.2 is an UNREADABLE PROCESS LIST. Linux always has
+// /proc, so on an ubuntu runner the chain is readable and the gate cannot see that class. The "process list is unreadable"
+// test below therefore FAILS wherever the installed core can read its ancestors, unless E2E_PS_READABLE_OK=1 (set on
+// the ubuntu CI job, where that is known and accepted). The macOS CI job runs this file under `sandbox-exec` with
+// `/bin/ps` and `/usr/bin/ps` denied; locally, run it inside the Claude Code sandbox.
 //
 // THE FLOWS ARE A TABLE (FLOWS below): one row per flow, with the outcome and the code it must end in. A new flow is
 // one row. The honest mistake the file covers: shipping a release that blocks the main path for every sandboxed agent.
@@ -30,11 +37,14 @@
 //     PAST every sandbox check (proxy variables, process list, no TTY) and stopped at the token step; the answered
 //     credential rows use an App-mapped owner and a stub taaad.
 //   - repo-aegis runs `ps` by absolute path, which a PATH stub cannot replace (world.mjs says more).
+//   - One packed install serves the whole file (the world is built once), to keep the process count down.
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { APP_TOKEN, DEAD_PROXY, MARKER_TEXT, makeWorld, writeStub } from "./world.mjs";
+import { pathToFileURL } from "node:url";
+import { APP_TOKEN, DEAD_PROXY, MARKER_TEXT, handWrittenHelperLine, makeReadOnly, makeWorld, sandboxEnv, writeStub } from "./world.mjs";
 
 // ---------------------------------------------------------------------------
 // The world, built once
@@ -44,6 +54,7 @@ import { APP_TOKEN, DEAD_PROXY, MARKER_TEXT, makeWorld, writeStub } from "./worl
 let w;
 let shimDir;
 let ctx;
+let pushes = 0;
 
 /** A repository whose origin is a GitHub ssh URL (served by the `ssh` stub) and whose visibility is declared. */
 function makeRepo(name, owner, visibility) {
@@ -150,6 +161,7 @@ const FLOWS = [
     name: "fetch over HTTPS, App-mapped owner: the credential helper answers under proxy variables, no process list, no TTY",
     outcome: "answered",
     drive: () => httpsHelper("fetch", "org-app"),
+    tokenOnStdout: true,
     prove: (r) => {
       assert.match(r.stdout, /^username=x-access-token$/m);
       assert.ok(r.stdout.includes(`password=${APP_TOKEN}`), "the token goes to git on stdout");
@@ -161,6 +173,7 @@ const FLOWS = [
     name: "push over HTTPS, App-mapped owner: the credential helper answers under proxy variables, no process list, no TTY",
     outcome: "answered",
     drive: () => httpsHelper("push", "org-app"),
+    tokenOnStdout: true,
     prove: (r) => {
       assert.ok(r.stdout.includes(`password=${APP_TOKEN}`), "the token goes to git on stdout");
       assert.doesNotMatch(r.stderr, SANDBOX_REFUSAL, "no sandbox refusal");
@@ -186,7 +199,8 @@ const FLOWS = [
     name: "push to a private destination is answered (real git, real pre-push)",
     outcome: "answered",
     drive: () => {
-      commit(ctx.priv, "b.txt", "two\n", "second");
+      // A new file each time: the read-only variant below runs this row a second time.
+      commit(ctx.priv, `b-${++pushes}.txt`, "two\n", "second");
       return w.git(ctx.priv, ["push", "origin", "main"]);
     },
     prove: (r) => {
@@ -248,32 +262,126 @@ const TODO_FLOWS = [
 // ---------------------------------------------------------------------------
 
 describe("the world is sandbox-shaped", () => {
-  it("proxy variables point at a dead port, `ps` fails, nothing is a TTY, and the installed CLI is the packed one", () => {
+  it("nothing is a TTY, and the installed CLI is the packed one", () => {
     const probe = w.run(w.node, [
       "-e",
-      "console.log(JSON.stringify({ in: process.stdin.isTTY === true, out: process.stdout.isTTY === true, err: process.stderr.isTTY === true, https: process.env.HTTPS_PROXY, docker: process.env.DOCKER_HTTPS_PROXY }))",
+      "console.log(JSON.stringify({ in: process.stdin.isTTY === true, out: process.stdout.isTTY === true, err: process.stderr.isTTY === true }))",
     ]);
-    assert.deepEqual(JSON.parse(probe.stdout), { in: false, out: false, err: false, https: DEAD_PROXY, docker: DEAD_PROXY });
-    assert.notEqual(w.run("ps", ["-A"]).code, 0, "the ps stub is first on PATH and fails");
+    assert.deepEqual(JSON.parse(probe.stdout), { in: false, out: false, err: false });
     assert.ok(w.cli.includes(`${w.prefix}`), "the CLI under test lives in the temp prefix, not in the workspace");
     assert.ok(existsSync(join(w.prefix, "node_modules", "@de-otio", "repo-aegis", "dist", "docs", "agent-guide.md")), "the package carries its docs");
   });
+
+  it("the sandbox's environment is set verbatim in shape, and every proxy points at the dead port", () => {
+    const probe = w.run(w.node, ["-e", "console.log(JSON.stringify(process.env))"]);
+    const env = JSON.parse(probe.stdout);
+    const want = sandboxEnv(w.root);
+    for (const [name, value] of Object.entries(want)) assert.equal(env[name], value, name);
+    for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy", "GRPC_PROXY", "NO_PROXY", "DOCKER_HTTPS_PROXY"]) {
+      assert.ok(env[name] !== undefined && env[name] !== "", `${name} is set`);
+    }
+    for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "GRPC_PROXY", "DOCKER_HTTPS_PROXY"]) {
+      assert.equal(new URL(env[name]).host, new URL(DEAD_PROXY).host, `${name} points at the dead proxy`);
+    }
+    assert.match(env["GIT_SSH_COMMAND"], /^ssh .*-o ProxyCommand="\/bin\/sh -c 'eval .*SRT_SSH_PROXY_COMMAND/, "GIT_SSH_COMMAND carries the quoted ProxyCommand");
+    assert.match(env["GIT_CONFIG_PARAMETERS"], /'http\.proxyAuthMethod=basic' 'credential\.http:\/\/127\.0\.0\.1:9\.helper='/);
+    assert.equal(env["SANDBOX_RUNTIME"], "1");
+    assert.equal(env["CLAUDECODE"], "1");
+  });
+
+  it("the process list is unreadable to the installed core (the condition that broke 0.13.1), or this run says why it is not", (t) => {
+    // Asks the INSTALLED core, in a child with the world's conditions: the same lookup the guard, the shim and the credential
+    // helper make. An empty chain is what an unreadable process list gives. (`ps` is run by absolute path, so a PATH stub
+    // cannot stand in; the real thing is the Claude Code sandbox, or `sandbox-exec` with /bin/ps denied on macOS.)
+    const core = pathToFileURL(join(w.prefix, "node_modules", "@de-otio", "repo-aegis-core", "dist", "index.js")).href;
+    const probe = w.run(w.node, [
+      "--input-type=module",
+      "-e",
+      `import(${JSON.stringify(core)}).then((m) => process.stdout.write(JSON.stringify(m.readProcessAncestry())))`,
+    ]);
+    assert.equal(probe.code, 0, `the probe could not run: ${probe.stderr}`);
+    const chain = JSON.parse(probe.stdout);
+    if (chain.ancestors.length === 0) return;
+    const message =
+      `the installed core read ${chain.ancestors.length} ancestor process(es), so this run does NOT exercise an unreadable process list, ` +
+      "the condition that made 0.13.1 refuse every sandboxed fetch and 0.13.2 every sandboxed push. Run it inside the Claude Code sandbox, " +
+      "or under `sandbox-exec -p '(version 1)(allow default)(deny process-exec (literal \"/bin/ps\") (literal \"/usr/bin/ps\"))'` on macOS.";
+    if (process.env["E2E_PS_READABLE_OK"] === "1") {
+      console.error(`E2E WARNING (E2E_PS_READABLE_OK=1): ${message}`);
+      t.skip(`process list is readable here (Linux /proc), accepted by E2E_PS_READABLE_OK=1: the unreadable-ps class is covered by the macOS sandbox-exec leg only`);
+      return;
+    }
+    assert.fail(`${message} (Set E2E_PS_READABLE_OK=1 only where /proc makes the chain readable and another job covers the class, as the ubuntu CI job does.)`);
+  });
+
+  it("the credential helper line is the installer's own rendering", () => {
+    const want = handWrittenHelperLine(w.node, w.cli, w.ra);
+    // Meaningful when the line came from the installer (`helperLineSource === "installer"`): any drift in either fails here.
+    assert.equal(w.helperLine, want, `the hand-written shape and the ${w.helperLineSource} line agree`);
+    const installed = w.git(w.home, ["config", "--global", "--get-all", "credential.https://github.com.helper"]).stdout.split("\n");
+    assert.deepEqual(installed.slice(0, 2), ["", w.helperLine]);
+  });
 });
 
+describe("a setup that fails part-way leaves no temp directory behind", () => {
+  it("makeWorld removes its root and re-throws (forced: a tarball directory with no CLI in it)", () => {
+    const scratch = realpathSync(mkdtempSync(join(tmpdir(), "repo-aegis-e2e-cleanup-probe-")));
+    const emptyTarballs = join(scratch, "no-tarballs");
+    mkdirSync(emptyTarballs);
+    const was = process.env["TMPDIR"];
+    process.env["TMPDIR"] = scratch;
+    try {
+      assert.throws(() => makeWorld({ tarballDir: emptyTarballs }), /no @de-otio\/repo-aegis tarball/);
+      assert.deepEqual(readdirSync(scratch), ["no-tarballs"], "the failed world's root (repo-aegis-e2e-world-*) was removed");
+    } finally {
+      if (was === undefined) delete process.env["TMPDIR"];
+      else process.env["TMPDIR"] = was;
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+/** Any GitHub token shape (`ghp_`, `gho_`, `ghs_`, `ghu_`): none may reach a person's or agent's screen. */
+const TOKEN_SHAPE = /gh[opsu]_[A-Za-z0-9]{20,}/;
+
+function runRow(row) {
+  const r = row.drive();
+  assert.equal(r.error, undefined, `could not run: ${String(r.error)}`);
+  assert.doesNotMatch(r.stderr, TOKEN_SHAPE, "no token on stderr");
+  // The two answered HTTPS rows hand the token to git on stdout BY DESIGN (that is what a credential helper does).
+  if (row.tokenOnStdout !== true) assert.doesNotMatch(r.stdout, TOKEN_SHAPE, "no token on stdout");
+  if (row.outcome === "answered") {
+    assert.equal(r.code, 0, `expected the flow to be answered, got exit ${r.code}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+  } else {
+    assert.notEqual(r.code, 0, `expected a refusal, got exit 0\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+    assert.match(r.stderr + r.stdout, row.code, `expected ${row.code}, got exit ${r.code}`);
+  }
+  row.prove?.(r);
+}
+
 describe(`sandbox-shaped flows (table: ${FLOWS.length} rows)`, () => {
+  for (const row of FLOWS) it(row.name, () => runRow(row));
+});
+
+/**
+ * M4: the same table with the whole REPO_AEGIS_HOME read-only (a sandbox that leaves the configuration directory outside
+ * its write list). A row that fails closed there is a finding, not fixed in P1-G: it is listed in READ_ONLY_FAILS with the
+ * entry point and code it ends in, and runs as a `todo` until someone decides what a read-only home should do.
+ */
+const READ_ONLY_FAILS = new Map([]);
+
+describe(`the same flows with REPO_AEGIS_HOME read-only (table: ${FLOWS.length} rows)`, () => {
+  let restore;
+  before(() => {
+    restore = makeReadOnly(w.ra);
+  });
+  after(() => {
+    restore?.();
+  });
   for (const row of FLOWS) {
-    it(row.name, () => {
-      const r = row.drive();
-      assert.equal(r.error, undefined, `could not run: ${String(r.error)}`);
-      assert.ok(!r.stderr.includes(APP_TOKEN) && !r.stdout.includes("gho_"), "no token on stderr");
-      if (row.outcome === "answered") {
-        assert.equal(r.code, 0, `expected the flow to be answered, got exit ${r.code}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
-      } else {
-        assert.notEqual(r.code, 0, `expected a refusal, got exit 0\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
-        assert.match(r.stderr + r.stdout, row.code, `expected ${row.code}, got exit ${r.code}`);
-      }
-      row.prove?.(r);
-    });
+    const note = READ_ONLY_FAILS.get(row.name);
+    if (note !== undefined) it.todo(`${row.name} [read-only home: ${note}]`);
+    else it(row.name, () => runRow(row));
   }
 });
 

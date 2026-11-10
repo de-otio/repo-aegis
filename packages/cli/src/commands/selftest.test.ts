@@ -16,7 +16,7 @@ import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { readDropInSettings } from "./doctor-managed-checks.js";
 import { checkGuardHook } from "./install-claude-md.js";
 import { realFs, resolveManagedEnv } from "./managed-privileged.js";
-import { formatSelftest, LAYERS, refusalCodeIn, sandboxFacts, type SelftestReport } from "./selftest.js";
+import { formatSelftest, LAYERS, refusalCodeIn, runSelftest, sandboxFacts, sshCommandFor, type SelftestReport } from "./selftest.js";
 
 // ---------------------------------------------------------------------------
 // Pure
@@ -49,6 +49,48 @@ describe("sandboxFacts", () => {
     assert.equal(typeof facts.psReadable, "boolean");
   });
   it("reports no proxy variables for a clean environment", () => assert.deepEqual(sandboxFacts({ PATH: "/usr/bin" }).proxyVars, []));
+});
+
+describe("sshCommandFor", () => {
+  const SANDBOX_SSH = `ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand="/bin/sh -c 'eval \\"\\\${SRT_SSH_PROXY_COMMAND:?unset}\\"' sh '%h' %p"`;
+  const CASES: ReadonlyArray<readonly [string, string | undefined, string]> = [
+    ["the sandbox's own command (ssh with a ProxyCommand) is kept", SANDBOX_SSH, SANDBOX_SSH],
+    ["bare ssh is kept", "ssh", "ssh"],
+    ["unset becomes plain ssh", undefined, "ssh"],
+    ["empty becomes plain ssh", "", "ssh"],
+    ["another program becomes plain ssh", "/usr/local/bin/my-ssh-wrapper -x", "ssh"],
+    ["a word that only starts with ssh becomes plain ssh", "sshpass -p x ssh", "ssh"],
+    ["an absolute path to ssh becomes plain ssh (the stub on PATH is what must run)", "/usr/bin/ssh -v", "ssh"],
+  ];
+  for (const [name, caller, want] of CASES) it(name, () => assert.equal(sshCommandFor(caller), want));
+});
+
+describe("runSelftest cleanup", () => {
+  it("a setup that throws after the temp directory exists leaves no temp directory behind, and the error propagates", () => {
+    const scratch = realpathSync(mkdtempSync(join(tmpdir(), "repo-aegis-selftest-cleanup-")));
+    const was = process.env["TMPDIR"];
+    process.env["TMPDIR"] = scratch;
+    try {
+      let seen: string | undefined;
+      assert.throws(
+        () =>
+          runSelftest({
+            afterTempDir: root => {
+              seen = root;
+              assert.ok(readdirSync(scratch).length === 1, "the temp directory exists when the seam runs");
+              throw new Error("forced setup failure");
+            },
+          }),
+        /forced setup failure/,
+      );
+      assert.ok(seen !== undefined && seen.startsWith(scratch), "the seam saw a directory under the run's TMPDIR");
+      assert.deepEqual(readdirSync(scratch), [], "the temp directory was removed");
+    } finally {
+      if (was === undefined) delete process.env["TMPDIR"];
+      else process.env["TMPDIR"] = was;
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("formatSelftest", () => {

@@ -151,10 +151,15 @@ need a design-doc update.
 Before `gh release create` (which triggers `publish.yml`):
 
 - [ ] `npm run build` is clean and `npm test` passes.
-- [ ] `npm run test:e2e` passes. It installs the **packed** tarballs and drives real `git` and the `gh` shim under a
-      sandbox's conditions (proxy variables set, no readable `ps`, no TTY, no network). 0.13.1 and 0.13.2 each
-      shipped a refusal of the main path for every sandboxed agent while the unit tests passed; this is the check
-      that would have caught both. CI runs it on every PR (`e2e-sandbox`); run it again on the release commit.
+- [ ] Run `npm run test:e2e` **inside the Claude Code sandbox**, not in a plain terminal. It installs the **packed**
+      tarballs and drives real `git` and the `gh` shim under a sandbox's conditions (the sandbox's environment
+      variables, no readable `ps`, no TTY, no network). 0.13.1 and 0.13.2 each shipped a refusal of the main path for
+      every sandboxed agent while the unit tests passed; this is the check that would have caught both. The
+      "process list is unreadable" test fails when the installed core can read its ancestors (any ordinary
+      terminal); that failure means the run did not exercise the condition, so run it in the sandbox. CI runs it
+      on every PR: `e2e-sandbox` on Linux (where `/proc` makes the chain readable, so it sets `E2E_PS_READABLE_OK=1`)
+      and `e2e-sandbox-macos` under `sandbox-exec` with `/bin/ps` and `/usr/bin/ps` denied, which is the leg that can
+      see that class. Run it again on the release commit.
 - [ ] `repo-aegis selftest` on your own install reports every layer ok after you install the release candidate.
 - [ ] CHANGELOG has the release's section, with the `## [Unreleased]` entries moved under it.
 

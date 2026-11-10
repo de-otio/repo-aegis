@@ -89,9 +89,38 @@ jobs:
           cache: npm
       - run: npm ci
         timeout-minutes: 5
-      - name: Sandbox-shaped end to end (packed tarballs, proxy variables, no ps, no TTY)
+      - name: Sandbox-shaped end to end (packed tarballs, sandbox environment, no TTY)
         timeout-minutes: 10
+        env:
+          # Linux always has /proc, so the process list is readable here and this leg cannot see the unreadable-`ps`
+          # class (0.13.1). The test fails on a readable chain unless told it is accepted; the macOS job below covers it.
+          E2E_PS_READABLE_OK: "1"
         run: npm run test:e2e
+
+  # The same gate where the process list can really be made unreadable. `sandbox-exec` denies exec of both `ps` paths
+  # repo-aegis uses (absolute paths, so a PATH stub cannot), which is the condition that broke 0.13.1 and 0.13.2. The test
+  # asserts the installed core reads no ancestors and FAILS if it does (E2E_PS_READABLE_OK is deliberately not set), so a
+  # runner image where the profile stops working fails loudly instead of passing a gate that checks nothing.
+  e2e-sandbox-macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.0.0  # zizmor: ignore[cache-poisoning]
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+        timeout-minutes: 5
+      - run: npm run build
+        timeout-minutes: 5
+      - name: Sandbox-shaped end to end under sandbox-exec (no ps)
+        timeout-minutes: 10
+        run: |
+          sandbox-exec -p '(version 1)(allow default)(deny process-exec (literal "/bin/ps") (literal "/usr/bin/ps"))' \
+            node --test --test-reporter=spec tests/e2e/sandbox-shaped.test.mjs
 
   # The managed-settings drop-in (doc/plan-pin-enforcement-binary.md §2.3) is
   # written as root into the real system directory, so only a real `sudo` on a
@@ -194,7 +223,7 @@ jobs:
   # without re-editing branch protection.
   ci-success:
     if: always()
-    needs: [test, action-smoke, shim-smoke, e2e-sandbox, managed-dropin-e2e, workflow-lint]
+    needs: [test, action-smoke, shim-smoke, e2e-sandbox, e2e-sandbox-macos, managed-dropin-e2e, workflow-lint]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

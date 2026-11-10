@@ -14,9 +14,12 @@
 //     tarballs declare, so a dependency missing from a package.json fails here. No registry is needed to run.
 //   - a temp HOME with its own global git config, a temp REPO_AEGIS_HOME, and the real CLI's own `init` /
 //     `install shim` run against them (the person-gated installers cannot run without a terminal; the
-//     credential-helper line is written by hand in the exact shape `install git-credential` writes it).
-//   - the sandbox's environment: HTTPS_PROXY and DOCKER_HTTPS_PROXY pointing at a dead localhost port, a failing `ps`
-//     first on PATH, stdin never a TTY, no network.
+//     credential-helper line is rendered by the INSTALLED build's own `helperCommand`, the function
+//     `install git-credential` writes it with, and falls back to a hand-written copy only for a release that predates
+//     the export).
+//   - the sandbox's environment (`sandboxEnv` below, the shapes Claude Code's sandbox sets, every proxy pointing at a
+//     dead localhost port), a failing `ps` first on PATH, stdin never a TTY, no network.
+//   - cleanup on failure: a setup that throws after the temp root exists removes the root and re-throws.
 //
 // KNOWN LIMIT. repo-aegis runs `ps` by ABSOLUTE path (/bin/ps, /usr/bin/ps), so a PATH stub cannot make ITS process
 // list unreadable; it makes every `ps` that is found by name fail (the hook and shim scripts, any tool a flow spawns).
@@ -26,6 +29,7 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -37,7 +41,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -46,6 +50,59 @@ export const PACKAGES = ["core", "llm", "scan", "cli"];
 
 /** A dead localhost port: nothing listens on the discard port in a test run, and a connect fails at once. */
 export const DEAD_PROXY = "http://127.0.0.1:9";
+
+/**
+ * The sandbox's proxy URL as Claude Code's sandbox sets it: credentials in the userinfo, the loopback host and a
+ * port. Host and port are the dead proxy, so nothing connects; the userinfo is a made-up placeholder in the same
+ * shape (`srt.<base64>:<secret>`), never a copy of a real value.
+ */
+export const SANDBOX_PROXY_URL = "http://srt.ZXhhbXBsZS1wcm94eS11c2Vy:example-proxy-secret@127.0.0.1:9";
+
+/** The `NO_PROXY` list the sandbox sets, verbatim (it holds no secret). */
+const SANDBOX_NO_PROXY = "localhost,127.0.0.1,::1,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
+
+/**
+ * Every environment variable Claude Code's sandbox sets on an agent's commands that repo-aegis could react to, in
+ * the shapes it sets them (read from a real sandboxed session's `env`, names and shapes only, no secret value
+ * copied): the proxy family in both cases, `GIT_SSH_COMMAND` with its quoted ProxyCommand, `GIT_CONFIG_PARAMETERS`
+ * (a basic-auth setting and an empty credential helper for the proxy), `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`
+ * (safe.directory), `SANDBOX_RUNTIME` and `CLAUDECODE`. Every proxy points at {@link DEAD_PROXY}'s host and port.
+ * `SRT_SSH_PROXY_COMMAND` (which the real `GIT_SSH_COMMAND` evaluates) is a harmless stand-in: the `ssh` the world
+ * puts on PATH never runs a ProxyCommand.
+ *
+ * @param {string} root the world's root, the directory `safe.directory` names
+ */
+export function sandboxEnv(root) {
+  const proxy = SANDBOX_PROXY_URL;
+  const socks = SANDBOX_PROXY_URL.replace(/^http:/, "socks5h:");
+  return {
+    SANDBOX_RUNTIME: "1",
+    CLAUDECODE: "1",
+    HTTP_PROXY: proxy,
+    HTTPS_PROXY: proxy,
+    http_proxy: proxy,
+    https_proxy: proxy,
+    ALL_PROXY: proxy,
+    all_proxy: proxy,
+    GRPC_PROXY: proxy,
+    grpc_proxy: proxy,
+    FTP_PROXY: socks,
+    ftp_proxy: socks,
+    RSYNC_PROXY: "127.0.0.1:9",
+    DOCKER_HTTP_PROXY: proxy,
+    DOCKER_HTTPS_PROXY: proxy,
+    NO_PROXY: SANDBOX_NO_PROXY,
+    no_proxy: SANDBOX_NO_PROXY,
+    SRT_SSH_PROXY_COMMAND: "echo 'sandbox proxy: not reachable in the e2e world' >&2; exit 1",
+    GIT_SSH_COMMAND: String.raw`ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand="/bin/sh -c 'eval \"\${SRT_SSH_PROXY_COMMAND:?unset, but GIT_SSH_COMMAND needs it}\"' sh '%h' %p"`,
+    GIT_CONFIG_PARAMETERS: `'http.proxyAuthMethod=basic' 'credential.http://127.0.0.1:9.helper='`,
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "safe.directory",
+    GIT_CONFIG_VALUE_0: root,
+    GIT_CONFIG_KEY_1: "safe.directory",
+    GIT_CONFIG_VALUE_1: `${root}/*`,
+  };
+}
 
 const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
@@ -208,12 +265,41 @@ export const APP_TOKEN = "ghs_exampletoken0123456789abcdef";
 
 export const MARKER_TEXT = "E2E-MARKER-123456";
 
+/** The helper line as `install git-credential` writes it, spelled out. The world's test compares it to the installer's own output. */
+export function handWrittenHelperLine(node, cli, ra) {
+  return `!${sh(node)} ${sh(cli)} git-credential --home ${sh(ra)}`;
+}
+
+/**
+ * The helper line from the INSTALLED build's own renderer (`helperCommand` in `install-git-credential.js`), so a change
+ * to the installer's line changes the world's line with it. Null when that build has no such export (a release that
+ * predates it) or cannot be loaded; the caller then falls back to {@link handWrittenHelperLine}.
+ */
+export function installerHelperLine(cliDir, node, cli, ra, env) {
+  const module = pathToFileURL(join(cliDir, "dist", "commands", "install-git-credential.js")).href;
+  const script =
+    "import(process.argv[1]).then((m) => { if (typeof m.helperCommand !== 'function') process.exit(3); " +
+    "process.stdout.write(m.helperCommand({ node: process.argv[2], cli: process.argv[3] }, process.argv[4])); }, () => process.exit(4));";
+  const r = spawnSync(node, ["-e", script, module, node, cli, ra], { encoding: "utf8", env, timeout: 60_000 });
+  return r.status === 0 && r.stdout !== "" ? r.stdout : null;
+}
+
 /**
  * Build the world. `tarballDir` (default: `process.env.E2E_TARBALL_DIR`, else a fresh `npm pack` of the workspace)
- * says which build of repo-aegis is under test.
+ * says which build of repo-aegis is under test. A setup that throws after the temp root exists removes it and
+ * re-throws: a failed `before()` must not leave a `repo-aegis-e2e-*` directory behind.
  */
 export function makeWorld({ tarballDir = process.env["E2E_TARBALL_DIR"] } = {}) {
   const root = tempDir("world");
+  try {
+    return buildWorld(root, tarballDir);
+  } catch (err) {
+    rmSync(root, { recursive: true, force: true });
+    throw err;
+  }
+}
+
+function buildWorld(root, tarballDir) {
   const prefix = join(root, "prefix");
   const home = join(root, "home");
   const ra = join(root, "repo-aegis-home");
@@ -252,8 +338,7 @@ export function makeWorld({ tarballDir = process.env["E2E_TARBALL_DIR"] } = {}) 
     GIT_TERMINAL_PROMPT: "0",
     REPO_AEGIS_HOME: ra,
     REPO_AEGIS_VISIBILITY_LOOKUP: "0",
-    HTTPS_PROXY: DEAD_PROXY,
-    DOCKER_HTTPS_PROXY: DEAD_PROXY,
+    ...sandboxEnv(root),
     ...extra,
   });
 
@@ -268,7 +353,7 @@ export function makeWorld({ tarballDir = process.env["E2E_TARBALL_DIR"] } = {}) 
   const https = installHttpsRemoteStub(root, node);
   const world = {
     https,
-    root, prefix, home, ra, stubs, ghStubs, bare, cli, node, version, gitconfig, env, run, git, cliRun: ra_,
+    root, prefix, home, ra, stubs, ghStubs, bare, cli, cliDir, node, version, gitconfig, env, run, git, cliRun: ra_,
     pathWith: (...dirs) => [...dirs, basePath].join(delimiter),
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
@@ -300,11 +385,35 @@ printf '{"token":"%s","expiresAt":"2099-01-01T00:00:00Z","installationAccount":"
   const shim = ra_(["install", "shim"], { cwd: setupRepo, env: { PATH: [taaadDir, basePath].join(delimiter) } });
   if (shim.code !== 0) throw new Error(`repo-aegis install shim failed (${shim.code}): ${shim.stderr}${shim.stdout}`);
 
-  // `install git-credential` needs a terminal. Same line, same keys (the unit tests in git-credential.test.ts do the same).
+  // `install git-credential` needs a person at a keyboard, so its effect is reproduced: the same keys, and the same line,
+  // rendered by the installed build's own `helperCommand` (a release that predates the export gets the hand-written copy).
+  const renderedLine = installerHelperLine(cliDir, node, cli, ra, { PATH: basePath });
+  world.helperLine = renderedLine ?? handWrittenHelperLine(node, cli, ra);
+  world.helperLineSource = renderedLine === null ? "hand-written" : "installer";
   git(home, ["config", "--global", "credential.https://github.com.useHttpPath", "true"]);
   git(home, ["config", "--global", "--add", "credential.https://github.com.helper", ""]);
-  git(home, ["config", "--global", "--add", "credential.https://github.com.helper", `!${sh(node)} ${sh(cli)} git-credential --home ${sh(ra)}`]);
+  git(home, ["config", "--global", "--add", "credential.https://github.com.helper", world.helperLine]);
 
   world.claudeHome = claudeHome;
   return world;
+}
+
+/**
+ * Make `dir` and everything under it read-only (directories 0555, files without their write bits), the way a sandbox
+ * that leaves a configuration directory outside its write list sees it. Returns a function that puts every mode back,
+ * which a caller MUST run (in `finally` or `after`) before the world is cleaned up.
+ */
+export function makeReadOnly(dir) {
+  const saved = [];
+  const walk = (p) => {
+    const st = lstatSync(p);
+    if (st.isSymbolicLink()) return;
+    saved.push([p, st.mode & 0o7777]);
+    if (st.isDirectory()) for (const name of readdirSync(p)) walk(join(p, name));
+  };
+  walk(dir);
+  for (const [p, mode] of [...saved].reverse()) chmodSync(p, mode & ~0o222);
+  return () => {
+    for (const [p, mode] of saved) chmodSync(p, mode);
+  };
 }

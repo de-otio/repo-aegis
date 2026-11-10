@@ -66,6 +66,8 @@ export interface SelftestReport {
 export interface SelftestOptions extends OutputOptions {
   /** Test seam: where Claude Code's settings.json lives (default `~/.claude`). */
   claudeHome?: string;
+  /** Test seam: called with the temp directory right after it exists. A throw is a setup failure (the directory must still be removed). */
+  afterTempDir?: (root: string) => void;
 }
 
 /** The synthetic marker the pre-commit flow commits. Not a secret and not anyone's name. */
@@ -145,8 +147,17 @@ const SCRUBBED_ENV = [
   "GITHUB_ENTERPRISE_TOKEN",
 ];
 
-function buildWorld(baseEnv: NodeJS.ProcessEnv): World {
-  const root = mkdtempSync(join(tmpdir(), "repo-aegis-selftest-"));
+/** `ssh` as the first word: the caller's own ssh command (the sandbox's carries a ProxyCommand), still served by the stub `ssh` first on PATH. */
+const PLAIN_SSH_COMMAND = /^ssh(?:\s|$)/;
+
+/** The GIT_SSH_COMMAND a flow runs with: the caller's when it starts with `ssh`, else plain `ssh`. */
+export function sshCommandFor(callerValue: string | undefined): string {
+  const v = callerValue ?? "";
+  return PLAIN_SSH_COMMAND.test(v) ? v : "ssh";
+}
+
+/** `root` is an existing, empty temp directory; the caller removes it, whether or not this returns. */
+function buildWorld(root: string, baseEnv: NodeJS.ProcessEnv): World {
   const home = join(root, "home");
   const stubs = join(root, "stubs");
   const ghStubs = join(root, "gh-stub");
@@ -189,14 +200,30 @@ printf '{"token":"%s","expiresAt":"2099-01-01T00:00:00Z","installationAccount":"
   env["REPO_AEGIS_VISIBILITY_LOOKUP"] = "0";
   env["GIT_TERMINAL_PROMPT"] = "0";
   env["GIT_ALLOW_PROTOCOL"] = "ssh:file";
-  // Plain `ssh` (the stub) beats a person's `core.sshCommand`, which could otherwise send a flow to a real host.
-  env["GIT_SSH_COMMAND"] = "ssh";
+  // The flows must look like the caller's: keep a GIT_SSH_COMMAND that starts with `ssh` (the sandbox sets one with a
+  // ProxyCommand, and the guard judges a push differently under it). The `ssh` that runs is still the stub first on PATH,
+  // which ignores every option. Anything else (another program, or none) becomes plain `ssh`, which also beats a person's
+  // `core.sshCommand` that could otherwise send a flow to a real host.
+  env["GIT_SSH_COMMAND"] = sshCommandFor(baseEnv["GIT_SSH_COMMAND"]);
+  // Git's system-wide configuration (on stock macOS: a credential helper) is not the install under test. The GLOBAL
+  // configuration stays: the pre-commit and pre-push layers need the person's `core.hooksPath` from it, and the helper
+  // line is read from it. (Pointing GIT_CONFIG_GLOBAL at /dev/null would make those layers report "not installed".)
+  // What it cannot hide is a person's own global `url.<base>.insteadOf` rewriting github.com: a flow then fails the way
+  // that person's own pushes do, which is true, if noisy.
+  env["GIT_CONFIG_NOSYSTEM"] = "1";
   env["PATH"] = [stubs, baseEnv["PATH"] ?? ""].join(delimiter);
   return { root, home, stubs, ghStubs, bare, ghLog, env };
 }
 
 /** Never the person's identity, signing, or hook-skipping defaults for the throwaway commits. */
-const GIT_FLAGS = ["-c", "user.name=selftest", "-c", "user.email=selftest@example.invalid", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"];
+const GIT_FLAGS = [
+  "-c", "user.name=selftest",
+  "-c", "user.email=selftest@example.invalid",
+  "-c", "commit.gpgsign=false",
+  "-c", "tag.gpgsign=false",
+  // A person's global `core.fsmonitor=true` would start a file-system monitor daemon for every throwaway repository.
+  "-c", "core.fsmonitor=false",
+];
 
 function git(w: World, cwd: string, args: readonly string[]): Run {
   return run("git", [...GIT_FLAGS, ...args], cwd, w.env);
@@ -385,8 +412,12 @@ export function sandboxFacts(env: NodeJS.ProcessEnv = process.env): SandboxFacts
 /** Run every layer. Writes only under a temp directory it removes. */
 export function runSelftest(opts: SelftestOptions = {}): SelftestReport {
   const baseEnv = process.env;
-  const w = buildWorld(baseEnv);
+  // The directory and the world are built INSIDE the try, so a setup that throws part-way still removes what it made.
+  let root: string | undefined;
   try {
+    root = mkdtempSync(join(tmpdir(), "repo-aegis-selftest-"));
+    opts.afterTempDir?.(root);
+    const w = buildWorld(root, baseEnv);
     // The shim's own install and the egress hook are read from the REAL home and settings (read-only); the flows run in the temp one.
     const layers: LayerResult[] = [
       preCommitLayer(w),
@@ -398,7 +429,7 @@ export function runSelftest(opts: SelftestOptions = {}): SelftestReport {
     const here = fileURLToPath(new URL("../index.js", import.meta.url));
     return { version: versionOf(here), ok: layers.every(l => l.ok), layers, sandbox: sandboxFacts(baseEnv) };
   } finally {
-    rmSync(w.root, { recursive: true, force: true });
+    if (root !== undefined) rmSync(root, { recursive: true, force: true });
   }
 }
 
