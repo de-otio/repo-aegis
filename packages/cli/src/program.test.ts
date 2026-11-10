@@ -115,6 +115,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
       "render",
       "resume",
       "scan-env",
+      "selftest",
       "status",
       "suggest-markers",
       "uninstall",
@@ -161,6 +162,7 @@ const EXPECTED_SHAPE: CommandShape[] = [
   { path: "docs", flags: ["--path"], subcommands: [] },
   { path: "egress-check", flags: [], subcommands: [] },
   { path: "explain", flags: ["--list"], subcommands: [] },
+  { path: "selftest", flags: [], subcommands: [] },
   { path: "gh", flags: [], subcommands: [] },
   { path: "gh", flags: [], subcommands: [] },
   {

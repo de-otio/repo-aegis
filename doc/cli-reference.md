@@ -2126,6 +2126,42 @@ shipped docs are rewritten at build time so they resolve inside `dist/docs/`.
 **Read-only, and an agent may run it**, like `explain`: it reads files that ship next to
 the command and nothing else. It is not on the person-only list.
 
+### `repo-aegis selftest [--json]`
+
+Runs the real install through the conditions the caller is in, so "why is everything refused?" has an answer
+that is not a day of guessing (0.13.1 refused every sandboxed fetch and 0.13.2 every sandboxed push; each took
+days to find from inside real work). Exit **0** when every layer is ok, **1** otherwise.
+
+One line per layer, then the facts it detected:
+
+```
+pre-commit ok
+pre-push ok
+shim ok
+credential helper ok
+egress hook ok
+sandbox: proxy variables set: DOCKER_HTTPS_PROXY, HTTPS_PROXY; ps readable: no; tty: no
+```
+
+| Layer | What it runs | Not ok reads |
+|---|---|---|
+| `pre-commit` | a clean commit, then a commit holding a synthetic marker, in a throwaway repository, through the hooks git is configured with (global `core.hooksPath`) | `FAILED` + why (a clean commit refused, the marker not refused, or refused for another reason) |
+| `pre-push` | a push to a declared-public destination (must be refused as `PUBLIC_PUSH_NEEDS_HUMAN`), then to a declared-private one (must go out), through the same hooks | `FAILED` + why, or `refuses: <code>` |
+| `shim` | `gh pr create` to a private then a public destination through a copy of the installed shim whose pinned `--home` is the temp home, with a stub `gh` | `not installed`, `not first on PATH` (checked on the real `PATH`), `refuses: <code>`, or `FAILED` |
+| `credential helper` | the helper command from git's global configuration (this CLI when none is installed), with its `--home` swapped for a temp home that maps one owner to an App and pins a stub `taaad`, asked for that owner's credential from your real environment and git configuration | `refuses: <code>` (for example `AGENT_PUSH_CREDENTIAL_CONFIG` when a trace variable is set). With no helper in git's configuration the line reads `ok (not installed in git's global configuration)`: the helper is optional, and the flow ran this CLI directly |
+| `egress hook` | reads `settings.json` and the managed drop-in for the `PreToolUse(Bash)` `guard-egress` entry | `not registered` |
+
+The `sandbox:` line names the proxy variables set (names only, never values), whether the process list could be
+read, and whether stderr is a terminal. `--json` prints `{ version, ok, layers: [{ layer, ok, status, detail }],
+sandbox: { proxyVars, psReadable, tty } }`.
+
+**Writes nothing outside `$TMPDIR`, touches no network, and an agent may run it.** Every child it starts gets
+`REPO_AEGIS_HOME` set to a temp home with a synthetic registry, so your registry, approvals, destination cache and
+audit log are not read or written; `ssh` and `taaad` are stubs on `PATH`, `GIT_ALLOW_PROTOCOL` admits only `ssh` and
+`file`, visibility lookups are off, and the children have no terminal and never `REPO_AEGIS_EGRESS_HUMAN`. The
+temp directory is removed afterwards, also when a layer fails. It cannot say whether Claude Code loaded the
+registered hook (the SessionStart heartbeat covers that), and it never asks your own credential helper for anything.
+
 ### `repo-aegis suggest-markers`
 
 LLM-assisted marker discovery: extracts prose from a repo, asks a **local**

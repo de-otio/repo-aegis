@@ -675,6 +675,16 @@ that they classify the destination repo (`repo-aegis classify
 
 ## Failure modes
 
+### "Something is refused and I do not know why": run `repo-aegis selftest` first
+
+Before reading a refusal's code in detail, or reaching for `doctor`, run `repo-aegis selftest` from the directory
+and environment you are refused in (your sandbox, with its proxy variables and without a process list or a
+terminal). It writes only under `$TMPDIR`, touches no network and no repository of the user's, and you may run it.
+It prints one line per layer (`pre-commit`, `pre-push`, `shim`, `credential helper`, `egress hook`), then the
+sandbox facts it detected, and exits 1 if any layer is not ok. A layer that says `refuses: <code>` names the code
+to `repo-aegis explain`; `not first on PATH` and `not registered` are installs only the person can fix
+(`repo-aegis doctor` says how). Report its output to the user rather than working around a layer that is not ok.
+
 ### "I get `customer-coupled with no engagement` errors"
 
 The repo's `.git/config` has
@@ -1349,6 +1359,7 @@ shape we don't model.
 | `check --range <r>` | scan commit range | (same) |
 | `check --history` | scan full git log | (same; `historyHits` populated) |
 | `render` | regenerate marker files | `RenderResult` |
+| `selftest` | run the real hooks, shim, credential helper and egress-hook registration through throwaway repos under `$TMPDIR` (exit 1 if a layer is not ok) | `version`, `ok`, `layers` (`layer`, `ok`, `status`, `detail`), `sandbox` (`proxyVars`, `psReadable`, `tty`) |
 | `engagements list` | list engagements | `engagements`, `alwaysBlock` |
 | `engagements add [id]` | add new engagement (id optional with `--github-org` / `--personal-org`; those two flags register an owner and are **for a person at a terminal**) | `action`, `id`, `name`, `markers`, `rendered`, `githubOrgs`, `personalOrgs` |
 | `engagements end <id>` | mark ended | `action`, `id`, `ended`, `purged`, `rendered` |

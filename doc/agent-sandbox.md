@@ -6,6 +6,11 @@ sandboxed process. This page says what works there, what does not, and what to
 configure. It was written on 2026-11-09. Items marked **unverified** were taken
 from vendor documentation and have not been run end to end.
 
+**Run `repo-aegis selftest` from inside the sandbox first.** It runs the real hooks, shim and credential helper
+through throwaway repositories under the temp directory, under the conditions it finds itself in (proxy variables,
+no process list, no terminal), and prints which layer, if any, refuses and with what code. It is read-only outside
+`$TMPDIR` and an agent may run it.
+
 ## What works inside the sandbox
 
 - **Every gate that only reads local files:** the write and egress hooks, the
