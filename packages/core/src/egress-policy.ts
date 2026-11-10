@@ -1396,7 +1396,8 @@ const DOT_GH_WRITE_NEEDS_BOT_REASON = [
   "Without --as, dot gh picks the account from the repository's owner, which for your user's own organisation is the user themself, so the agent would publish as them.",
   "Re-issue with --as bot as dot gh's first option:",
   "  dot gh --as bot <the same gh arguments>",
-  "If the bot lacks the permission (it has no issues, secrets, Actions or workflow-file access), stop and report it to your human; do not switch to --as owner or plain gh. [DOT_GH_WRITE_NEEDS_BOT]",
+  "If the bot lacks the permission (it has no issues, secrets, Actions or workflow-file access), stop and report it to your human; do not switch to --as owner or plain gh.",
+  // (the shared `[DOT_GH_WRITE_NEEDS_BOT; details: …]` trailer, with the version and next step, is added by `deny()`)
 ].join("\n");
 
 /** The owners a `gh` intent names literally: `--repo` / `-R` / `GH_REPO`, a URL or `o/r` positional, and a `repos/<o>/<r>/…` endpoint. */
