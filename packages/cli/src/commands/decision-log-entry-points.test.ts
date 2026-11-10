@@ -187,6 +187,16 @@ describe("decision log: the write hooks", { skip: SKIP }, () => {
     assert.doesNotMatch(JSON.stringify(rec), /repo-aegis\.yml|work/, "no path");
   });
 
+  it("check-write: a write to the decision log's switch is refused (an agent must not switch the log off), and to the log itself is not", () => {
+    const w = world();
+    const sw = runCliIn(w, ["hook", "check-write"], JSON.stringify({ tool_input: { file_path: join(w.home, "state", "decision-log.json") }, cwd: w.cwd }));
+    assert.equal(sw.code, 2);
+    assert.equal((JSON.parse(sw.stderr) as { code: string }).code, "DECISION_LOG_STATE_WRITE_REFUSED");
+    const rec = oneRecord(w, "switch write");
+    assert.equal(rec.code, "DECISION_LOG_STATE_WRITE_REFUSED");
+    assert.doesNotMatch(JSON.stringify(rec), /decision-log\.json|state/, "no path");
+  });
+
   it("check-write: an allowed write writes nothing", () => {
     const w = world();
     const file = join(w.cwd, "notes.txt");

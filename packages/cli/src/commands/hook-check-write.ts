@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename } from "node:path";
 import {
   APPROVALS_FILE,
+  DECISION_LOG_STATE_FILE,
   isGhConfigFile,
   loadRegistryState,
   OVERRIDE_FILENAME,
@@ -199,6 +200,21 @@ export async function hookCheckWrite(): Promise<void> {
           `mints (\`repo-aegis approve\`, from their own terminal), so an agent that wrote one would be approving its ` +
           `own publish. No approval covers this. Tell your human what you need. ` +
           `[APPROVALS_FILE_WRITE_REFUSED; details: repo-aegis explain APPROVALS_FILE_WRITE_REFUSED]`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
+  }
+
+  if (state === "decision-log") {
+    emitJsonAndExit(
+      {
+        code: "DECISION_LOG_STATE_WRITE_REFUSED",
+        error:
+          `agent write to ${DECISION_LOG_STATE_FILE} refused: that file switches the decision log on or off, and the log is ` +
+          `what you read to see why you were refused (\`repo-aegis log --last 1\`). Only a person switches it off ` +
+          `(\`repo-aegis log --off\`, from their own terminal); you may switch it back on with \`repo-aegis log --on\`. ` +
+          `No approval covers this. [DECISION_LOG_STATE_WRITE_REFUSED; details: repo-aegis explain DECISION_LOG_STATE_WRITE_REFUSED]`,
         details: { filePath },
       },
       EXIT_BLOCK,

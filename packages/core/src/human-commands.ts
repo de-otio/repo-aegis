@@ -544,6 +544,8 @@ export const HUMAN_VERB_PATHS: Readonly<Record<HumanOnlyKind, ReadonlyArray<read
 };
 
 const HELP_FLAGS: ReadonlySet<string> = new Set(["--help", "-h"]);
+/** A verb's own switch that may sit next to `--help`: Commander prints the help and runs nothing (`repo-aegis log --off --help`, P1-I). */
+const HELP_COMPANION_FLAGS: ReadonlySet<string> = new Set(["--off"]);
 const HELP_VERB_WORDS: ReadonlySet<string> = new Set(Object.values(HUMAN_VERB_PATHS).flat(2));
 /** Verbs with subcommands, which have Commander's implicit `help` subcommand: `identity help add`. */
 const HELP_GROUPS: ReadonlySet<string> = new Set(
@@ -587,7 +589,7 @@ function isHelpTokens(tokens: readonly string[]): boolean {
     const groupOrRoot = before.length === 0 || (before.length === 1 && HELP_GROUPS.has(before[0]!));
     return groupOrRoot && t.slice(h + 1).every(w => HELP_VERB_WORDS.has(w));
   }
-  return t.some(w => HELP_FLAGS.has(w)) && t.every(w => HELP_FLAGS.has(w) || HELP_VERB_WORDS.has(w));
+  return t.some(w => HELP_FLAGS.has(w)) && t.every(w => HELP_FLAGS.has(w) || HELP_VERB_WORDS.has(w) || HELP_COMPANION_FLAGS.has(w));
 }
 
 const MAX_NESTING = 3;
