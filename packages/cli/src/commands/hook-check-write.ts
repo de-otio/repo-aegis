@@ -9,8 +9,13 @@ import {
   OVERRIDE_FILENAME,
   PAUSE_FILE,
   pauseNotice,
+  REFUSAL_GUIDE,
+  refusalTrailer,
+  withLogTrailer,
+  withRefusalTrailer,
   type Registry,
 } from "@de-otio/repo-aegis-core";
+import { recordDecision, registryStateFact } from "../decision.js";
 import { pauseCoveringWorkingRepo, pausedRepoLabel, recordPausedAllow } from "../pause-scope.js";
 import { protectedStateFile } from "../state-file-guard.js";
 import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
@@ -41,7 +46,39 @@ import {
 //                    stderr is surfaced to the user as a warning.
 const EXIT_BLOCK = 2;
 
+/** X-10: a payload whose `code` is in the shared refusal table gets the table's version/next-step/person-only trailer. */
+function withGuideTrailer(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  const v = value as { code?: unknown; error?: unknown };
+  if (typeof v.code !== "string" || typeof v.error !== "string") return value;
+  if (!Object.prototype.hasOwnProperty.call(REFUSAL_GUIDE, v.code)) return value;
+  return { ...value, error: withRefusalTrailer(v.code, v.error) };
+}
+
+/**
+ * The registry state of this run, for the decision record's facts (P1-I). Module state: set once by the registry load
+ * below, read by `emitJsonAndExit` when a refusal is recorded. One process makes one decision.
+ */
+let registryFact: ReturnType<typeof registryStateFact> | undefined;
+
 function emitJsonAndExit(value: unknown, exitCode: number): never {
+  // X-10's guide trailer first, so P1-I's `(logged: …)` below stays last.
+  value = withGuideTrailer(value);
+  if (exitCode !== 0 && value !== null && typeof value === "object") {
+    // P1-I: every refusal of this hook is recorded (one record, written first), and its text ends with the trailer for
+    // what the write did. Never the path: the record names the code and the layer only.
+    const v = value as { code?: unknown; error?: unknown };
+    const code = typeof v.code === "string" ? v.code : "CHECK_WRITE_REFUSED";
+    const written = recordDecision({
+      layer: "check-write",
+      outcome: "refuse",
+      host: "claude-code",
+      code,
+      verb: "write",
+      ...(registryFact !== undefined && { facts: { registryState: registryFact } }),
+    }).written;
+    if (typeof v.error === "string") value = { ...value, error: withLogTrailer(v.error, written) };
+  }
   // Claude Code forwards STDERR (not stdout) to the model when a
   // PreToolUse hook exits non-zero. Emitting the diagnostic on stdout —
   // as this hook originally did — meant a blocked write reached the
@@ -141,7 +178,7 @@ export async function hookCheckWrite(): Promise<void> {
           `agent write to ${basename(filePath)} in gh's config directory refused: it controls which account, pager, ` +
           `editor and aliases gh uses, so changing it could redirect the credential repo-aegis injects. No approval ` +
           `covers this. Tell your human what you need changed; a person edits it, or runs \`gh config set\` or ` +
-          `\`gh auth\`, from their own terminal. [GH_CONFIG_WRITE_REFUSED; details: repo-aegis explain GH_CONFIG_WRITE_REFUSED]`,
+          `\`gh auth\`, from their own terminal.`,
         details: { filePath },
       },
       EXIT_BLOCK,
@@ -161,7 +198,7 @@ export async function hookCheckWrite(): Promise<void> {
         error:
           `agent write to ${PAUSE_FILE} refused: that file is the emergency pause, which only a person may set ` +
           `(\`repo-aegis pause\`, from their own terminal). No approval covers this. Tell your human what is wrong ` +
-          `and let them decide. [PAUSE_FILE_WRITE_REFUSED; details: repo-aegis explain PAUSE_FILE_WRITE_REFUSED]`,
+          `and let them decide.`,
         details: { filePath },
       },
       EXIT_BLOCK,
@@ -174,8 +211,22 @@ export async function hookCheckWrite(): Promise<void> {
         error:
           `agent write to ${APPROVALS_FILE} refused: that file holds the human egress approvals, which only a person ` +
           `mints (\`repo-aegis approve\`, from their own terminal), so an agent that wrote one would be approving its ` +
-          `own publish. No approval covers this. Tell your human what you need. ` +
-          `[APPROVALS_FILE_WRITE_REFUSED; details: repo-aegis explain APPROVALS_FILE_WRITE_REFUSED]`,
+          `own publish. No approval covers this. Tell your human what you need.`,
+        details: { filePath },
+      },
+      EXIT_BLOCK,
+    );
+  }
+
+  if (state === "decision-log") {
+    emitJsonAndExit(
+      {
+        code: "DECISION_LOG_STATE_WRITE_REFUSED",
+        error:
+          `agent write to the decision log refused (${basename(filePath)}): that is the log's on/off switch or the log itself, and the log is ` +
+          `what you read to see why you were refused (\`repo-aegis log --last 1\`). Only a person switches it off ` +
+          `(\`repo-aegis log --off\`, from their own terminal); you may switch it back on with \`repo-aegis log --on\`. ` +
+          `No approval covers this. ${refusalTrailer("DECISION_LOG_STATE_WRITE_REFUSED")}`,
         details: { filePath },
       },
       EXIT_BLOCK,
@@ -187,7 +238,7 @@ export async function hookCheckWrite(): Promise<void> {
   // Detection is not paused: `scan-after-write` still reports a marker hit, as advice.
   const paused = pauseCoveringWorkingRepo(cwd ?? process.cwd());
   if (paused !== null && paused.repo !== undefined) {
-    recordPausedAllow("hook check-write", { verb: "write", destination: pausedRepoLabel(paused.repo) });
+    recordPausedAllow("check-write", { verb: "write", destination: pausedRepoLabel(paused.repo), pause: paused });
     process.stdout.write(JSON.stringify({ systemMessage: pauseNotice(paused) }) + "\n");
     process.exit(0);
   }
@@ -198,6 +249,7 @@ export async function hookCheckWrite(): Promise<void> {
   // write check off. The messages are fixed text: the parse error names orgs and engagement ids, which must not reach
   // an agent's transcript.
   const load = loadRegistryState();
+  registryFact = registryStateFact(load.state);
   if (load.state === "newer-schema") {
     emitJsonAndExit({ code: "REGISTRY_ERROR", error: NEWER_SCHEMA_ERROR }, EXIT_BLOCK);
   }

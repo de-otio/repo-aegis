@@ -566,7 +566,7 @@ describe("findHumanOnlyCommand: --help alone reads help, so an agent may run it 
 
   it("HUMAN_VERB_PATHS has a path list for every kind", () => {
     const kinds: HumanOnlyKind[] = [
-      "approve", "pause", "owner-add", "upstream-add", "init-migrate", "init-force", "identity-change",
+      "approve", "pause", "log-off", "owner-add", "upstream-add", "init-migrate", "init-force", "identity-change",
       "claude-md-uninstall", "internal-entry", "managed-settings-write",
     ];
     assert.deepEqual(Object.keys(HUMAN_VERB_PATHS).sort(), [...kinds].sort());

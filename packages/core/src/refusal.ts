@@ -21,6 +21,7 @@
 // Callers pass only what the command already says (the verb, the destination
 // owner/repo). Never registry contents, other owners, engagement ids, payload
 // bytes or matched strings: the reason can land in an agent transcript.
+import { refusalGuideLine, type RefusalGuideOverride } from "./refusal-guide.js";
 
 /** One remedy, and who carries it out. */
 export interface RefusalFix {
@@ -141,8 +142,25 @@ function renderFix(fix: RefusalFix): string {
  * names a command that prints the guide's text (it ships in the package). The code stays first and unchanged, so
  * a tool that greps `[CODE` still matches.
  */
-export function refusalTrailer(code: string): string {
-  return `[${code}; details: repo-aegis explain ${code}]`;
+export function refusalTrailer(code: string, override?: RefusalGuideOverride): string {
+  return `${refusalGuideLine(code, override)} [${code}; details: repo-aegis explain ${code}]`;
+}
+
+/**
+ * `text` with the refusal trailer appended, unless it already carries THIS trailer (the version, next step and
+ * person-only line). For refusals built outside {@link refusal} (the shape rules, the terminal gates, plain CLI
+ * errors) so the version, next step and person-only fields come from the one table.
+ *
+ * "Already done" is decided by the guide line, not by the `[CODE; …]` token: an older hand-written token at the
+ * end (`[CODE]` or `[CODE; details: …]`) must not stop the new fields from being added. It is replaced by the full
+ * trailer, so a token never appears twice.
+ */
+export function withRefusalTrailer(code: string, text: string, override?: RefusalGuideOverride): string {
+  if (text.includes(refusalGuideLine(code, override))) return text;
+  const stripped = /^[A-Z][A-Z0-9_]*$/.test(code)
+    ? text.replace(new RegExp(`\\s*\\[${code}(?:; details: repo-aegis explain ${code})?\\]\\s*$`), "")
+    : text;
+  return `${stripped} ${refusalTrailer(code, override)}`;
 }
 
 /**
@@ -166,4 +184,18 @@ export function refusal(input: RefusalInput): string {
   }
   parts.push(refusalTrailer(input.code));
   return parts.join(" ");
+}
+
+/**
+ * The decision log's closing remark on a refusal (P1-I), assembled AFTER the write attempt so it tells the truth:
+ * `(logged: repo-aegis log --last 1)` when a record was written (primary or fallback), `(not logged)` when none was.
+ * The decision itself is never made, or changed, by this.
+ */
+export function logTrailer(written: "primary" | "fallback" | "none"): string {
+  return written === "none" ? "(not logged)" : "(logged: repo-aegis log --last 1)";
+}
+
+/** `text` followed by {@link logTrailer}: the one place a refusal gets it. */
+export function withLogTrailer(text: string, written: "primary" | "fallback" | "none"): string {
+  return `${text} ${logTrailer(written)}`;
 }

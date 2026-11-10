@@ -9,7 +9,7 @@ import { before, after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, relative } from "node:path";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
@@ -217,14 +217,22 @@ function makeInstall(opts: { bare?: boolean } = {}): Install {
 function snapshot(dir: string, skip: string[] = []): Map<string, string> {
   const out = new Map<string, string>();
   const walk = (d: string): void => {
-    for (const name of readdirSync(d)) {
-      const p = join(d, name);
+    for (const ent of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, ent.name);
       if (skip.includes(p)) continue;
-      const st = statSync(p);
-      if (st.isDirectory()) {
+      if (ent.isDirectory()) {
         out.set(`${relative(dir, p)}/`, "dir");
         walk(p);
-      } else out.set(relative(dir, p), createHash("sha256").update(readFileSync(p)).digest("hex") + `:${st.mode & 0o777}`);
+      } else {
+        // one descriptor for the mode and the content, so the file cannot change between the two reads
+        const fd = openSync(p, "r");
+        try {
+          const mode = fstatSync(fd).mode & 0o777;
+          out.set(relative(dir, p), createHash("sha256").update(readFileSync(fd)).digest("hex") + `:${mode}`);
+        } finally {
+          closeSync(fd);
+        }
+      }
     }
   };
   walk(dir);

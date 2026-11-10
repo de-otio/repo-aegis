@@ -39,6 +39,8 @@ export type HumanOnlyKind =
   | "approve"
   // The emergency pause (P1-E): a global, time-boxed off switch only a person may set. `resume` only re-enables protection, so an agent may run it.
   | "pause"
+  // Switching the decision log off (P1-I): an agent that did would remove the data the next refusal needs. `log --on` only turns it on.
+  | "log-off"
   | "owner-add"
   | "upstream-add"
   | "init-migrate"
@@ -490,6 +492,7 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
   const revokeOnly = win.includes("--revoke") && !win.includes("--list");
   if (win.includes("approve") && !revokeOnly) return "approve";
   if (win.includes("pause")) return "pause";
+  if (win.includes("log") && win.includes("--off")) return "log-off";
   const at = (word: string): number => win.indexOf(word);
   const eng = at("engagements");
   if (eng !== -1 && win.indexOf("add", eng) !== -1 && (win.includes("--personal-org") || win.includes("--github-org"))) {
@@ -529,6 +532,7 @@ function classify(win: readonly string[]): HumanOnlyKind | null {
 export const HUMAN_VERB_PATHS: Readonly<Record<HumanOnlyKind, ReadonlyArray<readonly string[]>>> = {
   approve: [["approve"]],
   pause: [["pause"]],
+  "log-off": [["log"]],
   "owner-add": [["engagements", "add"]],
   "upstream-add": [["upstreams", "add"]],
   "init-migrate": [["init"]],
@@ -540,6 +544,8 @@ export const HUMAN_VERB_PATHS: Readonly<Record<HumanOnlyKind, ReadonlyArray<read
 };
 
 const HELP_FLAGS: ReadonlySet<string> = new Set(["--help", "-h"]);
+/** A verb's own switch that may sit next to `--help`: Commander prints the help and runs nothing (`repo-aegis log --off --help`, P1-I). */
+const HELP_COMPANION_FLAGS: ReadonlySet<string> = new Set(["--off"]);
 const HELP_VERB_WORDS: ReadonlySet<string> = new Set(Object.values(HUMAN_VERB_PATHS).flat(2));
 /** Verbs with subcommands, which have Commander's implicit `help` subcommand: `identity help add`. */
 const HELP_GROUPS: ReadonlySet<string> = new Set(
@@ -583,7 +589,7 @@ function isHelpTokens(tokens: readonly string[]): boolean {
     const groupOrRoot = before.length === 0 || (before.length === 1 && HELP_GROUPS.has(before[0]!));
     return groupOrRoot && t.slice(h + 1).every(w => HELP_VERB_WORDS.has(w));
   }
-  return t.some(w => HELP_FLAGS.has(w)) && t.every(w => HELP_FLAGS.has(w) || HELP_VERB_WORDS.has(w));
+  return t.some(w => HELP_FLAGS.has(w)) && t.every(w => HELP_FLAGS.has(w) || HELP_VERB_WORDS.has(w) || HELP_COMPANION_FLAGS.has(w));
 }
 
 const MAX_NESTING = 3;
@@ -679,11 +685,21 @@ function isDownloadWriter(words: readonly string[]): boolean {
  * The person-only state files, by name, and the kind a shell write to each is refused as:
  *   - `pause.json`, the emergency pause: `pause`;
  *   - `egress-approvals.json`, the human egress approvals: `approve` (an agent that wrote one would be minting its own
- *     approval, which is exactly what the `approve` refusal says, so it reuses that kind and its fix, `repo-aegis approve`).
+ *     approval, which is exactly what the `approve` refusal says, so it reuses that kind and its fix, `repo-aegis approve`);
+ *   - `decision-log.json`, the decision log's on/off switch, and `decisions.jsonl` with its rotations, the log itself
+ *     (P1-I; deleting it is switching it off by another route): `log-off`.
  */
-const STATE_FILES: ReadonlyArray<{ name: string; kind: HumanOnlyKind }> = [
+/**
+ * Programs that DELETE a file. Next to the decision log's name they mean a write (deleting the log is switching it off);
+ * next to `pause.json` or the approvals they are not refused (removing either only tightens).
+ */
+const STATE_FILE_DELETERS = new Set(["rm", "unlink", "shred", "trash"]);
+
+const STATE_FILES: ReadonlyArray<{ name: string; kind: HumanOnlyKind; deletes?: true }> = [
   { name: "pause\\.json", kind: "pause" },
   { name: "egress-approvals\\.json", kind: "approve" },
+  { name: "decision-log\\.json", kind: "log-off" },
+  { name: "decisions\\.jsonl(?:\\.\\d)?", kind: "log-off", deletes: true },
 ];
 
 /**
@@ -700,13 +716,13 @@ const STATE_FILES: ReadonlyArray<{ name: string; kind: HumanOnlyKind }> = [
 function writesStateFile(command: string): HumanOnlyKind | null {
   const plain = command.replace(/["'\\]/g, "");
   if (!/repo[-_]aegis/i.test(plain)) return null;
-  for (const { name, kind } of STATE_FILES) {
+  for (const { name, kind, deletes } of STATE_FILES) {
     if (!new RegExp(name, "i").test(plain)) continue;
     if (new RegExp(`>>?\\|?\\s*[^\\s<>;&|]*${name}`, "i").test(plain)) return kind;
     const ending = new RegExp(`${name}$`, "i");
     for (const { words } of splitRegions(command)) {
       if (!words.some(w => ending.test(normalizePath(w)))) continue;
-      if (words.some(w => STATE_FILE_WRITERS.has(tokenBase(w))) || isDownloadWriter(words)) return kind;
+      if (words.some(w => STATE_FILE_WRITERS.has(tokenBase(w)) || (deletes === true && STATE_FILE_DELETERS.has(tokenBase(w)))) || isDownloadWriter(words)) return kind;
     }
   }
   return null;
@@ -776,6 +792,13 @@ const DESCRIPTION: Readonly<Record<HumanOnlyKind, { what: string; fix: string; w
     why:
       "A pause switches repo-aegis off for a while, so it counts only when a person decides to run it; an agent that ran it " +
       "would be switching off its own guard, with or without a terminal attached",
+  },
+  "log-off": {
+    what: "repo-aegis log --off",
+    fix: "repo-aegis log --off   (and repo-aegis log --on to turn it back on)",
+    why:
+      "The decision log is what an agent reads to see why it was refused, so switching it off counts only when a person decides " +
+      "to; an agent that ran it would be removing the data its own next refusal needs, with or without a terminal attached",
   },
   "owner-add": {
     what: "repo-aegis engagements add --personal-org/--github-org",

@@ -27,6 +27,7 @@ import {
   type EgressApproval,
   type Registry,
 } from "@de-otio/repo-aegis-core";
+import { USAGE_AFTER_TERMINAL_GATE } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, emitError, type OutputOptions } from "../format.js";
 import { requireTerminal } from "../require-terminal.js";
 
@@ -180,18 +181,18 @@ export function approve(target: string | undefined, opts: ApproveOptions): void 
     opts,
   );
   if (target === undefined || target.trim() === "") {
-    emitError({ code: "USAGE", error: "approve <org>/<repo> | <org>/* | *   (or --list / --revoke <id|all>)" }, opts);
+    emitError({ code: "USAGE", error: "approve <org>/<repo> | <org>/* | *   (or --list / --revoke <id|all>)" }, opts, USAGE_AFTER_TERMINAL_GATE);
   }
   const parsed = parseApprovalTarget(target);
   if (parsed === null) {
-    emitError({ code: "USAGE", error: `not a destination: ${JSON.stringify(target)} — use <org>/<repo>, <org>/*, or *` }, opts);
+    emitError({ code: "USAGE", error: `not a destination: ${JSON.stringify(target)} — use <org>/<repo>, <org>/*, or *` }, opts, USAGE_AFTER_TERMINAL_GATE);
   }
   let ttlMs = DEFAULT_APPROVAL_TTL_MS;
   if (opts.ttl !== undefined) {
     const t = parseTtl(opts.ttl);
-    if (t === null) emitError({ code: "USAGE", error: `--ttl must be like 15m, 2h, 90s or 1d (got ${JSON.stringify(opts.ttl)})` }, opts);
+    if (t === null) emitError({ code: "USAGE", error: `--ttl must be like 15m, 2h, 90s or 1d (got ${JSON.stringify(opts.ttl)})` }, opts, USAGE_AFTER_TERMINAL_GATE);
     if (t > MAX_APPROVAL_TTL_MS) {
-      emitError({ code: "USAGE", error: `--ttl may not exceed 24h: an approval is for a task, not a standing grant` }, opts);
+      emitError({ code: "USAGE", error: `--ttl may not exceed 24h: an approval is for a task, not a standing grant` }, opts, USAGE_AFTER_TERMINAL_GATE);
     }
     ttlMs = t;
   }

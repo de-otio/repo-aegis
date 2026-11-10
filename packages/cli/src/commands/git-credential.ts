@@ -52,7 +52,10 @@ import {
   type IdentityScope,
   type Registry,
   type RefusalFix,
+  type DecisionInput,
+  withLogTrailer,
 } from "@de-otio/repo-aegis-core";
+import { recordDecision } from "../decision.js";
 import {
   credentialConfigViolation,
   credentialConfigWarnings,
@@ -75,7 +78,16 @@ export interface GitCredentialResult {
   stdout: string;
   /** What goes to stderr: the refusal text with its code. Never a token. */
   stderr: string;
+  /**
+   * What the decision log records for this run (P1-I): the outcome and the facts only this module knows. `runGitCredential`
+   * writes it once and, for a refusal, ends `stderr` with the log trailer. Absent when the run is not a decision of this
+   * helper (not a github.com `get`, or a pause that stood aside, which records itself).
+   */
+  log?: CredentialLog;
 }
+
+/** The part of a decision record the credential helper decides; the layer, host, version and clock are filled by the writer. */
+export type CredentialLog = Pick<DecisionInput, "outcome" | "code" | "destination" | "identityColumn" | "verb">;
 
 /** Everything the helper reads from outside, injectable so the decision is testable without a process tree. */
 export interface GitCredentialDeps {
@@ -379,7 +391,16 @@ function refuse(
     approval,
     fixes: [fix],
   });
-  return { stdout: QUIT, stderr: `repo-aegis git-credential: ${reason}\n` };
+  return {
+    stdout: QUIT,
+    stderr: `repo-aegis git-credential: ${reason}\n`,
+    log: { outcome: "refuse", code, ...(dest !== undefined && { destination: { org: dest.owner, repo: dest.repo } }) },
+  };
+}
+
+/** Nothing on stdout, so git asks its next helper: a recorded step-aside, with the fixed reason as its code. */
+function stepAside(code: string, stderr = "", dest?: { owner: string; repo: string }): GitCredentialResult {
+  return { stdout: "", stderr, log: { outcome: "step-aside", code, ...(dest !== undefined && { destination: { org: dest.owner, repo: dest.repo } }) } };
 }
 
 /**
@@ -396,7 +417,11 @@ function localHooksOverride(entries: readonly ConfigEntry[], home: string, env: 
 }
 
 function refuseText(code: string, reason: string): GitCredentialResult {
-  return { stdout: QUIT, stderr: `repo-aegis git-credential: ${reason.includes(code) ? reason : `${reason} [${code}]`}\n` };
+  return {
+    stdout: QUIT,
+    stderr: `repo-aegis git-credential: ${reason.includes(code) ? reason : `${reason} [${code}]`}\n`,
+    log: { outcome: "refuse", code },
+  };
 }
 
 /**
@@ -453,7 +478,7 @@ export function gitCredentialGet(stdin: string, home: string, deps: GitCredentia
     ? null
     : pauseCoveringDestinations([dest], { path: pausePath(home), ...(deps.now !== undefined && { now: deps.now() }) });
   if (paused === null) return result;
-  recordPausedAllow("git credential helper", { verb: "credential", destination: dest, home });
+  recordPausedAllow("credential-helper", { verb: "credential", destination: dest, home, pause: paused });
   return NOTHING;
 }
 
@@ -461,7 +486,7 @@ function gitCredentialDecide(request: Request, home: string, deps: GitCredential
 
   // A person present: the next helper answers, exactly as without repo-aegis. No registry read, no mint.
   const presence = deps.presence();
-  if (presence === "person") return NOTHING;
+  if (presence === "person") return stepAside("CREDENTIAL_PERSON_PRESENT");
 
   if (!isAbsolute(home)) {
     return refuse(
@@ -511,13 +536,13 @@ function gitCredentialDecide(request: Request, home: string, deps: GitCredential
   // The registry, from the pinned home only (a person present never reaches here: no registry read for them).
   const registry = deps.loadRegistry(home);
   // No registry: nothing maps this owner, so the next helper answers, exactly as without repo-aegis.
-  if (registry === "missing") return NOTHING;
+  if (registry === "missing") return stepAside("CREDENTIAL_NO_REGISTRY", "", dest);
   // Encrypted: the same, but the person is told why no account was chosen.
-  if (registry === "encrypted") return { stdout: "", stderr: encryptedNote(dest) };
+  if (registry === "encrypted") return stepAside("CREDENTIAL_REGISTRY_ENCRYPTED", encryptedNote(dest), dest);
   if (registry === "unreadable") {
     // A known read publishes nothing, so the person's own helper may answer it; a push must not: git's next helper
     // would answer with whatever account it holds, which may be the wrong one for this owner.
-    if (knownRead) return NOTHING;
+    if (knownRead) return stepAside("CREDENTIAL_READ_REGISTRY_UNREADABLE", "", dest);
     return refuse(
       "GH_IDENTITY_UNAVAILABLE",
       "the registry in the pinned home exists but cannot be read (it does not parse, or a newer repo-aegis wrote it), so repo-aegis cannot tell which account this push must use, and git's next helper would answer with the person's own; repo-aegis did not change the file",
@@ -542,7 +567,7 @@ function gitCredentialDecide(request: Request, home: string, deps: GitCredential
     registeredOwner: o => owners.has(o.toLowerCase()),
   });
   // An unmapped owner falls through to the person's own helper.
-  if (choice.kind === "none") return NOTHING;
+  if (choice.kind === "none") return stepAside("CREDENTIAL_OWNER_UNMAPPED", "", dest);
   if (choice.kind === "refuse") return refuseText(choice.code, choice.reason);
 
   const column = choice.column;
@@ -657,6 +682,7 @@ function gitCredentialDecide(request: Request, home: string, deps: GitCredential
     }
     auditBestEffort(record, home);
     return {
+      log: { outcome: "allow", verb: knownRead ? "git fetch" : "git push", destination: { org: dest.owner, repo: dest.repo }, identityColumn: "person" },
       stdout: `username=x-access-token\npassword=${got.token}\n`,
       // One line on a push, so a person reading the push output sees which account it ran as. A read prints
       // nothing: a line on every fetch would be noise.
@@ -708,12 +734,18 @@ function gitCredentialDecide(request: Request, home: string, deps: GitCredential
     verb: knownRead ? "fetch" : "push",
   }, home);
   return {
+    log: { outcome: "allow", verb: knownRead ? "git fetch" : "git push", destination: { org: dest.owner, repo: dest.repo }, identityColumn: "agent" },
     stdout: `username=x-access-token\npassword=${minted.token}\n${expiryLine(minted.expiresAt)}`,
     stderr: warnings,
   };
 }
 
-/** The helper as `repo-aegis git-credential` runs it. Total: a fault on a github.com `get` is a refusal. */
+/**
+ * The helper as `repo-aegis git-credential` runs it. Total: a fault on a github.com `get` is a refusal.
+ *
+ * P1-I: one decision record per github.com `get`, written here (the pinned home, not the caller's), and a refusal's text
+ * ends with the trailer for what the write did. The write never changes the answer: it is made first.
+ */
 export function runGitCredential(
   action: string,
   stdin: string,
@@ -721,6 +753,19 @@ export function runGitCredential(
   deps: GitCredentialDeps = realGitCredentialDeps(),
 ): GitCredentialResult {
   if (action !== "get") return NOTHING; // store, erase, and any verb a later git adds
+  return withDecisionLog(runGitCredentialGet(stdin, home, deps), home);
+}
+
+function withDecisionLog(result: GitCredentialResult, home: string): GitCredentialResult {
+  const log = result.log;
+  if (log === undefined) return result;
+  const { log: _done, ...rest } = result;
+  const written = recordDecision({ layer: "credential-helper", host: "git", home, ...log }).written;
+  if (log.outcome !== "refuse") return rest;
+  return { ...rest, stderr: rest.stderr.replace(/\n$/, "") === "" ? rest.stderr : `${withLogTrailer(rest.stderr.replace(/\n$/, ""), written)}\n` };
+}
+
+function runGitCredentialGet(stdin: string, home: string, deps: GitCredentialDeps): GitCredentialResult {
   try {
     return gitCredentialGet(stdin, home, deps);
   } catch {

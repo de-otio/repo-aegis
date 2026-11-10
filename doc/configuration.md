@@ -329,7 +329,7 @@ URL, a `repos/<owner>/<repo>/…` endpoint, `GH_REPO` or the working directory's
   account with one warning line on stderr, and carries no token.
 
 Every injecting call prints `repo-aegis: as <identity> (<kind>) for <owner>/<repo>` and appends
-a record (never the token) to `<home>/state/gh-decisions.jsonl`.
+a record (never the token, never the login) to the decision log, `<home>/state/decisions.jsonl` (see "The decision log" below).
 
 **taaad and root ownership.** App tokens are minted by taaad, the only holder of the App private
 keys. App identities need taaad v0.6.0 or later (`taaad mint`). taaad's optional macOS helper,
@@ -610,6 +610,40 @@ is needed.
 An agent may not run any of this: the egress guard refuses an agent's `sudo` on
 the managed-settings directory and `install claude-md --uninstall`
 (`AGENT_RAN_HUMAN_COMMAND`). This detection code is temporary and goes in 0.17.
+
+## The decision log
+
+Every refusal, ask and fallback of every entry point (pre-commit, pre-push, the agent egress hook, the write hooks, the
+`gh` shim, the git credential helper, prompt approvals) is recorded in one JSON Lines file, **on by default**, so a
+refusal can be debugged from what actually decided it instead of by rebuilding those facts by hand. Read it with
+`repo-aegis log` (see the CLI reference); an agent may.
+
+| File | What |
+|---|---|
+| `<home>/state/decisions.jsonl` | the log: mode 0600, directory 0700 |
+| `<home>/state/decisions.jsonl.1` ... `.3` (an agent's write or delete of them is refused by `check-write` and the shell-write rule; no `Edit` deny rule, so sandboxed hooks can still append) | rotated generations: at **10 MiB** the file is renamed to `.1` (`.1` to `.2`, `.2` to `.3`, the old `.3` dropped), so at most three are kept. Rotation runs under a lock with a **200 ms** cap; if the lock is not had in time the record is written without rotating (an over-size file is harmless, a hook waiting on a lock is not) |
+| `<home>/state/decision-log.json` | the switch, `{"enabled": false}` only after `repo-aegis log --off`. Missing, unreadable or unparseable means **on**. Person-only: written by `log --off` (a person's terminal), refused to an agent's write tools (`Edit(<home>/state/decision-log.json)` is among the deny rules `install claude-md` writes, and `hook check-write` refuses it) and to an agent's shell (`AGENT_RAN_HUMAN_COMMAND`). `log --on` only turns recording back on |
+| `$TMPDIR/repo-aegis-<uid>/decisions.jsonl` | the **fallback**, used when the primary cannot be written (a read-only home, or a sandbox that only writes the working directory and `$TMPDIR`; the Claude Code default sandbox has not been verified to deny the home, so this is treated as possible). Same modes; its records carry `facts.logFallback: true`. `repo-aegis log` reads both and merges them by time (the fallback only from a directory this user owns that is not group- or world-writable: in a shared `/tmp` another user could plant lines); `doctor` reports `DECISION_LOG_FALLBACK` (info) when the fallback holds records newer than the primary's last |
+| `<home>/state/gh-decisions.jsonl` | **legacy**: the `gh` shim wrote it before the decision log existed. It is no longer written; `repo-aegis log` reads it once so the history does not vanish on upgrade |
+
+**Writing never changes a decision.** A record that cannot be written (neither the home nor `$TMPDIR`) is reported:
+the refusal ends `(not logged)` instead of `(logged: repo-aegis log --last 1)`, and `doctor` says
+`DECISION_LOG_UNWRITABLE` (warn). The `gh` shim's identity injection included: an `inject` whose record could not be
+written still runs (this reverses the earlier rule, D4, under which it was a fault).
+
+**What a record holds** is fixed by the type of the one function that builds it, not by a scrubber: no free-form field
+exists, and every string is checked against a closed pattern or list (a value that fails is written as `"invalid"`).
+It names layer, outcome, refusal code, the parsed command shape (`git push`, `gh pr create`; never an argument),
+`owner/repo`, a validated ref name, the identity column, an approval id, and the facts that decided: which proxy
+variables were set (names only), whether `ps` was readable, whether stderr was a terminal, the sandbox guess, the
+registry's state, the permission mode. **Never** logged: tokens or anything token-shaped, marker patterns or matched
+text, file contents, command text or arguments, environment values, URLs, file-system paths, approval or pause
+reasons, the `gh` account login, hostnames. A branch can be named after a customer, and that is accepted: `owner/repo`
+and ref names are what a person needs to debug, and the registry already holds the owners on this machine. The log is
+for this machine; do not paste it into a public issue.
+
+`repo-aegis uninstall` removes all of these files, including the `$TMPDIR` fallback directory for the `$TMPDIR` it runs
+under (a sandbox's own `$TMPDIR` may differ; its copy is the sandbox's to clear).
 
 ## Environment variables
 

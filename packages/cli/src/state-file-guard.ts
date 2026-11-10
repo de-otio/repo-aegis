@@ -18,13 +18,17 @@
 // costs a re-worded path, a missed one costs the guard.
 import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { APPROVALS_FILE, PAUSE_FILE, repoAegisHome } from "@de-otio/repo-aegis-core";
+import { APPROVALS_FILE, DECISION_LOG_FILE, DECISION_LOG_STATE_FILE, PAUSE_FILE, repoAegisHome } from "@de-otio/repo-aegis-core";
 
-export type ProtectedStateFile = "pause" | "approvals";
+export type ProtectedStateFile = "pause" | "approvals" | "decision-log";
 
-const NAMES: ReadonlyArray<readonly [prefix: string, kind: ProtectedStateFile]> = [
-  [PAUSE_FILE, "pause"],
-  [APPROVALS_FILE, "approvals"],
+/** `dir` is the directory under the home the file lives in ("" for the home itself). The decision log's switch lives in `state/`. */
+const NAMES: ReadonlyArray<readonly [prefix: string, kind: ProtectedStateFile, dir: string]> = [
+  [PAUSE_FILE, "pause", ""],
+  [APPROVALS_FILE, "approvals", ""],
+  [DECISION_LOG_STATE_FILE, "decision-log", "state"],
+  // the log and its rotations/lock files (prefix match): deleting or truncating it removes the data the next refusal needs
+  [DECISION_LOG_FILE, "decision-log", "state"],
 ];
 
 /** `realpath` of `p`, or, when it does not exist, of its nearest existing ancestor with the rest appended. */
@@ -43,9 +47,12 @@ function realpathLoose(p: string): string {
   }
 }
 
-function kindOfName(name: string): ProtectedStateFile | null {
+/** The kind of state file a name in directory `dir` (already lower-cased, as is `homeReal`) is, or null. */
+function kindOfName(name: string, dir: string, homeReal: string): ProtectedStateFile | null {
   const lower = name.toLowerCase();
-  for (const [prefix, kind] of NAMES) if (lower.startsWith(prefix)) return kind;
+  for (const [prefix, kind, sub] of NAMES) {
+    if (lower.startsWith(prefix) && dir === (sub === "" ? homeReal : `${homeReal}/${sub}`)) return kind;
+  }
   return null;
 }
 
@@ -88,8 +95,8 @@ export function protectedStateFile(filePath: string, cwd: string, home: string =
   const homeReal = realpathLoose(resolve(home)).toLowerCase();
   const { candidates, loop } = writeCandidates(resolve(cwd, filePath));
   for (const c of candidates) {
-    const kind = kindOfName(basename(c));
-    if (kind !== null && dirname(c).toLowerCase() === homeReal) return kind;
+    const kind = kindOfName(basename(c), dirname(c).toLowerCase(), homeReal);
+    if (kind !== null) return kind;
   }
   return loop ? "pause" : null;
 }

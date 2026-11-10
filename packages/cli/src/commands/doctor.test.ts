@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { doctor } from "./doctor.js";
-import { fakeGh, withEnv } from "../_test-utils.js";
+import { fakeGh, withEnv, isolateTmpdir } from "../_test-utils.js";
 import { destinationCachePath, pinnedHookCommand, readDestinationCache, renderHookScript, type HookName } from "@de-otio/repo-aegis-core";
 import { currentEnforcementPin } from "../enforcement-pin.js";
 import { renderShimScript } from "./shim-script.js";
@@ -27,11 +27,14 @@ const { setDefaultSshDirForTests } = (await import(
 
 let root: string;
 
+let restoreTmpdir: () => void = () => {};
 before(() => {
+  restoreTmpdir = isolateTmpdir();
   root = mkdtempSync(join(tmpdir(), "repo-aegis-doctor-"));
 });
 
 after(() => {
+  restoreTmpdir();
   rmSync(root, { recursive: true, force: true });
 });
 

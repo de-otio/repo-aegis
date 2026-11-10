@@ -13,6 +13,7 @@
 // path, and it never blocks the prompt: a hook that can fail a person's message is worse than a leftover record that
 // expires on its own. Terminal approvals (`repo-aegis approve`) are untouched.
 import { appendAuditRecord, revokeAllPromptApprovals } from "@de-otio/repo-aegis-core";
+import { recordDecision } from "../decision.js";
 
 /** Read and discard stdin (the host writes the prompt JSON to it), capped so a huge prompt cannot stall the hook. */
 async function drainStdin(): Promise<void> {
@@ -32,6 +33,8 @@ export async function hookPromptSubmit(): Promise<void> {
   try {
     const removed = revokeAllPromptApprovals();
     if (removed.length > 0) {
+      // P1-I: one record per revoke that removed something (no prompt text: the hook never reads it).
+      recordDecision({ layer: "prompt-submit", outcome: "notice", host: "claude-code" });
       try {
         appendAuditRecord({
           action: "egress-approval-revoke",

@@ -11,6 +11,9 @@
 //   - install shim --uninstall    (the `gh` PATH shim)
 //   - install git-credential --uninstall  (the global git credential helper; needs a terminal)
 //   - remove pause.json           (an emergency pause set before the uninstall)
+//   - remove the decision log     (decisions.jsonl and its rotations, decision-log.json, the legacy gh-decisions.jsonl,
+//                                  and the $TMPDIR fallback directory for the current $TMPDIR; a sandbox's own
+//                                  $TMPDIR may differ, and its copy is the sandbox's to clear)
 //
 // And, opt-in:
 //   - --purge-repos: sweep `repo-aegis.*` git config keys out of every
@@ -29,7 +32,9 @@ import {
   appendAuditRecord,
   auditLogPath,
   clearPause,
+  decisionLogFiles,
   isAuditLogEnabled,
+  removeDecisionLogFiles,
   pausePath,
   readRepoConfig,
   repoAegisHome,
@@ -170,6 +175,8 @@ export function uninstall(opts: UninstallOptions): void {
     // The emergency pause's state file is something repo-aegis wrote: it goes too, so a pause set before an uninstall
     // cannot outlive it and switch off a later reinstall. (`--purge-home` below removes the whole home anyway.)
     runStepSilent("remove pause.json", reports, () => ({ applied: clearPause(pausePath()) }));
+    // The decision log is something repo-aegis wrote on its own (it is on by default), so it goes with the install.
+    runStepSilent("remove decision log", reports, () => ({ applied: removeDecisionLogFiles().length > 0 }));
   } else {
     reports.push({ step: "install-hooks --uninstall", ok: true, details: { dryRun: true } });
     reports.push({ step: "install-gitignore --uninstall", ok: true, details: { dryRun: true } });
@@ -190,6 +197,11 @@ export function uninstall(opts: UninstallOptions): void {
       step: "remove pause.json",
       ok: true,
       details: { dryRun: true, wouldRemove: existsSync(pausePath()) ? pausePath() : null },
+    });
+    reports.push({
+      step: "remove decision log",
+      ok: true,
+      details: { dryRun: true, wouldRemove: decisionLogFiles().length > 0 ? `${decisionLogFiles().length} file(s): decisions.jsonl and its rotations, decision-log.json, gh-decisions.jsonl, the $TMPDIR fallback` : null },
     });
   }
 

@@ -474,14 +474,14 @@ terminal with the command `doctor` prints (see
 [`doc/configuration.md`](configuration.md#removing-a-legacy-managed-drop-in)). You do not run `sudo`.
 
 It also adds `permissions.deny` **Edit** rules for the registry file and its
-`.age`, the approvals store, the emergency pause (`pause.json`), the destination cache (`destinations.json`), `hooks/**`, `bin/**`, `prompt-approvals/**` (the hook's record of a yes at the agent prompt), `markers/**` (the rendered
+`.age`, the approvals store, the emergency pause (`pause.json`), the decision log's on/off switch (`state/decision-log.json`), the destination cache (`destinations.json`), `hooks/**`, `bin/**`, `prompt-approvals/**` (the hook's record of a yes at the agent prompt), `markers/**` (the rendered
 deny set) plus the uninstall ledger under the
 repo-aegis home
 (default `~/.config/repo-aegis`), so the agent cannot register an owner by
 editing `engagements.yaml`. Only Edit rules are written (Claude Code never
 matches `Write(path)`), and Claude Code merges them into the sandbox write-deny
 list, so a sandboxed Bash `sed -i` is stopped too: verify once with a sandboxed
-`touch` of the registry file. `state/` stays writable on purpose. An agent-run
+`touch` of the registry file. `state/` stays writable on purpose (the hooks append to the decision log there; only its on/off switch is denied). An agent-run
 `repo-aegis render` is therefore refused in the sandbox
 (`MARKERS_WRITE_PROTECTED`): a person runs `render` from their own terminal.
 `--uninstall` removes exactly the rules install added (recorded in

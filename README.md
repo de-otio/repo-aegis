@@ -279,9 +279,10 @@ repo-aegis uninstall --yes    # removes every install step
 npm uninstall -g @de-otio/repo-aegis
 ```
 
-`uninstall` reverses the git hooks, the Claude Code wiring, the CI workflows, the `gh` wrapper and
-the git credential helper. `--purge-repos` also clears repo-aegis's git config in your classified
-repositories. `--purge-home` also deletes `~/.config/repo-aegis/`. See `repo-aegis uninstall --help`.
+`uninstall` reverses the git hooks, the Claude Code wiring, the CI workflows, the `gh` wrapper, the git
+credential helper and the decision log (`state/decisions.jsonl` and its rotations, the on/off switch, the old
+`gh-decisions.jsonl`, and the `$TMPDIR` fallback). `--purge-repos` also clears repo-aegis's git config in your
+classified repositories. `--purge-home` also deletes `~/.config/repo-aegis/`. See `repo-aegis uninstall --help`.
 
 **Upgrading from 0.13 or earlier with a root-owned managed drop-in installed?** That feature was
 removed. `repo-aegis doctor` reports `MANAGED_LEGACY_PRESENT`, and `repo-aegis uninstall` prints the

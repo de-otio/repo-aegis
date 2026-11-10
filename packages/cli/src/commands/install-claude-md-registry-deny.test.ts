@@ -89,6 +89,9 @@ describe("registryDenyPlan", () => {
       `Edit(/${h}/egress-approvals.json)`,
       // the emergency pause: an agent that could write it would have switched repo-aegis off for itself
       `Edit(/${h}/pause.json)`,
+      // the decision log's on/off switch: an agent that could write it would remove the data its next refusal needs
+      `Edit(/${h}/state/decision-log.json)`,
+      // (the log file itself has no Edit rule: sandboxed hooks would then log to the sandbox's own $TMPDIR)
       `Edit(/${h}/destinations.json)`,
       `Edit(/${h}/state/claude-md-deny-rules.json)`,
       `Edit(/${h}/hooks/**)`,
@@ -106,7 +109,9 @@ describe("registryDenyPlan", () => {
     // path TRUSTS is denied: the ledger uninstall reads. (The deny-set cache is gone, so it has no rule.)
     assert.deepEqual(
       plan.rules.filter(r => r.includes("/state")),
-      [`Edit(/${h}/state/claude-md-deny-rules.json)`],
+      [
+        `Edit(/${h}/state/decision-log.json)`,
+        `Edit(/${h}/state/claude-md-deny-rules.json)`],
     );
     assert.ok(plan.rules.every(r => !r.includes("/state/**") && !r.includes("audit")));
     assert.ok(plan.rules.every(r => r !== `Edit(/${h}/**)`), "the whole home must not be denied");

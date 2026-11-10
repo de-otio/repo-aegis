@@ -14,6 +14,7 @@ import { fileIssue } from "./issue-filer.js";
 import { encryptFile, decryptFile, writeBufferTo, AgeNotFoundError, AgeError } from "./age.js";
 import { runAudit, type AuditOptions } from "./audit.js";
 import { REMOVED_REBUILD_PROFILES_MESSAGE, removedRunOptionMessage } from "./removed-features.js";
+import { REFUSAL_GUIDE, withRefusalTrailer } from "@de-otio/repo-aegis-core";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as { version: string };
@@ -48,7 +49,9 @@ interface AuditCliOptions extends AuditOptions {
 }
 
 function emitError(payload: { code: string; error: string; details?: unknown }, exitCode = 2): never {
-  process.stderr.write(JSON.stringify(payload) + "\n");
+  // X-10: a code in the shared refusal table ends with its version, next step and person-only answer.
+  const shown = Object.prototype.hasOwnProperty.call(REFUSAL_GUIDE, payload.code) ?{ ...payload, error: withRefusalTrailer(payload.code, payload.error) } : payload;
+  process.stderr.write(JSON.stringify(shown) + "\n");
   process.exit(exitCode);
 }
 

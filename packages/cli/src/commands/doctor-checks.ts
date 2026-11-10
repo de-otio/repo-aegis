@@ -46,7 +46,11 @@ export type DoctorCheckCode =
   | "HOOKS_PATH_LOCAL_DUPLICATE"
   | "AGENT_REMOTE_IS_SSH"
   // The person-only emergency pause (complexity-review P1-E): protection is deliberately off until it expires.
-  | "PAUSE_ACTIVE";
+  | "PAUSE_ACTIVE"
+  // The decision log (complexity-review P1-I): on by default; these say when it is off or cannot be written.
+  | "DECISION_LOG_OFF"
+  | "DECISION_LOG_FALLBACK"
+  | "DECISION_LOG_UNWRITABLE";
 
 /**
  * How loudly a failing check speaks. Only `fail` makes `doctor` exit 1.

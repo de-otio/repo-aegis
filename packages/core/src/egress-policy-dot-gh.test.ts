@@ -239,7 +239,8 @@ describe("the refusal text (§3.3)", () => {
   it("T15: names the corrected command literally", () => {
     assert.ok(reason.includes("dot gh --as bot <the same gh arguments>"), reason);
     assert.ok(reason.startsWith("repo-aegis: dot gh write without --as bot: refused."), reason);
-    assert.ok(reason.endsWith("[DOT_GH_WRITE_NEEDS_BOT]"), reason);
+    assert.ok(reason.endsWith("[DOT_GH_WRITE_NEEDS_BOT; details: repo-aegis explain DOT_GH_WRITE_NEEDS_BOT]"), reason);
+    assert.match(reason, /Only a person can run it: no\. \[/, reason);
   });
 
   it("T15: carries no gh argument, no repository and no identity from the command", () => {

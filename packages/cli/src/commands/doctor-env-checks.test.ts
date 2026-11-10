@@ -23,16 +23,19 @@ import {
   checkSshGithubRedirect,
   watchedVariablesIn,
 } from "./doctor-env-checks.js";
-import { captureOutput, fakeGh, withEnv } from "../_test-utils.js";
+import { captureOutput, fakeGh, withEnv, isolateTmpdir } from "../_test-utils.js";
 import { renderShimScript } from "./shim-script.js";
 
 let root: string;
 let n = 0;
 
+let restoreTmpdir: () => void = () => {};
 before(() => {
+  restoreTmpdir = isolateTmpdir();
   root = mkdtempSync(join(tmpdir(), "repo-aegis-doctor-env-"));
 });
 after(() => {
+  restoreTmpdir();
   rmSync(root, { recursive: true, force: true });
 });
 
