@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { isHomeOverridden, REFUSAL_GUIDE, withRefusalTrailer, type RefusalGuideOverride } from "@de-otio/repo-aegis-core";
+import { isHomeOverridden, REFUSAL_GUIDE, withLogTrailer, withRefusalTrailer, type DecisionAppendResult, type RefusalGuideOverride } from "@de-otio/repo-aegis-core";
 
 export interface OutputOptions {
   json?: boolean;
@@ -21,17 +21,38 @@ export interface ErrorPayload {
 }
 
 /**
+ * The decision log's hook into every refusal this module prints (P1-I). A command that makes a logged decision (the
+ * pre-commit and pre-push checks) sets it for its run; `emitError` then writes the record FIRST and ends the error text
+ * with `(logged: repo-aegis log --last 1)` or `(not logged)`, so the trailer says what actually happened and no call
+ * site assembles it. The hook must not throw; if it does, the refusal is printed without a trailer, unchanged.
+ * Module state (one process makes one decision), set only by {@link setErrorDecisionHook}.
+ */
+let errorDecisionHook: ((payload: ErrorPayload) => DecisionAppendResult) | null = null;
+
+export function setErrorDecisionHook(hook: ((payload: ErrorPayload) => DecisionAppendResult) | null): void {
+  errorDecisionHook = hook;
+}
+
+/**
  * `guide` (optional) replaces the table's next step or person-only answer for THIS error only, for a call site that
  * knows more than the code does (`USAGE` after a terminal gate: the reader is a person). The code is unchanged.
+ * Order: the X-10 guide trailer, then the decision record (P1-I), then `(logged: …)`, which is always last.
  */
 export function emitError(value: ErrorPayload | string, opts: OutputOptions = {}, guide?: RefusalGuideOverride): never {
   const given: ErrorPayload = typeof value === "string" ? { error: value } : value;
   // X-10: a refusal code in the shared table always ends with its version, next step, person-only answer and
   // `[CODE; details: …]` token, whichever call site raised it (a no-op when the text already carries it).
-  const payload: ErrorPayload =
+  let payload: ErrorPayload =
     given.code !== undefined && Object.prototype.hasOwnProperty.call(REFUSAL_GUIDE, given.code)
       ? { ...given, error: withRefusalTrailer(given.code, given.error, guide) }
       : given;
+  if (errorDecisionHook !== null) {
+    try {
+      payload = { ...payload, error: withLogTrailer(payload.error, errorDecisionHook(payload).written) };
+    } catch {
+      /* the log never changes or blocks a refusal */
+    }
+  }
   if (opts.json) {
     process.stderr.write(JSON.stringify(payload) + "\n");
   } else {

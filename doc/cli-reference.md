@@ -936,7 +936,8 @@ reports the count per event.
    files whose tampering bypasses the guard, and nothing else: the registry
    file and its `.age` ciphertext, the approvals store
    (`egress-approvals.json`), the emergency pause (`pause.json`: an agent that
-   could write it would have switched repo-aegis off for itself), the prompt approvals directory
+   could write it would have switched repo-aegis off for itself), the decision log's on/off
+   switch (`state/decision-log.json`: it would have removed the data its next refusal needs), the prompt approvals directory
    (`prompt-approvals/**`: an agent that could write one would have approved
    itself), the destination cache (`destinations.json`: rules e-g read a cached entry's class and visibility, so a forged "private" entry for a public repo would skip the person check; every writer treats a failed write as a cache miss), `hooks/**` (the git hook scripts), `bin/**`
    (the `gh` shim), `markers/**` (the rendered deny set the write scan and
@@ -1751,9 +1752,15 @@ The injected `gh` gets an allowlisted environment: `HOME`, a PATH the caller can
 `GIT_TERMINAL_PROMPT=0` and `GIT_CONFIG_COUNT` overrides (`core.fsmonitor=false`,
 `core.hooksPath=/dev/null`, `credential.helper=`, `core.sshCommand=ssh`). Pagers, editors, proxies,
 `BASH_ENV`, `SHELLOPTS` and the caller's `GIT_CONFIG_*` do not reach it. An injecting call prints
-`repo-aegis: as <identity> (<kind>) for <owner>/<repo>` on stderr and appends a record (identity,
-kind, owner/repo, verb, approval id; never the token) to `<home>/state/gh-decisions.jsonl`
-whatever the audit log's setting; refusals are recorded too.
+`repo-aegis: as <identity> (<kind>) for <owner>/<repo>` on stderr and writes one decision-log record (`outcome: inject`,
+the destination as `owner/repo`, the identity **column** (`person|agent`), the approval id, the verb; never the token and
+never the account's login) to `<home>/state/decisions.jsonl`, whatever the audit log's setting; refusals, fallbacks and an
+allowed egress shape are recorded too (see `repo-aegis log`). `gh-decisions.jsonl` is no longer written; `repo-aegis log`
+still reads it once, so the history does not vanish on upgrade. **A record that cannot be written never stops a call**:
+the log falls back to `$TMPDIR/repo-aegis-<uid>/decisions.jsonl`, and `doctor` reports `DECISION_LOG_FALLBACK` and
+`DECISION_LOG_UNWRITABLE`. (This reverses the earlier rule that an `inject` whose record could not be written was a
+fault: with the log on by default at every entry point, an unwritable home would have locked every identity-mapped `gh`
+call out of a sandbox.)
 
 Any fault between choosing and spawning on a mapped owner is `GH_IDENTITY_UNAVAILABLE` and `gh`
 does not run for a **write** (never a call as the active account). A **read** (a call the egress
@@ -1932,8 +1939,10 @@ log is on): `pause` (scope, expiry, reason length, never the text) and `resume` 
 `repo-aegis: paused until 14:30 (resume: repo-aegis resume)` for one scoped with `--repo`. **A machine-wide pause
 keeps the cross-org checks on** (`CROSS_ORG_PUSH`, `CROSS_ORG_WRITE`: carrying content across a trust boundary is a
 different mistake from a false positive); a pause scoped to a repository lifts them for that repository only. Each
-entry point that stands aside also writes one best-effort audit record, `paused-allow` (the layer, the verb and the
-destination as `owner/repo`; never the command, a path, a marker or the reason).
+entry point that stands aside also writes one best-effort decision-log record (`outcome: notice`, `paused: machine|repo`;
+the layer, the verb and the destination as `owner/repo`; never the command, a path, a marker or the reason). These
+`paused-allow` records moved from the audit log to the decision log in P1-I; `pause` and `resume` stay in the audit
+log, because they are a person's actions.
 
 | Entry point | While paused |
 |---|---|
@@ -1953,6 +1962,45 @@ file, to `gh`'s config, to `egress-approvals.json` and to `pause.json`. A pause 
 `--json`; never the repository's name) and `doctor` reports it as `PAUSE_ACTIVE` (warn, with the expiry and
 `fix: repo-aegis resume`); neither changes an exit code. `uninstall` removes `pause.json` (`--purge-home` removes
 the whole home, so it is covered too).
+
+### `repo-aegis log [--since <dur>] [--code <CODE>] [--layer <layer>] [--last <n>] [--json]`, `log --off`, `log --on`
+
+The decision log: what each repo-aegis entry point decided and the facts it decided on, so a refusal can be debugged
+without rebuilding those facts by hand. **On by default**, read-only to read, and meant for the agent: every refusal ends
+`(logged: repo-aegis log --last 1)` (or `(not logged)` when no record could be written), and the next steps are
+`repo-aegis log --last 1`, then `repo-aegis explain <code>`.
+
+- **Default view** (no flags): the last 20 refusals, asks and fallbacks, grouped by code (newest group first), each
+  group with the code's one fix line (the first sentence of its `explain` recovery) and the three latest records.
+- **`--last <n>`** prints the last *n* records of any outcome, one line each (`--last 1` is the record a refusal just
+  wrote). **`--code`**, **`--layer`** (`pre-commit`, `pre-push`, `egress-hook`, `check-write`, `scan-after-write`, `shim`,
+  `credential-helper`, `prompt-submit`, `prompt-approval`, `pause`) and **`--since 30m|2h|1d`** filter the same flat view.
+  **`--json`** prints the validated records. Output is from this machine only: it names owner/repo and ref names, which
+  can be a customer's; the redacted path for sharing is the report bundle, not this.
+- **`log --off`** is **person-only**, like `pause`: it needs a person's terminal (`LOG_OFF_NEEDS_TTY`, exit 2;
+  `REPO_AEGIS_EGRESS_HUMAN` is not honoured), the egress guard refuses an agent Bash command whose text runs it
+  (`AGENT_RAN_HUMAN_COMMAND`) or writes `state/decision-log.json`, `Edit(<home>/state/decision-log.json)` is among the
+  deny rules `install claude-md` writes, and `hook check-write` refuses a write to the file
+  (`DECISION_LOG_STATE_WRITE_REFUSED`). The log itself (`state/decisions.jsonl` and its `.1`..`.3` rotations) is
+  protected from an agent's tools, because deleting or truncating it is switching it off by another route: `hook check-write`
+  refuses a write to it and the shell-write rule refuses a command that writes or deletes it. It has **no** `Edit(...)`
+  deny rule on purpose: a deny rule reaches the agent's sandboxed shell, where the hooks and the shim run too, and they
+  would then log to the sandbox's own `$TMPDIR`, which a person's `repo-aegis log` does not read. The honest mistake it stops: an agent switching the log off because it is
+  "noise", which removes the data its next refusal needs. **`log --on`** only turns recording back on, so an agent may
+  run it. `repo-aegis log --off --help` is allowed (an agent can always read help).
+- **`doctor`** reports `DECISION_LOG_OFF` (info), `DECISION_LOG_FALLBACK` (info) and `DECISION_LOG_UNWRITABLE` (warn).
+
+What a record holds is fixed by the type of its builder (`core/decision-log.ts`), not by a scrubber: `ts`, `version`,
+`layer`, `host`, `outcome` (`allow|ask|refuse|fallback|step-aside|notice|inject`), `code`, `verb` (one to three words
+from a closed list, such as `git push`), `destination` (`owner/repo`, lower-cased), `refKind` and `ref` (a validated
+short ref name), `identityColumn` (`person|agent`, never the login), `approvalId`, `pinFallback`, `paused`, `durationMs`,
+and `facts`: the proxy variable **names** that were set, `psReadable`, `tty`, `sandboxGuess`, `registryState`,
+`hooksPathScope`, `shimFirst`, `permissionMode`, `logFallback`. A value that fails its rule is written as `"invalid"`.
+**Never** logged: tokens or anything token-shaped, marker patterns or matched text, file contents, command text or
+arguments, environment values, URLs, file-system paths, approval or pause reasons, the `gh` account login, hostnames.
+The reader rebuilds every line through the same rules, so a hand-edited file cannot show more: `log` also shows a
+`code` only when it has a row in the agent guide (the codes `explain` knows), else `"invalid"`, and it reads the
+`$TMPDIR` fallback only from a directory this user owns that no one else can write.
 
 ### `repo-aegis egress-check -- <gh args…>`
 
@@ -2000,6 +2048,9 @@ now reports, unless `--no-egress-checks`:
 | `PERSONAL_ORG_UNREGISTERED` (warn, per repo) | the remote org is in no engagement's `githubOrgs` and not in `personalOrgs` | `repo-aegis engagements add --personal-org <org>` (or `--github-org`); **a person runs this from their own terminal** (it refuses without a TTY) |
 | `REGISTRY_UNREADABLE` (**fail**) | the registry exists but does not parse or validate, or a newer repo-aegis wrote it (`schemaVersion` above what this build reads), so rule h asks (agent hook) or refuses (pre-push, the shim) every non-interactive egress that has a destination | repair the file (`repo-aegis status` shows why); for a newer schema, upgrade repo-aegis, then `repo-aegis install hooks` and `repo-aegis install claude-md` |
 | `REGISTRY_ENCRYPTED` (warn) | the registry is encrypted at rest, so repo-aegis runs as if there were none: rule h and the GitHub identity mapping are off; marker scanning is unaffected. Encryption at rest is removed in 0.15.0 | `repo-aegis registry decrypt --identity <file>` (a person, at a terminal) |
+| `DECISION_LOG_OFF` (info) | a person switched the decision log off (`repo-aegis log --off`), so a refusal cannot be explained from it. Reported even under `--no-egress-checks` | `repo-aegis log --on` |
+| `DECISION_LOG_FALLBACK` (info) | the `$TMPDIR` fallback holds decision records newer than the primary file's last: some process could not write the repo-aegis home (a sandbox that only writes the working directory and `$TMPDIR`). `repo-aegis log` reads both | none needed; make the home writable for that process to keep one file |
+| `DECISION_LOG_UNWRITABLE` (warn) | neither `<home>/state` nor the `$TMPDIR` fallback can be written, so every refusal ends `(not logged)` | make `<home>/state` writable for this user |
 | `PAUSE_ACTIVE` (warn) | a person paused repo-aegis (`repo-aegis pause`): its hooks, egress guard, `gh` shim and git credential helper are standing aside until the expiry. Reported even under `--no-egress-checks`; the scope is not named | `repo-aegis resume` (an agent may run it; only a person sets a pause) |
 | `OWNERS_UNDECLARED` (**fail**) | the registry loads but declares no owners, so rule h is inert | `repo-aegis engagements add --personal-org <login>` (a person, at a terminal) |
 | `GIT_CREDENTIAL_HELPER_ORDER` (**fail**, only when some owner is mapped to an `agent` identity) | the repo-aegis git credential helper is not installed, is from another install (a moved CLI or Node), or another helper answers first for `https://github.com` (a reset entry, a system-scope helper, `gh auth setup-git`); an agent's HTTPS push there would be authenticated as the person | a person runs `repo-aegis install git-credential` from a terminal |
@@ -2247,7 +2298,11 @@ the `gh` shim and the git credential helper. A **dry run** unless `--yes`.
 `--purge-repos` also unsets the `repo-aegis.*` git config in every repo under
 the scan roots (default `~/repos`, `~/code`, `~/src`, `~/projects`);
 `--purge-home` also deletes `~/.config/repo-aegis/` (registry, audit log,
-profiles, caches).
+profiles, caches). Without `--purge-home` it still removes the **decision log**:
+`state/decisions.jsonl` and its `.1`..`.3` rotations, `state/decision-log.json`, the legacy
+`state/gh-decisions.jsonl`, and the `$TMPDIR/repo-aegis-<uid>/` fallback directory for the *current*
+`$TMPDIR` (a sandbox's own `$TMPDIR` may differ; its copy is the sandbox's to clear), as the step
+`remove decision log`, next to `remove pause.json`.
 
 `repo-aegis uninstall sweep-repos [--yes] [--scan-root <path...>]` runs just
 the per-repo step: it walks the scan roots and unsets `repo-aegis.class` and

@@ -20,7 +20,8 @@ import { basename, join } from "node:path";
 import { approvalsPath, mintApproval, mintPause, pausePath, type TerminalCheck } from "@de-otio/repo-aegis-core";
 import { cliBuilt, cliPath } from "../_subprocess-utils.js";
 import { scrubGitEnv } from "../_test-utils.js";
-import { runGhCommand, decisionLogPath, findPlainGh, type GhCommandDeps } from "./gh-command.js";
+import { decisionLogPath } from "@de-otio/repo-aegis-core";
+import { runGhCommand, findPlainGh, type GhCommandDeps } from "./gh-command.js";
 import { MintError, validateMintOutput } from "./taaad-mint.js";
 import type { TaaadPin } from "./taaad-pin.js";
 
@@ -156,6 +157,27 @@ function makeWorld(registry: string = REGISTRY): World {
   return { root, home, stubs, repo, taaad: { launcher: join(stubs, "taaad"), interpreter: "/bin/bash", packageDir: stubs } };
 }
 
+/**
+ * `env` whose variable `name` throws on its THIRD read (when given), then reads normally: a one-off fault made late.
+ * The first two reads are the trusted-gh lookup and the gh `config get` (before any token); the third builds the
+ * injected child's environment, after the identity was chosen and the token minted.
+ */
+function faulty(env: NodeJS.ProcessEnv, name: string | undefined): NodeJS.ProcessEnv {
+  if (name !== undefined) {
+    const value = env[name];
+    let reads = 0;
+    Object.defineProperty(env, name, {
+      enumerable: true,
+      get: () => {
+        reads++;
+        if (reads === 3) throw new Error("simulated fault");
+        return value;
+      },
+    });
+  }
+  return env;
+}
+
 type Presence = "person" | "agent" | "unknown" | "throws";
 
 const TERMINALS: Record<Exclude<Presence, "throws">, TerminalCheck> = {
@@ -175,6 +197,8 @@ interface RunOpts {
   plainPath?: boolean;
   /** Replaces the egress decision (a test seam for a fault in it). */
   evaluate?: GhCommandDeps["evaluate"];
+  /** Reading this caller-environment variable throws: a fault made late, after a mapped identity was chosen and its token minted. */
+  faultOnEnvRead?: string;
 }
 
 interface Ran {
@@ -212,7 +236,7 @@ function run(w: World, args: string[], o: RunOpts = {}): Ran {
   const errChunks: string[] = [];
   const presence = o.presence ?? "agent";
   const deps: GhCommandDeps = {
-    env: callerEnv(w, o.env, o.plainPath !== true),
+    env: faulty(callerEnv(w, o.env, o.plainPath !== true), o.faultOnEnvRead),
     terminal: presence === "throws" ? () => {
       throw new Error("the ancestry reader exploded");
     } : () => TERMINALS[presence],
@@ -406,14 +430,12 @@ describe("repo-aegis gh: injection", () => {
     assert.equal(r.status, 0, r.err);
     const [rec] = decisions(w);
     assert.ok(rec !== undefined);
-    assert.equal(rec["decision"], "inject");
-    assert.equal(rec["identity"], "example-bot");
-    assert.equal(rec["kind"], "github-app");
-    assert.equal(rec["column"], "agent");
-    assert.equal(rec["owner"], "example-org");
-    assert.equal(rec["repo"], "svc");
-    assert.equal(rec["scope"], "write");
+    assert.equal(rec["outcome"], "inject");
+    assert.equal(rec["layer"], "shim");
+    assert.equal(rec["identityColumn"], "agent", "the COLUMN is logged, not the identity's name or login");
+    assert.equal(rec["destination"], "example-org/svc");
     assert.equal(typeof rec["verb"], "string");
+    assert.ok(!("identity" in rec) && !("owner" in rec) && !("kind" in rec), "the legacy free-form fields are gone");
     assert.equal(statSync(decisionLogPath(w.home)).mode & 0o777, 0o600);
     for (const t of ALL_TOKENS) assert.ok(!readFileSync(decisionLogPath(w.home), "utf8").includes(t));
   });
@@ -687,13 +709,61 @@ describe("repo-aegis gh: refusals never run gh", () => {
 describe("repo-aegis gh: faults, pass-through and the pinned home", () => {
   it("T13: a fault between choosing and spawning on a mapped owner is GH_IDENTITY_UNAVAILABLE and gh does not run", () => {
     const w = makeWorld();
-    // The decision log is where the fault is made: `state` is a file, so the record cannot be written.
-    rmSync(join(w.home, "state"), { recursive: true });
-    writeFileSync(join(w.home, "state"), "not a directory");
-    const r = run(w, WRITE, { presence: "agent" });
+    // A fault made after the identity was chosen and its token minted (reading LC_ALL to build the child's environment).
+    const r = run(w, WRITE, { presence: "agent", faultOnEnvRead: "LC_ALL" });
     assert.equal(refusalCode(r), "GH_IDENTITY_UNAVAILABLE", r.err);
     assert.equal(r.status, 2);
     assert.deepEqual(mainCalls(r), []);
+  });
+
+  it("P1-I reverses D4: a decision-log write that fails (neither the home nor $TMPDIR can be written) never stops a mapped call; the answer, the token and the exit code are as with a working log", () => {
+    const ok = makeWorld();
+    const good = run(ok, WRITE, { presence: "agent" });
+    assert.equal(good.status, 0, good.err);
+
+    const w = makeWorld();
+    // `state` is a file, so neither the log nor its directory can be created under the pinned home...
+    rmSync(join(w.home, "state"), { recursive: true });
+    writeFileSync(join(w.home, "state"), "not a directory");
+    // ...and the fallback under $TMPDIR is unwritable too: point it at a path under a regular file.
+    const savedTmp = process.env["TMPDIR"];
+    const blocker = join(w.root, "tmp-is-a-file");
+    writeFileSync(blocker, "x");
+    process.env["TMPDIR"] = blocker;
+    try {
+      const r = run(w, WRITE, { presence: "agent" });
+      assert.equal(r.status, good.status, r.err);
+      assert.equal(refusalCode(r), undefined, r.err);
+      assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], TOKEN_BOT, "the mapped identity was used");
+      assert.deepEqual(mainCalls(r), mainCalls(good));
+    } finally {
+      if (savedTmp === undefined) delete process.env["TMPDIR"];
+      else process.env["TMPDIR"] = savedTmp;
+    }
+  });
+
+  it("a refusal says '(not logged)' when its record could not be written, and '(logged: repo-aegis log --last 1)' when it was", () => {
+    const w = makeWorld();
+    const logged = run(w, WRITE, { presence: "agent", faultOnEnvRead: "LC_ALL" });
+    assert.match(logged.err, /\(logged: repo-aegis log --last 1\)/);
+    assert.equal(decisions(w).at(-1)?.["code"], "GH_IDENTITY_UNAVAILABLE");
+
+    const w2 = makeWorld();
+    rmSync(join(w2.home, "state"), { recursive: true });
+    writeFileSync(join(w2.home, "state"), "not a directory");
+    const savedTmp = process.env["TMPDIR"];
+    const blocker = join(w2.root, "tmp-is-a-file");
+    writeFileSync(blocker, "x");
+    process.env["TMPDIR"] = blocker;
+    try {
+      const unlogged = run(w2, WRITE, { presence: "agent", faultOnEnvRead: "LC_ALL" });
+      assert.equal(refusalCode(unlogged), "GH_IDENTITY_UNAVAILABLE");
+      assert.match(unlogged.err, /\(not logged\)/);
+      assert.doesNotMatch(unlogged.err, /\(logged: /);
+    } finally {
+      if (savedTmp === undefined) delete process.env["TMPDIR"];
+      else process.env["TMPDIR"] = savedTmp;
+    }
   });
 
   it("T14: the same kind of fault where nothing is known to be mapped keeps today's behaviour: a warning, then gh runs unchanged", () => {
@@ -1077,9 +1147,8 @@ describe("U5: an account-bound approval covers a repository git setting", () => 
       rmSync(join(w.stubs, "gh.argv"), { force: true });
     }
     const last = decisions(w).at(-1)!;
-    assert.equal(last["decision"], "inject");
-    assert.equal(last["coveredBy"], a.id);
-    assert.equal(last["covers"], "core.hooksPath (local scope)");
+    assert.equal(last["outcome"], "inject");
+    assert.ok(!("coveredBy" in last) && !("covers" in last), "the closed schema has no setting name; the approval id rides on the stderr line");
   });
 
   it("an <org>/* approval with a login covers every repository of the owner", () => {
@@ -1202,7 +1271,7 @@ describe("U4: a read whose identity cannot be produced runs as the active gh acc
     assert.equal(ghEnv(w, mainCallNumber(r))["GH_TOKEN"], undefined, "the read ran with a token");
     assert.equal(ghEnv(w, mainCallNumber(r))["GH_PROMPT_DISABLED"], undefined, "the read ran with the allowlisted environment");
     assert.ok(!r.err.includes(TOKEN_BOT) && !r.out.includes(TOKEN_BOT));
-    assert.equal(decisions(w).at(-1)?.["decision"], "fallback");
+    assert.equal(decisions(w).at(-1)?.["outcome"], "fallback");
   });
 
   it("every unusable mint answer is the same for a read: no output, not JSON, another repository, wider permissions, no token", () => {
@@ -1298,15 +1367,13 @@ describe("U4: a read whose identity cannot be produced runs as the active gh acc
 
   it("a fault after a token was minted: the read runs plain and the token is not handed to it; the write refuses (T13)", () => {
     const w = makeWorld();
-    // The decision log is where the fault is made: `state` is a file, so the record cannot be written.
-    rmSync(join(w.home, "state"), { recursive: true });
-    writeFileSync(join(w.home, "state"), "not a directory");
-    const read = run(w, READ, { presence: "agent", plainPath: true });
+    // A fault made after the token was minted (reading LC_ALL to build the child's environment).
+    const read = run(w, READ, { presence: "agent", plainPath: true, faultOnEnvRead: "LC_ALL" });
     assert.equal(read.status, 0, read.err);
     assert.ok(read.taaadArgv.length > 0, "a token was minted before the fault");
     assert.match(warning(read), /^repo-aegis gh: GH_IDENTITY_UNAVAILABLE: repo-aegis faulted while preparing the GitHub identity for a mapped owner, so this read runs as the active gh account; proceeding$/);
     assert.equal(ghEnv(w, mainCallNumber(read))["GH_TOKEN"], undefined, "the minted token reached the read");
-    const write = run(w, WRITE, { presence: "agent" });
+    const write = run(w, WRITE, { presence: "agent", faultOnEnvRead: "LC_ALL" });
     assert.equal(refusalCode(write), "GH_IDENTITY_UNAVAILABLE", write.err);
   });
 
@@ -1381,17 +1448,18 @@ describe("P1-E: the gh shim under an emergency pause", () => {
     assert.doesNotMatch(r.err, /PUBLISHED →/);
   });
 
-  it("a pause that lets a call through is one `paused-allow` audit record: layer, verb and destination, nothing from the call", () => {
+  it("a pause that lets a call through is one decision-log `notice` record: layer, verb and destination, nothing from the call", () => {
     const w = makeWorld();
-    writeFileSync(join(w.home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
     setPause(w, "active");
     const r = run(w, ["pr", "create", "--repo", "Example-Org/SVC", "--title", "SECRET-TITLE", "--body-file", "/var/folders/xx/pr.md"], { presence: "agent", plainPath: true });
     assert.equal(r.status, 0, r.err);
-    const log = readFileSync(join(w.home, "state", "audit.log"), "utf8");
-    const rec = log.split("\n").filter(l => l !== "").map(l => JSON.parse(l) as { action: string; details?: Record<string, unknown> }).filter(x => x.action === "paused-allow");
+    const log = readFileSync(decisionLogPath(w.home), "utf8");
+    const rec = log.split("\n").filter(l => l !== "").map(l => JSON.parse(l) as Record<string, unknown>).filter(x => x["outcome"] === "notice");
     assert.equal(rec.length, 1);
-    assert.equal(rec[0]!.details?.["layer"], "gh shim");
-    assert.equal(rec[0]!.details?.["destination"], "example-org/svc");
+    assert.equal(rec[0]!["layer"], "shim");
+    assert.equal(rec[0]!["paused"], "machine");
+    assert.equal(rec[0]!["verb"], "gh pr create");
+    assert.equal(rec[0]!["destination"], "example-org/svc");
     assert.doesNotMatch(log, /SECRET-TITLE|pr\.md/);
   });
 

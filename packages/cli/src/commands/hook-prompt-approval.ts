@@ -21,6 +21,7 @@ import {
   type PromptApproval,
   type PromptBinding,
 } from "@de-otio/repo-aegis-core";
+import { recordDecision, verbWords } from "../decision.js";
 
 /** What the hook adds to an `ask`, and what it says on stderr. Both fixed text plus validated names. */
 export interface PromptApprovalOutcome {
@@ -104,6 +105,16 @@ export function writePromptApprovals(
     // Nothing a lower layer could honour (an unresolved destination, a delete…): nothing to write or to promise.
     if (first === undefined) return {};
     if (ctx.permissionMode === undefined || !PROMPT_APPROVAL_MODES.has(ctx.permissionMode)) {
+      // P1-I: an approval not minted is a decision too (no prompt text, no command: the verb, destination and mode only).
+      recordDecision({
+        layer: "prompt-approval",
+        outcome: "refuse",
+        code: "PROMPT_APPROVAL_MODE_UNSUPPORTED",
+        host: "claude-code",
+        verb: verbWords(first.verb),
+        destination: { org: first.org, repo: first.repo },
+        ...(ctx.permissionMode !== undefined && { facts: { permissionMode: ctx.permissionMode } }),
+      });
       return { sentence: noCarry("In this permission mode", first) };
     }
     const written: PromptApproval[] = [];
@@ -117,9 +128,28 @@ export function writePromptApprovals(
       });
       if (a === null) {
         failed++;
+        recordDecision({
+          layer: "prompt-approval",
+          outcome: "refuse",
+          code: "PROMPT_APPROVAL_NOT_RECORDED",
+          host: "claude-code",
+          verb: verbWords(b.verb),
+          destination: { org: b.org, repo: b.repo },
+          facts: { permissionMode: ctx.permissionMode },
+        });
         continue;
       }
       written.push(a);
+      recordDecision({
+        layer: "prompt-approval",
+        outcome: "allow",
+        host: "claude-code",
+        verb: verbWords(a.verb),
+        destination: { org: a.org, repo: a.repo },
+        approvalId: a.id,
+        ...(a.ref !== undefined && { ref: a.ref }),
+        facts: { permissionMode: a.permissionMode },
+      });
       try {
         // Never the command text: the verb, the scope, the ref or endpoint, and the bounds.
         appendAuditRecord({

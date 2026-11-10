@@ -69,6 +69,9 @@ import {
   registryUnreadable,
   appendAuditRecord,
   pauseNotice,
+  logTrailer,
+  type DecisionAppendResult,
+  type DecisionFactsInput,
   type PauseState,
   type Registry,
   type RepoVisibility,
@@ -98,7 +101,8 @@ import {
   type Waiver,
   EXIT_HIT,
 } from "@de-otio/repo-aegis-core";
-import { emitJson, emitText, emitError, shouldRevealMatches } from "../format.js";
+import { emitJson, emitText, emitError, setErrorDecisionHook, shouldRevealMatches, type ErrorPayload } from "../format.js";
+import { recordDecision, registryStateFact, type RecordArgs } from "../decision.js";
 import { currentHumanPresent } from "../human-presence.js";
 import { enforceDenySetFloor, type DenySetFloorOptions } from "../deny-set-floor.js";
 import { pauseCoveringDestinations, pauseCoveringWorkingRepo, recordPausedAllow } from "../pause-scope.js";
@@ -539,6 +543,11 @@ function evaluateDestination(repo: RepoConfig, opts: CheckOptions, pause: PauseS
 
   const ref = refLabel(opts);
   const loaded = loadRegistryForPush();
+  if (runDecision !== null) {
+    // Mutation: this run's decision record learns how the registry loaded, and (when the URL names one) where the push goes.
+    runDecision.facts = { ...runDecision.facts, registryState: registryStateFact(loaded.state) };
+    if (target.kind === "github") runDecision.destination = { org: target.org, repo: target.repo };
+  }
   const humanPresent = currentHumanPresent();
   const ruleH = ruleHStatus(loaded.state, loaded.registry ?? EMPTY_REGISTRY);
 
@@ -880,7 +889,64 @@ function pausedHookRun(opts: CheckOptions): PauseState | null {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The decision log (P1-I): pre-commit and pre-push each write one record per run
+// ---------------------------------------------------------------------------
+
+/**
+ * What this run knows for its decision record. Module state on purpose: `emitError` (the one place a refusal is
+ * printed) reaches it through `setErrorDecisionHook`, so no refusal site assembles a record or a trailer itself. One
+ * process makes one `check` call; `check` resets it first. Mutated only by `check` and `evaluateDestination`.
+ */
+interface RunDecision {
+  layer: "pre-commit" | "pre-push";
+  verb: string;
+  destination?: { org: string; repo: string };
+  ref?: string;
+  refKind?: "branch" | "tag" | "other";
+  facts: DecisionFactsInput;
+}
+let runDecision: RunDecision | null = null;
+
+function refKindOf(ref: string): "branch" | "tag" | "other" {
+  return ref.startsWith("refs/tags/") ? "tag" : ref.startsWith("refs/heads/") ? "branch" : "other";
+}
+
+function recordRun(outcome: "allow" | "refuse", code?: string, extra: Partial<RecordArgs> = {}): DecisionAppendResult {
+  const d = runDecision;
+  if (d === null) return { written: "none" };
+  return recordDecision({
+    layer: d.layer,
+    outcome,
+    host: "git",
+    verb: d.verb,
+    ...(code !== undefined && { code }),
+    ...(d.destination !== undefined && { destination: d.destination }),
+    ...(d.ref !== undefined && { ref: d.ref, refKind: d.refKind ?? "other" }),
+    facts: d.facts,
+    ...extra,
+  });
+}
+
+/** Every `emitError` of a pre-commit / pre-push run is a refusal of that run: its code (or a fixed one) and the destination it names. */
+function recordErrorPayload(payload: ErrorPayload): DecisionAppendResult {
+  const details = payload.details;
+  const dest = typeof details === "object" && details !== null ? (details as Record<string, unknown>)["destination"] : undefined;
+  const parts = typeof dest === "string" ? dest.split("/") : [];
+  return recordRun("refuse", payload.code ?? "CHECK_ERROR", parts.length === 2 ? { destination: { org: parts[0]!, repo: parts[1]! } } : {});
+}
+
 export function check(opts: CheckOptions): void {
+  try {
+    checkRun(opts);
+  } finally {
+    // One process makes one decision; an in-process caller (a test) must not leave this run's decision hook on `emitError`.
+    setErrorDecisionHook(null);
+    runDecision = null;
+  }
+}
+
+function checkRun(opts: CheckOptions): void {
   // Validate flags FIRST. Exactly one of --staged, --path, --range,
   // --push-ref, --history must be specified.
   const modes = [opts.staged, !!opts.path, !!opts.range, !!opts.pushRef, !!opts.history].filter(
@@ -898,6 +964,20 @@ export function check(opts: CheckOptions): void {
     );
   }
 
+  // P1-I: only the two git-hook shapes are decisions that get logged; an explicit `--path`/`--range`/`--history` scan is
+  // something a person asked to read.
+  const hookLayer = opts.staged ? "pre-commit" : isPrePushRun(opts) ? "pre-push" : null;
+  runDecision =
+    hookLayer === null
+      ? null
+      : {
+          layer: hookLayer,
+          verb: hookLayer === "pre-commit" ? "git commit" : "git push",
+          ...(hookLayer === "pre-push" && opts.pushRef !== undefined && { ref: opts.pushRef, refKind: refKindOf(opts.pushRef) }),
+          facts: {},
+        };
+  setErrorDecisionHook(runDecision === null ? null : recordErrorPayload);
+
   // P1-E: a person's emergency pause. Only for the two git-hook shapes (pre-commit `--staged`, pre-push with a
   // remote URL): an explicit `--path`/`--range`/`--history` scan is something a person asked to read.
   const paused = pausedHookRun(opts);
@@ -907,7 +987,7 @@ export function check(opts: CheckOptions): void {
     // destination checks run with the pause, which skips rule g, rule h and the account checks and nothing else.
     const dest = isPrePushRun(opts) ? pausedDestination(opts) : null;
     if (paused.repo === undefined && isPrePushRun(opts)) evaluateDestination(readRepoConfig(opts.cwd), opts, paused);
-    recordPausedAllow(opts.staged ? "pre-commit" : "pre-push", { verb: opts.staged ? "git commit" : "git push", destination: dest });
+    recordPausedAllow(opts.staged ? "pre-commit" : "pre-push", { verb: opts.staged ? "git commit" : "git push", destination: dest, pause: paused });
     const notice = pauseNotice(paused);
     if (opts.json) emitJson({ status: "paused", notice, hits: [], skipped: [], egress: [] });
     else process.stderr.write(`${notice}\n`);
@@ -985,6 +1065,7 @@ export function check(opts: CheckOptions): void {
           : "staged";
 
   if (!hasDenySet && egress.length === 0) {
+    recordRun("allow");
     if (opts.json) {
       emitJson({
         hits: [],
@@ -1373,5 +1454,11 @@ export function check(opts: CheckOptions): void {
     }
   }
 
-  if ((totalHits > 0 || egress.length > 0) && !advisory) process.exit(EXIT_HIT);
+  if ((totalHits > 0 || egress.length > 0) && !advisory) {
+    // The hit text above already went out; the trailer follows it on stderr, after the write attempt.
+    const written = recordRun("refuse", totalHits > 0 ? "MARKER_HIT" : "REGISTRY_EGRESS_HIT").written;
+    if (runDecision !== null) process.stderr.write(`repo-aegis: ${logTrailer(written)}\n`);
+    process.exit(EXIT_HIT);
+  }
+  recordRun("allow");
 }

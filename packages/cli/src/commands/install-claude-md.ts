@@ -14,6 +14,7 @@ import {
   leakContextFlagPath,
   appendAuditRecord,
   approvalsPath,
+  decisionLogStatePath,
   pausePath,
   PROMPT_APPROVALS_DIR,
   denySetCachePath,
@@ -423,6 +424,12 @@ export function registryDenyPlan(pin: EnforcementPin = currentEnforcementPin()):
     approvalsPath(home),
     // The emergency pause (P1-E): a file an agent that could write would switch repo-aegis off for itself.
     pausePath(home),
+    // The decision log's on/off switch (P1-I): an agent that could write `{"enabled": false}` would remove the data its
+    // own next refusal needs. `log --off` is person-only; this keeps the file out of the agent's write tools.
+    decisionLogStatePath(home),
+    // The log FILE has no Edit rule on purpose: a deny rule reaches the agent's sandboxed shell, where the hooks and the shim
+    // run too, so they would log to the sandbox's own $TMPDIR, which the person's `repo-aegis log` does not read. Agent
+    // tools are stopped by `check-write` and the shell-write rule instead (state-file-guard.ts, human-commands.ts).
     // Rules e-g read a cached entry's class and visibility to decide whether a
     // destination is public-facing: a forged "private" entry for a public repo
     // would skip rule g's person check. Every writer treats a failed write as a
@@ -502,7 +509,7 @@ function legacyDenyPair(list: readonly unknown[]): string[] {
 
 /** Basenames/globs of the paths this install protects, for recognising its own rules. */
 const OUR_RULE_SHAPE =
-  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|pause\.json|destinations\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers|prompt-approvals)\/\*\*)\)$/;
+  /^Edit\(\/(\/.+)\/(?:engagements\.yaml(?:\.age)?|egress-approvals\.json|pause\.json|destinations\.json|state\/decision-log\.json|state\/deny-set\.cache\.json|state\/claude-md-deny-rules\.json|(?:hooks|bin|markers|prompt-approvals)\/\*\*)\)$/;
 
 /** Shape of the rules `registryDenyPlan` writes for a pin: `<...>/@de-otio/repo-aegis/**`, or a file named `node`. */
 const OUR_PIN_RULE_SHAPE = /^Edit\(\/\/(?:.+\/@de-otio\/repo-aegis\/\*\*|.+\/node)\)$/;

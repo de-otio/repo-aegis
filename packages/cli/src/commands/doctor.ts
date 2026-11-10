@@ -37,6 +37,10 @@ import {
   loadRegistryState,
   readActivePause,
   pauseNotice,
+  isDecisionLogEnabled,
+  fallbackHoldsNewer,
+  decisionLogWritable,
+  repoAegisHome,
   type HookState,
   type HookStateCode,
   type Registry,
@@ -258,6 +262,47 @@ export function pauseChecks(): DoctorCheck[] {
   ];
 }
 
+/**
+ * The decision log's three findings (P1-I), reported whatever `--no-egress-checks` says: they say whether the next
+ * refusal will be explained. `DECISION_LOG_OFF` (info): a person switched it off. `DECISION_LOG_FALLBACK` (info): the
+ * `$TMPDIR` fallback holds records newer than the primary's last (the home was not writable from some process, a sandbox
+ * usually). `DECISION_LOG_UNWRITABLE` (warn): neither the home nor the fallback can be written, so refusals end
+ * `(not logged)`.
+ */
+export function decisionLogChecks(home: string = repoAegisHome()): DoctorCheck[] {
+  const out: DoctorCheck[] = [];
+  if (!isDecisionLogEnabled(home)) {
+    out.push({
+      code: "DECISION_LOG_OFF",
+      ok: false,
+      severity: "info",
+      detail: "the decision log is switched off, so a refusal cannot be explained from it (`repo-aegis log` shows only older records)",
+      fix: "repo-aegis log --on",
+    });
+    return out;
+  }
+  if (fallbackHoldsNewer(home)) {
+    out.push({
+      code: "DECISION_LOG_FALLBACK",
+      ok: false,
+      severity: "info",
+      detail:
+        "some process could not write the decision log in the repo-aegis home (a sandbox that only writes the working directory and $TMPDIR does this) and wrote to a fallback under $TMPDIR instead; `repo-aegis log` reads both",
+      fix: "no action needed; to keep the log in one place make the home writable for that process, or let the sandbox allow the repo-aegis home",
+    });
+  }
+  if (decisionLogWritable(home) === "none") {
+    out.push({
+      code: "DECISION_LOG_UNWRITABLE",
+      ok: false,
+      severity: "warn",
+      detail: "neither the repo-aegis home nor the $TMPDIR fallback can be written from here, so refusals end `(not logged)` and nothing can be debugged afterwards",
+      fix: "make <home>/state writable for this user (check its owner and mode), then run repo-aegis doctor again",
+    });
+  }
+  return out;
+}
+
 function machineChecks(opts: DoctorOptions, reg: RegistryLoad): DoctorCheck[] {
   // The managed drop-in (D8) is where the Claude Code hooks and deny rules live once
   // `install claude-md` has run; the guard and deny checks read it with the user file.
@@ -432,7 +477,7 @@ export function doctor(opts: DoctorOptions): void {
     ? loadRegistryForDoctor()
     : { state: "missing" };
   const registry = regLoad.state === "loaded" ? regLoad.registry : null;
-  const machine = [...pauseChecks(), ...(egressChecksOn ? machineChecks(opts, regLoad) : [])];
+  const machine = [...pauseChecks(), ...decisionLogChecks(), ...(egressChecksOn ? machineChecks(opts, regLoad) : [])];
 
   const results: DoctorRepoResult[] = [];
   let scanned = 0;

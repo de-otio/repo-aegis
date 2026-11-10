@@ -185,3 +185,17 @@ export function refusal(input: RefusalInput): string {
   parts.push(refusalTrailer(input.code));
   return parts.join(" ");
 }
+
+/**
+ * The decision log's closing remark on a refusal (P1-I), assembled AFTER the write attempt so it tells the truth:
+ * `(logged: repo-aegis log --last 1)` when a record was written (primary or fallback), `(not logged)` when none was.
+ * The decision itself is never made, or changed, by this.
+ */
+export function logTrailer(written: "primary" | "fallback" | "none"): string {
+  return written === "none" ? "(not logged)" : "(logged: repo-aegis log --last 1)";
+}
+
+/** `text` followed by {@link logTrailer}: the one place a refusal gets it. */
+export function withLogTrailer(text: string, written: "primary" | "fallback" | "none"): string {
+  return `${text} ${logTrailer(written)}`;
+}

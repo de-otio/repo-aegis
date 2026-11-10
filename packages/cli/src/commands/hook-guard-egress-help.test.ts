@@ -70,6 +70,7 @@ function assertRefusedAsHumanCommand(command: string): void {
 const REFUSED_SAMPLE: Readonly<Record<HumanOnlyKind, string>> = {
   approve: "repo-aegis approve acme/svc --ttl 1h",
   pause: "repo-aegis pause --for 1h",
+  "log-off": "repo-aegis log --off",
   "owner-add": "repo-aegis engagements add --personal-org stranger",
   "upstream-add": "repo-aegis upstreams add upstream-org/lib",
   "init-migrate": "repo-aegis init --migrate-classify",
@@ -100,7 +101,11 @@ describe("hook guard-egress: --help on a person-only verb is allowed", { skip: !
   it("every kind's sample is refused, and stays refused with --help or -h added to it", () => {
     for (const [kind, sample] of Object.entries(REFUSED_SAMPLE)) {
       const code = kind === "managed-settings-write" ? null : "AGENT_RAN_HUMAN_COMMAND";
-      for (const command of [sample, `${sample} --help`, `${sample} -h`]) {
+      // `log --off --help` is the one sample that stays allowed with `--help` added: `--off` is the verb's own switch, and
+      // Commander prints help and runs nothing (P1-I, spec §7). Only the bare sample must be refused for that kind.
+      const variants = kind === "log-off" ? [sample] : [sample, `${sample} --help`, `${sample} -h`];
+      if (kind === "log-off") assertAllowed(`${sample} --help`);
+      for (const command of variants) {
         const r = runGuard(command);
         assert.equal(r.code, 2, `${kind}: ${command}\n${r.stdout}`);
         if (code !== null) assert.equal((JSON.parse(r.stderr) as { code: string }).code, code, command);

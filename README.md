@@ -282,7 +282,8 @@ npm uninstall -g @de-otio/repo-aegis
 ```
 
 `uninstall` reverses the git hooks, the Claude Code wiring (including the root-owned settings
-file), the CI workflows, the `gh` wrapper and the git credential helper. `--purge-repos` also
+file), the CI workflows, the `gh` wrapper, the git credential helper and the decision log (`state/decisions.jsonl`
+and its rotations, the on/off switch, the old `gh-decisions.jsonl`, and the `$TMPDIR` fallback). `--purge-repos` also
 clears repo-aegis's git config in your classified repositories. `--purge-home` also deletes
 `~/.config/repo-aegis/`. See `repo-aegis uninstall --help`.
 

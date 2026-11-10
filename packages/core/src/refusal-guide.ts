@@ -94,10 +94,15 @@ export const REFUSAL_GUIDE: Readonly<Record<string, RefusalGuideEntry>> = {
   PAUSE_FILE_WRITE_REFUSED: person("A person decides whether to pause, with `repo-aegis pause` from their own terminal."),
   APPROVALS_FILE_WRITE_REFUSED: person("A person mints an approval with `repo-aegis approve`, from their own terminal."),
   WAIVER_FILE_WRITE_REFUSED: person("A person writes a waiver with `repo-aegis waive`, from their own terminal."),
+  // P1-I: the decision log and its switch. `repo-aegis log --on` is the one change an agent may make.
+  DECISION_LOG_STATE_WRITE_REFUSED: agent("Leave the decision log's files alone; run `repo-aegis log --on` if recording is off."),
+  // The fallback code when a check-write refusal carries none of its own: read the message printed with it.
+  CHECK_WRITE_REFUSED: agent("Read the message printed with it; `repo-aegis doctor` shows whether the install is healthy."),
 
   // ---- commands that need a person's terminal ----
   APPROVE_NEEDS_TTY: person("A person runs the `repo-aegis approve` line from their own terminal."),
   PAUSE_NEEDS_TTY: person("A person runs `repo-aegis pause` from their own terminal, and only when a refusal is wrong."),
+  LOG_OFF_NEEDS_TTY: person("A person runs `repo-aegis log --off` from their own terminal, if they want recording off."),
   IDENTITY_CHANGE_NEEDS_TTY: person("A person runs the identity command from their own terminal; the refusal prints it."),
   OWNER_ADD_NEEDS_TTY: person("A person runs the command from their own terminal; the refusal prints it."),
   OWNER_SET_EMPTY_NEEDS_TTY: person("A person runs the command from their own terminal; removing one owner among several needs none."),

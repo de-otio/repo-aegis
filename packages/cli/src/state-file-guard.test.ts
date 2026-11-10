@@ -44,6 +44,35 @@ describe("protectedStateFile: direct paths", () => {
   });
 });
 
+describe("protectedStateFile: the decision log's switch (P1-I)", () => {
+  it("<home>/state/decision-log.json is protected, in any letter case; the log itself and a same-named file elsewhere are not", () => {
+    const home = homeDir();
+    mkdirSync(join(home, "state"), { recursive: true });
+    assert.equal(guard(join(home, "state", "decision-log.json"), home), "decision-log");
+    assert.equal(guard(join(home, "state", "Decision-Log.JSON"), home), "decision-log");
+    assert.equal(guard(join(home, "state", "decision-log.json.1.tmp"), home), "decision-log", "a temp sibling, as the writer makes one");
+    assert.equal(guard(join(home, "state", "decisions.jsonl"), home), "decision-log", "the log itself (review F3): an agent deleting it is switching it off");
+    for (const f of ["decisions.jsonl.1", "decisions.jsonl.3", "Decisions.JSONL", "decisions.jsonl.lockfile", "decisions.jsonl.lockfile.lock"]) {
+      assert.equal(guard(join(home, "state", f), home), "decision-log", f);
+    }
+    assert.equal(guard(join(home, "state", "audit.log"), home), null, "other state files stay writable");
+    assert.equal(guard(join(home, "decisions.jsonl"), home), null, "only state/ holds the log");
+    assert.equal(guard(join(home, "decision-log.json"), home), null, "only the state/ directory holds the switch");
+    assert.equal(guard(join(workDir(), "state", "decision-log.json"), home), null);
+  });
+
+  it("through a symlinked directory or a symlinked (even dangling) file", () => {
+    const home = homeDir();
+    mkdirSync(join(home, "state"), { recursive: true });
+    const viaDir = workDir();
+    symlinkSync(join(home, "state"), join(viaDir, "s"));
+    assert.equal(guard(join(viaDir, "s", "decision-log.json"), home), "decision-log");
+    const viaFile = join(workDir(), "x");
+    symlinkSync(join(home, "state", "decision-log.json"), viaFile);
+    assert.equal(guard(viaFile, home), "decision-log");
+  });
+});
+
 describe("protectedStateFile: a dangling symlink to a state file is refused", () => {
   for (const [name, kind] of [["pause.json", "pause"], ["egress-approvals.json", "approvals"]] as const) {
     it(`a link to a ${name} that does not exist yet (absolute target)`, () => {

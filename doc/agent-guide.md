@@ -730,6 +730,20 @@ the literal pattern, the user runs
 `repo-aegis render` (no `--json`) at the terminal. **You** never see
 the literal pattern from a hook.
 
+## When you are refused: read the decision log
+
+Every refusal ends with `(logged: repo-aegis log --last 1)` (or `(not logged)` when nothing could be written). **When
+refused: `repo-aegis log --last 1`, then `repo-aegis explain <code>`.** `repo-aegis log --last 1` prints the record the
+refusal just wrote: which layer decided (`pre-push`, `egress-hook`, `shim`, ...), the code, the parsed command shape
+(never its arguments), the destination as `owner/repo`, and the facts that decided it: `proxyVarSet` (which proxy
+variables were set, names only), `psReadable`, `tty`, `sandboxGuess`, `registryState`, `shimFirst`, `permissionMode`,
+`pinFallback`. With no flags, `repo-aegis log` shows the last 20 refusals grouped by code, each with its one fix line;
+`--code`, `--layer` and `--since 1h` narrow it. It is read-only and you may run it; **you may not switch it off**
+(`repo-aegis log --off` is a person's, and writing `state/decision-log.json` is refused as
+`DECISION_LOG_STATE_WRITE_REFUSED`). `repo-aegis log --on` turns it back on. The log never holds tokens, marker text,
+command text, paths or URLs, so reading it is safe; it does name `owner/repo` and ref names, so do not paste it into a
+public place.
+
 ## A person can pause repo-aegis
 
 When a refusal is **wrong** and is blocking your human's work under a deadline, the human can pause repo-aegis
@@ -767,6 +781,10 @@ repo-aegis uninstall --yes --purge-repos            # also unset repo-aegis.* in
 repo-aegis uninstall --yes --purge-home             # also delete ~/.config/repo-aegis/
 repo-aegis uninstall --yes --purge-repos --purge-home   # full reset
 ```
+
+The uninstall also removes the decision log (`state/decisions.jsonl` and its rotations, `state/decision-log.json`,
+the old `state/gh-decisions.jsonl`, and the `$TMPDIR/repo-aegis-<uid>/` fallback for the current `$TMPDIR`; a sandbox's
+own `$TMPDIR` may differ, and its copy is the sandbox's to clear), as the step `remove decision log`.
 
 What the steps do:
 
@@ -1182,6 +1200,16 @@ gh` only) are covered by an approval; the rest say "No approval covers this":
 | `REGISTRY_WOULD_BE_INVALID` | a registry mutator refused because the result would not load (typically an org registered twice: an org belongs to `personalOrgs` or to exactly one engagement) | nothing was written. Surface it; run `repo-aegis doctor` once the registry loads. Do not edit the file to force it. |
 | `MIGRATION_NOT_CONFIRMED` | `init --migrate-classify` listed the owners it would register and did not get a typed `y` on a stdin terminal | nothing was written. A person re-runs it at a terminal and answers `y` after reading the list. |
 | `APPROVE_NEEDS_TTY` | `repo-aegis approve` was run without a person's terminal | ask the user to run the `approve` line themselves; never set `REPO_AEGIS_EGRESS_HUMAN` or wrap it. |
+| `LOG_OFF_NEEDS_TTY` | `repo-aegis log --off` was run without a person's terminal. The decision log is what you read to see why you were refused, so only a person switches it off | do not retry or wrap it, and never set `REPO_AEGIS_EGRESS_HUMAN`; tell the person what you need from the log. `repo-aegis log --on` (which you may run) turns recording back on. |
+| <a id="decision_log_state_write_refused"></a>`DECISION_LOG_STATE_WRITE_REFUSED` | the write hook refused a write to the decision log's switch (`state/decision-log.json` in the repo-aegis home): that file turns the log off, and the log is the data your next refusal needs | do not look for another way to write it. `repo-aegis log --on` is the only thing you may run to change it. |
+| `DECISION_LOG_OFF` (`doctor`, info) | a person switched the decision log off, so refusals cannot be explained from it (`repo-aegis log` shows only older records) | tell the person it is off if you are debugging a refusal; `repo-aegis log --on` turns it back on. |
+| `DECISION_LOG_FALLBACK` (`doctor`, info) | some process could not write the log in the repo-aegis home (a sandbox that only writes the working directory and `$TMPDIR`) and wrote to `$TMPDIR/repo-aegis-<uid>/decisions.jsonl` instead; `repo-aegis log` reads both | nothing to do; `repo-aegis log` already shows the records. |
+| `DECISION_LOG_UNWRITABLE` (`doctor`, warn) | neither the repo-aegis home nor `$TMPDIR` can be written, so refusals end `(not logged)` and cannot be debugged afterwards | tell the person: `<home>/state` must be writable for this user. |
+| `MARKER_HIT` | the pre-commit or pre-push scan, or the post-write scan, found a marker; the decision log records the code only, never the match | run `repo-aegis check --path <file>` from the repo to see which stems (never `--verbose` from a hook), redact, retry. |
+| `REGISTRY_EGRESS_HIT` | the pre-commit or pre-push scan found a private-registry reference in a public-facing repository | remove the reference from the file named in the output; `repo-aegis check --staged` re-checks. |
+| `CHECK_ERROR` / `CHECK_WRITE_REFUSED` / `SCAN_AFTER_WRITE_ERROR` | a pre-commit, pre-push, `check-write` or `scan-after-write` run ended with an error that has no code of its own (a git failure, an unreadable path) | read the message printed with it; `repo-aegis doctor` shows whether the install is healthy. |
+| `CREDENTIAL_PERSON_PRESENT` / `CREDENTIAL_NO_REGISTRY` / `CREDENTIAL_OWNER_UNMAPPED` / `CREDENTIAL_REGISTRY_ENCRYPTED` / `CREDENTIAL_READ_REGISTRY_UNREADABLE` | decision-log codes of the git credential helper stepping aside (it printed nothing, so git asked its next helper): a person is at the terminal, there is no registry, the owner has no mapped identity, the registry is encrypted, or a read could not consult an unreadable registry. Not refusals | nothing to do; the next credential helper answered. |
+| `PROMPT_APPROVAL_MODE_UNSUPPORTED` / `PROMPT_APPROVAL_NOT_RECORDED` | decision-log codes of a prompt approval that was not minted: the permission mode is not one where a yes carries down to the layers below, or the record could not be written | a person mints an approval for the push from a terminal (`repo-aegis approve <owner>/<repo>`). |
 | `PAUSE_NEEDS_TTY` | `repo-aegis pause` was run without a person's terminal. A pause switches repo-aegis off for a while, so only a person sets one; an agent must never switch off its own guard | do not retry, wrap it or write `pause.json`. If a refusal is WRONG and is blocking your human's work, tell them they can run `repo-aegis pause --for 1h` (add `--repo <owner>/<repo>` to limit it) in their own terminal, and that `repo-aegis resume` ends it early. Suggest it only when a refusal is wrong, never to get past one that is right. |
 | `PAUSE_TOO_LONG` | `repo-aegis pause --for` asked for more than 8 hours. A pause always expires: the default is 1 hour and there is no "until further notice" | ask the person to pick 8h or less and pause again when it ends. |
 | `PAUSE_ACTIVE` (`doctor`, a warning; also shown by `status`) | a person paused repo-aegis: its hooks, egress guard, `gh` shim and git credential helper are standing aside until the expiry (`repo-aegis: paused until 14:30, cross-org checks stay on (resume: repo-aegis resume)`), for the whole machine or for one repository. A machine-wide pause keeps the cross-org checks on. `approve`, `pause`, identity changes and uninstall stay person-only, and a write to `pause.json` is refused (`PAUSE_FILE_WRITE_REFUSED`) | carry on with the work, and take extra care that nothing private leaves: nothing is checking. You may run `repo-aegis resume` if the work that needed the pause is done; you cannot set or extend one. |

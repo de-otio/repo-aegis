@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (decision log, P1-I)
+
+- **A decision log, on by default, that an agent can debug from.** Every entry point (pre-commit, pre-push, the agent
+  egress hook, `check-write`, `scan-after-write`, the `gh` shim, the git credential helper, prompt approvals) now writes
+  one JSON Lines record per decision to `<home>/state/decisions.jsonl` (mode 0600, rotated at 10 MiB, three kept), with
+  the facts that decided it: the proxy variable names that were set, whether `ps` was readable, TTY, sandbox guess,
+  registry state, identity column, permission mode. What a record may hold is fixed by the type of its one builder
+  (`core/decision-log.ts`), not by a scrubber: no free-form field, every string checked against a closed pattern or list
+  (a failure is written as `"invalid"`), so tokens, marker text, command text, paths, URLs, env values and account logins
+  cannot reach the file. When the home cannot be written (a read-only home, a sandbox) the record goes to
+  `$TMPDIR/repo-aegis-<uid>/decisions.jsonl` with `facts.logFallback`, and writing never changes a decision or
+  blocks for more than 200 ms.
+- `repo-aegis log [--since] [--code] [--layer] [--last N] [--json]`: read-only, allowed for agents. With no flags, the
+  last 20 refusals grouped by code, each with its one fix line. Every refusal now ends
+  `(logged: repo-aegis log --last 1)` (or `(not logged)`); `agent-guide`: "when refused: `repo-aegis log --last 1`, then
+  `repo-aegis explain <code>`".
+- `repo-aegis log --off` is person-only (a terminal, like `pause`; the egress guard refuses an agent's command text, an
+  agent's write of `state/decision-log.json` is refused as `DECISION_LOG_STATE_WRITE_REFUSED`, and
+  `Edit(<home>/state/decision-log.json)` joins the `install claude-md` deny rules); `log --on` is allowed for an agent.
+- The log itself (`state/decisions.jsonl` and its rotations) is protected from an agent's tools: a `check-write` refusal
+  and a shell-write rule (deleting it counts). It has no `Edit(...)` deny rule, so sandboxed hooks can still append to it. `log` shows a `code` only when the agent guide has a
+  row for it (else `"invalid"`), reads the `$TMPDIR` fallback only from a directory this user owns that is not
+  group- or world-writable, and nothing is written when `REPO_AEGIS_HOME` is relative.
+- `doctor`: `DECISION_LOG_OFF` (info), `DECISION_LOG_FALLBACK` (info), `DECISION_LOG_UNWRITABLE` (warn).
+- `uninstall` removes the decision log (`decisions.jsonl*`, `decision-log.json`, the legacy `gh-decisions.jsonl` and the
+  `$TMPDIR` fallback directory for the current `$TMPDIR`).
+
+### Changed (decision log, P1-I)
+
+- **A decision-log write failure never changes a decision, the `gh` shim's identity injection included** (the earlier D4
+  rule, under which an `inject` whose record could not be written was `GH_IDENTITY_UNAVAILABLE`, is reversed: with the log
+  on by default everywhere, an unwritable home would have locked every identity-mapped `gh` call out of a sandbox).
+  The fallback file and `doctor`'s `DECISION_LOG_FALLBACK` / `DECISION_LOG_UNWRITABLE` cover "an identity was used and
+  nobody can tell afterwards".
+- The `gh` shim's `gh-decisions.jsonl` is folded into the decision log: it is no longer written, and `repo-aegis log` reads
+  it once as a legacy source. Its records now carry the identity **column** (`person|agent`) instead of the identity's
+  name, kind and scope, and no longer name the approval that covered a repository git setting.
+- The emergency pause's `paused-allow` records moved from the audit log to the decision log (`outcome: notice`,
+  `paused: machine|repo`); `pause` and `resume` stay in the audit log, because they are a person's actions.
+- The shim logs an allowed call only when it parsed as an egress shape (a plain `gh pr view` writes no record), like the
+  egress hook.
+
 
 ### Added
 

@@ -14,18 +14,18 @@
 // Both return null on ANY doubt (no pause, an invalid file, an unreadable origin, a throw): not knowing is never a
 // reason to switch a check off.
 import {
-  appendAuditRecord,
   getRemoteUrl,
   parseRemoteUrlResolved,
   pauseCovers,
   readActivePause,
   resolveDestinationOffline,
-  safeDestination,
+  type DecisionLayer,
   type EgressIntent,
   type PauseDestination,
   type PauseReadOptions,
   type PauseState,
 } from "@de-otio/repo-aegis-core";
+import { recordDecision } from "./decision.js";
 
 /** The pause in force for a command that reaches `dests`, or null. */
 export function pauseCoveringDestinations(dests: readonly PauseDestination[], opts: PauseReadOptions = {}): PauseState | null {
@@ -73,36 +73,24 @@ export function pauseCoveringIntents(intents: readonly EgressIntent[], cwd: stri
 }
 
 /**
- * One best-effort audit record, `paused-allow`, from an entry point that stood aside because a pause covers it: which
- * layer, which verb, and the destination as `owner/repo` when it is a plain GitHub name (`safeDestination`). Never the
- * command line, a path, a marker, or the pause's reason (which is not stored anywhere). No `cwd`: a working
- * directory's name can carry a customer's. The audit log is opt-in, so this is a no-op until it is on. `home` pins the
- * log for the entry points that read a pinned home (the `gh` shim, the credential helper).
+ * One decision-log record from an entry point that stood aside because a pause covers it (`outcome: notice`, `paused:
+ * machine|repo`): which layer, which verb, and the destination as `owner/repo` when it is a plain GitHub name (the
+ * builder's `safeDestination`). The audit log's `pause` and `resume` records stay (they are a person's actions); the
+ * `paused-allow` records moved here (P1-I). Never the command line, a path, a marker, or the pause's reason. `home`
+ * pins the log for the entry points that read a pinned home (the `gh` shim, the credential helper). Never throws.
  */
 export function recordPausedAllow(
-  layer: string,
-  info: { verb?: string; destination?: { org: string; repo: string } | null; home?: string } = {},
+  layer: DecisionLayer,
+  info: { verb?: string; destination?: { org: string; repo: string } | null; home?: string; pause: PauseState },
 ): void {
-  const saved = process.env["REPO_AEGIS_HOME"];
-  try {
-    if (info.home !== undefined) process.env["REPO_AEGIS_HOME"] = info.home;
-    const safe = info.destination === null || info.destination === undefined ? null : safeDestination(info.destination.org, info.destination.repo);
-    appendAuditRecord({
-      action: "paused-allow",
-      details: {
-        layer,
-        ...(info.verb !== undefined && { verb: info.verb }),
-        ...(safe !== null && { destination: `${safe.org}/${safe.repo}` }),
-      },
-    });
-  } catch {
-    /* the audit log must never break the allow */
-  } finally {
-    if (info.home !== undefined) {
-      if (saved === undefined) delete process.env["REPO_AEGIS_HOME"];
-      else process.env["REPO_AEGIS_HOME"] = saved;
-    }
-  }
+  recordDecision({
+    layer,
+    outcome: "notice",
+    paused: info.pause.repo === undefined ? "machine" : "repo",
+    ...(info.verb !== undefined && { verb: info.verb }),
+    ...(info.destination !== null && info.destination !== undefined && { destination: info.destination }),
+    ...(info.home !== undefined && { home: info.home }),
+  });
 }
 
 /** The first intent's destination, resolved offline, for {@link recordPausedAllow}; null on any doubt. */

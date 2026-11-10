@@ -30,7 +30,7 @@ import {
 import { PERSON_RUNS_THIS, type DoctorCheck } from "./doctor-checks.js";
 import { renderShimScript } from "./shim-script.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
-import { withStreamTty } from "../_test-utils.js";
+import { withStreamTty, isolateTmpdir } from "../_test-utils.js";
 
 // ---------------------------------------------------------------------------
 // The fake gh
@@ -88,7 +88,9 @@ exit 1
 let root: string;
 let counter = 0;
 
+let restoreTmpdir: () => void = () => {};
 before(() => {
+  restoreTmpdir = isolateTmpdir();
   root = mkdtempSync(join(tmpdir(), "repo-aegis-doctor-owners-"));
   // A PATH directory that reaches git but has no gh (the gh-absent cases).
   const dir = join(root, "git-only");
@@ -99,6 +101,7 @@ before(() => {
 });
 
 after(() => {
+  restoreTmpdir();
   rmSync(root, { recursive: true, force: true });
 });
 

@@ -10,12 +10,12 @@
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureOutput, withEnv, lastJsonLine, scrubGitEnv, PERSON_ANCESTRY } from "../_test-utils.js";
 import { check } from "./check.js";
-import { auditLogPath, mintPause, pausePath, setAncestryReaderForTests } from "@de-otio/repo-aegis-core";
+import { auditLogPath, decisionLogPath, mintPause, pausePath, setAncestryReaderForTests } from "@de-otio/repo-aegis-core";
 
 const HOUR = 3_600_000;
 const NOTICE = /repo-aegis: paused until \d\d:\d\d(?:, cross-org checks stay on)? \(resume: repo-aegis resume\)/;
@@ -190,31 +190,35 @@ describe("pre-commit under a pause (check --staged)", () => {
   });
 });
 
-describe("a pause is an audit record (`paused-allow`)", () => {
+describe("a pause is a decision-log record (`outcome: notice`, `paused`)", () => {
   it("pre-commit writes one record with the layer and the verb, and nothing from the command, the files or the reason", () => {
     const home = setupHome();
-    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
     const repo = makeRepo({ class: "private-strict", visibility: "private", origin: "git@github.com:acme/x.git" });
     stageMarker(repo);
     mintPause({ path: pausePath(home), now: new Date(Date.now() - 60_000), durationMs: HOUR, reasonLength: 31 });
     assert.equal(run(home, { cwd: repo, staged: true }).exitCode, undefined);
-    const log = readFileSync(auditLogPath(home), "utf8");
-    const records = log.split("\n").filter(l => l !== "").map(l => JSON.parse(l) as { action: string; details?: Record<string, unknown>; cwd?: string });
-    const allowed = records.filter(r => r.action === "paused-allow");
-    assert.equal(allowed.length, 1);
-    assert.deepEqual(allowed[0]!.details, { layer: "pre-commit", verb: "git commit" });
-    assert.equal(allowed[0]!.cwd, undefined, "no working directory: its name can carry a customer's");
+    const log = readFileSync(decisionLogPath(home), "utf8");
+    const records = log.split("\n").filter(l => l !== "").map(l => JSON.parse(l) as Record<string, unknown>);
+    assert.equal(records.length, 1);
+    assert.equal(records[0]!["layer"], "pre-commit");
+    assert.equal(records[0]!["outcome"], "notice");
+    assert.equal(records[0]!["paused"], "machine");
+    assert.equal(records[0]!["verb"], "git commit");
+    assert.equal(records[0]!["cwd"], undefined, "no working directory: its name can carry a customer's");
     assert.doesNotMatch(log, /leak-token|leak\.txt/);
+    assert.ok(!existsSync(auditLogPath(home)), "paused-allow no longer goes to the audit log (the pause and resume records stay there)");
   });
 
   it("pre-push names the destination as owner/repo", () => {
     const home = setupHome();
-    writeFileSync(join(home, "state", "audit-log.json"), JSON.stringify({ enabled: true }));
     const repo = makeRepo({ class: "public-eligible", visibility: "public", origin: "git@github.com:acme/x.git" });
     setPause(home, "active");
     run(home, { cwd: repo, pushRef: "refs/heads/main", remoteUrl: "git@github.com:Acme/X.git" });
-    const rec = readFileSync(auditLogPath(home), "utf8").split("\n").filter(l => l !== "").map(l => JSON.parse(l) as { action: string; details?: Record<string, unknown> }).find(r => r.action === "paused-allow");
-    assert.deepEqual(rec?.details, { layer: "pre-push", verb: "git push", destination: "acme/x" });
+    const rec = readFileSync(decisionLogPath(home), "utf8").split("\n").filter(l => l !== "").map(l => JSON.parse(l) as Record<string, unknown>).find(r => r["outcome"] === "notice");
+    assert.equal(rec?.["layer"], "pre-push");
+    assert.equal(rec?.["verb"], "git push");
+    assert.equal(rec?.["destination"], "acme/x");
+    assert.equal(rec?.["paused"], "machine");
   });
 });
 
