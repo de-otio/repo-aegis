@@ -73,13 +73,17 @@ export async function buildProgram(): Promise<Command> {
     // or `gh`: their output is read as data). Must never stop a command from running.
     try {
       const path = commandPath(actionCommand);
-      if (noticeApplies(path)) versionNotice({ home: repoAegisHome(), version: packageVersion(), write: s => void process.stderr.write(s) });
+      // `--json` (global or command level) means a machine reads this: neither print nor record, or the line is spent on nobody.
+      const json = actionCommand.optsWithGlobals()["json"] === true;
+      if (noticeApplies(path, process.env, json)) versionNotice({ home: repoAegisHome(), version: packageVersion(), write: s => void process.stderr.write(s) });
     } catch {
       /* a notice is never worth a failed command */
     }
   });
 
-  // `init` writes this version's hooks, shim and drop-in, so the notice has nothing to say after it.
+  // `init` writes this release's hook scripts and its user-settings hooks, so the notice has nothing to say
+  // about them after it. It installs neither the shim nor the managed drop-in: a machine that has either got
+  // them from `install shim` / `install claude-md`, and `upgrade` finds those when they go stale.
   program.hook("postAction", (_thisCommand, actionCommand) => {
     try {
       const path = commandPath(actionCommand);

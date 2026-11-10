@@ -20,22 +20,30 @@
 //
 // It never installs something that was not installed (a missing shim stays missing), and `--dry-run` changes
 // nothing, not even the "last version seen" record the once-per-version notice reads.
-import { readFileSync } from "node:fs";
+//
+// It never moves the pin to an install that only happens to be the one running it. The hooks and the shim run a
+// pinned CLI by absolute path; `upgrade` run from a worktree, an `npx` copy with an older devDependency or a second
+// global install would re-pin every hook there, and removing that copy later refuses every commit and push until
+// a person runs `install hooks`. So the pin is read back from the scripts first (`pinVerdict`): re-pin only when
+// the pinned CLI is the running one (an in-place `npm i -g`) or is gone, refuse when the running version is older
+// than the pinned one, and otherwise leave the pin alone and say which install to run instead.
+import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { appendAuditRecord, inspectHookScripts, pinProblem, repoAegisHome, type EnforcementPin } from "@de-otio/repo-aegis-core";
+import { appendAuditRecord, inspectHookScripts, isPinnedHookCommand, parsePinFromScript, pinProblem, repoAegisHome, shellQuote, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { emitJson, emitText, type OutputOptions } from "../format.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
-import { isHumanTerminal, type ConfirmOptions } from "../require-terminal.js";
+import { isHumanTerminal, readLine, type ConfirmOptions } from "../require-terminal.js";
 import { recordVersion } from "../version-notice.js";
 import { gitCredentialHelperStale, type GitCredentialCheckOptions } from "./doctor-git-credential-checks.js";
+import { canonical, unusable, versionIsOlder } from "./doctor-pin-checks.js";
 import { managedDropinStaleCheck } from "./doctor-managed-checks.js";
-import { installClaudeMd } from "./install-claude-md.js";
+import { defaultClaudeHome, installClaudeMd, readSettingsFile } from "./install-claude-md.js";
 import { installGitCredential } from "./install-git-credential.js";
 import { writeHookScripts } from "./install-hooks.js";
 import { checkShim, installShim, shimBinDir, shimPathFor } from "./install-shim.js";
 import { managedPaths } from "./managed-dropin.js";
 import { resolveManagedEnv, type ManagedEnv } from "./managed-privileged.js";
-import { parseTaaadPinFromScript } from "./shim-script.js";
+import { parseTaaadPinFromScript, SHIM_HEADER_LINE } from "./shim-script.js";
 import { resolveTaaadPin } from "./taaad-pin.js";
 
 export interface UpgradeOptions extends OutputOptions {
@@ -63,7 +71,7 @@ export interface UpgradeDeps {
   credential?: GitCredentialCheckOptions;
 }
 
-export type StepName = "hooks" | "shim" | "claude-md" | "git-credential";
+export type StepName = "hooks" | "shim" | "claude-md" | "user-settings" | "git-credential";
 
 export type StepStatus =
   /** Nothing stale: no action. */
@@ -73,6 +81,10 @@ export type StepStatus =
   | "upgraded"
   | "would-upgrade"
   | "failed"
+  /** Stale, but this install must not re-pin it: the pin belongs to another install, or to a newer one. Nothing was changed. */
+  | "refused"
+  /** A person at the terminal answered no at the installer's prompt. Nothing was written; the command to retry is listed. */
+  | "declined"
   /** Stale, and only a person can run the installer. */
   | "run-yourself";
 
@@ -93,6 +105,8 @@ export interface UpgradeReport {
   /** True when no installer was (or would be) run and nothing is waiting on a person. */
   nothingToUpgrade: boolean;
   failed: boolean;
+  /** True when a stale step was left alone because re-pinning it from this install would be the wrong move. Exit 1. */
+  refused: boolean;
   next: "repo-aegis doctor";
 }
 
@@ -105,6 +119,15 @@ class ExitSignal extends Error {
   }
 }
 
+/**
+ * Run an installer, turning its failure into a value. The installers report errors through `emitError`, which
+ * calls `process.exit(2)`, and `silent` only mutes their success output: so `process.exit` is trapped here for the
+ * duration of the call and turned into a throw. This is the fragile part. It works only while every installer
+ * either throws or exits through `process.exit` on the same synchronous stack; an installer that exits from a
+ * callback or after an `await` would still end the process. All four steps are synchronous today. The proper fix is
+ * for the installers to throw in silent mode (as `installClaudeMd`'s removal path already does); until then, a new
+ * step must be checked against this.
+ */
 function attempt(run: () => void): { ok: true } | { ok: false; reason: string } {
   const realExit = process.exit;
   process.exit = ((code?: number) => {
@@ -142,6 +165,14 @@ function findShim(home: string, path: string | undefined): Found {
   // is the person's business (SHIM_NOT_FIRST), not a reason to leave the file stale. So ask it with the shim's
   // directory first.
   const env = { ...process.env, REPO_AEGIS_HOME: home, PATH: [join(home, "bin"), path ?? process.env["PATH"] ?? ""].join(delimiter) };
+  // A `gh` at <home>/bin that is not ours is the person's: `install shim` refuses to overwrite it, so trying
+  // would fail on every run, forever.
+  try {
+    const text = readFileSync(join(home, "bin", "gh"), "utf8");
+    if (!text.includes(SHIM_HEADER_LINE)) return { state: "not-installed", detail: `${join(home, "bin", "gh")} is not a repo-aegis shim: left alone` };
+  } catch {
+    /* absent or unreadable: checkShim says which */
+  }
   const found = checkShim(env)[0];
   if (found === undefined) return { state: "current", detail: "no shim finding" };
   if (found.code === "SHIM_MISSING" && !found.ok) return { state: "not-installed", detail: "no `gh` shim is installed" };
@@ -158,6 +189,80 @@ function findDropIn(env: ManagedEnv, pin: EnforcementPin): Found {
   return check.ok
     ? { state: "current", detail: "the managed drop-in is what this release writes" }
     : { state: "stale", detail: `the managed drop-in at ${paths.file} differs from what this release writes (MANAGED_DROPIN_STALE)` };
+}
+
+// ---------------------------------------------------------------------------
+// Whose pin is it? (never move it to an install that merely ran this command)
+// ---------------------------------------------------------------------------
+
+/** The pins rendered into the scripts under `home` (the two hooks and the shim), as they are on disk. Unpinned or absent scripts add none. */
+function installedPins(home: string): EnforcementPin[] {
+  const out: EnforcementPin[] = [];
+  for (const rel of [join("hooks", "pre-commit"), join("hooks", "pre-push"), join("bin", "gh")]) {
+    try {
+      const pin = parsePinFromScript(readFileSync(join(home, rel), "utf8"));
+      if (pin !== null) out.push(pin);
+    } catch {
+      /* absent or unreadable: no pin to protect */
+    }
+  }
+  return out;
+}
+
+export type PinVerdict = { ok: true } | { ok: false; detail: string };
+
+/**
+ * May the hooks and the shim be re-pinned to `running`, given the pins they carry now? Yes when each existing
+ * pin is the running CLI (an in-place `npm i -g` over the same path) or is unusable (its node or CLI is gone:
+ * the scripts are broken until something re-pins them). No when an existing pin names ANOTHER install that still
+ * works, or one newer than the running version.
+ *
+ * The honest mistake this stops: running `upgrade` from a copy that is not the one enforcing (a worktree build, an
+ * `npx` cache, an older devDependency, a second global install). Re-pinning there looks like a successful upgrade
+ * and later, when that copy is removed, refuses every commit and push until a person runs `install hooks`. The one
+ * fix, in each message, is to run the upgrade of the install the scripts are pinned to.
+ */
+export function pinVerdict(existing: readonly EnforcementPin[], running: EnforcementPin, runningVersion: string | undefined): PinVerdict {
+  const runningCli = canonical(running.cli);
+  let other: EnforcementPin | null = null;
+  for (const p of existing) {
+    if (unusable(p.node, "exec") || unusable(p.cli, "read")) continue; // gone: the scripts need re-pinning
+    if (p.version !== undefined && runningVersion !== undefined && versionIsOlder(runningVersion, p.version)) {
+      return {
+        ok: false,
+        detail:
+          `pinned to ${p.cli} (version ${p.version}), which is newer than this install (${runningVersion}): run that install's upgrade, ` +
+          `or \`install hooks\` from this one to switch. Re-pinning from here would roll enforcement back to an older copy (an old devDependency run by npx, a stale global)`,
+      };
+    }
+    if (canonical(p.cli) !== runningCli && other === null) other = p;
+  }
+  return other === null
+    ? { ok: true }
+    : {
+        ok: false,
+        detail:
+          `pinned to another install (${other.cli}): run that install's upgrade, or \`install hooks\` from this one to switch. ` +
+          `Re-pinning from here would point every hook and the shim at ${running.cli}, which stops enforcing when that copy is removed (a worktree, an npx cache)`,
+      };
+}
+
+/** True when a repo-aegis hook command in Claude Code's user `settings.json` is pinned to anything but `pin` (node, CLI and version). */
+function userSettingsHooksStale(claudeHome: string, pin: EnforcementPin): boolean {
+  const settings = readSettingsFile(join(claudeHome, "settings.json"));
+  if (settings === null) return false;
+  const current = [shellQuote(pin.node), shellQuote(pin.cli), `__ra_version=${shellQuote(pin.version ?? "")}`];
+  for (const entries of Object.values(settings.hooks ?? {})) {
+    for (const entry of entries ?? []) {
+      for (const h of entry.hooks ?? []) {
+        const command = typeof h.command === "string" ? h.command.trim() : "";
+        const m = / hook ([a-z-]+)/.exec(command);
+        if (m === null || !isPinnedHookCommand(command, m[1]!)) continue;
+        if (!current.every(part => command.includes(part))) return true;
+      }
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +284,14 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
 
   const add = (step: StepName, status: StepStatus, detail: string, command?: string): void => {
     steps.push({ step, status, detail, ...(command !== undefined && { command }) });
-    if (status === "run-yourself" && command !== undefined) runYourself.push({ step, command });
+    if ((status === "run-yourself" || status === "declined") && command !== undefined) runYourself.push({ step, command });
+  };
+  // Whose pin the hooks and the shim carry, judged once and only when one of them (or the user settings hint) asks.
+  let verdict: PinVerdict | null = null;
+  const repinVerdict = (): PinVerdict => (verdict ??= pinVerdict(installedPins(home), pin, pin.version ?? deps.version));
+  const refusal = (): string => {
+    const v = repinVerdict();
+    return v.ok ? "" : v.detail;
   };
   /** Not stale: report it in the JSON, say nothing in the text. */
   const quiet = (step: StepName, found: Found): void => add(step, found.state === "not-installed" ? "not-installed" : "current", found.detail);
@@ -188,6 +300,7 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
   {
     const found = findHooks(home, pin);
     if (found.state !== "stale") quiet("hooks", found);
+    else if (!repinVerdict().ok) add("hooks", "refused", refusal());
     else if (dryRun) add("hooks", "would-upgrade", "would rewrite pre-commit and pre-push");
     else {
       const problem = pinProblem(pin);
@@ -204,17 +317,20 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
   {
     const found = findShim(home, deps.path);
     if (found.state !== "stale") quiet("shim", found);
+    else if (!repinVerdict().ok) add("shim", "refused", refusal());
     else if (dryRun) add("shim", "would-upgrade", `would rewrite ${shimPathFor()}`);
     else {
-      // Keep the taaad pin the earlier install made when this PATH does not reach taaad: `install shim` run
-      // from a shell without it would otherwise drop the pin and, with it, every App identity.
+      // Keep the taaad the earlier install pinned while its launcher still exists: a different `taaad` that merely
+      // comes first on this PATH (a venv an agent can write to) must not silently replace the vetted one. When
+      // the old launcher is gone, or none was pinned, take the one on PATH; and `install shim` run from a shell
+      // without any would drop the pin and, with it, every App identity, so the old pin is the last resort.
       let old = null as ReturnType<typeof parseTaaadPinFromScript>;
       try {
         old = parseTaaadPinFromScript(readFileSync(shimPathFor(), "utf8"));
       } catch {
         /* unreadable: the installer reports it */
       }
-      const taaad = resolveTaaadPin(deps.path ?? process.env["PATH"], shimBinDir()) ?? old;
+      const taaad = old !== null && existsSync(old.launcher) ? old : (resolveTaaadPin(deps.path ?? process.env["PATH"], shimBinDir()) ?? old);
       const outcome = attempt(() => void installShim(undefined, { silent: true, json: false, taaad }));
       if (outcome.ok) add("shim", "upgraded", `rewrote ${shimPathFor()}`);
       else add("shim", "failed", outcome.reason);
@@ -229,17 +345,36 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
     else if (!person()) add("claude-md", "run-yourself", "writing the managed drop-in needs a person at a terminal (sudo asks for a password)", command);
     else if (dryRun) add("claude-md", "would-upgrade", "would rewrite the managed drop-in (asks for your sudo password)");
     else {
+      // Remember what the person typed, so an `n` at the password prompt reads as a decision, not a failure.
+      let typed: string | null = null;
+      const read = deps.terminal?.readAnswer ?? readLine;
       const outcome = attempt(() =>
         installClaudeMd({
           silent: true,
           json: false,
           ...(opts.claudeHome !== undefined && { claudeHome: opts.claudeHome }),
           ...(deps.pin !== undefined && { pin: deps.pin }),
-          managed: { env: deps.managedEnv ?? {}, ...(deps.terminal !== undefined && { terminal: deps.terminal }) },
+          managed: { env: deps.managedEnv ?? {}, terminal: { ...deps.terminal, readAnswer: () => (typed = read()) } },
         }),
       );
+      const answer = typed as string | null; // assigned inside the callback, which the compiler's flow analysis cannot see
       if (outcome.ok) add("claude-md", "upgraded", "rewrote the managed drop-in");
+      else if (answer !== null && !/^y(es)?$/i.test(answer.trim())) add("claude-md", "declined", "you answered no: nothing was written", command);
       else add("claude-md", "failed", outcome.reason);
+    }
+  }
+
+  // 3b. user-settings: the hooks `init` and `install claude-md --user-settings` put into Claude Code's own
+  // settings.json carry the pin too, and go stale when Node or the install moves. Listed, never run: whether the
+  // hooks live there rather than in the managed drop-in is the person's call. Not listed while the pin is another
+  // install's, because the command would move it here.
+  {
+    const claudeHome = opts.claudeHome ?? defaultClaudeHome();
+    const command = `repo-aegis install claude-md --user-settings${opts.claudeHome !== undefined ? ` --claude-home ${opts.claudeHome}` : ""}`;
+    if (!repinVerdict().ok || !userSettingsHooksStale(claudeHome, pin)) {
+      add("user-settings", "current", "no repo-aegis hook in Claude Code's settings.json is pinned to another install");
+    } else {
+      add("user-settings", "run-yourself", `the repo-aegis hooks in ${join(claudeHome, "settings.json")} are pinned to another install or Node (doctor: ENFORCEMENT_PIN_MISSING once that is gone)`, command);
     }
   }
 
@@ -265,7 +400,7 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
     }
   }
 
-  const acted = steps.some(s => s.status === "upgraded" || s.status === "would-upgrade" || s.status === "failed");
+  const acted = steps.some(s => s.status === "upgraded" || s.status === "would-upgrade" || s.status === "failed" || s.status === "refused");
   return {
     action: "upgrade",
     dryRun,
@@ -274,6 +409,7 @@ export function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): Upgrad
     runYourself,
     nothingToUpgrade: !acted && runYourself.length === 0,
     failed: steps.some(s => s.status === "failed"),
+    refused: steps.some(s => s.status === "refused"),
     next: "repo-aegis doctor",
   };
 }
@@ -284,6 +420,8 @@ const TEXT_VERB: Readonly<Record<StepStatus, string>> = {
   upgraded: "done",
   "would-upgrade": "would",
   failed: "FAILED",
+  refused: "REFUSED",
+  declined: "declined",
   "run-yourself": "needs you",
 };
 
@@ -319,7 +457,7 @@ export function upgrade(opts: UpgradeOptions, deps: UpgradeDeps = {}): UpgradeRe
     }
     emitText(`next: ${report.next}`);
   }
-  if (report.failed) process.exit(1);
+  if (report.failed || report.refused) process.exit(1);
   return report;
 }
 

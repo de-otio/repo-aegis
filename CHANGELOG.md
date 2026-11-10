@@ -49,14 +49,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was not installed, a second run prints `nothing to upgrade`, and `--dry-run` changes nothing. The
   two steps that need a person (the managed drop-in's `sudo` write, the credential helper) run only
   at a person's terminal; otherwise they are listed under `run yourself:` with the exact command and
-  are not counted as failures. Exit 1 only when an installer failed. An agent may run `upgrade`: it
+  are not counted as failures (a person who answers `n` at the `sudo` prompt has `declined`, exit 0).
+  Exit 1 when an installer failed or a step was refused (below). An agent may run `upgrade`: it
   only re-runs installers an agent may already run, so it is not in the person-only commands.
-- **A once-per-version notice.** The version last seen is kept in `<home>/state/last-version`. The first
-  command after a newer version is installed prints one stderr line, ``repo-aegis <version> is new
-  here: run `repo-aegis upgrade` ``, and records the version (so does `upgrade`, and `init`). It is
-  never printed by `hook ...` (Claude Code's hook JSON on stdout stays clean), `git-credential`
-  (stdout is the credential protocol), `gh`, `egress-check`, `egress-readback`, `explain` (read-only),
-  `uninstall` or a CI run.
+- **`upgrade` never moves the pin to the install that happens to run it.** The hooks and the `gh` shim
+  run a CLI pinned by absolute path, and `upgrade` run from a worktree build, an `npx` copy with an older
+  devDependency or a second global install would re-pin all of them there; removing that copy later
+  refuses every commit and push until a person runs `install hooks`. It now reads the pin back from the
+  scripts and re-pins only when the pinned CLI is the running one (an in-place `npm install -g`) or is
+  gone. It refuses (step `REFUSED`, nothing rewritten, exit 1) when the pin names another install that
+  still works (``pinned to another install (<path>): run that install's upgrade, or `install hooks` from
+  this one to switch``) or when the running version is older than the pinned one. It also keeps the pinned
+  taaad while that launcher still exists (a different `taaad` first on `PATH` no longer replaces it),
+  leaves a `gh` at `<home>/bin` that is not a repo-aegis shim alone (it failed on every run), and lists
+  `repo-aegis install claude-md --user-settings` under `run yourself:` when the hooks in Claude Code's
+  `settings.json` are pinned to a Node or install that has moved. Not covered by `upgrade`: a root
+  account's managed drop-in, and `MANAGED_DROPIN_LEDGER_STALE` / `MANAGED_DROPIN_ORPHANED` (follow
+  `doctor`'s fix).
+- **A once-per-version notice.** The version last seen is kept in `<home>/state/last-version`, and it
+  keeps the highest version seen, so two installs sharing a home do not announce themselves in turn.
+  The first command after a newer version is installed prints one stderr line, ``repo-aegis <version> is
+  new here: run `repo-aegis upgrade` ``, and records the version (so do `upgrade` and `init`, which
+  matters only when one of them is the first command). It is never printed, and nothing is recorded,
+  under `--json` (global or command level: the VS Code extension runs `status --json` and
+  `check --json` and discards stderr), by `hook ...` (Claude Code's hook JSON on stdout stays clean),
+  `git-credential` (stdout is the credential protocol), `gh`, `egress-check`, `egress-readback`,
+  `explain` (read-only), `uninstall`, a CI run, or on a machine whose `<home>` does not exist.
 
 ### Changed
 

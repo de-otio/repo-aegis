@@ -62,12 +62,37 @@ describe("versionNotice", () => {
     assert.equal(notices(home, "0.14.0").length, 1);
   });
 
-  it("a downgrade is recorded without a line; the upgrade after it is news again", () => {
+  it("a lower version run against a higher record prints nothing and leaves the record at the highest", () => {
     const home = freshHome();
     recordVersion(home, "0.15.0");
     assert.deepEqual(notices(home, "0.14.0"), []);
+    assert.equal(readLastVersion(home), "0.15.0", "the downgrade does not overwrite the record");
+    assert.deepEqual(notices(home, "0.15.0"), [], "so the higher version is not announced again");
+    assert.equal(notices(home, "0.16.0").length, 1, "a genuinely newer release still is");
+  });
+
+  it("two installs sharing one home, run in turn: one line in total, not one per switch", () => {
+    const home = freshHome();
+    const lines: string[] = [];
+    for (const v of ["0.14.0", "0.13.2", "0.14.0", "0.13.2", "0.14.0", "0.13.2"]) lines.push(...notices(home, v));
+    assert.deepEqual(lines, [`${noticeLine("0.14.0")}\n`], "the first run of the higher one, then silence from both");
     assert.equal(readLastVersion(home), "0.14.0");
-    assert.equal(notices(home, "0.15.0").length, 1);
+  });
+
+  it("recordVersion keeps the highest too (upgrade and init record through it)", () => {
+    const home = freshHome();
+    assert.equal(recordVersion(home, "0.14.0"), true);
+    assert.equal(recordVersion(home, "0.13.2"), true, "nothing to write counts as recorded");
+    assert.equal(readLastVersion(home), "0.14.0");
+    assert.equal(recordVersion(home, "0.14.1"), true);
+    assert.equal(readLastVersion(home), "0.14.1");
+  });
+
+  it("a machine with no <home> gets no notice and no directory (nothing was installed there to go stale)", () => {
+    const home = join(tmp, `never-created-${n++}`);
+    assert.deepEqual(notices(home, "0.14.0"), []);
+    assert.equal(recordVersion(home, "0.14.0"), false);
+    assert.equal(existsSync(home), false);
   });
 
   it("when the record cannot be written nothing is printed (it could not stay 'once')", () => {
@@ -112,6 +137,11 @@ describe("noticeApplies: where it is never printed", () => {
       assert.equal(noticeApplies(path, none), false, path.join(" "));
     }
   });
+  it("--json (global or command level) does not: a machine reads that output and drops stderr", () => {
+    assert.equal(noticeApplies(["status"], none, true), false);
+    assert.equal(noticeApplies(["check"], none, true), false);
+    assert.equal(noticeApplies(["status"], none, false), true);
+  });
   it("a CI run does not (a fresh home on every job would print it every time)", () => {
     assert.equal(noticeApplies(["check"], { CI: "true" }), false);
     assert.equal(noticeApplies(["check"], { CI: "1" }), false);
@@ -126,6 +156,8 @@ describe("the notice at the CLI entry point", { skip: !cliBuilt() }, () => {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       REPO_AEGIS_HOME: home,
+      // A throwaway HOME: `upgrade` reads Claude Code's settings and git's configuration from the user's home.
+      HOME: join(tmp, "user-home"),
       GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_CONFIG_SYSTEM: "/dev/null",
       GIT_CONFIG_NOSYSTEM: "1",
@@ -145,6 +177,20 @@ describe("the notice at the CLI entry point", { skip: !cliBuilt() }, () => {
     const second = cli(home, ["context", "status"]);
     assert.equal(count(second.stderr), 0);
     assert.ok(readLastVersion(home) !== null);
+  });
+
+  it("--json commands neither print the notice nor use it up: the next interactive command still gets it (M2)", () => {
+    const home = freshHome();
+    const file = join(tmp, "scanned.txt");
+    writeFileSync(file, "nothing here\n");
+    // The VS Code extension runs exactly these two and discards stderr.
+    for (const args of [["status", "--json"], ["--json", "status"], ["check", "--path", file, "--json"]]) {
+      const r = cli(home, args);
+      assert.equal(count(r.stderr), 0, `${args.join(" ")}: ${r.stderr}`);
+      assert.equal(count(r.stdout), 0, `${args.join(" ")}: ${r.stdout}`);
+      assert.equal(existsSync(lastVersionPath(home)), false, `${args.join(" ")} did not record the version`);
+    }
+    assert.equal(count(cli(home, ["context", "status"]).stderr), 1, "a person's command after the machine's still gets the line");
   });
 
   it("the Claude Code hook commands print nothing extra and record nothing, whatever they emit", () => {

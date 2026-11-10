@@ -12,8 +12,12 @@
 //   - `git-credential` (stdout is git's credential protocol), `gh` and `egress-check` / `egress-readback`
 //     (reached through the shim on every `gh` call),
 //   - `explain` (read-only by contract: it creates nothing),
-//   - CI runners (a fresh home on every job would print it on every run).
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+//   - CI runners (a fresh home on every job would print it on every run),
+//   - `--json` (global or command level): a machine reads that output, usually the VS Code extension, and discards
+//     stderr, so the line would be spent on nobody (see `noticeApplies`),
+//   - a machine with no `<home>` at all: a person who never ran `init` has nothing generated to go stale, and the
+//     notice would create the directory (default permissions) just to nag.
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { statePath } from "@de-otio/repo-aegis-core";
 
@@ -45,9 +49,17 @@ export function readLastVersion(home: string): string | null {
   }
 }
 
-/** Record `version` as seen. Returns false (and writes nothing the caller can rely on) when the state directory is not writable. */
+/**
+ * Record `version` as seen, keeping the HIGHEST version seen: two installs sharing one home (a global one and a
+ * worktree or `npx` copy) would otherwise overwrite each other's record and each would announce itself again on
+ * every alternate run. Returns false when `<home>` does not exist (a machine that never ran `init`: nothing to
+ * go stale, and this must not create it) or the state directory is not writable.
+ */
 export function recordVersion(home: string, version: string): boolean {
   try {
+    if (!existsSync(home)) return false;
+    const seen = readLastVersion(home);
+    if (seen !== null && !isNewer(version, seen)) return true; // the record already holds this or something newer
     mkdirSync(statePath(home), { recursive: true });
     const path = lastVersionPath(home);
     writeFileSync(path, `${version}\n`, { mode: 0o600 });
@@ -92,26 +104,26 @@ export interface VersionNoticeInput {
  * Print the notice when the running version is newer than the one last seen in `home` (or none was recorded:
  * an install from before this file existed is exactly who needs it), and record the version. The record is made
  * first: when it cannot be written the notice could not stay "once", so it is not printed at all. A running
- * version that is OLDER than the recorded one (a downgrade) is recorded without a line.
- * Returns true when it printed.
+ * version that is OLDER than the recorded one (another install on the same home, a downgrade) prints nothing and
+ * leaves the record at the highest version seen. Returns true when it printed.
  */
 export function versionNotice(input: VersionNoticeInput): boolean {
   const seen = readLastVersion(input.home);
   if (seen === input.version) return false;
-  const news = seen === null || isNewer(input.version, seen);
+  if (seen !== null && !isNewer(input.version, seen)) return false;
   if (!recordVersion(input.home, input.version)) return false;
-  if (!news) return false;
   input.write(`${noticeLine(input.version)}\n`);
   return true;
 }
 
 /**
  * Which command the notice is for: `path` is the command's name chain below the program (`["install", "hooks"]`).
- * False for the commands whose output is read as data, and for CI.
+ * False for the commands whose output is read as data, for `--json` (a machine, not a person, reads it: the VS Code
+ * extension runs `status --json` and `check --json` and drops stderr), and for CI.
  */
-export function noticeApplies(path: readonly string[], env: NodeJS.ProcessEnv = process.env): boolean {
+export function noticeApplies(path: readonly string[], env: NodeJS.ProcessEnv = process.env, json = false): boolean {
   const first = path[0];
-  if (first === undefined || QUIET_COMMANDS.has(first)) return false;
+  if (first === undefined || QUIET_COMMANDS.has(first) || json) return false;
   const ci = env["CI"];
   return ci === undefined || ci === "" || ci === "0" || ci.toLowerCase() === "false";
 }

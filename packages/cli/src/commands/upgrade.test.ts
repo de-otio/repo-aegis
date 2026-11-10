@@ -7,11 +7,11 @@
 // a simulated `sudo`; placeholder names only.
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { inspectHookScripts, type EnforcementPin } from "@de-otio/repo-aegis-core";
+import { inspectHookScripts, parsePinFromScript, pinnedHookCommand, type EnforcementPin } from "@de-otio/repo-aegis-core";
 import { captureOutput, fakeGh, scrubGitEnv, type CaptureResult } from "../_test-utils.js";
 import { makeFakeSystem, type FakeSystem } from "../_managed-test-utils.js";
 import { currentEnforcementPin } from "../enforcement-pin.js";
@@ -265,10 +265,31 @@ describe("upgrade: stale hooks and shim", () => {
         ["hooks", "upgraded"],
         ["shim", "not-installed"],
         ["claude-md", "not-installed"],
+        ["user-settings", "current"],
         ["git-credential", "current"],
       ],
     );
     assert.equal(report.nothingToUpgrade, false);
+    assert.equal(report.refused, false);
+  });
+
+  it("a `gh` at <home>/bin that is not a repo-aegis shim is the person's: left alone, not a failure on every run", () => {
+    const fx = makeFixture();
+    mkdirSync(join(fx.home, "bin"), { recursive: true });
+    writeFileSync(join(fx.home, "bin", "gh"), "#!/bin/sh\nexec /usr/bin/true\n", { mode: 0o755 });
+    const out = runUpgrade(fx);
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.match(out.stdout, /^nothing to upgrade/);
+    assert.equal(readFileSync(join(fx.home, "bin", "gh"), "utf8"), "#!/bin/sh\nexec /usr/bin/true\n");
+  });
+
+  it("with no <home> at all it does nothing: nothing to upgrade, and the directory is not created", () => {
+    const fx = makeFixture();
+    const home = join(fx.base, "never-created");
+    const out = fx.run(() => captureOutput(() => void upgrade({}, { version: VERSION, terminal: NO_PERSON, home })));
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.match(out.stdout, /^nothing to upgrade/);
+    assert.equal(existsSync(home), false);
   });
 
   it("records the version after a completed run (and only then)", () => {
@@ -366,12 +387,14 @@ describe("upgrade: the managed drop-in (a root write behind a sudo password)", (
     assert.match(runUpgrade(c.fx, {}, { pin: c.newPin, managedEnv: c.sys.env, terminal: NO_PERSON }).stdout, /^nothing to upgrade/, "and a re-run is a no-op");
   });
 
-  it("a person who answers no: the installer's refusal is a failed step, exit 1, the drop-in untouched", () => {
+  it("a person who answers no has declined, not failed: nothing written, exit 0, the command to retry is listed", () => {
     const c = staleDropIn();
     const before = dropInText(c);
     const out = runUpgrade(c.fx, { claudeHome: c.fx.claudeHome }, { pin: c.newPin, managedEnv: c.sys.env, terminal: { ...PERSON, readAnswer: () => "n" } });
-    assert.equal(out.exitCode, 1);
-    assert.match(out.stdout, /upgrade: claude-md\s+FAILED/);
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.match(out.stdout, /upgrade: claude-md\s+declined\s+you answered no/);
+    assert.doesNotMatch(out.stdout, /FAILED/);
+    assert.match(out.stdout, /run yourself:\n {2}repo-aegis install claude-md --claude-home /);
     assert.equal(dropInText(c), before);
     assert.equal(c.sys.toolCalls().length, 0);
   });
@@ -411,5 +434,180 @@ describe("upgrade: the git credential helper (its own terminal gate)", () => {
     const out = runUpgrade(clean, {}, { credential: { cwd: clean.base }, terminal: { stderrIsTTY: true } });
     assert.match(out.stdout, /^nothing to upgrade/);
     assert.equal(readFileSync(clean.globalConfig, "utf8"), "");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H1: the pin belongs to whichever install enforces, not to whichever one ran `upgrade`
+// ---------------------------------------------------------------------------
+
+const escapeRe = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+describe("upgrade: it never moves the pin to an install that merely ran it", () => {
+  const readPin = (fx: Fixture, rel: string): EnforcementPin | null => parsePinFromScript(readFileSync(join(fx.home, rel), "utf8"));
+
+  /** Hooks and shim as they would be had `pin`'s install written them. */
+  function pinnedTo(fx: Fixture, pin: EnforcementPin): void {
+    writeHookScripts(join(fx.home, "hooks"), pin);
+    mkdirSync(join(fx.home, "bin"), { recursive: true });
+    writeFileSync(join(fx.home, "bin", "gh"), renderShimScript(pin, { home: fx.home }), { mode: 0o755 });
+    chmodSync(join(fx.home, "bin", "gh"), 0o755);
+  }
+  const refusedOther = (cli: string): RegExp =>
+    new RegExp(`REFUSED\\s+pinned to another install \\(${escapeRe(cli)}\\): run that install's upgrade, or \`install hooks\` from this one to switch`);
+
+  it("a pin to another install that still exists is left alone: both refused, nothing rewritten, exit 1", () => {
+    const fx = makeFixture();
+    const other = { ...makePin(join(fx.base, "other-install")), version: "0.0.1" };
+    pinnedTo(fx, other);
+    const before = snapshot(fx);
+
+    const out = runUpgrade(fx);
+    assert.equal(out.exitCode, 1, out.stdout);
+    assert.match(out.stdout, /upgrade: hooks\s+REFUSED/);
+    assert.match(out.stdout, /upgrade: shim\s+REFUSED/);
+    assert.match(out.stdout, refusedOther(other.cli));
+    assert.doesNotMatch(out.stdout, /nothing to upgrade/);
+    assert.deepEqual(snapshot(fx), before, "no script was rewritten");
+    assert.equal(readPin(fx, "hooks/pre-commit")?.cli, other.cli);
+    assert.equal(readPin(fx, "bin/gh")?.cli, other.cli);
+
+    const json = JSON.parse(runUpgrade(fx, { json: true }).stdout) as UpgradeReport;
+    assert.equal(json.refused, true);
+    assert.deepEqual(json.steps.filter(s => s.status === "refused").map(s => s.step), ["hooks", "shim"]);
+    assert.deepEqual(snapshot(fx), before);
+  });
+
+  it("--dry-run reports the refusal too and changes nothing", () => {
+    const fx = makeFixture();
+    const other = { ...makePin(join(fx.base, "other-install")), version: "0.0.1" };
+    pinnedTo(fx, other);
+    const before = snapshot(fx);
+    const out = runUpgrade(fx, { dryRun: true });
+    assert.match(out.stdout, /upgrade: hooks\s+REFUSED/);
+    assert.deepEqual(snapshot(fx), before);
+  });
+
+  it("an older running version is refused: it would roll enforcement back to an older copy", () => {
+    const fx = makeFixture();
+    const newer = { ...makePin(join(fx.base, "newer-install")), version: "999.0.0" };
+    pinnedTo(fx, newer);
+    const before = snapshot(fx);
+
+    const out = runUpgrade(fx);
+    assert.equal(out.exitCode, 1, out.stdout);
+    assert.match(out.stdout, /upgrade: hooks\s+REFUSED\s+pinned to .*newer-install.* \(version 999\.0\.0\), which is newer than this install \(/);
+    assert.match(out.stdout, /run that install's upgrade, or `install hooks` from this one to switch/);
+    assert.deepEqual(snapshot(fx), before);
+  });
+
+  it("the same CLI path with a newer pinned version is refused too (an in-place downgrade is a person's choice)", () => {
+    const fx = makeFixture();
+    pinnedTo(fx, { ...fx.run(() => currentEnforcementPin()), version: "999.0.0" });
+    const before = snapshot(fx);
+    const out = runUpgrade(fx);
+    assert.equal(out.exitCode, 1, out.stdout);
+    assert.match(out.stdout, /upgrade: hooks\s+REFUSED.*newer than this install/);
+    assert.deepEqual(snapshot(fx), before);
+  });
+
+  it("a pinned CLI that is gone is re-pinned (the scripts are broken until it is), even when its version was newer", () => {
+    const fx = makeFixture();
+    pinnedTo(fx, { node: "/opt/example/gone/bin/node", cli: "/opt/example/gone/dist/index.js", version: "999.0.0" });
+    const out = runUpgrade(fx);
+    assert.equal(out.exitCode, undefined, out.stdout + out.stderr);
+    assert.match(out.stdout, /upgrade: hooks\s+done/);
+    assert.match(out.stdout, /upgrade: shim\s+done/);
+    const now = fx.run(() => currentEnforcementPin());
+    assert.equal(readPin(fx, "hooks/pre-push")?.cli, now.cli);
+    assert.equal(readPin(fx, "bin/gh")?.cli, now.cli);
+    assert.deepEqual(staleCodes(doctorJson(fx)), []);
+  });
+
+  it("the same CLI path is re-pinned: an in-place `npm i -g` over the pinned install", () => {
+    const fx = makeFixture();
+    const now = fx.run(() => currentEnforcementPin());
+    pinnedTo(fx, { ...now, version: "0.0.1" }); // same node and CLI, an earlier release's pin
+    const out = runUpgrade(fx);
+    assert.equal(out.exitCode, undefined, out.stdout + out.stderr);
+    assert.match(out.stdout, /upgrade: hooks\s+done/);
+    assert.match(out.stdout, /upgrade: shim\s+done/);
+    assert.deepEqual(readPin(fx, "hooks/pre-commit"), now);
+    assert.deepEqual(staleCodes(doctorJson(fx)), []);
+  });
+
+  it("an unpinned (by-name) older install has no pin to protect: it is re-pinned", () => {
+    const fx = makeFixture();
+    writeStaleHooks(fx);
+    writeStaleShim(fx);
+    const out = runUpgrade(fx);
+    assert.match(out.stdout, /upgrade: hooks\s+done/);
+    assert.match(out.stdout, /upgrade: shim\s+done/);
+  });
+
+  describe("the taaad the shim pins", () => {
+    function taaadFixture(fx: Fixture): { pinned: { launcher: string; interpreter: string; packageDir: string }; pathDir: string; onPath: string } {
+      const pinnedDir = join(fx.base, "vetted-taaad", "bin");
+      mkdirSync(pinnedDir, { recursive: true });
+      const launcher = join(pinnedDir, "taaad");
+      writeFileSync(launcher, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const pinned = { launcher, interpreter: "/bin/sh", packageDir: join(fx.base, "vetted-taaad") };
+      const pathDir = join(fx.base, "other-bin");
+      mkdirSync(pathDir, { recursive: true });
+      const onPath = join(pathDir, "taaad");
+      writeFileSync(onPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      // The shim is stale because its CLI pin is gone, so the re-pin is allowed.
+      mkdirSync(join(fx.home, "bin"), { recursive: true });
+      const gone: EnforcementPin = { node: "/opt/example/gone/bin/node", cli: "/opt/example/gone/dist/index.js" };
+      writeFileSync(join(fx.home, "bin", "gh"), renderShimScript(gone, { home: fx.home, taaad: pinned }), { mode: 0o755 });
+      chmodSync(join(fx.home, "bin", "gh"), 0o755);
+      return { pinned, pathDir, onPath };
+    }
+
+    it("a different taaad on PATH does not replace a pinned one whose launcher exists", () => {
+      const fx = makeFixture();
+      const { pinned, pathDir } = taaadFixture(fx);
+      const out = runUpgrade(fx, {}, { path: pathDir });
+      assert.match(out.stdout, /upgrade: shim\s+done/);
+      assert.deepEqual(parseTaaadPinFromScript(readFileSync(join(fx.home, "bin", "gh"), "utf8")), pinned);
+    });
+
+    it("when the pinned launcher is gone, the one on PATH is taken", () => {
+      const fx = makeFixture();
+      const { pinned, pathDir, onPath } = taaadFixture(fx);
+      rmSync(pinned.launcher);
+      const out = runUpgrade(fx, {}, { path: pathDir });
+      assert.match(out.stdout, /upgrade: shim\s+done/);
+      assert.equal(parseTaaadPinFromScript(readFileSync(join(fx.home, "bin", "gh"), "utf8"))?.launcher, realpathSync(onPath));
+    });
+  });
+});
+
+describe("upgrade: Claude Code's user settings (what `init` writes by default)", () => {
+  const settingsWith = (fx: Fixture, pin: EnforcementPin): void => {
+    const command = pinnedHookCommand(pin, "hook guard-egress --agent claude");
+    writeFileSync(join(fx.claudeHome, "settings.json"), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command }] }] } }));
+  };
+
+  it("hooks pinned to a Node or install that has moved are listed under `run yourself:`, never rewritten", () => {
+    const fx = makeFixture();
+    settingsWith(fx, { node: "/opt/example/old-node/bin/node", cli: "/opt/example/old/dist/index.js", version: "0.1.0" });
+    const before = readFileSync(join(fx.claudeHome, "settings.json"), "utf8");
+    const out = runUpgrade(fx, { claudeHome: fx.claudeHome });
+    assert.equal(out.exitCode, undefined, out.stderr);
+    assert.match(out.stdout, /upgrade: user-settings\s+needs you/);
+    assert.match(out.stdout, new RegExp(`run yourself:\\n {2}repo-aegis install claude-md --user-settings --claude-home ${escapeRe(fx.claudeHome)}\\n`));
+    assert.equal(readFileSync(join(fx.claudeHome, "settings.json"), "utf8"), before);
+  });
+
+  it("hooks pinned to this install are current: nothing to upgrade", () => {
+    const fx = makeFixture();
+    settingsWith(fx, fx.run(() => currentEnforcementPin()));
+    assert.match(runUpgrade(fx, { claudeHome: fx.claudeHome }).stdout, /^nothing to upgrade/);
+  });
+
+  it("no settings.json at all: nothing to say", () => {
+    const fx = makeFixture();
+    assert.match(runUpgrade(fx, { claudeHome: fx.claudeHome }).stdout, /^nothing to upgrade/);
   });
 });

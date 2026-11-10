@@ -161,15 +161,25 @@ wrapper, the root-owned Claude Code settings file, the credential helper's pin. 
 rewritten, `doctor` reports them as stale (`HOOKS_SCRIPT_STALE`, `SHIM_STALE`,
 `MANAGED_DROPIN_STALE`) and the new behaviour does not apply. `repo-aegis upgrade` finds each stale
 one the way `doctor` does, re-runs its installer in a fixed order (hooks, shim, claude-md,
-git-credential) and prints one line per step. It installs nothing you did not install, and a second
-run says `nothing to upgrade`. `--dry-run` shows what it would do and changes nothing.
+git-credential) and prints one line per step. It only rewrites installs that are already there and never
+adds one, and a second run says `nothing to upgrade`. `--dry-run` shows what it would do and changes nothing.
+
+It never moves your hooks or the `gh` wrapper to the copy of repo-aegis that happens to run it. Each
+is pinned to one install, and `upgrade` re-pins only when that install is the running one (an in-place
+`npm install -g`) or is gone. If they are pinned to another install, or to a newer version, the step says
+`REFUSED` and exits 1: run that install's `upgrade`, or `repo-aegis install hooks` from this one to switch
+on purpose. (A worktree build or an `npx` copy re-pinning your hooks would refuse every commit once it
+was removed.)
 
 Two steps need a person: the root-owned settings file (`sudo` asks for your password) and the git
 credential helper (it decides which GitHub account an agent pushes as). Where no person is at a
 terminal, for example when an agent runs `upgrade`, they are not run and not counted as failures.
-They are listed under `run yourself:` with the exact command to type. After you upgrade, the first
-command you run prints `repo-aegis <version> is new here: run `repo-aegis upgrade``, once, on stderr.
-It never appears in a Claude Code hook's output or in the git credential helper's.
+They are listed under `run yourself:` with the exact command to type, as is
+`repo-aegis install claude-md --user-settings` when the hooks in your `~/.claude/settings.json` (what
+`init` writes) are pinned to a Node or install that has moved. After you upgrade, the first
+command you run prints ``repo-aegis <version> is new here: run `repo-aegis upgrade` ``, once, on stderr
+(not under `--json`, not from a Claude Code hook, not from the git credential helper). The record keeps the
+highest version seen, so two installs sharing a home do not announce themselves in turn.
 
 ## Documentation
 
