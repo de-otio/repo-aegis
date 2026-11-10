@@ -8,6 +8,8 @@ import {
   CustomerCoupledNoEngagementError,
   EXIT_HIT,
   pauseNotice,
+  logTrailer,
+  withLogTrailer,
   type PauseState,
   type RepoJson,
   type ScanHit,
@@ -17,6 +19,7 @@ import {
 import { decideHookAction, ENCRYPTED_REGISTRY_NOTICE, NEWER_SCHEMA_ERROR, type HookDecision } from "./hook-policy.js";
 import { parseHookWriteFields, readHookStdin, WRITE_HOOK_INPUT_MAX_BYTES } from "./hook-input.js";
 import { pauseCoveringWorkingRepo, recordPausedAllow } from "../pause-scope.js";
+import { recordDecision, registryStateFact } from "../decision.js";
 
 /** A scan hit without the text of its match. */
 function stripMatchText(hit: unknown): unknown {
@@ -24,6 +27,9 @@ function stripMatchText(hit: unknown): unknown {
   const { matchPreview: _preview, ...rest } = hit as Record<string, unknown>;
   return rest;
 }
+
+/** The registry state of this run, for the decision record's facts (P1-I). Module state, set once; one process, one decision. */
+let registryFact: ReturnType<typeof registryStateFact> | undefined;
 
 interface HookOptions {
   /** When true, do not exit non-zero on hits — return as if clean. Useful
@@ -110,6 +116,29 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   // count. Every OTHER refusal (a cross-org write, an unreadable registry) is lifted only by a pause scoped to this
   // repository: a machine-wide pause keeps the cross-org checks on.
   let paused: PauseState | null = null;
+  /**
+   * P1-I: a non-zero answer (a marker hit, a cross-org write, an unreadable registry) is a decision worth recording; a clean
+   * write is not (every write would be a record). Written first, so the text's trailer says what happened.
+   */
+  const recordNonZero = (value: unknown, exitCode: number): object => {
+    const body = value as { code?: unknown; error?: unknown };
+    if (exitCode === 0) return body;
+    const hit = exitCode === EXIT_HIT;
+    const written = recordDecision({
+      layer: "scan-after-write",
+      outcome: "refuse",
+      host: cursor ? "cursor" : "claude-code",
+      code: typeof body.code === "string" ? body.code : hit ? "MARKER_HIT" : "SCAN_AFTER_WRITE_ERROR",
+      verb: "write",
+      ...(registryFact !== undefined && { facts: { registryState: registryFact } }),
+    }).written;
+    return {
+      ...body,
+      ...(typeof body.error === "string" && { error: withLogTrailer(body.error, written) }),
+      // A marker hit has no error text to end with the trailer, so it rides in its own key.
+      ...(hit && typeof body.error !== "string" && { log: logTrailer(written) }),
+    };
+  };
   const emit: (value: unknown, exitCode: number) => never = (value, exitCode) => {
     if (paused !== null) {
       const lifted = exitCode === EXIT_HIT || (exitCode !== 0 && paused.repo !== undefined);
@@ -117,17 +146,18 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
       const finalCode = lifted ? 0 : exitCode;
       // The audit record says "a pause let something through", so it is written only when the pause lifted a refusal
       // (a marker hit turned advisory, a cross-org or registry refusal lifted by a scoped pause): not for a clean write.
-      if (lifted) recordPausedAllow("hook scan-after-write", { verb: "write" });
+      if (lifted) recordPausedAllow("scan-after-write", { verb: "write", pause: paused });
       const found = finalCode === 0 && Array.isArray(hits) && hits.length > 0 ? `; ${hits.length} marker hit(s) found, advisory while paused` : "";
       // At exit 0 this payload goes to stdout, which lands in the transcript, where a refusal's stderr would not:
       // a hit's `matchPreview` is the first characters of what matched, so it is dropped here (path, line, column
       // and the marker file's stem stay: that is where to look, not what was found).
-      const body = finalCode === 0 && Array.isArray(hits) ? { ...(value as object), hits: hits.map(stripMatchText) } : (value as object);
-      emitJsonAndExit({ ...body, ...(lifted && { advisory: true }), systemMessage: `${pauseNotice(paused)}${found}` }, finalCode);
+      const shown = finalCode === 0 && Array.isArray(hits) ? { ...(value as object), hits: hits.map(stripMatchText) } : recordNonZero(value, finalCode);
+      emitJsonAndExit({ ...shown, ...(lifted && { advisory: true }), systemMessage: `${pauseNotice(paused)}${found}` }, finalCode);
     }
+    const body = recordNonZero(value, exitCode);
     emitJsonAndExit(
       {
-        ...(value as object),
+        ...body,
         ...(cursor && exitCode !== 0 && { note: CURSOR_DETECTION_ONLY }),
         ...(notice !== undefined && { systemMessage: notice }),
       },
@@ -148,6 +178,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
   // deprecated), so `_always` and engagement markers still scan. A registry that exists but cannot be read is
   // surfaced as REGISTRY_ERROR with fixed text (the parse error names orgs and engagement ids).
   const load = loadRegistryState();
+  registryFact = registryStateFact(load.state);
   if (load.state === "newer-schema") emit({ code: "REGISTRY_ERROR", error: NEWER_SCHEMA_ERROR }, 2);
   if (load.state === "unparseable") {
     emit(

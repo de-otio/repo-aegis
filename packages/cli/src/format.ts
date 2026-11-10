@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Richard Myers and contributors.
-import { isHomeOverridden } from "@de-otio/repo-aegis-core";
+import { isHomeOverridden, withLogTrailer, type DecisionAppendResult } from "@de-otio/repo-aegis-core";
 
 export interface OutputOptions {
   json?: boolean;
@@ -20,8 +20,28 @@ export interface ErrorPayload {
   details?: unknown;
 }
 
+/**
+ * The decision log's hook into every refusal this module prints (P1-I). A command that makes a logged decision (the
+ * pre-commit and pre-push checks) sets it for its run; `emitError` then writes the record FIRST and ends the error text
+ * with `(logged: repo-aegis log --last 1)` or `(not logged)`, so the trailer says what actually happened and no call
+ * site assembles it. The hook must not throw; if it does, the refusal is printed without a trailer, unchanged.
+ * Module state (one process makes one decision), set only by {@link setErrorDecisionHook}.
+ */
+let errorDecisionHook: ((payload: ErrorPayload) => DecisionAppendResult) | null = null;
+
+export function setErrorDecisionHook(hook: ((payload: ErrorPayload) => DecisionAppendResult) | null): void {
+  errorDecisionHook = hook;
+}
+
 export function emitError(value: ErrorPayload | string, opts: OutputOptions = {}): never {
-  const payload: ErrorPayload = typeof value === "string" ? { error: value } : value;
+  let payload: ErrorPayload = typeof value === "string" ? { error: value } : value;
+  if (errorDecisionHook !== null) {
+    try {
+      payload = { ...payload, error: withLogTrailer(payload.error, errorDecisionHook(payload).written) };
+    } catch {
+      /* the log never changes or blocks a refusal */
+    }
+  }
   if (opts.json) {
     process.stderr.write(JSON.stringify(payload) + "\n");
   } else {

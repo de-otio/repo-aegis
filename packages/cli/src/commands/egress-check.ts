@@ -40,7 +40,9 @@ import {
   type EgressIntent,
   type Registry,
   type RegistryState,
+  withLogTrailer,
 } from "@de-otio/repo-aegis-core";
+import { recordDecision, verbWords } from "../decision.js";
 import { emitJson, type OutputOptions } from "../format.js";
 import { currentHumanPresent } from "../human-presence.js";
 
@@ -142,7 +144,7 @@ export type AllowVerdict = Record<string, unknown> & {
 /** The outcome of the egress decision, before anyone exits or prints a verdict. */
 export type EgressEvaluation =
   /** A policy refusal: `stderrLine` is the structured JSON line, exit status 2. */
-  | { kind: "deny"; stderrLine: string }
+  | { kind: "deny"; stderrLine: string; log: { code: string; verb: string; destination?: { org: string; repo: string } } }
   /** A fault in the guard itself: exit status 1 for `egress-check`, warn-and-proceed for the shim. */
   | { kind: "fault"; message: string }
   | { kind: "allow"; verdict: AllowVerdict; intents: EgressIntent[] };
@@ -192,6 +194,11 @@ export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
     const shown = decision.destination && destinationJson(decision.destination);
     return {
       kind: "deny",
+      log: {
+        code: decision.code,
+        verb: verbWords(decision.intent.verb),
+        ...(decision.destination !== undefined && decision.destination.unresolved === undefined && { destination: { org: decision.destination.org, repo: decision.destination.repo } }),
+      },
       stderrLine:
         JSON.stringify({
           code: decision.code,
@@ -273,12 +280,36 @@ export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
   };
 }
 
+/**
+ * The structured refusal line of a `deny` evaluation, after its decision record was written (P1-I): `error` ends with
+ * `(logged: repo-aegis log --last 1)` or `(not logged)`. The record is made first, so the trailer is true; the refusal
+ * is the same whatever the write did. `home` pins the log for the `gh` shim.
+ */
+export function recordedDenyLine(ev: Extract<EgressEvaluation, { kind: "deny" }>, home?: string): string {
+  const written = recordDecision({
+    layer: "shim",
+    outcome: "refuse",
+    host: "unknown",
+    code: ev.log.code,
+    verb: ev.log.verb,
+    ...(ev.log.destination !== undefined && { destination: ev.log.destination }),
+    ...(home !== undefined && { home }),
+  }).written;
+  try {
+    const parsed = JSON.parse(ev.stderrLine) as { error?: unknown };
+    if (typeof parsed.error !== "string") return ev.stderrLine;
+    return JSON.stringify({ ...parsed, error: withLogTrailer(parsed.error, written) }) + "\n";
+  } catch {
+    return ev.stderrLine;
+  }
+}
+
 export function egressCheck(args: string[], opts: EgressCheckOptions): void {
   const cwd = opts.cwd ?? process.cwd();
   const result = evaluateEgress(args, cwd);
   if (result.kind === "fault") return internalError(result.message);
   if (result.kind === "deny") {
-    process.stderr.write(result.stderrLine);
+    process.stderr.write(recordedDenyLine(result));
     process.exit(2);
   }
   emitJson(result.verdict);

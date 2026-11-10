@@ -17,7 +17,7 @@
 //
 // WRITING NEVER CHANGES A DECISION. {@link appendDecisionRecord} never throws and never waits longer than the lock
 // timeout; it reports where the record went and the caller prints `(logged: …)` or `(not logged)` from that.
-import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LockTimeoutError } from "./exceptions.js";
@@ -681,8 +681,7 @@ export function decisionLogWritable(home: string = repoAegisHome(), opts: ReadOp
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       const file = join(dir, `.probe-${process.pid}`);
       appendFileSync(file, "", { mode: 0o600 });
-      renameSync(file, `${file}.gone`);
-      renameSync(`${file}.gone`, file);
+      rmSync(file, { force: true });
       return true;
     } catch {
       return false;
@@ -690,4 +689,54 @@ export function decisionLogWritable(home: string = repoAegisHome(), opts: ReadOp
   };
   if (probe(statePath(home))) return "primary";
   return realDecisionLogOps.trustedDir(fallbackDecisionDir(opts.tmp)) || probe(fallbackDecisionDir(opts.tmp)) ? "fallback" : "none";
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall: every file this module writes has an opposite
+// ---------------------------------------------------------------------------
+
+/**
+ * Every decision-log file that exists: the active file, its `.1`..`.3` generations, their lock targets, the on/off switch,
+ * the legacy `gh-decisions.jsonl`, and the fallback directory's own files for the given `$TMPDIR` (a sandbox's own
+ * `$TMPDIR` may differ from the one this process sees; that one is not reachable from here).
+ */
+export function decisionLogFiles(home: string = repoAegisHome(), opts: ReadOptions = {}): string[] {
+  const primary = decisionLogPath(home);
+  const fb = fallbackDecisionLogPath(opts.tmp);
+  const names: string[] = [];
+  for (const base of [primary, fb]) {
+    names.push(base, `${base}.lockfile`, `${base}.lockfile.lock`);
+    for (let i = 1; i <= DECISION_LOG_KEEP; i++) names.push(`${base}.${i}`);
+  }
+  names.push(decisionLogStatePath(home), legacyGhDecisionsPath(home));
+  return names.filter(n => {
+    try {
+      lstatSync(n);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Delete {@link decisionLogFiles} (and the fallback directory when that leaves it empty). Returns what was removed.
+ * Never throws.
+ */
+export function removeDecisionLogFiles(home: string = repoAegisHome(), opts: ReadOptions = {}): string[] {
+  const removed: string[] = [];
+  for (const f of decisionLogFiles(home, opts)) {
+    try {
+      rmSync(f, { recursive: true, force: true });
+      removed.push(f);
+    } catch {
+      /* best effort: a file that cannot be removed is reported by its absence from the list */
+    }
+  }
+  try {
+    rmdirSync(fallbackDecisionDir(opts.tmp));
+  } catch {
+    /* not empty, or not there */
+  }
+  return removed;
 }

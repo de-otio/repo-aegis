@@ -649,6 +649,8 @@ export {
   readDecisionRecords,
   fallbackHoldsNewer,
   decisionLogWritable,
+  decisionLogFiles,
+  removeDecisionLogFiles,
 } from "./decision-log.js";
 export type {
   DecisionInput,

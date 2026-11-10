@@ -785,6 +785,24 @@ export async function buildProgram(): Promise<Command> {
       resume(withGlobals(opts, cmd));
     });
 
+  // The decision log (P1-I): on by default, read-only for an agent. When a refusal ends `(logged: repo-aegis log --last 1)`,
+  // this is the command to run, then `explain <code>`. `--off` is a person's (terminal-gated); `--on` is anyone's.
+  program
+    .command("log")
+    .description(
+      "print the decision log: what each repo-aegis hook, shim and credential helper decided and the facts it decided on (the last 20 refusals by code with their one fix line, or --last N records). Read-only; works from any directory; never holds a token, a path, a URL, a command or a marker. `--off` (a person's terminal only) switches recording off; `--on` switches it back on.",
+    )
+    .option("--since <duration>", "only records from the last 30m, 2h, 1d, ...")
+    .option("--code <CODE>", "only records with this refusal code")
+    .option("--layer <layer>", "only records of this layer: pre-commit, pre-push, egress-hook, check-write, scan-after-write, shim, credential-helper, prompt-submit, prompt-approval, pause")
+    .option("--last <n>", "the last n records, any outcome (`--last 1` is the record the refusal just wrote)")
+    .option("--off", "switch the decision log off (a person's terminal only; an agent that did would remove the data its next refusal needs)")
+    .option("--on", "switch the decision log back on")
+    .action(async (opts, cmd) => {
+      const { log } = await import("./commands/log.js");
+      log(withGlobals(opts, cmd));
+    });
+
   // A client-side gate that is installed but disconnected looks exactly like
   // one that is clean — both are silent. `doctor` is the fleet-wide sweep that
   // makes that state findable on purpose rather than by luck.
