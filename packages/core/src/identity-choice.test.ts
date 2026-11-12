@@ -438,6 +438,14 @@ describe("rule 6: redirecting environment", () => {
     const c = chooseIdentity(input({ presence: "agent", redirect: "HTTPS_PROXY", suppliedToken: true, args: ["pr", "view", "-w"] }));
     assert.equal(refused(c), "GH_IDENTITY_ENV_REDIRECT");
   });
+  it("the refusal names the redirect, in the reason and in the fix", () => {
+    for (const [redirect, name] of [["https_proxy", "https_proxy"], ["ALL_PROXY", "ALL_PROXY"], ["http_unix_socket", "gh's http_unix_socket setting"]] as const) {
+      const c = chooseIdentity(input({ presence: "agent", redirect }));
+      assert.ok(c.kind === "refuse", redirect);
+      assert.ok(c.reason.includes(`${name} is set`), c.reason);
+      assert.ok(c.reason.includes(`with ${name} unset`), c.reason);
+    }
+  });
   it("null redirect does not refuse", () => assert.equal(chooseIdentity(input({ redirect: null })).kind, "inject"));
 });
 

@@ -351,6 +351,11 @@ export interface ChooseIdentityInput {
 const TERMINAL_FIX: RefusalFix = { by: "person" };
 const NO_APPROVAL = "No approval covers this.";
 
+/** The redirect named in a refusal: the environment variable, or gh's own `http_unix_socket` setting. */
+function redirectName(redirect: string): string {
+  return redirect === "http_unix_socket" ? "gh's http_unix_socket setting" : redirect;
+}
+
 function refuse(
   code: IdentityRefusalCode,
   what: string,
@@ -463,7 +468,15 @@ function unsafeArgRefusal(dest: { owner: string; repo: string | null } | undefin
     "this gh call",
     "its arguments (an editor or browser option, another host or a full-URL endpoint, git options for a clone such as `--`, `--template` or `-c`, or a command that is not a built-in gh group) could hand a token to another program or host; the arguments are the cause, and no repo-aegis setting created this",
     "No approval covers this: for this code an approval covers a repository git setting, never these arguments.",
-    [{ by: "agent", command: "the same call on github.com only, without --editor/-e, --web/-w or --hostname, using a built-in gh command" }],
+    [
+      { by: "agent", command: "the same call on github.com only, without --editor/-e, --web/-w or --hostname, using a built-in gh command" },
+      {
+        by: "agent",
+        when: "For a clone that needs git options (`gh repo clone <repo> -- --mirror`)",
+        command: "git clone --mirror https://github.com/<owner>/<repo>.git",
+        note: "plain git; repo-aegis's git credential helper answers for the mapped account",
+      },
+    ],
     dest,
   );
 }
@@ -556,9 +569,9 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
     return refuse(
       "GH_IDENTITY_ENV_REDIRECT",
       "this gh call",
-      "the environment redirects where gh sends its requests (a proxy, a socket or a host override), which would send the injected token elsewhere",
+      `the environment redirects where gh sends its requests (${redirectName(input.redirect)} is set: a proxy, a socket or a host override), which would send the injected token elsewhere`,
       NO_APPROVAL,
-      [{ by: "agent", command: "the same command with the redirecting variable unset" }],
+      [{ by: "agent", command: `the same command with ${redirectName(input.redirect)} unset` }],
       dest,
     );
   }

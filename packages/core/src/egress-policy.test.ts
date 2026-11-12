@@ -795,7 +795,9 @@ describe("resolveDestinationOffline — real git config", () => {
   });
 
   it("gh api graphql from a directory with no origin → null", () => {
-    assert.equal(resolveDestinationOffline(intent("gh api graphql -f query=x"), other), null);
+    const q = join(root, "no-origin-viewer.graphql");
+    writeFileSync(q, "query { viewer { login } }\n");
+    assert.equal(resolveDestinationOffline(intent(`gh api graphql -F query=@${q}`), other), null);
   });
 
   // ---- gh api graphql: a mutation's target is a node id, not the cwd (#113)
@@ -904,20 +906,17 @@ describe("resolveDestinationOffline — real git config", () => {
     assert.equal(d.action, "allow");
   });
 
-  it("a read-only GraphQL query keeps the cwd attribution and is allowed from a private checkout", () => {
-    const d = resolveDestinationOffline(intent(VIEWER), priv, REGISTRY);
+  it("an inline read-only GraphQL query is no egress at all: not attributed to the cwd, not labelled mutating", () => {
+    assert.deepEqual(parseEgressIntents(VIEWER), []);
+  });
+
+  it("a read-only GraphQL query from a file stays an intent and keeps the cwd attribution", () => {
+    const qf = join(root, "viewer-cwd.graphql");
+    writeFileSync(qf, "query { viewer { login } }\n");
+    const d = resolveDestinationOffline(intent(`gh api graphql -F query=@${qf}`), priv, REGISTRY);
     assert.equal(d?.unresolved, undefined);
     assert.equal(d?.org, "acme");
     assert.equal(d?.repo, "notes");
-    const decision = decideEgress({
-      intents: parseEgressIntents(VIEWER),
-      cwd: priv,
-      registry: REGISTRY,
-      registryState: "loaded",
-      humanPresent: false,
-      capabilities: { ask: false },
-    });
-    assert.equal(decision.action, "allow");
   });
 
   it("a mutation read from a query file, or an --input body, is unresolved; a query there is not", () => {

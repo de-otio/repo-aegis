@@ -387,3 +387,51 @@ describe("precedence and plumbing", () => {
     assert.ok(!reason.includes("some-owner"));
   });
 });
+
+describe("quoting decides what runs: substitutions and wrapper words in data are not invocations", () => {
+  it("backticks inside single quotes (a commit message) run nothing: no refusal", () => {
+    allows([
+      "git commit -m 'docs: never run `gh auth token` in an agent'",
+      "git commit -m $'docs: never run `gh auth token`'",
+      "git commit -m 'note $(gh auth token) is refused'",
+    ]);
+  });
+
+  it("… but double quotes, an unquoted heredoc, and a redirection target do run them", () => {
+    refuses("GH_AUTH_NEEDS_HUMAN", [
+      'git commit -m "docs: never run `gh auth token`"',
+      "git commit -F - <<EOF\ndocs: never run `gh auth token`\nEOF",
+      "cat <<EOF > /x/notes.md\ntoken: $(gh auth token)\nEOF",
+      "echo hi > \"$(gh auth token)\"",
+      // a literal and a real occurrence of the same text: the real one still counts
+      "echo '`gh auth token`' `gh auth token`",
+      // the text of `bash -c '…'` is a program of its own, so its backticks run
+      "bash -c 'echo `gh auth token`'",
+    ]);
+  });
+
+  it("a quoted heredoc delimiter keeps the body literal", () => {
+    allows([
+      "git commit -F - <<'EOF'\ndocs: never run `gh auth token`\nEOF",
+      'git commit -F - <<"EOF"\ndocs: never run $(gh auth token)\nEOF',
+      "git commit -F - <<\\EOF\ndocs: never run `gh auth token`\nEOF",
+    ]);
+  });
+
+  it("`expect`, `script` and the like named in interpreter code are not a pty wrapper", () => {
+    allows([
+      "python3 - <<'EOF'\nimport re\nexpect = 'git status'\nEOF",
+      "node -e \"expect(run('git', ['push'])).toBe(1)\"",
+      "node -e \"const script = 'git log'; console.log(script.length)\"",
+    ]);
+  });
+
+  it("… while a wrapper the interpreter runs still is", () => {
+    refuses("EGRESS_PTY_WRAPPER", [
+      "python3 -c \"import os; os.system('script -q /dev/null git push')\"",
+      "python3 -c \"import subprocess; subprocess.run(['expect', '-c', 'spawn git push'])\"",
+      "python3 - <<'EOF'\nimport os\nos.system(\"unbuffer gh pr create --fill\")\nEOF",
+      "expect -c 'spawn git push'",
+    ]);
+  });
+});

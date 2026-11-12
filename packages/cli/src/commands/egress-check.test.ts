@@ -431,14 +431,13 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
     );
   });
 
-  it("a read-only GraphQL query from the same checkout is unchanged: allowed, attributed to the cwd", () => {
+  it("an inline read-only GraphQL query is no egress: allowed, and attributed to no repository (not the cwd's)", () => {
     const priv = declaredPrivateRepo();
     const r = runCli(home, priv, ["egress-check", "--cwd", priv, "--", "api", "graphql", "-f", "query=query { viewer { login } }"]);
     assert.equal(r.code, 0, r.stderr);
     const payload = JSON.parse(r.stdout) as { action: string; destination?: { org: string; repo: string } };
     assert.equal(payload.action, "allow");
-    assert.equal(payload.destination?.org, "acme");
-    assert.equal(payload.destination?.repo, "notes");
+    assert.equal(payload.destination, undefined);
   });
 
   it("a REST write names the path's repository, not the cwd's", () => {

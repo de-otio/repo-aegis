@@ -662,7 +662,18 @@ describe("git-credential get: a push as the owner's person account (D1: the defa
       assert.match(r.stderr, /core\.hooksPath is set in local scope/);
       assert.match(r.stderr, /pushes from a terminal, or chains repo-aegis's pre-push hook/);
       assert.equal(loginCalls.length, 0);
-      for (const scope of ["worktree", "command"]) assertRefused(push(`${scope}\tcore.hookspath /tmp/h`), "AGENT_PUSH_GUARD_NOT_RUNNING", scope);
+      assertRefused(push("worktree\tcore.hookspath /tmp/h"), "AGENT_PUSH_GUARD_NOT_RUNNING", "worktree");
+    });
+
+    it("command scope (`-c core.hooksPath=/dev/null` on the call itself) is the caller's choice, not a husky setting: the token", () => {
+      destinationPublic = true;
+      for (const cfg of ["command\tcore.hookspath /dev/null", "global\tcore.hookspath /h/hooks\ncommand\tcore.hookspath /dev/null"]) {
+        assert.equal(push(cfg).stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`, cfg);
+      }
+      // git reads the last value, so a command-scope value after a husky one is the caller's choice too.
+      assert.equal(push(`${HUSKY}\ncommand\tcore.hookspath /dev/null`).stdout, `username=x-access-token\npassword=${PERSON_TOKEN}\n`);
+      // A local override alone still refuses.
+      assertRefused(push(HUSKY), "AGENT_PUSH_GUARD_NOT_RUNNING");
     });
 
     it("the same with the destination recorded private: the token", () => {
@@ -831,6 +842,21 @@ describe("git-credential get: A5 configuration and environment (P1-A: only what 
     refusedWith("global\tcredential.https://github.com.helper !ours\nlocal\tcredential.helper !evil");
     refusedWith("global\tcredential.https://github.com.helper !ours\nworktree\tcredential.https://github.com.helper !evil");
     refusedWith("global\tcredential.https://github.com.helper !ours\ncommand\tcredential.helper !evil");
+  });
+
+  it("the person's own entries re-applied in command scope (GIT_CONFIG_GLOBAL=/dev/null plus GIT_CONFIG_COUNT): repo-aegis's helper and gh's are no refusal", () => {
+    const ours = "!'/usr/bin/node' '/x/dist/index.js' git-credential --home '/h'";
+    const copied = [
+      "command\tcredential.helper osxkeychain",
+      "command\tcredential.https://github.com.helper ",
+      `command\tcredential.https://github.com.helper ${ours}`,
+      "command\tcredential.https://github.com.helper !/opt/homebrew/bin/gh auth git-credential",
+      "command\tcredential.https://github.com.usehttppath true",
+    ].join("\n");
+    tokenWith(copied);
+    tokenWith(copied, {}, "p/r.git");
+    // A storing or unrecognised helper in command scope still refuses, as before.
+    refusedWith(`${copied}\ncommand\tcredential.https://github.com.helper !evil`);
   });
 
   it("a proxy is no refusal: HTTPS_PROXY in the environment, and http.proxy in global config, each give the token (the default sandbox sets one)", () => {

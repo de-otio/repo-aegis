@@ -285,7 +285,14 @@ export function credentialConfigViolation(
   env: NodeJS.ProcessEnv,
 ): string | null {
   for (const e of effectiveHelpers(entries, ctx)) {
-    if (!isSystemScope(e.scope) && e.scope !== "global") return `a credential helper is configured in ${e.scope} scope`;
+    if (isSystemScope(e.scope) || e.scope === "global") continue;
+    // repo-aegis's own helper and `gh auth git-credential` never persist what `store` hands them, so their scope
+    // does not matter: a tool that nulls the global config and re-applies the person's credential.* entries with
+    // `-c` / GIT_CONFIG_COUNT moves exactly these into command scope. A helper that stores is judged by
+    // laterStoringHelper, whatever its scope.
+    const v = e.value ?? "";
+    if (isRepoAegisHelperValue(v) || isGhHelperValue(v)) continue;
+    return `a credential helper is configured in ${e.scope} scope`;
   }
   return environmentViolation(env);
 }

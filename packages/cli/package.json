@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/repo-aegis",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Engagement-scoped leak prevention CLI for multi-customer git repos",
   "keywords": [
     "claude-code",

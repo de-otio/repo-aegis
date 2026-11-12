@@ -392,8 +392,8 @@ describe("parseApiEndpoint", () => {
 describe("gh api graphql — the document source is captured (issue #113)", () => {
   it("-f query=… / -F query=… / --raw-field=query=… → inline text", () => {
     assert.deepEqual(only("gh api graphql -f query='mutation { x }'").graphql, { query: "mutation { x }" });
-    assert.deepEqual(only("gh api graphql -F query='query { viewer { login } }'").graphql, {
-      query: "query { viewer { login } }",
+    assert.deepEqual(only("gh api graphql -F query='query { viewer { login } $(x) }'").graphql, {
+      query: "query { viewer { login } $(x) }",
     });
     assert.deepEqual(only("gh api graphql --raw-field=query='mutation { x }' -F id=PR_1").graphql, {
       query: "mutation { x }",
@@ -404,7 +404,8 @@ describe("gh api graphql — the document source is captured (issue #113)", () =
     const i = only("gh api graphql -F query=@/abs/m.graphql -F id=PR_1");
     assert.deepEqual(i.graphql, { queryFile: "/abs/m.graphql" });
     assert.deepEqual(i.payloadFiles, ["/abs/m.graphql"]);
-    assert.deepEqual(only("gh api graphql -f query=@/abs/m.graphql").graphql, { query: "@/abs/m.graphql" });
+    // `-f` sends `@/abs/m.graphql` as the document text itself, which is no mutation: a read, so no intent.
+    assert.deepEqual(parseEgressIntents("gh api graphql -f query=@/abs/m.graphql"), []);
     assert.deepEqual(only("gh api graphql -F query=@-").graphql, { queryFile: "-" });
   });
 
@@ -421,6 +422,32 @@ describe("gh api graphql — the document source is captured (issue #113)", () =
 
   it("a query field on a REST endpoint is not GraphQL", () => {
     assert.equal(only("gh api -X POST repos/acme/svc/issues -f query=mutation").graphql, undefined);
+  });
+
+  it("an inline document that is a query only reads: no intent, as a REST GET", () => {
+    for (const cmd of [
+      "gh api graphql -F query='query { viewer { login } }'",
+      "gh api graphql -f query='{ viewer { login } }' -F owner=acme",
+      "gh api -X POST graphql -f query='query { viewer { login } }'",
+      'gh api graphql -f query="query { repository(owner: \\"acme\\", name: \\"svc\\") { pullRequest(number: 33) { comments(first: 5) { nodes { databaseId } } } } }"',
+      "gh api https://api.github.com/graphql -f query='query { viewer { login } }'",
+    ]) {
+      assert.deepEqual(parseEgressIntents(cmd), [], cmd);
+    }
+  });
+
+  it("… but a mutation, an expansion, a file, stdin, an --input body or another host stays an intent", () => {
+    for (const cmd of [
+      "gh api graphql -f query='mutation { x }'",
+      'gh api graphql -f query="$(cat q.graphql)"',
+      "gh api graphql -f query='query { a }' --input /abs/body.json",
+      "gh api graphql -F query=@/abs/q.graphql",
+      "gh api graphql -f query='query { a }' -F extra=@/abs/payload.txt",
+      "gh api --hostname ghe.example.com graphql -f query='query { a }'",
+      "gh api -X DELETE graphql -f query='query { a }'",
+    ]) {
+      assert.equal(parseEgressIntents(cmd).length, 1, cmd);
+    }
   });
 
   it("a GraphQL call with no fields is still not an intent (unchanged)", () => {

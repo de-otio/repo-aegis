@@ -1,6 +1,6 @@
 {
   "name": "@de-otio/repo-aegis-scan",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Org-wide GitHub code-search sweep for leaked engagement markers",
   "license": "GPL-3.0-or-later",
   "author": "Richard Myers",
