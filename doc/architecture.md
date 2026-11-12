@@ -77,7 +77,11 @@ a string is identified as a leak by the same logic at every layer.
 - **Claude Code SessionStart hook** (`repo-aegis hook first-touch`)
   classifies a previously-unclassified repo from its git remote +
   registry org membership, prompting the user only when the org is
-  unknown.
+  unknown. It runs once, at session start, on the starting directory,
+  so it is not the only classifier: a repo created or cloned later is
+  classified on every read from where it pushes (`repo-inference.ts`),
+  and both use the same owner rule (`owner-class.ts`), so an org that
+  is in two engagements belongs to neither.
 - **Central registry** (`~/.config/repo-aegis/engagements.yaml`)
   tracks engagement → markers → start/end dates → orgs.
   Per-engagement marker files

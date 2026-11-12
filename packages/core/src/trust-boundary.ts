@@ -16,7 +16,8 @@
 // declares the canonical engagement-org mapping. The remote is only
 // consulted as a last-resort fallback for completely unclassified repos.
 
-import { readRepoConfig, type RepoClass } from "./repo.js";
+import { readEffectiveRepoConfig } from "./repo-inference.js";
+import type { RepoClass } from "./repo.js";
 import { type Registry } from "./registry.js";
 import { getRemoteOrg } from "./working-tree.js";
 
@@ -39,7 +40,8 @@ export interface TrustBoundary {
  * Compute the trust boundary for a working tree against a registry.
  *
  * Reads `git config repo-aegis.class` / `.repo-aegis.yml` for the
- * working tree (via {@link readRepoConfig}), pulls the relevant
+ * working tree (via {@link readEffectiveRepoConfig}, which also infers an
+ * unclassified repository's engagement from where it pushes), pulls the relevant
  * `githubOrgs` arrays out of the registry, and falls back to the
  * remote URL only when the classification supplies no orgs.
  */
@@ -47,7 +49,7 @@ export function computeTrustBoundary(
   workingTree: string,
   registry: Registry,
 ): TrustBoundary {
-  const repo = readRepoConfig(workingTree);
+  const repo = readEffectiveRepoConfig(workingTree, registry);
   const orgs = new Set<string>();
 
   // Engagement-derived orgs.

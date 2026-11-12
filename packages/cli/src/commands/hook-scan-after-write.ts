@@ -285,6 +285,7 @@ export async function hookScanAfterWrite(opts: HookOptions = {}): Promise<void> 
     isGitRepo: repo.isGitRepo,
     class: repo.class,
     classExplicit: repo.classExplicit,
+    ...(repo.classInferred === true && { classInferred: true as const }),
     engagements: repo.engagements,
   };
 

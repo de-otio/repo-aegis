@@ -14,6 +14,7 @@
 import { execFileSync } from "node:child_process";
 import { loadRegistry, type Engagement, type Registry } from "./registry.js";
 import { RegistryNotFoundError } from "./exceptions.js";
+import { classifyOwner } from "./owner-class.js";
 import { parseRemoteUrl } from "./remote-url.js";
 import { readRepoConfig, setClass, addEngagement } from "./repo.js";
 
@@ -101,14 +102,13 @@ function tryRegistryMatch(
     if (err instanceof RegistryNotFoundError) return "registry-not-found";
     return null;
   }
-  const personalOrgs = reg.personalOrgs ?? [];
-  if (personalOrgs.includes(parsedOrg)) {
-    return { class: "public-eligible", engagement: null };
-  }
-  for (const eng of reg.engagements) {
-    if ((eng.githubOrgs ?? []).includes(parsedOrg)) {
-      return { class: "customer-coupled", engagement: eng };
-    }
+  // The same owner rule every layer uses: case-insensitive, and an owner that is in two engagements (or in a personal
+  // org and an engagement) belongs to none of them, so it is asked about rather than silently given to the first.
+  const owner = classifyOwner(parsedOrg, reg);
+  if (owner.kind === "personal") return { class: "public-eligible", engagement: null };
+  if (owner.kind === "engagement") {
+    const eng = reg.engagements.find(e => e.id === owner.id);
+    if (eng !== undefined) return { class: "customer-coupled", engagement: eng };
   }
   return null;
 }

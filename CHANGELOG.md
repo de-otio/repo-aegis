@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A repository created or cloned mid-session in an engagement's own org is that engagement's, not `private-strict`.**
+  First-touch classification runs once, at session start, on the starting directory, so a repository made later was
+  never classified, and the write scan and pre-commit blocked the engagement's own name in the engagement's own
+  repository (a cross-repository `uses: org/repo/.github/workflows/x.yml@main` line must name the owner). An
+  unclassified repository whose pushes all go to one engagement's org is now judged `customer-coupled` for that
+  engagement by every layer that decides a class, nothing is written to git config, and any doubt (a second remote
+  in another org or on another host, an unresolvable alias, a personal org, an org in two engagements, a recorded-public
+  checkout, a different configured engagement) keeps `private-strict`. `status` says so, and `status --json` adds
+  `classInferred`.
+- **A push and a `gh` call to one repository are judged under one class.** The egress guard classified a repository
+  from the registry when it was reached with `--repo` but from git config when it was pushed to, so one repository
+  could be `customer-coupled` on one receipt and `private-strict` on the other. An org in two engagements is now
+  `private-strict` everywhere, where first-touch used to take the first match and the guard every match, and owner
+  names match case-insensitively everywhere.
+
 ### Changed
 
 - **An empty private `gh repo create` no longer needs a person.** `gh repo create OWNER/REPO --private` (or

@@ -57,6 +57,8 @@ import {
   type IntentUnresolved,
 } from "./egress-intent.js";
 import { isFreshCheck, resolveCachedDestination } from "./destination-cache.js";
+import { classifyOwner } from "./owner-class.js";
+import { readEffectiveRepoConfig, type EffectiveRepoConfig } from "./repo-inference.js";
 import {
   approvalScopeOf,
   findApproval,
@@ -539,14 +541,16 @@ function ownOrigin(base: string): { org: string; repo: string } | null {
   return parsed ? { org: parsed.org, repo: parsed.repo } : null;
 }
 
-/** Engagement ids whose `githubOrgs` contain `org` (lowercased). */
+/**
+ * The engagement ids the registry says own `org`: exactly one for an owner that is one engagement's, none for any
+ * other answer. An ambiguous owner (two engagements, or a personal org that is also an engagement's) is no
+ * engagement's: the same rule first-touch and an unclassified repository's inference follow, so the three layers
+ * cannot disagree (see `owner-class.ts`).
+ */
 function engagementsForOrg(registry: Registry | undefined, org: string): string[] {
   if (!registry) return [];
-  const out: string[] = [];
-  for (const e of registry.engagements) {
-    if ((e.githubOrgs ?? []).some(o => o.toLowerCase() === org)) out.push(e.id);
-  }
-  return out;
+  const c = classifyOwner(org, registry);
+  return c.kind === "engagement" ? [c.id] : [];
 }
 
 /** `publicFacing` (and `assumedPublic` when only the unknown visibility makes it so), by the one shared rule. */
@@ -635,9 +639,12 @@ function withLocalClass(
       classKnown: false,
     };
   }
-  let cfg: RepoConfig;
+  let cfg: EffectiveRepoConfig;
   try {
-    cfg = readRepoConfig(base);
+    // An unclassified repository whose pushes all go to one engagement's org is that engagement's, as the same
+    // org reached with `--repo` already is (above). Without this a push and a `gh` call to one repository
+    // were judged under two different classes.
+    cfg = readEffectiveRepoConfig(base, registry);
   } catch {
     return {
       ...target,
@@ -659,6 +666,9 @@ function withLocalClass(
     ...gateFields(cfg.class, visibility),
     classKnown: true,
     workingTree: base,
+    // The class came from the registry, not from a declaration: the payload scan and rule e, which key on this,
+    // then judge it like any other registry-inferred destination.
+    ...(cfg.classInferred === true && { inferredFromRegistry: true as const, engagements: cfg.engagements }),
   };
 }
 

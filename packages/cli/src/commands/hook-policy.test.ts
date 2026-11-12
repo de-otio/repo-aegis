@@ -286,3 +286,43 @@ describe("decideHookAction", () => {
     assert.equal(d.action, "scan");
   });
 });
+
+// Change A2 (doc/plan-engagement-repo-consistency.md): a repository nobody classified, pushing only to one
+// engagement's org, is that engagement's when the write is judged. Placeholders: `org-a` is the engagement's org.
+describe("decideHookAction — an unclassified repo in an engagement's org is that engagement's", () => {
+  const registry = {
+    engagements: [{ id: "org-a", name: "Org A", started: "2026-01-01", markers: [], githubOrgs: ["org-a"] } as unknown as Engagement],
+    alwaysBlock: [],
+    personalOrgs: ["mine"],
+    schemaVersion: 2,
+  } as unknown as Registry;
+
+  it("same-tree write: scanned as customer-coupled for that engagement, and says it was inferred", () => {
+    const dir = makeRepo("inferred-same", { remote: "https://github.com/org-a/lib.git" });
+    const d = decideHookAction({ filePath: join(dir, "f.txt"), launcherCwd: dir, registry });
+    assert.equal(d.action, "scan");
+    if (d.action !== "scan") return;
+    assert.equal(d.repo.class, "customer-coupled");
+    assert.deepEqual(d.repo.engagements, ["org-a"]);
+    assert.equal(d.repo.classExplicit, false);
+    assert.equal(d.repo.classInferred, true);
+  });
+
+  it("an explicit class is judged as declared", () => {
+    const dir = makeRepo("declared-same", { remote: "https://github.com/org-a/lib.git", class: "private-strict" });
+    const d = decideHookAction({ filePath: join(dir, "f.txt"), launcherCwd: dir, registry });
+    assert.equal(d.action, "scan");
+    if (d.action !== "scan") return;
+    assert.equal(d.repo.class, "private-strict");
+    assert.equal(d.repo.classInferred, undefined);
+  });
+
+  it("with an empty registry (none on this machine) nothing is inferred", () => {
+    const dir = makeRepo("no-registry", { remote: "https://github.com/org-a/lib.git" });
+    const empty = { engagements: [], alwaysBlock: [], personalOrgs: [], schemaVersion: 2 } as unknown as Registry;
+    const d = decideHookAction({ filePath: join(dir, "f.txt"), launcherCwd: dir, registry: empty });
+    assert.equal(d.action, "scan");
+    if (d.action !== "scan") return;
+    assert.equal(d.repo.class, "private-strict");
+  });
+});

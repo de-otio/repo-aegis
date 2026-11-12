@@ -2,7 +2,9 @@
 // Copyright (C) 2026 Richard Myers and contributors.
 import {
   loadRegistry,
+  readEffectiveRepoConfig,
   readRepoConfig,
+  type EffectiveRepoConfig,
   computeDenySet,
   isActive,
   isPublicFacing,
@@ -182,7 +184,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   // `--cwd` is documented as applying to every subcommand uniformly (design
   // README, "Universal CLI flags"). This previously ignored it and reported
   // the process cwd's repo instead.
-  const repo = readRepoConfig(opts.cwd);
+  let repo: EffectiveRepoConfig = readRepoConfig(opts.cwd);
 
   let registryEngagements: {
     id: string;
@@ -194,6 +196,8 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
   let identitySummary: IdentitySummary | null = null;
   try {
     const reg = loadRegistry();
+    // An unclassified repository whose pushes all go to one engagement's org is that engagement's, as every decider sees it.
+    repo = readEffectiveRepoConfig(opts.cwd ?? process.cwd(), reg);
     identitySummary = summariseIdentities(reg);
     registryEngagements = reg.engagements.map(e => ({
       id: e.id,
@@ -288,6 +292,7 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
     isGitRepo: repo.isGitRepo,
     class: repo.class,
     classExplicit: repo.classExplicit,
+    ...(repo.classInferred === true && { classInferred: true as const }),
     engagements: repo.engagements,
   };
 
@@ -323,7 +328,15 @@ export function status(opts: OutputOptions & { cwd?: string }): void {
     return;
   }
   emitText(`repo-aegis status: ${repo.cwd}`);
-  emitText(`  class:    ${repo.class}${repo.classExplicit ? "" : " (default; not set)"}`);
+  emitText(
+    `  class:    ${repo.class}${
+      repo.classExplicit
+        ? ""
+        : repo.classInferred === true
+          ? " (inferred from where this repo pushes; run `repo-aegis classify --apply` to record it)"
+          : " (default; not set)"
+    }`,
+  );
   emitText(
     `  github:   ${visibility}` +
       // The probe's status rides on the same line as the value it failed to
