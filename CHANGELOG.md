@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A customer's repository recorded as private is no longer "uncached, treated as public".** For an org that belongs
+  to an engagement, the egress guard kept the registry's class but never read the visibility a checkout had recorded,
+  so `gh` receipts and refusals said `VISIBILITY UNCACHED, TREATED AS PUBLIC` for a repo the push path already knew
+  was private. It now reads the recorded visibility, but only from a checkout that still exists, whose `origin` still
+  is that repository, and that was recorded within 7 days; otherwise the visibility stays unknown, as before. A
+  recorded `public` is never downgraded.
+- **A destination-cache pointer to a re-pointed checkout is ignored.** A clone of a public template whose `origin` was
+  changed to a private project used to answer for the template's key with the project's visibility. A pointer whose
+  tree no longer has that `origin` now resolves to nothing.
+
 ## [0.15.2] - 2026-11-12
 
 ### Fixed

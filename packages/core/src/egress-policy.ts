@@ -56,7 +56,7 @@ import {
   type GraphqlOperationKind,
   type IntentUnresolved,
 } from "./egress-intent.js";
-import { resolveCachedDestination } from "./destination-cache.js";
+import { isFreshCheck, resolveCachedDestination } from "./destination-cache.js";
 import {
   approvalScopeOf,
   findApproval,
@@ -559,14 +559,27 @@ function withLocalClass(
     // engagement, whatever directory the command runs from.
     const engagements = engagementsForOrg(registry, target.org);
     if (engagements.length > 0) {
+      // The class is the registry's statement about the org and stays. What a
+      // checkout of this repository has recorded may still answer the
+      // visibility, so "private" is not forgotten the moment the org is a
+      // customer's. Only a checkout that is still this repository, recorded
+      // recently, and says something is believed; and only `unknown` is ever
+      // replaced (nothing here downgrades a visibility already known).
+      const recorded = target.repo === "*" ? null : resolveCachedDestination(target.org, target.repo);
+      const believed =
+        recorded !== null && recorded.live && recorded.visibility !== "unknown" && isFreshCheck(recorded)
+          ? recorded
+          : null;
+      const visibility: RepoVisibility = believed?.visibility ?? "unknown";
       return {
         ...target,
         class: "customer-coupled",
-        visibility: "unknown",
-        ...gateFields("customer-coupled", "unknown"),
+        visibility,
+        ...gateFields("customer-coupled", visibility),
         classKnown: true,
         inferredFromRegistry: true,
         engagements,
+        ...(believed !== null && { workingTree: believed.workingTree }),
       };
     }
     // Not a customer's either. Does this machine hold a checkout of it? The

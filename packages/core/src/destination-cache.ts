@@ -114,6 +114,13 @@ export function lookupDestination(
   return readDestinationCache(path).repos[destinationKey(org, repo)] ?? null;
 }
 
+/** The cache key of the checkout's current `origin`, or null when it has no GitHub origin. */
+function originKey(workingTree: string): string | null {
+  const url = getRemoteUrl(workingTree);
+  const parsed = url === null ? null : parseRemoteUrlResolved(url);
+  return parsed === null ? null : destinationKey(parsed.org, parsed.repo);
+}
+
 /**
  * What a checkout says about itself right now, or null when it has no
  * GitHub origin (nothing to key on). The read the resolver performs when it
@@ -122,12 +129,11 @@ export function lookupDestination(
 export function describeWorkingTree(
   workingTree: string,
 ): { key: string; entry: Omit<DestinationCacheEntry, "checkedAt"> } | null {
-  const url = getRemoteUrl(workingTree);
-  const parsed = url === null ? null : parseRemoteUrlResolved(url);
-  if (parsed === null) return null;
+  const key = originKey(workingTree);
+  if (key === null) return null;
   const cfg = readRepoConfig(workingTree);
   return {
-    key: destinationKey(parsed.org, parsed.repo),
+    key,
     entry: {
       class: cfg.class,
       classExplicit: cfg.classExplicit,
@@ -198,6 +204,11 @@ export function resolveCachedDestination(
   if (cached === null) return null;
   let entry: DestinationCacheEntry & { live: boolean } = { ...cached, live: false };
   if (entryTreeExists(cached)) {
+    // A pointer is only knowledge while the tree it points at is still this
+    // repository. A checkout whose `origin` was re-pointed (a clone of a public
+    // template turned into a private project) says nothing about the key it was
+    // recorded under, and reading its visibility would be reading another repo's.
+    if (originKey(cached.workingTree) !== destinationKey(org, repo)) return null;
     try {
       const cfg = readRepoConfig(cached.workingTree);
       entry = {
@@ -213,4 +224,24 @@ export function resolveCachedDestination(
   }
   if (!entry.classExplicit && entry.visibility === "unknown") return null;
   return entry;
+}
+
+/**
+ * How long a recorded visibility is trusted where the answer lets a customer's
+ * repository through without a person (the engagement-org branch of the egress
+ * policy). A repository can be made public after it was recorded private, and
+ * `checkedAt` is refreshed by everything that visits the checkout, so a checkout
+ * in use never goes stale and one nobody touched for a week is asked about again.
+ */
+export const CACHED_VISIBILITY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Tolerated clock skew for a `checkedAt` that lies slightly in the future. */
+const CACHED_VISIBILITY_SKEW_MS = 5 * 60 * 1000;
+
+/** True when the entry was written recently enough to be believed. An unparseable or far-future stamp is not fresh. */
+export function isFreshCheck(entry: { checkedAt: string }, now: () => Date = () => new Date()): boolean {
+  const written = Date.parse(entry.checkedAt);
+  if (Number.isNaN(written)) return false;
+  const age = now().getTime() - written;
+  return age >= -CACHED_VISIBILITY_SKEW_MS && age <= CACHED_VISIBILITY_MAX_AGE_MS;
 }
