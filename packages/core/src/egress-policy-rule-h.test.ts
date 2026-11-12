@@ -330,13 +330,13 @@ describe("rule h — unregistered owner", () => {
 
     it("unparseable: an unresolved destination is refused too (no ask host); a person passes", () => {
       const unresolved = dest({ org: "*", repo: "*", unresolved: "graphql-mutation", publicFacing: true, classKnown: false });
-      const refused = decideH("gh api graphql -f query=x", "*", "*", {
+      const refused = decideH("gh api graphql -f query='mutation { x }'", "*", "*", {
         registryState: "unparseable",
         resolveDestination: () => unresolved,
         ...NO_ASK,
       });
       assert.equal(refused.d.action === "deny" && refused.d.code, "UNREGISTERED_OWNER_EGRESS");
-      const person = decideH("gh api graphql -f query=x", "*", "*", {
+      const person = decideH("gh api graphql -f query='mutation { x }'", "*", "*", {
         registryState: "unparseable",
         resolveDestination: () => unresolved,
         humanPresent: true,
@@ -650,7 +650,7 @@ describe("rule h — refusal messages (§3.9, §5.4)", () => {
 
   it("unresolved GraphQL mutation: why the owner is unknowable, that '*' no longer covers it, the agent's alternative and a person's step", () => {
     const unresolved = dest({ org: "*", repo: "*", unresolved: "graphql-mutation", publicFacing: true, classKnown: false });
-    const reason = refuse("gh api graphql -f query=x", unresolved);
+    const reason = refuse("gh api graphql -f query='mutation { x }'", unresolved);
     assert.ok(reason.startsWith("gh api graphql (mutation): refused."), reason);
     assert.match(reason, /names its target by node id/);
     assert.match(reason, /No approval covers this/);

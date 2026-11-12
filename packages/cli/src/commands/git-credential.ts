@@ -404,15 +404,18 @@ function stepAside(code: string, stderr = "", dest?: { owner: string; repo: stri
 }
 
 /**
- * The scope word ("local", "worktree" or "command") when the repository's own configuration sets `core.hooksPath` to a
+ * The scope word ("local" or "worktree") when the repository's own configuration sets `core.hooksPath` to a
  * directory that is not `<home>/hooks`, else null. With that setting git runs only that directory, so repo-aegis's
  * global pre-push does not run (a hooks manager such as husky does this). git reads the last value; a global or
  * system value is the person's own and is not judged here. A relative value cannot be compared and counts as foreign.
+ * Command scope (`-c core.hooksPath=/dev/null`, GIT_CONFIG_COUNT) is not judged either: it is the invoking tool's
+ * deliberate choice for that one call, as `--no-verify` is, not a setting left behind in the repository. In the
+ * sandbox a fetch cannot be told from a push, so judging it refused hardened fetches.
  */
 function localHooksOverride(entries: readonly ConfigEntry[], home: string, env: NodeJS.ProcessEnv): string | null {
   let last: ConfigEntry | null = null;
   for (const e of entries) if (e.key === "core.hookspath" && e.value !== null && e.value !== "") last = e;
-  if (last === null || (last.scope !== "local" && last.scope !== "worktree" && last.scope !== "command")) return null;
+  if (last === null || (last.scope !== "local" && last.scope !== "worktree")) return null;
   return isOwnHooksPath({ ...last, scope: "local" }, home, env) ? null : last.scope;
 }
 

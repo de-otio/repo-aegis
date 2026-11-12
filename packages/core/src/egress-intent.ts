@@ -244,6 +244,13 @@ interface Segment {
   joinedBy: SegmentJoin;
   /** Bodies of heredocs (`<<WORD`) opened on this segment's line, which the tokeniser otherwise skips. */
   heredocs: string[];
+  /** The subset of `heredocs` whose delimiter is unquoted: bash runs the `$(…)` and backticks inside them. */
+  expandingHeredocs: string[];
+  /**
+   * Substitution texts that sat inside single quotes (or `$'…'`): bash runs none of them, but the tokens keep
+   * them once the quotes are dropped. A multiset; the walkers skip one occurrence per entry.
+   */
+  literalSubstitutions: string[];
   /** The segment is a function definition (`name() {` …): its first token is the function's name, not a command. */
   funcDef: boolean;
 }
@@ -295,14 +302,14 @@ function decodeAnsiCEscape(text: string, at: number): [string, number] {
  */
 function tokenise(command: string): Segment[] {
   const segments: Segment[] = [];
-  let cur: Segment = { tokens: [], joinedBy: null, heredocs: [], funcDef: false };
+  let cur: Segment = { tokens: [], joinedBy: null, heredocs: [], expandingHeredocs: [], literalSubstitutions: [], funcDef: false };
   let word = "";
   let inWord = false;
   // Heredoc bodies must not be parsed as commands. When `<<WORD` is seen,
   // the delimiter is queued with the segment that opened it; at the next
   // newline the body is skipped up to (and including) the line that equals
   // the delimiter, and kept on that segment for callers that feed it to a shell.
-  const pendingHeredocs: Array<{ delim: string; owner: Segment }> = [];
+  const pendingHeredocs: Array<{ delim: string; owner: Segment; expands: boolean }> = [];
   // `(` nesting, so the `)` that closes a process substitution `<(…)` / `>(…)` ends its command.
   const parens: Array<"proc" | "sub"> = [];
 
@@ -316,7 +323,7 @@ function tokenise(command: string): Segment[] {
   const endSegment = (nextJoin: SegmentJoin): void => {
     pushWord();
     if (cur.tokens.length > 0) segments.push(cur);
-    cur = { tokens: [], joinedBy: nextJoin, heredocs: [], funcDef: false };
+    cur = { tokens: [], joinedBy: nextJoin, heredocs: [], expandingHeredocs: [], literalSubstitutions: [], funcDef: false };
   };
 
   const n = command.length;
@@ -328,13 +335,11 @@ function tokenise(command: string): Segment[] {
     if (c === "'") {
       inWord = true;
       const end = command.indexOf("'", i + 1);
-      if (end === -1) {
-        word += command.slice(i + 1);
-        i = n;
-      } else {
-        word += command.slice(i + 1, end);
-        i = end + 1;
-      }
+      const literal = end === -1 ? command.slice(i + 1) : command.slice(i + 1, end);
+      word += literal;
+      // bash runs nothing inside single quotes; remember what would look like a substitution once the quotes are gone.
+      cur.literalSubstitutions.push(...substitutionTexts(literal));
+      i = end === -1 ? n : end + 1;
       continue;
     }
     if (c === '"') {
@@ -384,6 +389,7 @@ function tokenise(command: string): Segment[] {
         }
       }
       word += text;
+      cur.literalSubstitutions.push(...substitutionTexts(text));
       i = j + 1; // closing quote (or past end)
       continue;
     }
@@ -442,7 +448,7 @@ function tokenise(command: string): Segment[] {
       if (pendingHeredocs.length > 0) {
         // Skip heredoc bodies, one per queued delimiter, in order.
         while (pendingHeredocs.length > 0) {
-          const { delim, owner } = pendingHeredocs.shift()!;
+          const { delim, owner, expands } = pendingHeredocs.shift()!;
           const bodyStart = i;
           let bodyEnd: number;
           for (;;) {
@@ -456,7 +462,9 @@ function tokenise(command: string): Segment[] {
               break;
             }
           }
-          owner.heredocs.push(command.slice(bodyStart, Math.max(bodyStart, bodyEnd)));
+          const body = command.slice(bodyStart, Math.max(bodyStart, bodyEnd));
+          owner.heredocs.push(body);
+          if (expands) owner.expandingHeredocs.push(body);
         }
       }
       continue;
@@ -571,8 +579,10 @@ function tokenise(command: string): Segment[] {
           j++;
         }
       }
+      // bash expands `$(…)` and backticks in the body unless any part of the delimiter is quoted (`'EOF'`, `"EOF"`, `\EOF`).
+      const expands = !quoted && !delim.includes("\\") && !delim.includes("'") && !delim.includes('"');
       if (!quoted) delim = delim.replace(/\\/g, "");
-      if (delim.length > 0) pendingHeredocs.push({ delim, owner: cur });
+      if (delim.length > 0) pendingHeredocs.push({ delim, owner: cur, expands });
       i = j;
       continue;
     }
@@ -2317,6 +2327,22 @@ function classifyGh(
     const mutating =
       method !== undefined ? MUTATING_METHODS.has(method) : hasFields || payloadFiles.length > 0;
     if (!mutating) return null;
+    // `gh api graphql` always POSTs, but an inline document that lexes as a query only reads: no intent, as a
+    // REST GET. A document from a file, stdin or an `--input` body, or one with a shell expansion, stays an
+    // intent and is classified by the policy (graphqlIntentKind), which cannot rule a mutation out offline.
+    if (
+      apiEndpoint !== undefined &&
+      isGraphqlEndpoint(apiEndpoint) &&
+      gqlQuery !== undefined &&
+      gqlQueryFile === undefined &&
+      gqlInputFile === undefined &&
+      payloadFiles.length === 0 &&
+      (method === undefined || method === "POST") &&
+      lastValue(events, "--hostname") === undefined &&
+      graphqlOperationKind(gqlQuery) === "query"
+    ) {
+      return null;
+    }
     // `markdown` / `markdown/raw` only render text on github.com: not egress (§3.3 item 4). With a
     // `--hostname` that is not github.com the request goes to another server, which is a mutating
     // intent (below) whose payload is scanned (M3).
@@ -2640,6 +2666,25 @@ function splitSubstitutions(word: string): { texts: string[]; rest: string } {
 /** The command texts of `$(…)` and `` `…` `` substitutions inside one word (at most 32). */
 function substitutionTexts(word: string): string[] {
   return splitSubstitutions(word).texts;
+}
+
+/**
+ * The substitutions bash runs for one segment: those in its words, less the ones that sat inside single quotes
+ * (one skipped per literal occurrence), plus those in the bodies of its unquoted heredocs.
+ */
+function segmentSubstitutions(seg: Segment, words: readonly string[]): string[] {
+  const literal = new Map<string, number>();
+  for (const t of seg.literalSubstitutions) literal.set(t, (literal.get(t) ?? 0) + 1);
+  const out: string[] = [];
+  for (const w of words) {
+    for (const inner of substitutionTexts(w)) {
+      const left = literal.get(inner) ?? 0;
+      if (left > 0) literal.set(inner, left - 1);
+      else out.push(inner);
+    }
+  }
+  for (const body of seg.expandingHeredocs) out.push(...substitutionTexts(body));
+  return out;
 }
 
 /** Bash brace expansion of the first `{a,b}` group, recursively, at most 64 results. */
@@ -3216,11 +3261,13 @@ const PTY_INTERPRETER_RE = /^(?:python[\d.]*|perl|ruby|node|nodejs|php|lua|tclsh
 /**
  * Text that opens a pty, or runs a wrapper that does: `import pty`, `-rpty`,
  * `pexpect`, `openpty`, `node-pty`, `IO::Pty`, or `script`/`unbuffer`/`tmux`…
- * as a word inside a string handed to `os.system` / `subprocess`.
+ * as a word inside a string handed to `os.system` / `subprocess`. A wrapper word counts only where it is run:
+ * followed by a closing quote or bracket (`["expect", …]`), by arguments (`"script -q …"`), or by the end of the
+ * text. Program code that merely names one (`expect(x).toBe(1)`, `expect = …`, `script.run()`) does not.
  */
 const PTY_TEXT_RE = new RegExp(
   "(?:^|[^A-Za-z])-?r?(?:pty|pexpect|ptyprocess)(?![A-Za-z])|openpty|forkpty|node-pty|IO::Pty|" +
-    `(?:^|[^A-Za-z0-9_./-])(?:${[...PTY_WRAPPER_COMMANDS].join("|")})(?![A-Za-z0-9_-])`,
+    `(?:^|[^A-Za-z0-9_./-])(?:${[...PTY_WRAPPER_COMMANDS].join("|")})(?=["'\`\\]]|[ \\t]+[^\\s=(]|\\s*$)`,
 );
 
 /** `ssh -t`, `-tt`, `-tq`, `-o RequestTTY=force|yes`: a forced pty on the far side (and `ssh -tt localhost` is local). */
@@ -3416,9 +3463,7 @@ function parseUnsafe(command: string, ctx: ParseCtx): EgressIntent[] {
       // Command substitutions run whatever their text says, wherever they sit in the line. (The text
       // of `bash -c` / `eval` is parsed whole below, substitutions included.)
       if (resolved.nestedText === undefined) {
-        for (const w of tokens) {
-          for (const inner of substitutionTexts(w)) nest(inner, envRaw);
-        }
+        for (const inner of segmentSubstitutions(seg, rawTokens)) nest(inner, envRaw);
       }
 
       if (resolved.exhausted) {
@@ -3713,9 +3758,7 @@ function walkCommands(
       const assigns: Assignment[] = [];
       const resolved = resolveCommand(tokens, assigns);
       const segEnv = new Set<string>([...inherited, ...running, ...repoAegisNames(assigns.map(a => a.name))]);
-      for (const w of tokens) {
-        for (const inner of substitutionTexts(w)) walkCommands(inner, depth + 1, budget, segEnv, wrapperNames, binds, out);
-      }
+      for (const inner of segmentSubstitutions(seg, rawTokens)) walkCommands(inner, depth + 1, budget, segEnv, wrapperNames, binds, out);
       if (resolved.nestedText !== undefined) {
         const args = resolved.nestedArgs ?? [];
         let text = resolved.nestedText;

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-12
+
+### Fixed
+
+- **A hardened git call can fetch with the person's credentials.** A tool that sets `GIT_CONFIG_GLOBAL=/dev/null` and
+  re-applies the person's `credential.*` entries with `-c` or `GIT_CONFIG_COUNT` moves repo-aegis's own helper into
+  command scope, and the git credential helper refused it (`AGENT_PUSH_CREDENTIAL_CONFIG`). repo-aegis's helper and
+  `gh auth git-credential` no longer count as a foreign helper in any scope. A helper that would store the token is
+  still refused (`AGENT_PUSH_CREDENTIAL_STORE`).
+- **`-c core.hooksPath=/dev/null` no longer refuses a credential.** `AGENT_PUSH_GUARD_NOT_RUNNING` exists for a hooks
+  manager such as husky, set in the repository's own configuration. A command-scope value is the caller's choice for
+  that one call, like `--no-verify`. In the sandbox a fetch cannot be told from a push, so hardened fetches were refused.
+  Local and worktree values are still judged.
+- **A read-only `gh api graphql` query is not egress.** An inline document that is a query (no expansion, no file, no
+  other host) is now handled like a REST GET. Before, it was labelled "mutating" and attributed to the current
+  directory's repository. Mutations, and documents repo-aegis cannot read, are handled as before.
+- **`GH_IDENTITY_ENV_REDIRECT` names the variable**, for example `HTTPS_PROXY` or `all_proxy`, or gh's
+  `http_unix_socket` setting.
+- **Backticks and `$(…)` inside single quotes are data.** `git commit -m '… `gh auth token` …'` was refused with
+  `GH_AUTH_NEEDS_HUMAN`, though bash runs nothing there.
+- **Substitutions in an unquoted heredoc body now count.** `git commit -F - <<EOF` with `` `gh auth token` `` in the body
+  runs the command, and was not caught. With a quoted delimiter (`<<'EOF'`) the body stays data.
+- **`expect`, `script` and the like named in interpreter code are not a pty wrapper.** `expect(x)` in a
+  `node -e` or a Python heredoc refused the call with `EGRESS_PTY_WRAPPER`. A wrapper the code runs
+  (`os.system("script -q …")`, `["expect", "-c", …]`) is still refused.
+- **`GH_IDENTITY_ARG_UNSAFE` suggests plain `git clone --mirror`** for a `gh repo clone … -- <git options>`.
+
 ## [0.15.1] - 2026-11-10
 
 ### Fixed
