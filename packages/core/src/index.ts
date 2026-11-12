@@ -341,6 +341,8 @@ export {
   describeWorkingTree,
   recordWorkingTree,
   resolveCachedDestination,
+  isFreshCheck,
+  CACHED_VISIBILITY_MAX_AGE_MS,
   DESTINATION_CACHE_FILE,
 } from "./destination-cache.js";
 export type { DestinationCache, DestinationCacheEntry } from "./destination-cache.js";

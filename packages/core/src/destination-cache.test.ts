@@ -11,6 +11,7 @@ import {
   destinationKey,
   describeWorkingTree,
   lookupDestination,
+  isFreshCheck,
   readDestinationCache,
   recordWorkingTree,
   resolveCachedDestination,
@@ -173,5 +174,60 @@ describe("destination cache", () => {
 
   it("a write failure is silent", () => {
     assert.equal(recordWorkingTree(pub, join(noRemote, ".git", "HEAD", "impossible.json")), null);
+  });
+});
+
+describe("destination cache — a pointer is only knowledge while the tree is still that repository", () => {
+  let root: string;
+  let cache: string;
+
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), "destination-cache-origin-"));
+    cache = destinationCachePath(join(root, "home"));
+  });
+
+  after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function checkout(name: string, origin: string): string {
+    const dir = join(root, name);
+    mkdirSync(dir);
+    git(dir, ["init", "-q"]);
+    git(dir, ["remote", "add", "origin", origin]);
+    git(dir, ["config", "repo-aegis.class", "private-strict"]);
+    git(dir, ["config", "repo-aegis.visibility", "private"]);
+    return dir;
+  }
+
+  it("a tree whose origin still matches resolves live", () => {
+    const dir = checkout("same", "git@github.com:acme/same.git");
+    recordWorkingTree(dir, cache);
+    assert.equal(resolveCachedDestination("acme", "same", cache)?.live, true);
+  });
+
+  it("a tree re-pointed at another repository resolves to nothing, not to the other repo's visibility", () => {
+    const dir = checkout("moved", "git@github.com:acme/template.git");
+    recordWorkingTree(dir, cache);
+    git(dir, ["remote", "set-url", "origin", "git@github.com:acme/private-project.git"]);
+    assert.equal(resolveCachedDestination("acme", "template", cache), null);
+  });
+
+  it("a tree that lost its origin resolves to nothing", () => {
+    const dir = checkout("headless", "git@github.com:acme/headless.git");
+    recordWorkingTree(dir, cache);
+    git(dir, ["remote", "remove", "origin"]);
+    assert.equal(resolveCachedDestination("acme", "headless", cache), null);
+  });
+
+  it("isFreshCheck: recent and slightly-future stamps are fresh; old, far-future and unparseable are not", () => {
+    const now = () => new Date("2026-11-12T12:00:00.000Z");
+    const at = (iso: string) => ({ checkedAt: iso });
+    assert.equal(isFreshCheck(at("2026-11-12T11:00:00.000Z"), now), true);
+    assert.equal(isFreshCheck(at("2026-11-05T12:00:01.000Z"), now), true); // just under 7 days
+    assert.equal(isFreshCheck(at("2026-11-05T11:59:59.000Z"), now), false); // just over
+    assert.equal(isFreshCheck(at("2026-11-12T12:03:00.000Z"), now), true); // small skew
+    assert.equal(isFreshCheck(at("2026-11-13T12:00:00.000Z"), now), false); // a day ahead
+    assert.equal(isFreshCheck(at("not a date"), now), false);
   });
 });

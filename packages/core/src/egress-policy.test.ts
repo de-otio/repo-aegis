@@ -13,7 +13,7 @@ after(() => {
 });
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseEgressIntents, type EgressIntent } from "./egress-intent.js";
@@ -1196,5 +1196,113 @@ describe("decideEgress — an UNKNOWN visibility is treated as public (issue #11
       capabilities: { ask: false },
     });
     assert.equal(d.action, "deny");
+  });
+});
+
+// B (doc/plan-engagement-repo-consistency.md): the engagement-org branch keeps the registry's class and
+// reads a verified, fresh cached visibility, so a repo a checkout recorded as private is not "uncached".
+// Placeholders only: `customer-a-org` is the engagement's org.
+describe("resolveDestinationOffline — engagement org with a recorded checkout", () => {
+  let root: string;
+  let home: string;
+  let from: string;
+  let priorHome: string | undefined;
+
+  function git(cwd: string, args: string[]): void {
+    execFileSync("git", args, { cwd, stdio: ["ignore", "ignore", "ignore"] });
+  }
+
+  /** A checkout of `customer-a-org/<name>` recording `visibility`, written into this suite's cache. */
+  function checkout(name: string, visibility: "public" | "private"): string {
+    const dir = join(root, name);
+    mkdirSync(dir);
+    git(dir, ["init", "-q"]);
+    git(dir, ["remote", "add", "origin", `https://github.com/customer-a-org/${name}.git`]);
+    git(dir, ["config", "repo-aegis.class", "customer-coupled"]);
+    git(dir, ["config", "repo-aegis.visibility", visibility]);
+    assert.equal(recordWorkingTree(dir), `customer-a-org/${name}`);
+    return dir;
+  }
+
+  function resolve(name: string): Destination | null {
+    return resolveDestinationOffline(
+      parseEgressIntents(`gh pr create -t x -b y --repo customer-a-org/${name}`)[0]!,
+      from,
+      REGISTRY,
+    );
+  }
+
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), "egress-policy-b-"));
+    home = join(root, "home");
+    from = join(root, "elsewhere");
+    mkdirSync(from);
+    git(from, ["init", "-q"]);
+    priorHome = process.env["REPO_AEGIS_HOME"];
+    process.env["REPO_AEGIS_HOME"] = home;
+  });
+
+  after(() => {
+    if (priorHome === undefined) delete process.env["REPO_AEGIS_HOME"];
+    else process.env["REPO_AEGIS_HOME"] = priorHome;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("a live checkout recorded private: still customer-coupled and registry-inferred, but known private, not assumed public", () => {
+    const dir = checkout("lib-priv", "private");
+    const d = resolve("lib-priv");
+    assert.equal(d?.class, "customer-coupled");
+    assert.equal(d?.inferredFromRegistry, true);
+    assert.deepEqual(d?.engagements, ["customer-a"]);
+    assert.equal(d?.visibility, "private");
+    assert.equal(d?.publicFacing, false);
+    assert.equal(d?.assumedPublic, undefined);
+    assert.equal(d?.workingTree, dir);
+  });
+
+  it("a checkout recorded public stays public-facing", () => {
+    checkout("lib-pub", "public");
+    const d = resolve("lib-pub");
+    assert.equal(d?.visibility, "public");
+    assert.equal(d?.publicFacing, true);
+  });
+
+  it("a checkout whose origin was re-pointed elsewhere says nothing about this repository", () => {
+    const dir = checkout("lib-moved", "private");
+    git(dir, ["remote", "set-url", "origin", "https://github.com/customer-a-org/something-else.git"]);
+    const d = resolve("lib-moved");
+    assert.equal(d?.visibility, "unknown");
+    assert.equal(d?.publicFacing, true);
+    assert.equal(d?.class, "customer-coupled");
+  });
+
+  it("a record older than the maximum age is not believed", () => {
+    checkout("lib-old", "private");
+    const file = join(home, "destinations.json");
+    const cache = JSON.parse(readFileSync(file, "utf8")) as { repos: Record<string, { checkedAt: string }> };
+    cache.repos["customer-a-org/lib-old"]!.checkedAt = new Date(Date.now() - 8 * 24 * 3600 * 1000).toISOString();
+    writeFileSync(file, JSON.stringify(cache));
+    const d = resolve("lib-old");
+    assert.equal(d?.visibility, "unknown");
+    assert.equal(d?.publicFacing, true);
+  });
+
+  it("a record whose tree is gone is not believed (a snapshot is not live)", () => {
+    const dir = checkout("lib-gone", "private");
+    rmSync(dir, { recursive: true, force: true });
+    const d = resolve("lib-gone");
+    assert.equal(d?.visibility, "unknown");
+  });
+
+  it("a checkout that recorded no visibility leaves it unknown", () => {
+    const dir = join(root, "lib-novis");
+    mkdirSync(dir);
+    git(dir, ["init", "-q"]);
+    git(dir, ["remote", "add", "origin", "https://github.com/customer-a-org/lib-novis.git"]);
+    git(dir, ["config", "repo-aegis.class", "customer-coupled"]);
+    recordWorkingTree(dir);
+    const d = resolve("lib-novis");
+    assert.equal(d?.visibility, "unknown");
+    assert.equal(d?.publicFacing, true);
   });
 });
