@@ -159,7 +159,7 @@ exception is rule h, which fails closed on a write whose owner it cannot name
 | h | context | no person present, and the destination's owner is not registered: not in `personalOrgs` or any engagement's `githubOrgs`, and not an exact `allowedUpstreams` entry on a PR / issue verb. A destination whose owner cannot be named offline (D5) counts as unregistered. Runs right after resolution, before e and before the visibility lookup; no approval satisfies it | deny | `UNREGISTERED_OWNER_EGRESS` |
 | e | context | payload file's enclosing working tree has a trust boundary **positively disjoint** from the destination's | deny | `CROSS_ORG_EGRESS` |
 | f | context | payload content matches the destination's deny set (`check --path` with the destination's `RepoConfig`) | deny | `PAYLOAD_MARKER_HIT` |
-| g | context | destination `publicFacing`, or verb ∈ {`gh-pr-merge`, `gh-release-*`, `gh-repo-edit`, `npm-publish`}, and `!humanPresent` and no live approval that covers it (§4a) | `ask` if `capabilities.ask`, else deny | `PUBLIC_EGRESS_NEEDS_HUMAN` |
+| g | context | destination `publicFacing`, or verb ∈ {`gh-pr-merge`, `gh-release-*`, `gh-repo-create`, `gh-repo-edit`, `npm-publish`} (a `gh-repo-create` that is plainly private, copies no content and names a registered `OWNER/REPO` is not irreversible: `isPrivateRepoCreateWithoutContent`), and `!humanPresent` and no live approval that covers it (§4a) | `ask` if `capabilities.ask`, else deny | `PUBLIC_EGRESS_NEEDS_HUMAN` |
 | g′ | context | rule g on a `gh-*` verb with `capabilities.ghShimOnPath === false` | deny | `SHIM_UNREACHABLE_NEEDS_HUMAN` |
 | — | — | otherwise (including class `scratch`) | allow | — |
 

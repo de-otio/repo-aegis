@@ -134,6 +134,10 @@ gh repo create <owner>/<name> --private --source=. --remote=origin --push=false
 gh repo view <owner>/<name> --json visibility
 ```
 
+Under the repo-aegis egress guard, an agent may run an empty `gh repo create <owner>/<name> --private` for a registered
+owner without a person. With `--source`, `--push`, `--template` or `--clone` (as above) the command copies content, so
+the guard still asks a person.
+
 ## Layer 1: remove ambient coupling
 
 A project's state should depend on configuration that lives in the project, not in whatever your
