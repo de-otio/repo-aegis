@@ -887,7 +887,14 @@ function runPinned(
   const readback = verdict?.readback;
   const run = spawnGh(ghPath, args, env, cwd, readback !== undefined, deps, io);
 
-  if (verdict?.receipt !== undefined) io.err(`${run.status === 0 ? verdict.receipt : (verdict.failedReceipt ?? "")}\n`);
+  if (verdict?.receipt !== undefined) {
+    // The guard allowed this command and `gh` ran it. When `gh` (or GitHub) then failed it, the line says whose failure
+    // it is: it follows `gh`'s own error, and without this it reads like a refusal by repo-aegis.
+    const how = `exited ${run.status}`;
+    io.err(
+      `${run.status === 0 ? verdict.receipt : `${verdict.failedReceipt ?? ""} — the command ${how}; the error above is its own, repo-aegis allowed it`}\n`,
+    );
+  }
 
   if (readback !== undefined && run.status === 0) {
     const r = readbackResult({ cwd, bodyFile: readback.bodyFile, pr: run.stdout, gh: ghPath, env });

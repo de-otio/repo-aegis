@@ -26,6 +26,7 @@ import {
   findPromptApprovalDefault,
   recordWorkingTree,
   describeDestinationForReceipt,
+  describeIntentCommand,
   describeVerb,
   egressParseOptions,
   formatReceipt,
@@ -257,7 +258,7 @@ export function evaluateEgress(args: string[], cwd: string): EgressEvaluation {
   const detail =
     first === undefined
       ? undefined
-      : `${describeVerb(first.verb)}${first.refspec !== undefined ? ` ${first.refspec}` : ""}`;
+      : `${describeIntentCommand(first)}${first.refspec !== undefined ? ` ${first.refspec}` : ""}`;
   const destJson = destination ? destinationJson(destination) : undefined;
   return {
     kind: "allow",

@@ -166,6 +166,13 @@ export interface EgressIntent {
    */
   createCopiesContent?: true;
   /**
+   * The `gh` command as typed, `<group> <subcommand>` (`repo delete`, `pr create`), for the words a receipt prints. The policy
+   * keys on {@link verb}, which groups commands (`repo delete`, `archive` and `rename` are all `gh-repo-edit`); a person
+   * who ran `gh repo delete` must not be told `gh repo edit` failed. Only plain lower-case command words are kept, since
+   * the text comes from the command line. Absent for `gh api`, for an unrecognised command and for a shell alias.
+   */
+  ghCommand?: string;
+  /**
    * `gh api`: the endpoint positional, verbatim (`repos/o/r/pulls/12/merge`,
    * `orgs/o/repos`, `graphql`, a full URL). For a REST call the destination
    * is *in the path* — see {@link parseApiEndpoint} — and must be judged from
@@ -1798,6 +1805,9 @@ function findGhCommand(args: string[]): { groupIdx: number; subIdx?: number } | 
   return groupIdx === -1 ? null : { groupIdx };
 }
 
+/** A gh command word as it may be printed: lower-case letters and hyphens, as every gh group and subcommand is. */
+const COMMAND_WORD = /^[a-z][a-z-]{0,30}$/;
+
 type CreateVisibility = NonNullable<EgressIntent["createVisibility"]>;
 
 const CREATE_VISIBILITY_FLAGS: ReadonlyMap<string, CreateVisibility> = new Map([
@@ -2444,11 +2454,13 @@ function classifyGh(
   const [positionalRepo, ...extraRepos] = targets.repos;
   const targetRef = group !== "api" && GH_TARGETED_VERBS.has(verb) ? positionals[0] : undefined;
   const create = group === "repo" && sub === "create" ? repoCreateFacts(events, args) : undefined;
+  const ghCommand = group !== "api" && sub !== undefined && COMMAND_WORD.test(group) && COMMAND_WORD.test(sub) ? `${group} ${sub}` : undefined;
   return {
     ...base,
     verb,
     payloadFiles,
     ...(create !== undefined && create),
+    ...(ghCommand !== undefined && { ghCommand }),
     ...(targetRef !== undefined && { targetRef }),
     ...(group === "api" && { apiMethod: method ?? "POST" }),
     ...(repoFlag !== undefined && { repoFlag }),

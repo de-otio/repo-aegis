@@ -249,6 +249,17 @@ describe("egress-check (subprocess)", { skip: cliBuilt() ? false : "CLI not buil
     assert.ok(!r.stderr.includes("PUBLISHED"), r.stderr);
   });
 
+  it("the receipt names the command as typed, not the policy group: `gh repo delete` is not `gh repo edit`", () => {
+    const r = withEnv("REPO_AEGIS_EGRESS_HUMAN", "1", () =>
+      runCli(home, publicRepo, ["egress-check", "--cwd", publicRepo, "--", "repo", "delete", "acme/svc", "--yes"]),
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const payload = JSON.parse(r.stdout) as { failedReceipt?: string; receipt?: string };
+    assert.match(payload.failedReceipt ?? "", /: gh repo delete$/);
+    assert.match(payload.receipt ?? "", /: gh repo delete$/);
+    assert.ok(!(payload.failedReceipt ?? "").includes("gh repo edit"));
+  });
+
   it("allows a public publish on a live human approval and names it in the verdict", () => {
     const home2 = join(root, "approved-home");
     mkdirSync(join(home2, "markers"), { recursive: true });
