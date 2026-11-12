@@ -351,6 +351,32 @@ export const VERBS_NEEDING_HUMAN: ReadonlySet<EgressVerb> = new Set<EgressVerb>(
   "npm-publish",
 ]);
 
+/**
+ * `gh repo create` is hard to undo only when it can publish something: a public repository, or a tree or template
+ * copied into one. An empty private (or internal) repository in an owner this registry knows publishes nothing, and
+ * stopping it names no honest mistake. The waiver is deliberately narrow; every other shape keeps the person check:
+ *
+ * - the visibility flag is plainly `--private` or `--internal` (see `EgressIntent.createVisibility`); `gh repo fork`
+ *   never has one, and a missing, repeated or `=false` flag is `unspecified`;
+ * - no `--source`, `--push`, `--template` or `--clone`: that content is scanned nowhere else;
+ * - an explicit `OWNER/REPO` whose owner is in the registry. A bare name is created under whichever account `gh` is
+ *   logged into, which this guard cannot see, and is judged against the cwd's origin, not the new repository;
+ * - the registry loaded, and the command named everything it needs (`unresolved` unset).
+ */
+export function isPrivateRepoCreateWithoutContent(
+  intent: EgressIntent,
+  registry: Registry,
+  registryState: RegistryState,
+): boolean {
+  if (intent.verb !== "gh-repo-create" || intent.unresolved !== undefined) return false;
+  if (intent.createVisibility !== "private" && intent.createVisibility !== "internal") return false;
+  if (intent.createCopiesContent === true) return false;
+  if (registryState !== "loaded") return false;
+  const slash = intent.positionalRepo?.indexOf("/") ?? -1;
+  if (intent.positionalRepo === undefined || slash <= 0) return false;
+  return registeredOwners(registry).has(intent.positionalRepo.slice(0, slash).toLowerCase());
+}
+
 /** Resolves an intent's destination from local state and the registry. Injectable for tests. */
 export type DestinationResolver = (
   intent: EgressIntent,
@@ -1644,8 +1670,15 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   // judged by rules e–g, and the most restrictive decision wins (deny over ask
   // over an approved allow, earliest target first within a severity). Rule h
   // above has already required every target's owner to be registered.
+  const privateCreate = isPrivateRepoCreateWithoutContent(intent, opts.registry, opts.registryState);
   const judgeTarget = (target: Destination | null): EgressDecision => {
   let destination: Destination | null = target;
+  // A repository this command is creating private has no visibility to look up, and "unknown" would read as
+  // public. Only `unknown` is replaced: a visibility already known is never downgraded.
+  if (privateCreate && destination !== null && destination.visibility === "unknown" && destination.unresolved === undefined) {
+    const { assumedPublic: _dropped, ...rest } = destination;
+    destination = { ...rest, visibility: "private", ...gateFields(destination.class, "private") };
+  }
   if (destination !== null) {
     destination = refreshDestinationVisibility(destination, effectiveVisibilityLookup(opts.lookupVisibility));
   }
@@ -1723,7 +1756,7 @@ function decideOne(intent: EgressIntent, opts: DecideEgressOptions): EgressDecis
   }
 
   // ---- g: public destination or irreversible verb needs a person -----------
-  const irreversible = VERBS_NEEDING_HUMAN.has(intent.verb);
+  const irreversible = VERBS_NEEDING_HUMAN.has(intent.verb) && !privateCreate;
   const publicFacing = destination?.publicFacing === true;
   if ((publicFacing || irreversible) && !opts.humanPresent) {
     // A person may have declared themselves in advance: a live approval

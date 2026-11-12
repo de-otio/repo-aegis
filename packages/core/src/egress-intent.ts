@@ -153,6 +153,19 @@ export interface EgressIntent {
    */
   ghPlainBase?: true;
   /**
+   * `gh repo create` only: the visibility the command asks for. `private` and `internal` when exactly one such
+   * flag is given bare (or `=true`) and the argv holds no shell expansion; `public` likewise; `unspecified` for
+   * everything else (none, several, `--private=false`, an expansion), so that only a plainly non-public create is
+   * ever treated as one. Absent on every other verb, `gh repo fork` included.
+   */
+  createVisibility?: "private" | "internal" | "public" | "unspecified";
+  /**
+   * `gh repo create` only: the command copies a tree or template into the new repository (`--source`, `--push`,
+   * `--template`, `--clone` or their short forms). That content is not scanned anywhere else (a template is copied
+   * on GitHub's side; a repo-local `core.hooksPath` skips the pre-push hook), so such a create keeps its person check.
+   */
+  createCopiesContent?: true;
+  /**
    * `gh api`: the endpoint positional, verbatim (`repos/o/r/pulls/12/merge`,
    * `orgs/o/repos`, `graphql`, a full URL). For a REST call the destination
    * is *in the path* — see {@link parseApiEndpoint} — and must be judged from
@@ -1785,6 +1798,30 @@ function findGhCommand(args: string[]): { groupIdx: number; subIdx?: number } | 
   return groupIdx === -1 ? null : { groupIdx };
 }
 
+type CreateVisibility = NonNullable<EgressIntent["createVisibility"]>;
+
+const CREATE_VISIBILITY_FLAGS: ReadonlyMap<string, CreateVisibility> = new Map([
+  ["--private", "private"],
+  ["--internal", "internal"],
+  ["--public", "public"],
+]);
+
+/** Flags of `gh repo create` that copy a tree or a template into the new repository. */
+const CREATE_CONTENT_FLAGS: ReadonlySet<string> = new Set(["--source", "-s", "--push", "--template", "-p", "--clone", "-c"]);
+
+/** What `gh repo create` asks for, read conservatively: anything unclear is `unspecified`. */
+function repoCreateFacts(
+  events: readonly GhFlagEvent[],
+  args: readonly string[],
+): { createVisibility: CreateVisibility; createCopiesContent?: true } {
+  const visibility = events.filter(e => CREATE_VISIBILITY_FLAGS.has(e.flag));
+  const one = visibility.length === 1 ? visibility[0]! : undefined;
+  const plain = one !== undefined && (one.value === undefined || one.value === "true") && !args.some(a => hasExpansion(a));
+  const createVisibility: CreateVisibility = plain ? CREATE_VISIBILITY_FLAGS.get(one.flag)! : "unspecified";
+  const copies = events.some(e => CREATE_CONTENT_FLAGS.has(e.flag));
+  return { createVisibility, ...(copies && { createCopiesContent: true as const }) };
+}
+
 interface GhFlagEvent {
   /** `-R` or `--repo`: the canonical spelling, whatever form the token took. */
   flag: string;
@@ -2406,10 +2443,12 @@ function classifyGh(
 
   const [positionalRepo, ...extraRepos] = targets.repos;
   const targetRef = group !== "api" && GH_TARGETED_VERBS.has(verb) ? positionals[0] : undefined;
+  const create = group === "repo" && sub === "create" ? repoCreateFacts(events, args) : undefined;
   return {
     ...base,
     verb,
     payloadFiles,
+    ...(create !== undefined && create),
     ...(targetRef !== undefined && { targetRef }),
     ...(group === "api" && { apiMethod: method ?? "POST" }),
     ...(repoFlag !== undefined && { repoFlag }),
