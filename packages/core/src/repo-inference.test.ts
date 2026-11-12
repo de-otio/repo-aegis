@@ -77,7 +77,6 @@ describe("inferClass — every veto leaves the raw class standing (null)", () =>
 // hand-rolled enumeration instead of a property-testing dependency: the input space is small enough to check all of.
 describe("inferClass — metamorphic properties, exhaustive over a small universe", () => {
   const UNIVERSE: RemoteTarget[] = [gh("org-a", "x"), gh("ORG-A-LABS", "y"), gh("org-b"), gh("mine"), gh("shared"), gh("stranger"), NON_GITHUB, UNRESOLVED];
-  const OTHERS: RemoteTarget[] = [gh("org-b"), gh("mine"), gh("shared"), gh("stranger"), NON_GITHUB, UNRESOLVED];
 
   function lists(max: number): RemoteTarget[][] {
     const out: RemoteTarget[][] = [[]];
