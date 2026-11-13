@@ -940,6 +940,15 @@ export function describeVerb(verb: EgressVerb): string {
 }
 
 /**
+ * The command words a receipt prints: the `gh` command as typed (`gh repo delete`) when the parser kept it, else the
+ * verb's label. `VERB_LABEL` groups commands for the policy (`repo delete` is `gh repo edit` there), and a receipt that
+ * names the group's label for a different command reads as if another command had run.
+ */
+export function describeIntentCommand(intent: Pick<EgressIntent, "verb" | "ghCommand">): string {
+  return intent.ghCommand !== undefined ? `gh ${intent.ghCommand}` : describeVerb(intent.verb);
+}
+
+/**
  * `<org>/<repo> (<visibility>, class <class>)` — the only way a destination is ever printed.
  * A command with several targets (a remote with several push URLs) names every
  * one of them, each through the same name validation.

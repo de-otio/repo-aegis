@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A destination-cache pointer to a re-pointed checkout is ignored.** A clone of a public template whose `origin` was
   changed to a private project used to answer for the template's key with the project's visibility. A pointer whose
   tree no longer has that `origin` now resolves to nothing.
+- **A failed `gh repo delete` is no longer reported as a failed `gh repo edit`.** The egress receipts named the
+  policy group's label, so the command you typed and the receipt disagreed. They now print the command as typed
+  (`gh repo delete`, `gh repo archive`, `gh repo rename`, …), and when `gh` exits non-zero the failure line says the
+  error above is `gh`'s own and that repo-aegis allowed the command, so a missing token scope is not mistaken for a
+  block.
 
 ## [0.15.2] - 2026-11-12
 

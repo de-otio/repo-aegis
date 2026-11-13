@@ -37,7 +37,7 @@
 //      extracted tag — nothing else from the output is repeated.
 import {
   describeDestinationForReceipt,
-  describeVerb,
+  describeIntentCommand,
   egressParseOptions,
   formatReceipt,
   loadRegistry,
@@ -283,22 +283,22 @@ function detailFor(intent: EgressIntent, output: string, push: PushEvidence): st
         ? `${moved.join(", ")}${suffix}`
         : `${sanitiseRef(intent.refspec)} (${moved.join(", ")}${suffix})`;
     }
-    return intent.refspec === undefined ? describeVerb(intent.verb) : sanitiseRef(intent.refspec);
+    return intent.refspec === undefined ? describeIntentCommand(intent) : sanitiseRef(intent.refspec);
   }
 
   if (intent.verb === "gh-pr-create" || intent.verb === "gh-pr-edit") {
     const n = extractPrNumber(output);
     if (n !== null) return `PR #${n}`;
-    return describeVerb(intent.verb);
+    return describeIntentCommand(intent);
   }
 
   if (intent.verb.startsWith("gh-release-")) {
     const tag = extractReleaseTag(output);
     if (tag !== null) return `tag ${tag}`;
-    return describeVerb(intent.verb);
+    return describeIntentCommand(intent);
   }
 
-  return describeVerb(intent.verb);
+  return describeIntentCommand(intent);
 }
 
 /**

@@ -329,6 +329,7 @@ export {
   humanPresence,
   isModeDependentPath,
   describeVerb,
+  describeIntentCommand,
   describeDestination,
   describeDestinationForReceipt,
   formatReceipt,

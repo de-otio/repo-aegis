@@ -422,6 +422,8 @@ describe("repo-aegis gh: injection", () => {
     assert.match(r.err, /HTTP 422/);
     assert.match(r.err, /^EGRESS FAILED → example-org\/svc/m);
     assert.ok(!r.err.includes("PUBLISHED"));
+    // Whose failure it is: gh's own error is above the line, and repo-aegis let the command through.
+    assert.match(r.err, /^EGRESS FAILED .*— the command exited 1; the error above is its own, repo-aegis allowed it$/m);
   });
 
   it("writes a decision-log record for the injected call, with no token in it (A15)", () => {
