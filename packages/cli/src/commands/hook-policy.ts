@@ -19,9 +19,10 @@
 import {
   computeTrustBoundary,
   findEnclosingWorkingTree,
-  readRepoConfig,
+  readEffectiveRepoConfig,
   trustBoundariesOverlap,
   type Registry,
+  type EffectiveRepoConfig,
   type RepoConfig,
   type TrustBoundary,
 } from "@de-otio/repo-aegis-core";
@@ -52,7 +53,7 @@ export type HookDecision =
 export interface HookScanDecision {
   action: "scan";
   workingTree: string | null;
-  repo: RepoConfig;
+  repo: EffectiveRepoConfig;
 }
 
 /**
@@ -65,7 +66,7 @@ export interface HookScanDecision {
 export interface HookScanWithWarningDecision {
   action: "scan-with-warning";
   workingTree: string | null;
-  repo: RepoConfig;
+  repo: EffectiveRepoConfig;
   warning: HookWarning;
 }
 
@@ -141,7 +142,9 @@ export function decideHookAction(opts: {
   }
 
   const srcTree = findEnclosingWorkingTree(launcherCwd) ?? launcherCwd;
-  const destRepo = readRepoConfig(destTree);
+  // The class the write is judged under: declared, or inferred from where the tree pushes (an engagement's own
+  // repository created mid-session is that engagement's, not `private-strict`).
+  const destRepo = readEffectiveRepoConfig(destTree, registry);
 
   // Same-tree write: trivially in scope. No need to compute boundaries.
   if (destTree === srcTree) {

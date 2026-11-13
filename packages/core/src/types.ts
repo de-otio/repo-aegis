@@ -33,6 +33,12 @@ export interface RepoJson {
   isGitRepo: boolean;
   class: import("./repo.js").RepoClass;
   classExplicit: boolean;
+  /**
+   * Present (`true`) when `class` and `engagements` were inferred from where the repository pushes, not declared: an
+   * unclassified repository whose push targets all belong to one engagement. `engagements` then holds that one id
+   * although git config holds none, and `classExplicit` is still `false`.
+   */
+  classInferred?: true;
   engagements: string[];
 }
 

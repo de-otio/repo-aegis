@@ -5,7 +5,8 @@ import { join } from "node:path";
 import {
   markersDir as defaultMarkersDir,
   computeDenySet,
-  readRepoConfig,
+  loadRegistryState,
+  readEffectiveRepoConfig,
   redactMatch,
   patternId,
   ALWAYS_FILE_STEM,
@@ -99,7 +100,8 @@ export function markersTest(input: string, opts: MarkersTestOptions): void {
   }
 
   const cwd = opts.cwd ?? process.cwd();
-  const repo = readRepoConfig(cwd);
+  const loaded = loadRegistryState();
+  const repo = readEffectiveRepoConfig(cwd, loaded.state === "loaded" ? loaded.registry : null);
   const denySet = computeDenySet(repo);
   const reveal = shouldRevealMatches(opts);
 

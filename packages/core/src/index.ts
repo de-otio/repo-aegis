@@ -129,6 +129,10 @@ export {
   RepoOverrideError,
   OVERRIDE_FILENAME,
 } from "./repo.js";
+export { classifyOwner } from "./owner-class.js";
+export type { OwnerClass, OwnerRegistry } from "./owner-class.js";
+export { inferClass, readEffectiveRepoConfig, readPushTargets } from "./repo-inference.js";
+export type { EffectiveRepoConfig, InferClassInput, InferredClass } from "./repo-inference.js";
 export type { RepoClass, RepoConfig, RepoOverride } from "./repo.js";
 
 // ---- deny set ------------------------------------------------------------

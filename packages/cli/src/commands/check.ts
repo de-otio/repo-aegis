@@ -8,7 +8,8 @@ import { currentEnforcementPin } from "../enforcement-pin.js";
 import { helperOrder, readCredentialConfig } from "../git-credential-config.js";
 import { helperCommand } from "./install-git-credential.js";
 import {
-  readRepoConfig,
+  readEffectiveRepoConfig,
+  type EffectiveRepoConfig,
   computeDenySet,
   scanFile,
   scanDirectory,
@@ -409,6 +410,14 @@ const EMPTY_REGISTRY: Registry = { engagements: [], alwaysBlock: [] };
  * determine context (the spurious `CROSS_ORG_WRITE` flake,
  * doc/bugs/repo-aegis-check-write-flake.md).
  */
+/**
+ * The repository's class as every decider sees it: declared, or, for an unclassified repository whose pushes all go to
+ * one engagement's org, inferred from that. The registry is the one this process loads; an unreadable one infers nothing.
+ */
+function effectiveRepo(cwd: string | undefined): EffectiveRepoConfig {
+  return readEffectiveRepoConfig(cwd ?? process.cwd(), loadRegistryForPush().registry);
+}
+
 function loadRegistryForPush(): { registry: Registry | null; state: RegistryState } {
   const load = loadRegistryState();
   switch (load.state) {
@@ -986,7 +995,7 @@ function checkRun(opts: CheckOptions): void {
     // the cross-org check on (a push across a trust boundary is a different mistake from a false positive): the
     // destination checks run with the pause, which skips rule g, rule h and the account checks and nothing else.
     const dest = isPrePushRun(opts) ? pausedDestination(opts) : null;
-    if (paused.repo === undefined && isPrePushRun(opts)) evaluateDestination(readRepoConfig(opts.cwd), opts, paused);
+    if (paused.repo === undefined && isPrePushRun(opts)) evaluateDestination(effectiveRepo(opts.cwd), opts, paused);
     recordPausedAllow(opts.staged ? "pre-commit" : "pre-push", { verb: opts.staged ? "git commit" : "git push", destination: dest, pause: paused });
     const notice = pauseNotice(paused);
     if (opts.json) emitJson({ status: "paused", notice, hits: [], skipped: [], egress: [] });
@@ -994,7 +1003,7 @@ function checkRun(opts: CheckOptions): void {
     return;
   }
 
-  const repo = readRepoConfig(opts.cwd);
+  const repo = effectiveRepo(opts.cwd);
 
   if (repo.isGitRepo && repo.class === "customer-coupled" && repo.engagements.length === 0) {
     const err = new CustomerCoupledNoEngagementError();
@@ -1304,6 +1313,7 @@ function checkRun(opts: CheckOptions): void {
     isGitRepo: repo.isGitRepo,
     class: repo.class,
     classExplicit: repo.classExplicit,
+    ...(repo.classInferred === true && { classInferred: true as const }),
     // A clean run leaks too: this array is emitted whether or not anything
     // matched, so redaction cannot be conditional on there being hits.
     engagements: redactAttribution ? [] : repo.engagements,

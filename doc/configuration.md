@@ -411,7 +411,19 @@ suppressed a finding.
 
 1. `.git/config` (per-clone `repo-aegis.class` / `repo-aegis.engagement`).
 2. `.repo-aegis.yml` at the repo root.
-3. Default (`private-strict`, no engagements).
+3. Inferred from the push targets (below), when nothing is declared.
+4. Default (`private-strict`, no engagements).
+
+**Inferred class.** A repository with no class in either place is not always `private-strict`. When the registry is
+loaded, nothing is declared, the checkout is not recorded public, and **every** push URL of **every** remote is a
+resolved GitHub repository in the **same single** engagement's org, every layer that decides a class (the write
+scan, pre-commit and pre-push, the trust boundary, the egress guard, `markers test`, `status`) treats it as
+`customer-coupled` for that engagement. Nothing is written to git config; the answer is recomputed on each read, so a
+changed remote changes it. Any doubt keeps `private-strict`: a second remote in another org or on another host, an
+ssh alias that cannot be resolved, a personal org, an org in two engagements, or a configured engagement that
+differs. `status` says `(inferred from where this repo pushes; run repo-aegis classify --apply to record it)` and
+`status --json` adds `classInferred: true` (`classExplicit` stays `false`, and `engagements` then holds the inferred
+id although git config holds none). `allow`, `deny` and `classify` keep working on what git config holds.
 
 No command-line flag sets the class or the engagements (`--cwd` only chooses
 which repo is read). `repo-aegis status --json` does not report which source a
