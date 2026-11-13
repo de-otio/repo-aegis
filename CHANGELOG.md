@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-13
+
+### Changed
+
+- **An empty private `gh repo create` no longer needs a person.** `gh repo create OWNER/REPO --private` (or
+  `--internal`) for a registered owner publishes nothing, so rule g no longer treats it as hard to undo, and its
+  unknown visibility counts as private. Every shape that can publish something keeps the person check: `--public`,
+  no visibility flag, `--private=false`, two visibility flags, a shell expansion in the command, a bare name (created
+  under whichever account `gh` is logged into), `--source`/`--push` (the tree is scanned nowhere else),
+  `--template`, `--clone`, and `gh repo fork`. A visibility already known to be public is never downgraded.
+
 ### Fixed
 
 - **A repository created or cloned mid-session in an engagement's own org is that engagement's, not `private-strict`.**
@@ -23,18 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could be `customer-coupled` on one receipt and `private-strict` on the other. An org in two engagements is now
   `private-strict` everywhere, where first-touch used to take the first match and the guard every match, and owner
   names match case-insensitively everywhere.
-
-### Changed
-
-- **An empty private `gh repo create` no longer needs a person.** `gh repo create OWNER/REPO --private` (or
-  `--internal`) for a registered owner publishes nothing, so rule g no longer treats it as hard to undo, and its
-  unknown visibility counts as private. Every shape that can publish something keeps the person check: `--public`,
-  no visibility flag, `--private=false`, two visibility flags, a shell expansion in the command, a bare name (created
-  under whichever account `gh` is logged into), `--source`/`--push` (the tree is scanned nowhere else),
-  `--template`, `--clone`, and `gh repo fork`. A visibility already known to be public is never downgraded.
-
-### Fixed
-
 - **A customer's repository recorded as private is no longer "uncached, treated as public".** For an org that belongs
   to an engagement, the egress guard kept the registry's class but never read the visibility a checkout had recorded,
   so `gh` receipts and refusals said `VISIBILITY UNCACHED, TREATED AS PUBLIC` for a repo the push path already knew
