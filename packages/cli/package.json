@@ -34,7 +34,7 @@
     "build": "tsc && chmod +x dist/index.js && node ../../scripts/copy-cli-docs.mjs"
   },
   "dependencies": {
-    "@de-otio/repo-aegis-core": "^0.15.0",
+    "@de-otio/repo-aegis-core": "^0.16.0",
     "commander": "^15.0.0",
     "zod": "^4.6.7"
   }
