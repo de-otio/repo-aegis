@@ -35,7 +35,7 @@
   },
   "dependencies": {
     "@de-otio/repo-aegis-core": "^0.17.0",
-    "commander": "^15.0.0",
+    "commander": "^15.1.0",
     "zod": "^4.6.7"
   }
 }
