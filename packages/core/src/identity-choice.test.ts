@@ -10,6 +10,7 @@ import {
   ghCallTargets,
   identityPresence,
   personLoginOf,
+  suppliedTokensAreInstallation,
   type ChooseIdentityInput,
   type GhCallTarget,
   type IdentityChoice,
@@ -447,6 +448,56 @@ describe("rule 6: redirecting environment", () => {
     }
   });
   it("null redirect does not refuse", () => assert.equal(chooseIdentity(input({ redirect: null })).kind, "inject"));
+});
+
+describe("S1: a supplied GitHub App installation token", () => {
+  const app = { suppliedToken: true, suppliedInstallationToken: true } as const;
+  it("is used as supplied for every mapped shape and either column, read or write", () => {
+    for (const owner of ["both-org", "person-org", "agent-org"]) {
+      for (const presence of ["agent", "person", "unknown"] as const) {
+        for (const isWrite of [true, false]) {
+          const c = chooseIdentity(input({ ...app, presence, isWrite, targets: [lit(owner)] }));
+          assert.deepEqual(c, { kind: "supplied", owner, repo: "r" }, `${owner} ${presence} ${isWrite}`);
+        }
+      }
+    }
+  });
+  it("needs suppliedToken too: the flag alone changes nothing", () => {
+    assert.equal(chooseIdentity(input({ presence: "agent", suppliedToken: false, suppliedInstallationToken: true })).kind, "inject");
+  });
+  it("without the flag, rule 7 still refuses", () => {
+    assert.equal(refused(chooseIdentity(input({ presence: "agent", suppliedToken: true, suppliedInstallationToken: false }))), "GH_IDENTITY_TOKEN_SUPPLIED");
+  });
+  it("ORDER: rule 1 (auth verbs) and the alias rule still refuse", () => {
+    assert.equal(refused(chooseIdentity(input({ ...app, presence: "agent", args: ["auth", "token"], targets: [] }))), "GH_AUTH_NEEDS_HUMAN");
+    assert.equal(refused(chooseIdentity(input({ ...app, presence: "agent", args: ["my-alias"] }))), "GH_IDENTITY_ARG_UNSAFE");
+  });
+  it("no target, an unmapped owner, or several owners: none (gh runs as the caller, unchanged)", () => {
+    assert.equal(chooseIdentity(input({ ...app, presence: "agent", targets: [] })).kind, "none");
+    assert.equal(chooseIdentity(input({ ...app, presence: "agent", targets: [lit("plain-org")] })).kind, "none");
+    assert.equal(chooseIdentity(input({ ...app, presence: "agent", targets: [lit("both-org"), lit("agent-org")] })).kind, "none");
+  });
+});
+
+describe("suppliedTokensAreInstallation", () => {
+  it("true only when every non-empty supplied token has the installation prefix", () => {
+    const yes = [{ GH_TOKEN: "ghs_a" }, { GITHUB_TOKEN: "ghs_b" }, { GH_TOKEN: "ghs_a", GITHUB_TOKEN: "ghs_b" }, { GH_TOKEN: "ghs_a", GITHUB_TOKEN: "" }];
+    const no = [
+      {},
+      { GH_TOKEN: "" },
+      { GH_TOKEN: "ghs_" },
+      { GH_TOKEN: "ghp_a" },
+      { GH_TOKEN: "gho_a" },
+      { GH_TOKEN: "github_pat_a" },
+      { GH_TOKEN: "GHS_a" },
+      { GH_TOKEN: " ghs_a" },
+      { GH_TOKEN: "ghs_a b" },
+      { GH_TOKEN: "ghs_a", GITHUB_TOKEN: "ghp_b" },
+      { GH_TOKEN: "ghp_a", GITHUB_TOKEN: "ghs_b" },
+    ];
+    for (const env of yes) assert.equal(suppliedTokensAreInstallation(env), true, JSON.stringify(env));
+    for (const env of no) assert.equal(suppliedTokensAreInstallation(env), false, JSON.stringify(env));
+  });
 });
 
 describe("rule 7: a supplied token with an agent", () => {

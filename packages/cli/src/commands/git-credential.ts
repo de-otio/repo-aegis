@@ -572,6 +572,8 @@ function gitCredentialDecide(request: Request, home: string, deps: GitCredential
   // An unmapped owner falls through to the person's own helper.
   if (choice.kind === "none") return stepAside("CREDENTIAL_OWNER_UNMAPPED", "", dest);
   if (choice.kind === "refuse") return refuseText(choice.code, choice.reason);
+  // S1 needs a supplied token, and this call passes none; fail closed rather than guess.
+  if (choice.kind === "supplied") return refuse("GH_IDENTITY_UNAVAILABLE", "repo-aegis reached an identity choice it never makes for a push", dest);
 
   const column = choice.column;
   const identity = choice.identity;

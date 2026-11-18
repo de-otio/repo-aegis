@@ -68,7 +68,7 @@ export const DECISION_REF_KINDS = ["branch", "tag", "delete", "new-branch", "oth
 export type DecisionRefKind = (typeof DECISION_REF_KINDS)[number];
 
 /** The identity-choice column names of core/identity-choice.ts. */
-export const DECISION_IDENTITY_COLUMNS = ["person", "agent"] as const;
+export const DECISION_IDENTITY_COLUMNS = ["person", "agent", "supplied"] as const;
 export type DecisionIdentityColumn = (typeof DECISION_IDENTITY_COLUMNS)[number];
 
 export const DECISION_PAUSED = ["no", "machine", "repo"] as const;

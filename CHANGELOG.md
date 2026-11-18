@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-18
+
+### Changed
+
+- **A GitHub App installation token the caller supplies is used as supplied.** A session launcher that gives its
+  agent its own GitHub App identity sets `GH_TOKEN` to an installation token and runs `gh`; for a mapped owner that
+  was refused as `GH_IDENTITY_TOKEN_SUPPLIED`, so every `gh` call in such a session failed. When every token in
+  `GH_TOKEN` / `GITHUB_TOKEN` has the installation prefix `ghs_`, repo-aegis now chooses no identity and runs `gh`
+  with the caller's environment. The egress decision (public repositories, approvals, markers, receipts) is
+  unchanged, `gh auth …` and aliases stay refused, and a person's token (`ghp_`, `gho_`, `github_pat_`), alone or
+  beside an installation token, is still refused. The call says which identity it ran as on stderr and in its
+  decision record (`identityColumn: "supplied"`); the token is printed and logged nowhere.
+
 ## [0.16.0] - 2026-11-13
 
 ### Changed

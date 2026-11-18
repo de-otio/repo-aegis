@@ -324,7 +324,28 @@ export type IdentityChoice =
       compareSuppliedToken: boolean;
       approvalId?: string;
     }
+  /**
+   * S1: the caller supplied a GitHub App installation token. repo-aegis chooses no identity and gh runs with the
+   * caller's environment unchanged; the egress decision was made before this and still stands.
+   */
+  | { kind: "supplied"; owner: string; repo: string | null }
   | { kind: "refuse"; code: IdentityRefusalCode; reason: string };
+
+/** GitHub's prefix for an App installation token (the classic and the longer stateless form alike). */
+const INSTALLATION_TOKEN_PREFIX = "ghs_";
+
+/**
+ * S1: true when the environment carries GH_TOKEN or GITHUB_TOKEN and EVERY non-empty one is a GitHub App
+ * installation token. Only the prefix is checked, because GitHub does not promise the rest of the format. A person's
+ * token (`ghp_`, `gho_`, `github_pat_`, anything else) beside it makes this false. Pure; never keeps a token.
+ */
+export function suppliedTokensAreInstallation(env: Readonly<Record<string, string | undefined>>): boolean {
+  const supplied = [env["GH_TOKEN"], env["GITHUB_TOKEN"]].filter((v): v is string => v !== undefined && v !== "");
+  return (
+    supplied.length > 0 &&
+    supplied.every(v => v.startsWith(INSTALLATION_TOKEN_PREFIX) && v.length > INSTALLATION_TOKEN_PREFIX.length && !/\s/.test(v))
+  );
+}
 
 export interface ChooseIdentityInput {
   args: readonly string[]; // the gh argv
@@ -342,6 +363,8 @@ export interface ChooseIdentityInput {
    */
   boundApprovalFor?: (owner: string, repo: string | null) => string | null;
   suppliedToken: boolean; // GH_TOKEN or GITHUB_TOKEN set in the caller's environment
+  /** S1: every supplied token is a GitHub App installation token ({@link suppliedTokensAreInstallation}). */
+  suppliedInstallationToken?: boolean;
   redirect: string | null; // the name of a D9 variable or `http_unix_socket`, if present
   registeredOwner: (owner: string) => boolean;
   /** The caller resolved a host other than github.com that `args` do not show (e.g. a GH_REPO of `HOST/o/r`; see `ghCallInfo`). */
@@ -490,6 +513,18 @@ function choose(input: ChooseIdentityInput): IdentityChoice {
   }
   // L6: for an agent, an alias or extension may expand to `auth token`, so it is judged even with no target.
   if (presence === "agent" && nonBuiltinFirstWord(args)) return unsafeArgRefusal(undefined);
+  // S1: the caller brings a GitHub App installation token. It is bounded by the App's installation and permissions,
+  // expires within the hour and is attributed to the App, so there is no person's account to keep the agent out of
+  // and no identity left for repo-aegis to choose. N7 stops a session acting with a token other than the one mapped
+  // to the owner; that mistake is about a person's token, which this is not. The egress decision (public
+  // repositories, approvals, markers) was made before this and is unchanged. Rules 1 and L6 above still apply.
+  if (input.suppliedToken && input.suppliedInstallationToken === true) {
+    const owners = [...new Set(targets.map(t => t.owner.toLowerCase()))];
+    const touches = owners.some(o => entryOf(registry, o) !== undefined) || (registry.requireIdentity === true && isWrite);
+    if (!touches || owners.length !== 1) return { kind: "none" };
+    const reposSeen = new Set(targets.map(t => (t.repo === null ? null : t.repo.toLowerCase())));
+    return { kind: "supplied", owner: owners[0]!, repo: reposSeen.size === 1 ? targets[0]!.repo : null };
+  }
   // M1: a reference on another host. A token for github.com must not be chosen for it, whichever column.
   const info = ghCallInfo(args, {});
   if (info.foreignHost || input.foreignHost === true) {
