@@ -323,6 +323,15 @@ URL, a `repos/<owner>/<repo>/…` endpoint, `GH_REPO` or the working directory's
   records it), else `GH_IDENTITY_WRITE_NEEDS_HUMAN`.
 - A token you already hold in `GH_TOKEN` / `GITHUB_TOKEN` is not used for a mapped owner:
   refused for an agent, compared with the mapped account's token for a person.
+- **Except a GitHub App installation token** (prefix `ghs_`, for example one that a session launcher
+  mints for its agent from its own App): when every token set in `GH_TOKEN` / `GITHUB_TOKEN` has that
+  prefix, repo-aegis chooses no identity and `gh` runs with the caller's environment unchanged. The token
+  is already limited to the App's installation and permissions, expires within the hour and acts as the
+  App, never as a person. The egress decision (public repositories, approvals, markers, receipts) is made
+  exactly as for any other call, and `gh auth …` and aliases stay refused. The call prints
+  `repo-aegis: as the GitHub App installation token the caller supplied (GH_TOKEN/GITHUB_TOKEN) for
+  <owner>/<repo>` and its decision record carries `identityColumn: "supplied"`. A person's token
+  (`ghp_`, `gho_`, `github_pat_`), alone or beside an installation token, is refused as before.
 - If the identity cannot be used (no token, taaad failing, an untrusted `gh`), a write is refused
   (`GH_IDENTITY_UNAVAILABLE`, `GH_BINARY_UNTRUSTED`); it never silently runs as whichever account is
   active. A read whose identity is merely unavailable (`GH_IDENTITY_UNAVAILABLE`) runs as the active

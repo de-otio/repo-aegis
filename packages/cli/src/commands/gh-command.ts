@@ -60,6 +60,7 @@ import {
   type Identity,
   type PauseState,
   type IdentityChoice,
+  suppliedTokensAreInstallation,
   type IdentityPresence,
   type IdentityScope,
   type Registry,
@@ -265,7 +266,7 @@ export function findPlainGh(pathValue: string | undefined, home: string): string
 // ---------------------------------------------------------------------------
 
 type IdentityOutcome =
-  | { kind: "plain"; hint?: string; note?: string }
+  | { kind: "plain"; hint?: string; note?: string; supplied?: { owner: string; repo: string | null } }
   | { kind: "refuse"; code: string; reason: string; logged?: DecisionAppendResult["written"] }
   | {
       kind: "inject";
@@ -388,6 +389,8 @@ function decideIdentity(
 
   const input: ChooseIdentityInput = { ...baseInput(args, intents, targets, registry!, presence(), home, callerEnv), foreignHost };
   let choice = chooseIdentity(input);
+  // S1: a caller-supplied App installation token runs as itself, with the caller's environment and gh, unchanged.
+  if (choice.kind === "supplied") return { kind: "plain", supplied: { owner: choice.owner, repo: choice.repo } };
   /** U5: the approval that covered a repository git setting, to be printed and recorded with the injection. */
   let covered: { id: string; setting: string } | undefined;
   if (choice.kind === "inject") {
@@ -516,6 +519,7 @@ function decideIdentity(
       // Explanation only: an approval with ANY login, so a refusal can say it is bound to another account.
       boundApprovalFor: (owner, repo) => findApprovalWithAnyLogin({ org: owner, repo: repo ?? "*" }, approvalsPath(h))?.id ?? null,
       suppliedToken: (env["GH_TOKEN"] ?? "") !== "" || (env["GITHUB_TOKEN"] ?? "") !== "",
+      suppliedInstallationToken: suppliedTokensAreInstallation(env),
       redirect: firstSet(env, REDIRECT_VARS),
       registeredOwner: o => owners.has(o.toLowerCase()),
     };
@@ -877,7 +881,16 @@ function runPinned(
     // not: it would be a record for every `gh pr view`). A pause records itself above.
     if (paused === null && intents !== null && intents[0] !== undefined) {
       const dest = firstIntentDestination(intents, cwd);
-      logShim(home, { outcome: "allow", verb: verbWords(intents[0].verb), ...(dest !== null && { destination: dest }) });
+      logShim(home, {
+        outcome: "allow",
+        verb: verbWords(intents[0].verb),
+        ...(dest !== null && { destination: dest }),
+        ...(outcome.supplied !== undefined && { identityColumn: "supplied" as const }),
+      });
+    }
+    // S1: say which identity this runs as. Never the token, and no login: the App is whoever minted it.
+    if (outcome.supplied !== undefined) {
+      io.err(`repo-aegis: as the GitHub App installation token the caller supplied (GH_TOKEN/GITHUB_TOKEN) for ${destLabel(outcome.supplied.owner, outcome.supplied.repo)}\n`);
     }
     if (outcome.note !== undefined) io.err(`repo-aegis gh: ${outcome.note}; proceeding\n`);
     if (outcome.hint !== undefined) io.err(`repo-aegis: ${outcome.hint}\n`);

@@ -1771,7 +1771,10 @@ with an environment of exactly `HOME`, `PATH=/usr/bin:/bin`, `TERM` and `LANG`, 
 answer only when `installationAccount` is the owner, `repositories` is exactly the repository
 and the permissions are no wider than the scope. A supplied `GH_TOKEN` / `GITHUB_TOKEN` is never
 used for a mapped owner with no person present; with one, it must be the mapped account's token
-(SHA-256, `timingSafeEqual`).
+(SHA-256, `timingSafeEqual`). The exception (S1): when every supplied token is a GitHub App
+installation token (prefix `ghs_`), no identity is chosen and the caller's `gh` runs with the
+caller's environment, after the same egress decision; stderr says
+`repo-aegis: as the GitHub App installation token the caller supplied …`.
 
 The injected `gh` gets an allowlisted environment: `HOME`, a PATH the caller cannot extend,
 `TERM`, `LANG` / `LC_*`, `TMPDIR`, `GH_REPO` when set, `GH_TOKEN`, and fixed `GH_PAGER=`,

@@ -525,6 +525,71 @@ describe("repo-aegis gh: refusals never run gh", () => {
     assert.ok(!r.err.includes("x-supplied-token-0123"), "the supplied token is echoed");
   });
 
+  it("S1: an agent that supplies a GitHub App installation token runs gh with it, unchanged, and nothing is minted", () => {
+    const w = makeWorld();
+    const supplied = "ghs_suppliedInstallationToken0123";
+    for (const [args, verb] of [[WRITE, "write"], [READ, "read"]] as const) {
+      rmSync(join(w.stubs, "gh.argv"), { force: true });
+      const r = run(w, [...args], { presence: "agent", plainPath: true, env: { GH_TOKEN: supplied } });
+      assert.equal(r.status, 0, `${verb}: ${r.err}`);
+      assert.equal(refusalCode(r), undefined, r.err);
+      assert.deepEqual(r.taaadArgv, [], `${verb}: nothing minted`);
+      assert.deepEqual(mainCalls(r), [args.join(" ")], `${verb}: no token fetch`);
+      assert.equal(ghEnv(w, 1)["GH_TOKEN"], supplied, `${verb}: the caller's token is the one gh gets`);
+      assert.match(r.err, /repo-aegis: as the GitHub App installation token the caller supplied \(GH_TOKEN\/GITHUB_TOKEN\) for example-org\/svc/);
+      assert.ok(!r.err.includes(supplied) && !r.out.includes(supplied), `${verb}: the token is printed`);
+    }
+    // The write is recorded with the supplied column; the token is in no record.
+    const write = decisions(w).find(d => d["identityColumn"] === "supplied");
+    assert.ok(write !== undefined, JSON.stringify(decisions(w)));
+    assert.ok(!readFileSync(decisionLogPath(w.home), "utf8").includes(supplied));
+  });
+
+  it("S1: GITHUB_TOKEN alone, and with a person present, also run as the supplied installation token", () => {
+    for (const [presence, env] of [["agent", { GITHUB_TOKEN: "ghs_viaGithubToken" }], ["person", { GH_TOKEN: "ghs_personPresent" }]] as const) {
+      const w = makeWorld();
+      const r = run(w, WRITE, { presence, plainPath: true, env });
+      assert.equal(r.status, 0, `${presence}: ${r.err}`);
+      assert.deepEqual(r.taaadArgv, []);
+      assert.deepEqual(mainCalls(r), [WRITE.join(" ")]);
+    }
+  });
+
+  it("S1: a person's token is still refused, alone or beside an installation token", () => {
+    for (const env of [
+      { GH_TOKEN: "ghp_personalAccessToken" },
+      { GH_TOKEN: "gho_oauthToken" },
+      { GH_TOKEN: "github_pat_fineGrained" },
+      { GH_TOKEN: "ghs_installation", GITHUB_TOKEN: "ghp_personalAccessToken" },
+      { GH_TOKEN: "ghs_" },
+      { GH_TOKEN: "GHS_upperCase" },
+    ]) {
+      const w = makeWorld();
+      const r = run(w, WRITE, { presence: "agent", env });
+      assert.equal(refusalCode(r), "GH_IDENTITY_TOKEN_SUPPLIED", `${JSON.stringify(env)}: ${r.err}`);
+      assert.deepEqual(r.ghArgv, []);
+    }
+  });
+
+  it("S1: the egress decision still applies to a supplied installation token", () => {
+    const w = makeWorld();
+    const r = run(w, WRITE, {
+      presence: "agent",
+      plainPath: true,
+      env: { GH_TOKEN: "ghs_suppliedInstallationToken0123" },
+      evaluate: () => ({ kind: "deny", stderrLine: '{"code":"EGRESS_TEST_DENY"}', log: { code: "EGRESS_TEST_DENY", verb: "gh pr create" } }),
+    });
+    assert.equal(r.status, 2, r.err);
+    assert.deepEqual(r.ghArgv, []);
+  });
+
+  it("S1: an auth verb is still refused with a supplied installation token", () => {
+    const w = makeWorld();
+    const r = run(w, ["auth", "token"], { presence: "agent", env: { GH_TOKEN: "ghs_suppliedInstallationToken0123" } });
+    assert.equal(refusalCode(r), "GH_AUTH_NEEDS_HUMAN", r.err);
+    assert.deepEqual(r.ghArgv, []);
+  });
+
   it("I7: an installation of another account is refused, the token discarded and printed nowhere", () => {
     const w = makeWorld();
     writeFileSync(join(w.stubs, "mint.json"), mintJson({ installationAccount: "other-org" }));
